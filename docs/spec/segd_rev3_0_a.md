@@ -891,3 +891,9 @@ Other gotchas:
 8. Trace Edit R/X/I list separator (`;` vs `,`).
 9. The leap-second table in the spec ends in 2014. Decide on a source for later leap seconds.
 10. GH1 time vs GH3 timestamp consistency: how strictly should a reader validate when they disagree (beyond leap seconds and sub-second truncation)?
+
+## Resolutions (added in the review, task 1.5)
+- **AMBIGUITY 1 (Additional Source Info block ID): RESOLVED as 0x20.** SEG-D Rev 3.1 confirms
+  0x20 both in its block ID table (3.1 text p.42) and in §8.10 byte 32 (3.1 text p.110).
+  The 0x1A in the 3.0 §7.10 table is a typo. Readers should accept 0x1A as a legacy alias;
+  writers emit 0x20.

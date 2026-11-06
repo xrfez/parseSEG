@@ -102,3 +102,4 @@ writers validate before emitting.
 - 2026-11-06: Task 1.1 done: segy_rev1.md (866 lines, 24 resolved AMBIGUITY items, open questions Q1-Q12).
 - 2026-11-06: Task 1.4 done: segd_rev3_0_b.md (902 lines). Follow-ups for 1.5: add the 2015/2017 leap seconds (the E.9 table stops at 2012); confirm the GH3 header-size formula against part A.
 - 2026-11-06: Task 1.3 done: segd_rev3_0_a.md (893 lines, 16 AMBIGUITY items). Phase 1 notes are complete; next is 1.5 (review/index).
+- 2026-11-06: Task 1.5 started: the 3.0 Additional Source Info ID is resolved as 0x20 (via the 3.1 text). Record each later resolution in a `## Resolutions` section at the end of the note concerned.
