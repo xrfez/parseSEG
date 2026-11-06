@@ -36,7 +36,7 @@ task zigDebug, "Build debug binary using Zig CC with debug symbols":
 
 task test, "Run test suite":
   ## Executes unittest suite.
-  selfExec "c -r --verbosity:0 tests/test_all.nim"
+  selfExec "c -r --hints:off tests/tester.nim"
 
 task fmt, "Format codebase via nimpretty":
   ## Formats source and test files in-place.

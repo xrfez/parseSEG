@@ -1,10 +1,7 @@
-## Main application module for parsesegd.
-## Provides the primary execution entry point and core logic.
+## parseSEGD: read and write SEG-Y and SEG-D seismic data on disk and tape.
+##
+## This umbrella module re-exports the public API. See `PLAN.md` for the
+## roadmap and implementation status.
 
-proc runApplication*(appName: string): int =
-  ## Runs the primary execution workflow and returns an exit code.
-  echo "Starting " & appName
-  result = 0
-
-when isMainModule:
-  quit(runApplication("parsesegd"))
+import parseSEGD/common/[errors, endians, bcd, ibmfloat, ebcdic]
+export errors, endians, bcd, ibmfloat, ebcdic

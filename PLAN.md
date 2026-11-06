@@ -20,7 +20,10 @@ Later: SEG-D 3.1 (a small delta on 3.0), SEG-Y Rev 2.0/2.1, and older SEG-D revi
 3. Find the first unchecked task below, do it, tick it, add a line to the
    **Log**, and **commit**. A commit after each task is the checkpoint, so no
    work is ever lost.
-4. Before writing any Nim, load the matching `nim-*` skill (see `AGENTS.md`).
+4. Before writing any Nim, load the matching `nim-*` skill (see `AGENTS.md`). The
+   `.agents/skills/*` symlinks are broken in this container. Read the skills from
+   `/opt/nim-agent-template/skills/<name>/SKILL.md` instead.
+6. Run the tests with `nim test` (this runs `tests/tester.nim`, which discovers `tests/t*.nim`).
 5. Work branch: `seg-library`.
 
 ## Architecture (target)
@@ -65,7 +68,7 @@ writers validate before emitting.
 - [ ] 1.6 (later) `segd_rev3_1_delta.md`, `segy_rev2_x.md`
 
 ### Phase 2: Core primitives (with unit tests)
-- [ ] 2.1 endians, bcd, ibmfloat, ebcdic, errors
+- [x] 2.1 endians, bcd, ibmfloat, ebcdic, errors (`tests/tcommon.nim`)
 - [ ] 2.2 I/O layer: blockio, diskio, tapeio (tape tested with a mock record device)
 
 ### Phase 3: SEG-Y Rev 1
@@ -93,3 +96,4 @@ writers validate before emitting.
 
 ## Log
 - 2026-11-06: Phase 0 done. The spec text is extracted and committed. Branch `seg-library` created.
+- 2026-11-06: Task 2.1 done: common primitives and tests pass (debug and release). Phase 1 distillation was started with 4 parallel subagents.
