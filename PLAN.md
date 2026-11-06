@@ -60,7 +60,7 @@ writers validate before emitting.
 - [x] 0.2 Write conventions for the spec notes (`docs/spec/CONVENTIONS.md`)
 
 ### Phase 1: Spec distillation (one note per spec chunk, done by parallel subagents)
-- [ ] 1.1 `docs/spec/segy_rev1.md`: SEG-Y Rev 1.0 (text: `SEG Y rev 1Release 1.02.txt`)
+- [x] 1.1 `docs/spec/segy_rev1.md`: SEG-Y Rev 1.0 (text: `SEG Y rev 1Release 1.02.txt`)
 - [x] 1.2 `docs/spec/segd_rev2_1.md`: SEG-D Rev 2.1 (text: `seg_d_rev2.1_.txt`)
 - [ ] 1.3 `docs/spec/segd_rev3_0_a.md`: SEG-D 3.0 pages 1-86 (structure, label, TOC, data body, header tables 7.x)
 - [ ] 1.4 `docs/spec/segd_rev3_0_b.md`: SEG-D 3.0 pages 87-188 (parameters 8.x, trailer, appendices)
@@ -99,3 +99,4 @@ writers validate before emitting.
 - 2026-11-06: Phase 0 done. The spec text is extracted and committed. Branch `seg-library` created.
 - 2026-11-06: Task 2.1 done: common primitives and tests pass (debug and release). Phase 1 distillation was started with 4 parallel subagents.
 - 2026-11-06: Task 1.2 done: segd_rev2_1.md (731 lines, 18 AMBIGUITY items, 10 open questions).
+- 2026-11-06: Task 1.1 done: segy_rev1.md (866 lines, 24 resolved AMBIGUITY items, open questions Q1-Q12).
