@@ -1,0 +1,21 @@
+{
+  "name": "Nim",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  // Breakpoints need ptrace. The default seccomp profile blocks it.
+  "capAdd": ["SYS_PTRACE"],
+  "securityOpt": ["seccomp=unconfined"],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "/home/vscode/.vscode-extensions/nimvscode-1.8.1.vsix",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "nim.lsp.path": "/home/vscode/.nimble/bin/nimlangserver"
+      }
+    }
+  }
+}
