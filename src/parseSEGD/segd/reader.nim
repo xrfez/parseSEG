@@ -265,7 +265,10 @@ proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
     rec.scanTypes.add s
   rec.extended = r.readBytes(32 * int64(nEC))
   rec.external = r.readBytes(32 * int64(nEX))
-  let computed = r.input.offset - rec.offset
+  # From the blocks read, not medium offsets (tape images interleave markers).
+  var computed = 3 * 32 + int64(rec.generalBlocks.len) + int64(rec.extended.len) +
+    int64(rec.external.len)
+  for st in rec.scanTypes: computed += 96 * int64(st.descriptors3.len) + int64(st.skew.len)
   if rec.gh3.headerSize != 0 and int64(rec.gh3.headerSize) != computed:
     r.note(sevWarning, dcInconsistent, "General Header #3 header size is " &
       $rec.gh3.headerSize & ", the header blocks take " & $computed & " bytes", o3 + 24,
