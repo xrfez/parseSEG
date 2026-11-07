@@ -572,3 +572,50 @@ block review_nan_filters_and_zeroed_traces:
   doAssert log.has("written as zeros", sevError), $log
 
 echo "tsegdrevconvert: ok"
+
+block rev0_demux_task_4_6:
+  # A demultiplexed Rev 0 record: one general header, no trace header
+  # extensions, CSD bytes 27-32 zero, GH1 bytes 20-25 the multiplexed fields.
+  const ns = 40
+  var r = SegdRecord(format: sd8048, formatKnown: true)
+  r.gh1 = SegdGeneralHeader1(fileNumber: 7, formatCode: 8048, year: 81, julianDay: 100,
+    hour: 1, manufacturerCode: 1, baseScanInterval16: 32, recordType: 8, recordLength: 1,
+    scanTypesPerRecord: 1, channelSetsPerScanType: 1, unused20: [0x00'u8, 0x01, 0x20],
+    unused24L: 1, unused25: 3)
+  doAssert r.gh1.bytesPerScan == 120 and r.gh1.scansPerBlock == 6
+  let cs = SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: 1,
+    endTime: uint16(ns), channelCount: 2, channelType: 1, gainControl: 3)
+  r.scanTypes = @[SegdScanType(descriptors: @[cs])]
+  r.traceCount = 2
+  var d: SegdData
+  var rd = SegdRecordData(record: r)
+  for k in 0..1:
+    var t = SegdTrace(index: k, numSamples: ns)
+    t.header = SegdTraceHeader(fileNumber: 7, scanTypeNumber: 1, channelSetNumber: 1,
+      traceNumber: k + 1)
+    var vals = newSeq[float64](ns)
+    for i in 0..<ns: vals[i] = float64(i - 20) * 0.5
+    t.samples = newSeq[byte](dataBytes(sd8048, ns))
+    encodeSegdSamples(sd8048, vals, t.samples)
+    rd.traces.add t
+  d.records.add rd
+  toDisk(d, tmp / "rev0.sgd")
+  let back = readSegd(tmp / "rev0.sgd")
+  doAssert back.diagnostics.len == 0, $back.diagnostics # no "array forming 0" note
+  let b = back.records[0]
+  doAssert not b.record.hasGh2 and b.record.revision.major == 0
+  doAssert b.traces.len == 2 and b.traces[1].numSamples == ns
+  doAssert b.record.gh1.scansPerBlock == 6
+  # To Rev 2.1: vertical stack and array forming 0 would mean something else.
+  var log = convertSegdRevision(tmp / "rev0.sgd", tmp / "rev0_21.sgd", rev(2, 1))
+  doAssert not log.isFatal and log.has("no vertical stack or array forming"), $log
+  let r21 = readSegd(tmp / "rev0_21.sgd")
+  let c21 = r21.records[0].record.scanTypes[0].descriptors[0]
+  doAssert c21.verticalStack == 1 and c21.arrayForming == 1
+  doAssert r21.records[0].record.gh1.unused25 == 0
+  doAssert r21.records[0].traces[1].samples == b.traces[1].samples
+  # To Rev 3.0 likewise.
+  log = convertSegdRevision(tmp / "rev0.sgd", tmp / "rev0_30.sgd", rev(3, 0))
+  doAssert not log.isFatal, $log
+  let c30 = readSegd(tmp / "rev0_30.sgd").records[0].record.scanTypes[0].descriptors3[0]
+  doAssert c30.verticalStack == 1 and c30.arrayForming == 1

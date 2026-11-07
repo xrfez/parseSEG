@@ -177,6 +177,16 @@ proc sourceFromGhn(g: SegdGeneralHeaderN): seq[byte] =
     result[15] = g.vibratorType
     putBeI16(result, 16, g.phaseAngle)
 
+proc fromRev0(c: var Conv, d: var SegdChannelSetDescriptor) =
+  ## Rev 0 descriptors leave bytes 27-32 at 0, where Rev 1+ define vertical
+  ## stack (0 = intentionally zeroed data) and array forming (0 = undefined):
+  ## write "no stack" and "no array forming" (1) instead.
+  if d.verticalStack == 0 or d.arrayForming == 0:
+    c.note(34, "Rev 0 channel sets have no vertical stack or array forming; written as 1 " &
+      "(no stacking, no array forming)")
+    if d.verticalStack == 0: d.verticalStack = 1
+    if d.arrayForming == 0: d.arrayForming = 1
+
 proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
     ns: var int): SegdChannelSetDescriptor3 =
   let si = d.sampleIntervalMs(g1)
@@ -253,6 +263,8 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, scan: RecordSc
     var s3 = SegdScanType(skew: st.skew)
     for k, d in st.descriptors:
       var ns: int
+      var d = d
+      if not rec.hasGh2: c.fromRev0(d)
       var d3 = c.csdToRev3(d, rec.gh1, ns)
       if i < scan.setSamples.len and k < scan.setSamples[i].len and
           scan.setSamples[i][k] >= 0:
@@ -606,6 +618,12 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
               outRec.hasGh2 = true
               outRec.gh1.additionalGhBlocks = rec.gh1.additionalGhBlocks + 1
               outRec.gh2 = SegdGeneralHeader2(blockNumber: 2)
+              # Rev 0: the multiplexed-only GH1 fields are "record as zero" in 2.x.
+              outRec.gh1.unused20 = [0'u8, 0, 0]
+              outRec.gh1.unused24L = 0
+              outRec.gh1.unused25 = 0
+              for st in outRec.scanTypes.mitems:
+                for d in st.descriptors.mitems: c.fromRev0(d)
             outRec.gh2.revisionMajor = 2
             outRec.gh2.revisionMinor = target.minor
             if target.minor >= 1 and not (rec.revision.major == 2 and rec.revision.minor >= 1):

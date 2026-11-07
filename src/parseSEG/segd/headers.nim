@@ -26,16 +26,17 @@ type
     year* {.bcdAt(11, 2).}: int             ## Last two digits.
     additionalGhBlocks* {.nibAt(12).}: uint8 ## General header blocks after #1 (binary).
     julianDay* {.bcdAtL(12, 3).}: int
-    hour* {.bcdAt(14, 2).}: int             ## UTC.
+    hour* {.bcdAt(14, 2).}: int             ## UTC (GMT in Rev 0).
     minute* {.bcdAt(15, 2).}: int
     second* {.bcdAt(16, 2).}: int
     manufacturerCode* {.bcdAt(17, 2).}: int
     manufacturerSerial* {.bcdAt(18, 4).}: int
-    unused20* {.at: 20.}: array[3, byte]    ## "Record as zero".
+    unused20* {.at: 20.}: array[3, byte]
+      ## "Record as zero" (Rev 2); Rev 0 multiplexed: bytes per scan, see `bytesPerScan`.
     baseScanInterval16* {.at: 23.}: uint8   ## Base scan interval in 1/16 ms.
     polarity* {.nibAt(24).}: uint8
-    unused24L* {.nibAtL(24).}: uint8
-    unused25* {.at: 25.}: uint8
+    unused24L* {.nibAtL(24).}: uint8        ## Rev 0: S/BX, see `scansPerBlock`.
+    unused25* {.at: 25.}: uint8             ## Rev 0: S/B, see `scansPerBlock`.
     recordType* {.nibAt(26).}: uint8        ## 8 = normal record.
     recordLength* {.bcdAtL(26, 3).}: int    ## RR.R × 1.024 s, as tenths; `BcdAllF`: see GH#2.
     scanTypesPerRecord* {.bcdAt(28, 2).}: int
@@ -133,6 +134,20 @@ type
     undef22* {.at: 22.}: array[11, byte]
     raw*: array[SegdBlockSize, byte]
 
+
+func bytesPerScan*(g: SegdGeneralHeader1): int =
+  ## Rev 0 multiplexed data: GH1 bytes 20-22, the bytes in one scan
+  ## (6-digit BCD; 0 for demultiplexed data). -1 if not BCD.
+  result = 0
+  for b in g.unused20:
+    for d in [b shr 4, b and 0xF]:
+      if d > 9: return -1
+      result = result * 10 + int(d)
+
+func scansPerBlock*(g: SegdGeneralHeader1): int =
+  ## Rev 0 multiplexed data: scans per tape block, S/B × 2^S/BX (GH1 byte 25
+  ## and the low nibble of 24); 0 means gapless (one block per record).
+  int(g.unused25) shl int(g.unused24L)
 
 const
   segdGeneralHeader1Fields* = fieldTable(SegdGeneralHeader1)

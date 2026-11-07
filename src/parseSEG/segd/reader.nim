@@ -391,7 +391,7 @@ proc readRecordHeaders(r: var SegdReader) =
         r.note(sevWarning, dcInconsistent, "channel set descriptor " & $(cs + 1) &
           " of scan type " & $(st + 1) & " says scan type " & $c.scanTypeNumber, o,
           r.loc(channelSet = cs, field = "csd.scanTypeNumber"))
-      if c.arrayForming == 0 and c.channelCount > 0:
+      if c.arrayForming == 0 and c.channelCount > 0 and rec.hasGh2: # Rev 0: unused
         r.note(sevInfo, dcBadValue, "channel set " & $c.channelSetNumber &
           " array forming code is 0 (spec: undefined; common in real files)", o + 31,
           r.loc(channelSet = cs, field = "csd.arrayForming"))

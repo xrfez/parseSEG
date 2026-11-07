@@ -259,7 +259,7 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       and validator, matcher, compiled field tables, `VendorBlock` values, code-decoder
       precedence. Test with a hand-written example map against synthetic blocks.
 
-- [ ] 4.6 SEG-D Rev 0 (the original standard) from the 1.8 gap analysis: revision detection
+- [x] 4.6 SEG-D Rev 0 (the original standard) from the 1.8 gap analysis: revision detection
       without a GH#2 revision, Rev 0 header fields and sample formats; synthetic tests
 
 - [ ] 4.7 Multiplexed SEG-D (Rev 0/1/2 codes 0015-0058): scan walker (start-of-scan and timing
@@ -759,4 +759,11 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
     - Python `load_sps`/`load_p1` hold the GIL while reading.
     - Join diagnostics name the record's list index, not its line.
     - A 1.0 file without H00 whose votes tie is read as 2.1.
+- 2026-11-07: Task 4.6 done: demultiplexed SEG-D Rev 0.
+  - Revision detection already worked: one general header (GH1 byte 12H = 0), no GH#2, revision 0.0. A test now covers it.
+  - The "array forming 0" note is gone for Rev 0, whose CSD bytes 27-32 are unused.
+  - GH1 `bytesPerScan` (bytes 20-22) and `scansPerBlock` (bytes 24L-25) decode the multiplexed fields that task 4.7 will need.
+  - Converting Rev 0 to 2.x or 3.0 writes vertical stack 1 and array forming 1 instead of copying 0s, which mean "zeroed data" and "undefined" from Rev 1 on, and zeroes the GH1 multiplexed fields for 2.x.
+  - Not done (noted): writer checks for Rev 0-only formats; trace lengths from tape block lengths.
+  - Multiplexed data is task 4.7.
 
