@@ -496,23 +496,64 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
       in this file, ranked. Each finding is marked either:
       - internal: no API change;
       - public API change: needs owner approval, since it breaks callers.
-- [ ] 12.2 Bindings from one declaration. Today each boundary function is written three times:
-      the `abi/core.nim` proc, a hand-written adapter in `capi.nim` / `pyapi.nim` (each already
-      tagged `{.segExport.}`), and a hand-written `include/parseseg.h`. Replace this with one
-      annotation on the core proc (e.g. `{.segApi.}`) whose macro generates:
-      - the C shim: handles as `pointer`, `cstring`/out-parameter conversion, `SegStatus` and
-        last-error mapping, `except Exception` guard;
-      - the nimpy export: `PPyObject` conversion, the Python exception mapping;
-      - `include/parseseg.h`, written at build time, with a test that fails if the
-        committed header differs (no drift).
+- [ ] 12.2 Bindings from one declaration (owner, 2026-11-07: do this first, before 12.1).
+      Every boundary function is written **once**: an ordinary exported Nim proc in
+      `src/parseSEG/abi/api.nim` carrying `{.segApi.}`. The macro (`abi/segapi.nim`) generates
+      everything else at compile time.
 
-      Evaluate `genny` (treeform) first; adopt it only if it handles handles, tensor views
-      and the nimpy path, else write the macro. Hand-written adapters stay only where a
-      function really is shaped differently per language (tensor views / DLPack, prefetch,
-      iterators). The C ABI must stay byte-compatible (`abi_test.c` and `test_pyapi.py`
-      unchanged and passing).
+      Owner decisions:
+      - Python becomes a generated **ctypes** module over the same shared library; nimpy,
+        `pyapi.nim` and the nimpy patch are dropped. One binary serves C and Python.
+      - **C ABI version 2** is allowed: one uniform convention from the Nim signature,
+        `abi_test.c` updated, Python keeps its names and keywords (`test_pyapi.py` is the
+        oracle).
+      - genny was evaluated (it lists exports in a separate DSL, has a single `LibError`, and
+        does not handle tensors, buffers or prefetch), so it is not used. Its architecture is
+        kept: one library, with a generated header and a generated ctypes module.
 
-      Do this **before** 6.8-6.10 and 10.5 if possible, so new APIs get bindings for free.
+      Design:
+      - **Pragma:** `{.segApi.}`, `{.segApi(c = "seg_x", py = "x").}`, `concurrent`,
+        `pyOnly` / `cOnly` for protocol hooks. Defaults: C = `seg_` & snake_case, Python =
+        snake_case. The first parameter of a handle type makes it a method of that class.
+      - **Handles:** `segHandle(FileObj, c = "SegFile", py = "SeismicFile")`, a `ref` kept
+        with `GC_ref`. It generates `seg_<x>_release` and the Python class (`close`, `with`,
+        `__del__`). Each handle has a lock: wrappers serialize calls on one handle unless the
+        proc is `concurrent` (reads). With ctypes there is no GIL during calls, so this
+        replaces the GIL's protection.
+      - **C convention:** every function returns `SegStatus`; results go through trailing
+        out-pointers.
+
+        | Nim | Parameter | Result |
+        |---|---|---|
+        | scalars | int64/int32/double/bool | `T*` |
+        | `string` | `const char*` (NULL = default if any) | caller buffer `char*, cap, int64_t* len` (Python retries when too small) |
+        | handle | `SegX*` | `SegX**` (owned) |
+        | enum | int32 checked against the enum | int32 |
+        | `openArray[int64]` | ptr + len | |
+        | `seq[T]` | | caller buffer `T*, cap, int64_t* len` |
+        | value object | | struct `T*` (header struct generated from the Nim type) |
+        | `DiagLog` | | owned `SegLog**` |
+        | `FieldValue` | `SegValue*` | `SegValue*` |
+        | `SampleBuffer` | `SegSampleBuffer*` (data, dtype, rows, cols, row_stride) | |
+
+        Errors use the same status table plus `SEG_ERR_MEMORY`. A `LoggedError` carries its
+        log out through the log out-pointer, and Python attaches it as `e.diagnostics`.
+      - **Generated files** (written at compile time by the lib build, committed, and checked
+        by a test that rebuilds them into a temp dir and compares):
+        - `include/parseseg.h`: doc comments come from the procs' `##` comments;
+        - `python/parseseg/__init__.py`: ctypes declarations, exception classes,
+          handle classes and dict/enum conversions. Python-only protocol code (DLPack capsule,
+          `__array__`, `tolist`, buffer-protocol `read_into`) is hand-written in
+          `python/extras.py` and spliced in.
+      - **Build:** a single entry `src/parseSEG/bindings.nim`. `nim lib` and the cross/static/
+        csources builds use it; `nim pylib` copies the library next to the generated package.
+        `capi.nim`, `pyapi.nim`, `abi/core.nim` and `abi/exporting.nim` are removed once
+        `api.nim` covers them.
+      - **Build tasks:** release builds use `--ic:off` and a fresh per-task nimcache (wiped
+        first). Dev builds (`test`, `nimDebug`, `zigDebug`) use `--ic:on` when `PARSESEG_IC=1`
+        is set. IC fails in this container even on a one-line program (the bundled `nifler`
+        is musl-linked, and a source build reports "modules stopped for imports discovered
+        during sem"), so it stays opt-in.
 - [ ] 12.3 Apply the approved 12.1 findings, one module per commit, tests green after each.
 - [ ] 12.4 Review by an agent; fix its findings.
 
@@ -881,3 +922,4 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
 - 2026-11-07: Closed the raw-memory hole (owner rule: files change only on an explicit write). `SeismicFile.memory` is now `unsafeMemory`, internal and not exported by `parseSEG` (`export traceindex except unsafeMemory`); a write through it on a `writable` map would have bypassed the `HeaderEditor` journal. Public replacements: `isOpen` and `copyBytes(offset, n)` (a bounds-checked copy). `tumbrella` checks that the pointer is not reachable. C ABI and Python never exposed it. `nim test` passes; lib/pylib/cli build.
 - 2026-11-07: Task 6.10 added: read-only header listing per trace/record/file for a viewer's headers tab. Owner rule recorded: viewers never edit files; viewer edits become a NIF patch (`writeHeaderPatch`), applied only by an explicit `importHeaders` (dry run first, preferably to a copy).
 - 2026-11-07: Phase 12 added (owner): idiomatic Nim pass. 12.2 generates the C shims, the nimpy exports and `parseseg.h` from one annotation on the `abi/core.nim` procs (evaluate genny first), replacing the hand-written adapter files (64 C / 71 Python exports) and the hand-written header. Suggested order: 12.2 before 6.8-6.10 and 10.5.
+- 2026-11-07: Owner chose to start Phase 12 with 12.2 (bindings from one `{.segApi.}` proc). Decisions: generated ctypes Python over the one shared library (nimpy dropped), C ABI v2 with a uniform convention, genny evaluated and not used. The design is in the 12.2 entry. Nim 2.4 `--ic:on` is broken in this container (musl `nifler`; a source build still fails), so it is opt-in.
