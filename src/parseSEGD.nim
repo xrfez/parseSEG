@@ -5,3 +5,12 @@
 
 import parseSEGD/common/[errors, diagnostics, endians, bcd, ibmfloat, ebcdic]
 export errors, diagnostics, endians, bcd, ibmfloat, ebcdic
+
+import parseSEGD/io/[records, diskio, tapeimage, tapedevice]
+export records, diskio, tapeimage, tapedevice
+when defined(linux):
+  import parseSEGD/io/tape_linux
+  export tape_linux
+elif defined(windows):
+  import parseSEGD/io/tape_windows
+  export tape_windows
