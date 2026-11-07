@@ -49,7 +49,9 @@
 ## hold the target are skipped, and bytes that hold neither the original
 ## nor the edited value are a conflict, logged and left alone.
 
-import std/[macros, math, strutils]
+import std/[algorithm, macros, math, strutils, tables]
+when defined(posix):
+  import std/posix
 import ../common/[endians, errors, diagnostics, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
@@ -71,10 +73,12 @@ type
     log*: DiagLog        ## Refused edits and journal problems.
     journalPath*: string
     journal: File
+    journalBroken: bool  ## A journal write failed part-way (see `journalLine`).
     edits: int
 
 const
   MaxJournalLine = 1 shl 16 ## Longer journal lines are malformed.
+  MaxRepeats = 5 ## Journal diagnostics of one kind logged per call; the rest are counted.
 
   segyBinaryStructural = ["samplesPerTrace", "formatCode", "extSamplesPerTrace",
     "byteOrderMarker", "segyMajor", "segyMinor", "fixedLengthTraces", "numExtTextHeaders",
@@ -111,17 +115,32 @@ func nifEscape(s: string): string =
     if c in {'"', '\\'} or ord(c) < 0x20 or ord(c) >= 0x7F: result.add "\\" & toHex(ord(c), 2)
     else: result.add c
 
+proc syncJournal(ed: var HeaderEditor) =
+  # The entry must be on disk before the map is written: mapped pages can
+  # reach the disk any time after.
+  ed.journal.flushFile()
+  when defined(posix):
+    if fsync(getFileHandle(ed.journal)) != 0:
+      raise newException(IOError, "fsync failed: " & ed.journalPath)
+
+proc journalLine(ed: var HeaderEditor, line: string) =
+  # After a failed write the file may end in a partial line: start afresh so
+  # the next entry does not merge into it.
+  if ed.journalBroken: ed.journal.write "\n"
+  ed.journalBroken = true
+  ed.journal.writeLine line
+  ed.syncJournal()
+  ed.journalBroken = false
+
 proc openJournal(ed: var HeaderEditor) =
   if not open(ed.journal, ed.journalPath, fmAppend):
     raise newException(IOError, "cannot open the edit journal: " & ed.journalPath)
-  ed.journal.writeLine "(session (file \"" & nifEscape(ed.file.path) & "\") (size " &
+  ed.journalLine "(session (file \"" & nifEscape(ed.file.path) & "\") (size " &
     $ed.file.mappedSize & "))"
-  ed.journal.flushFile()
 
 proc journalEdit(ed: var HeaderEditor, at: int64, old, new: openArray[byte], label: string) =
-  ed.journal.writeLine "(edit " & $at & " \"" & hexOf(old) & "\" \"" & hexOf(new) & "\" \"" &
+  ed.journalLine "(edit " & $at & " \"" & hexOf(old) & "\" \"" & hexOf(new) & "\" \"" &
     nifEscape(label) & "\")"
-  ed.journal.flushFile()
 
 type JournalEdit* = object
   ## One journaled edit.
@@ -173,29 +192,71 @@ proc parseEditLine(line: string, e: var JournalEdit): bool =
   while i < line.len and line[i] == ' ': inc i
   i == line.len - 1 and line[i] == ')'
 
+proc capped(log: var DiagLog, n: var int, severity: Severity, code: DiagCode, msg: string,
+    offset: int64, loc: Location) =
+  # Logs the first `MaxRepeats` problems of a kind; `n` counts them all.
+  inc n
+  if n <= MaxRepeats: log.report(severity, code, msg, offset, loc)
+
+proc summarize(log: var DiagLog, n: int, what: string, loc: Location) =
+  if n > MaxRepeats:
+    log.report(sevInfo, dcValidation, $(n - MaxRepeats) & " more " & what & " were not logged",
+      loc = loc)
+
 proc readJournal*(journalPath: string, log: var DiagLog): seq[JournalEdit] =
   ## The edits of a journal, oldest first. Malformed lines (e.g. one cut short
-  ## by a crash) are logged as errors and skipped; `(session ...)` lines are
-  ## skipped. Raises `IOError` if the journal cannot be read.
+  ## by a crash) are logged as errors (the first few; then a count) and
+  ## skipped; lines longer than 64 KB are malformed and never held whole;
+  ## `(session ...)` lines are skipped. Raises `IOError` if the journal cannot
+  ## be read.
   var f: File
   if not open(f, journalPath, fmRead):
     raise newException(IOError, "cannot open the edit journal: " & journalPath)
   defer: f.close()
+  var bad = 0
+  var lineNo = 0
   var line = ""
-  var n = 0
-  while f.readLine(line):
-    inc n
-    if line.len == 0 or line.startsWith("(session "):
-      discard
-    else:
-      var e = JournalEdit(line: n)
-      if line.len <= MaxJournalLine and parseEditLine(line, e):
-        result.add e
+  var tooLong = false
+  var buf {.noinit.}: array[65536, char]
+  proc finish(line: var string, tooLong: var bool, lineNo, bad: var int,
+      res: var seq[JournalEdit], log: var DiagLog, journalPath: string) {.nimcall.} =
+    inc lineNo
+    if tooLong or not (line.len == 0 or line.startsWith("(session ")):
+      var e = JournalEdit(line: lineNo)
+      if not tooLong and parseEditLine(line, e):
+        res.add e
       else:
-        log.report(sevError, dcValidation, "malformed journal line; skipped",
-          loc = Location(file: journalPath, record: n - 1, field: "journal"))
+        capped(log, bad, sevError, dcValidation, "malformed journal line " & $lineNo &
+          "; skipped", -1, Location(file: journalPath, field: "journal"))
+    line.setLen 0
+    tooLong = false
+  while true:
+    let n = f.readChars(buf)
+    if n == 0: break
+    for k in 0..<n:
+      let c = buf[k]
+      if c == '\n':
+        finish(line, tooLong, lineNo, bad, result, log, journalPath)
+      elif not tooLong:
+        if line.len >= MaxJournalLine:
+          tooLong = true
+          line.setLen 0
+        elif c != '\r':
+          line.add c
+  if line.len > 0 or tooLong: finish(line, tooLong, lineNo, bad, result, log, journalPath)
+  summarize(log, bad, "malformed journal lines", Location(file: journalPath, field: "journal"))
+
+type
+  ByteState = object
+    original, final: byte
+    label: string # of the last edit touching the byte (for diagnostics)
 
 proc replay(path, journalPath: string, undo: bool): DiagLog =
+  # Merges the journal per byte (original = the first edit's old byte, final
+  # = the last edit's new byte) and moves each contiguous run of touched
+  # bytes as a whole: from final to original (undo) or back (apply). A run
+  # already at the target is skipped and any other run is a conflict, so
+  # both operations can be repeated, also when a location was edited twice.
   var log: DiagLog
   var edits: seq[JournalEdit]
   if not log.tryRecord(Location(file: journalPath), (edits = readJournal(journalPath, log))):
@@ -206,28 +267,56 @@ proc replay(path, journalPath: string, undo: bool): DiagLog =
     return log
   defer: f.close()
   let size = f.getFileSize
-  for k in 0..<edits.len:
-    let e = if undo: edits[edits.len - 1 - k] else: edits[k]
-    let (fromBytes, toBytes) = if undo: (e.new, e.old) else: (e.old, e.new)
-    let loc = Location(file: path, field: e.label)
+  var bytes: Table[int64, ByteState]
+  var pastEnd = 0
+  for e in edits:
     if e.offset + e.old.len > size:
-      log.report(sevError, dcInconsistent, "journal line " & $e.line &
-        " lies past the end of the file; skipped", e.offset, loc)
+      capped(log, pastEnd, sevError, dcInconsistent, "journal line " & $e.line &
+        " lies past the end of the file; skipped", e.offset, Location(file: path, field: e.label))
     else:
-      var cur = newSeq[byte](e.old.len)
-      f.setFilePos(e.offset)
-      if f.readBytes(cur, 0, cur.len) != cur.len:
-        log.report(sevError, dcIo, "short read; skipped", e.offset, loc)
-      elif cur == toBytes:
-        discard "already done"
-      elif cur == fromBytes:
-        f.setFilePos(e.offset)
-        if f.writeBytes(toBytes, 0, toBytes.len) != toBytes.len:
-          log.report(sevFatal, dcIo, "write failed", e.offset, loc)
-          return log
-      else:
-        log.report(sevError, dcInconsistent, "journal line " & $e.line & ": the file holds " &
-          hexOf(cur) & ", neither the original nor the edited bytes; left alone", e.offset, loc)
+      for k in 0..<e.old.len:
+        let at = e.offset + k
+        if at in bytes:
+          bytes[at].final = e.new[k]
+          bytes[at].label = e.label
+        else:
+          bytes[at] = ByteState(original: e.old[k], final: e.new[k], label: e.label)
+  summarize(log, pastEnd, "journal lines past the end of the file", Location(file: path))
+  var offsets = newSeqOfCap[int64](bytes.len)
+  for at in bytes.keys: offsets.add at
+  offsets.sort()
+  var conflicts = 0
+  var i = 0
+  while i < offsets.len:
+    var j = i + 1
+    while j < offsets.len and offsets[j] == offsets[j - 1] + 1: inc j
+    let at = offsets[i]
+    var cur = newSeq[byte](j - i)
+    f.setFilePos(at)
+    if f.readBytes(cur, 0, cur.len) != cur.len:
+      log.report(sevFatal, dcIo, "short read", at, Location(file: path))
+      return log
+    var target = newSeq[byte](cur.len)
+    var atTarget, atSource = true
+    for k in 0..<cur.len:
+      let b = bytes[offsets[i + k]]
+      let (src, dst) = if undo: (b.final, b.original) else: (b.original, b.final)
+      target[k] = dst
+      if cur[k] != dst: atTarget = false
+      if cur[k] != src: atSource = false
+    if atTarget:
+      discard "already done"
+    elif atSource:
+      f.setFilePos(at)
+      if f.writeBytes(target, 0, target.len) != target.len:
+        log.report(sevFatal, dcIo, "write failed", at, Location(file: path))
+        return log
+    else:
+      capped(log, conflicts, sevError, dcInconsistent, "the file holds " & hexOf(cur) &
+        ", neither the original nor the edited bytes; left alone", at,
+        Location(file: path, field: bytes[at].label))
+    i = j
+  summarize(log, conflicts, "conflicts", Location(file: path))
   log
 
 proc rollbackJournal*(path, journalPath: string): DiagLog =
@@ -341,6 +430,7 @@ proc editBlock[T](ed: var HeaderEditor, at: int64, size: int, firstByte: static 
     ed.log.report(sevError, dcValidation, blockName & "." & field & ": " & msg, at, l)
     return false
   if ed.file.memory == nil: refuse "the file is closed"
+  if not ed.file.index.detected: refuse "the file is neither SEG-Y nor SEG-D"
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
   if field in structural:
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
@@ -462,7 +552,8 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     if result:
       rec.gh1 = decodeBlock[SegdGeneralHeader1](ed.file.memory.toOpenArray(int(rec.offset),
         int(rec.offset) + SegdBlockSize - 1))
-  elif blockName.len > 2 and blockName.startsWith("gh") and blockName[2..^1].allCharsInSet(Digits):
+  elif blockName.len in 3..6 and blockName.startsWith("gh") and
+      blockName[2..^1].allCharsInSet(Digits):
     let n = parseInt(blockName[2..^1])
     if rec.isRev3 or not rec.hasGh2:
       result = ed.refuseName(name, "only Rev 1/2 records have source blocks gh3, gh4, ... " &

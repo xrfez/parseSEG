@@ -358,6 +358,7 @@ proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
   ## the offsets are set, and a trace cut short still ends the read.
   result = SegyReader(cursor: initRecordCursor(src), name: src.name, maxRetained: maxRetained,
     byteStream: not src.hasRecordBoundaries, mediumSize: -1, headersOnly: headersOnly)
+  if headersOnly: result.cursor.preferSmallReads()
   if result.byteStream:
     try:
       result.mediumSize = getFileSize(src.name)

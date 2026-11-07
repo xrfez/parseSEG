@@ -23,7 +23,7 @@ proc key(record = NaN, ensemble = NaN, offset = NaN, sx = NaN, rx = NaN,
 proc segyIndex(sorting: int16, ks: openArray[TraceKeys]): TraceIndex =
   result = TraceIndex(kind: skSegy, keys: @ks)
   result.segy.binary.traceSorting = sorting
-  for _ in ks: result.entries.add TraceEntry(channelSet: -1, scanType: -1)
+  for _ in ks: result.entries.add TraceEntry(channelSet: NoChannelSet, scanType: -1)
 
 proc kinds(gs: seq[Gather]): seq[GatherKind] =
   for g in gs: result.add g.kind

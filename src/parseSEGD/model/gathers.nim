@@ -5,7 +5,8 @@
 ## `gathers` splits an index (built with `keys = true`) into gathers and
 ## derives each one's kind from its geometry:
 ##
-## - one source and several receivers: a shot (common source) gather;
+## - at most one known source and several receivers: a shot (common
+##   source) gather;
 ## - one receiver and several sources: a receiver gather;
 ## - one receiver, at most one source: a shot if it is a single trace or one
 ##   trace per component, else `gkUnknown` (the keys cannot tell);
@@ -14,6 +15,9 @@
 ## A SEG-Y sorting code of CMP/stack (2-4, 8, 9) or common offset (7) names
 ## the gathers outright; common receiver (6) does unless the geometry is
 ## plainly a shot (one source, several receivers).
+##
+## Nothing is assumed: a gather whose keys cannot tell (e.g. a SEG-D 2.x
+## receiver gather whose sources live only in vendor blocks) is `gkUnknown`.
 ##
 ## Splitting: a SEG-D record is one gather. SEG-Y has no record structure, so
 ## the trace sorting code (binary 3229-3230) picks the key whose changes
@@ -78,7 +82,7 @@ func isSeismic*(ix: TraceIndex, i: int): bool =
   ## False for SEG-D auxiliary traces (channel type other than seismic or
   ## EM); true for SEG-Y and for traces of unknown channel sets.
   let e = ix.entries[i]
-  if ix.kind == skSegy or e.channelSet < 0: true
+  if ix.kind == skSegy or e.channelSet == NoChannelSet: true
   elif ix.segdRecords[e.record].isRev3: e.channelType in {0x10'u8, 0x11'u8}
   else: e.channelType == 1
 
@@ -137,9 +141,7 @@ proc gathers*(ix: TraceIndex): seq[Gather] =
     var first = 0
     for i in 1..ix.len:
       if i == ix.len or ix.entries[i].record != ix.entries[first].record:
-        var g = ix.classify(first..i - 1)
-        if g.kind == gkUnknown: g.kind = gkShot # a record is a shot record by convention
-        result.add g
+        result.add ix.classify(first..i - 1)
         first = i
   else:
     let sorting = int(ix.segy.binary.traceSorting)

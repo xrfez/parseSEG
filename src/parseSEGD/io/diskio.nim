@@ -5,6 +5,8 @@
 ## but not stored (SEG disk files have none). For tape layouts on disk, use
 ## `tapeimage`.
 
+when defined(posix):
+  import std/posix
 import records
 
 type
@@ -22,7 +24,12 @@ proc openDiskSource*(path: string): DiskSource =
     raise newException(IOError, "cannot open for reading: " & path)
   var size = -1'i64 # unknown (a pipe or device): skips read and discard
   try:
-    size = getFileSize(f)
+    # Only a regular file's size is meaningful: a character device reports 0.
+    when defined(posix):
+      var st: Stat
+      if fstat(getFileHandle(f), st) == 0 and S_ISREG(st.st_mode): size = getFileSize(f)
+    else:
+      size = getFileSize(f)
   except IOError:
     discard
   DiskSource(f: f, name: path, size: size)
@@ -50,7 +57,7 @@ method hasRecordBoundaries*(s: DiskSource): bool = false
 
 method seekForward*(s: DiskSource; n: int64): int64 =
   if s.size < 0: return -1
-  if s.offset + n > s.size: s.refreshSize()
+  if n > s.size - s.offset: s.refreshSize()
   result = max(0'i64, min(n, s.size - s.offset))
   setFilePos(s.f, s.offset + result)
   s.offset += result

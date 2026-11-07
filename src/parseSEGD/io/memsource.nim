@@ -25,11 +25,11 @@ proc openMemFileSource*(path: string; writable = false;
   ## Maps `path` (read-only unless `writable`). Raises `IOError` or `OSError`
   ## if it cannot be opened or mapped. An empty file maps nothing and reads
   ## as end of data.
-  let size = getFileSize(path)
-  result = MemFileSource(name: path, size: size, chunk: max(1, chunk))
-  if size > 0:
+  result = MemFileSource(name: path, chunk: max(1, chunk))
+  if getFileSize(path) > 0:
     result.mf = memfiles.open(path, mode = if writable: fmReadWrite else: fmRead)
     result.mapped = true
+    result.size = int64(result.mf.size) # the mapped size, not an earlier stat
 
 proc size*(s: MemFileSource): int64 {.inline.} =
   ## File size in bytes.
@@ -61,3 +61,4 @@ method close*(s: MemFileSource) =
   if s.mapped:
     s.mf.close()
     s.mapped = false
+  s.size = 0

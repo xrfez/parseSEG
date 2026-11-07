@@ -77,6 +77,7 @@ proc readInto*(p: var PushbackInput, buf: var seq[byte], n: int64) =
 proc skip*(p: var PushbackInput, n: int64): int64 {.discardable.} =
   ## Discards up to `n` bytes (fewer at a tape mark or end of data) and
   ## returns how many were passed. Seekable byte streams skip without reading.
+  if n <= 0: return 0
   result = min(n, int64(p.pending.len - p.pendingPos))
   p.pendingPos += int(result)
   if result < n: result += p.cursor.skip(n - result)

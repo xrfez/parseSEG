@@ -3,7 +3,7 @@
 
 import std/[assertions, os]
 import parseSEGD/common/errors
-import parseSEGD/io/[records, diskio, tapeimage, tapedevice, memsource]
+import parseSEGD/io/[records, diskio, tapeimage, tapedevice, memsource, pushback]
 import parseSEGD/segy/[reader as segyreader, writer as segywriter]
 import parseSEGD/segd/[reader as segdreader, writer as segdwriter]
 import parseSEGD/model/traceindex
@@ -68,7 +68,7 @@ block index_matches_full_read_segd:
       for i, t in rd.traces:
         let e = f.index.entries[k]
         doAssert e.offset == t.offset and int(e.numSamples) == t.numSamples
-        doAssert int(e.channelSet) == t.channelSet and int(e.scanType) == t.scanType
+        doAssert e.channelSetIndex == t.channelSet and int(e.scanType) == t.scanType
         doAssert e.sampleOffset + f.index.dataBytes(k) <= f.mappedSize
         inc k
     doAssert k == f.len
@@ -233,3 +233,41 @@ block segy_repeated_trace_warnings_are_capped:
         if e.severity == sevWarning: inc mismatches
         elif e.severity == sevInfo: inc summaries
     doAssert mismatches == 5 and summaries == 1
+
+type CountingSource = ref object of RecordSource
+  inner: RecordSource
+  copied, seeked: int64
+
+method readRecordImpl(s: CountingSource; buf: var seq[byte]; maxLen: int): RecordKind =
+  result = s.inner.readRecord(buf, maxLen)
+  s.copied += buf.len
+  s.dataOffset = s.inner.dataOffset
+  s.offset = s.inner.offset
+
+method hasRecordBoundaries(s: CountingSource): bool = s.inner.hasRecordBoundaries
+
+method seekForward(s: CountingSource; n: int64): int64 =
+  result = s.inner.seekForward(n)
+  if result > 0: s.seeked += result
+  s.offset = s.inner.offset
+
+block headers_only_walk_copies_only_headers:
+  # Review finding: refills after a seek fetched whole chunks, so a header
+  # walk copied nearly the whole file. Inglewood: 200 traces of 8244 bytes.
+  for inner in [RecordSource(openDiskSource(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")),
+      openMemFileSource(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")]:
+    let c = CountingSource(inner: inner, name: inner.name)
+    let ix = buildIndex(c, skSegy)
+    doAssert ix.len == 200
+    let traceArea = 200 * 8244
+    doAssert c.seeked > traceArea * 9 div 10, $c.seeked
+    inner.close()
+
+block skip_guards:
+  let src = openDiskSource("/dev/zero") # a device: no size, reads still work
+  var buf: seq[byte]
+  doAssert src.readRecord(buf, 4096) == rkData and buf.len == 4096
+  doAssert src.seekForward(10) == -1
+  src.close()
+  var p = initPushbackInput(openMemFileSource(exampleDir / "63.sgd"))
+  doAssert p.skip(-5) == 0 and p.offset == 0

@@ -230,6 +230,7 @@ proc openSegd*(src: RecordSource, twosComplement8015 = false,
     byteStream: not src.hasRecordBoundaries, twosComplement8015: twosComplement8015,
     maxHeaderBytes: DefaultMaxHeaderBytes, maxTraceBytes: DefaultMaxTraceBytes,
     headersOnly: headersOnly)
+  if headersOnly: result.input.cursor.preferSmallReads()
   if not result.log.tryRecord(Location(file: src.name, field: "label"), result.readLabel()):
     result.done = true
 

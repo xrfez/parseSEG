@@ -19,8 +19,10 @@
 
 import ../common/errors
 
-const DefaultChunkSize* = 1 shl 20
-  ## Chunk size used by byte-stream sources when the caller does not ask for one.
+const
+  DefaultChunkSize* = 1 shl 20
+    ## Chunk size used by byte-stream sources when the caller does not ask for one.
+  SkipRefill = 512 ## Smallest refill after a seek: most trace headers fit (see `RecordCursor.sized`).
 
 type
   RecordKind* = enum
@@ -131,6 +133,10 @@ type
     pos: int
     pending: RecordKind  ## What stopped the stream; rkData while bytes flow.
     chunk: int
+    sized: bool
+      ## Set once a skip has seeked: refills then fetch what the next read
+      ## needs (at least `SkipRefill` bytes) instead of a whole chunk, so a
+      ## header-only walk copies the headers, not the samples it skips.
 
 proc initRecordCursor*(src: RecordSource; chunkSize = DefaultChunkSize): RecordCursor =
   ## Creates a cursor reading from `src`.
@@ -138,12 +144,18 @@ proc initRecordCursor*(src: RecordSource; chunkSize = DefaultChunkSize): RecordC
 
 proc source*(c: RecordCursor): RecordSource {.inline.} = c.src
 
-proc fill(c: var RecordCursor): bool =
-  ## Ensures unread bytes are buffered. False if a tape mark or end-of-data
-  ## blocks the stream.
+proc preferSmallReads*(c: var RecordCursor) {.inline.} =
+  ## Refill with what each read needs instead of whole chunks, as after a
+  ## seek: for header-only walks, which skip most bytes.
+  c.sized = true
+
+proc fill(c: var RecordCursor; want = 0): bool =
+  ## Ensures unread bytes are buffered (`want`: bytes the caller is about to
+  ## read, a size hint). False if a tape mark or end-of-data blocks the stream.
   while c.pos >= c.buf.len and c.pending == rkData:
     c.pos = 0
-    c.pending = c.src.readRecord(c.buf, c.chunk) # an empty data record loops again
+    let n = if c.sized: max(SkipRefill, min(want, c.chunk)) else: c.chunk
+    c.pending = c.src.readRecord(c.buf, n) # an empty data record loops again
   c.pos < c.buf.len
 
 proc stoppedAt*(c: var RecordCursor): RecordKind =
@@ -173,7 +185,7 @@ proc read*(c: var RecordCursor; dst: var openArray[byte]): int =
   ## Reads up to `dst.len` bytes, stopping early only at a tape mark or end of
   ## data. Returns the number of bytes read.
   result = 0
-  while result < dst.len and c.fill():
+  while result < dst.len and c.fill(dst.len - result):
     let n = min(dst.len - result, c.buf.len - c.pos)
     copyMem(addr dst[result], addr c.buf[c.pos], n)
     inc c.pos, n
@@ -192,17 +204,20 @@ proc skip*(c: var RecordCursor; n: int64): int64 =
   ## of data, and returns how many were passed. Byte streams that can seek
   ## (disk files, memory maps) skip without reading; other media read and
   ## discard.
+  if n <= 0: return 0
   result = min(n, int64(c.buf.len - c.pos))
   if result > 0: c.pos += int(result)
   if result < n and c.pending == rkData and not c.src.hasRecordBoundaries:
     let k = c.src.seekForward(n - result)
     if k >= 0:
       result += k
+      c.sized = true
       if result < n: discard c.fill() # let the source report end of data
-  var scratch: array[65536, byte]
-  while result < n and c.fill():
-    let k = c.read(scratch.toOpenArray(0, int(min(n - result, scratch.len)) - 1))
-    result += k
+  if result < n:
+    var scratch {.noinit.}: array[65536, byte]
+    while result < n and c.fill(int(min(n - result, scratch.len))):
+      let k = c.read(scratch.toOpenArray(0, int(min(n - result, scratch.len)) - 1))
+      result += k
 
 proc readRecordRest*(c: var RecordCursor): seq[byte] =
   ## Returns the unread rest of the current physical record (empty if at a

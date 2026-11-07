@@ -39,8 +39,10 @@ type
     headerBytes*: uint32 ## Header bytes before the samples (incl. extensions).
     numSamples*: uint32
     record*: uint32      ## SEG-D record index (0 for SEG-Y); indexes `codecs`.
-    channelSet*: int16   ## 0-based SEG-D channel set index, -1 if unknown (SEG-Y).
-    scanType*: int8      ## 0-based SEG-D scan type index, -1 if unknown (SEG-Y).
+    channelSet*: uint16
+      ## 0-based SEG-D channel set index, `NoChannelSet` if unknown (and for
+      ## SEG-Y); see `channelSetIndex`.
+    scanType*: int8      ## 0-based SEG-D scan type index (BCD, < 100), -1 if unknown (SEG-Y).
     channelType*: uint8
       ## SEG-D channel type of the trace's channel set (Rev 1/2 nibble, 1 =
       ## seismic; Rev 3 byte, 0x10 = seismic); 0 for SEG-Y and unknown sets.
@@ -69,11 +71,20 @@ type
     segdRecords*: seq[SegdRecord] ## SEG-D record headers and trailers, by record index.
     segdToc*: seq[SegdToc]    ## SEG-D Rev 3 Table of Contents files met.
     log*: DiagLog             ## Diagnostics of the walk.
+    detected*: bool           ## The stream was identified as `kind` and walked.
     keys*: seq[TraceKeys]
       ## Per-trace geometry, parallel to `entries`; empty unless the index was
       ## built with `keys = true` (about 100 bytes per trace).
 
+const NoChannelSet* = 0xFFFF'u16
+  ## `TraceEntry.channelSet` of a trace without a known channel set. The
+  ## reader allows at most 65535 sets per scan type, so index 65535 is free.
+
 static: doAssert sizeof(TraceEntry) == 24
+
+func channelSetIndex*(e: TraceEntry): int {.inline.} =
+  ## The 0-based channel set index, -1 if unknown.
+  if e.channelSet == NoChannelSet: -1 else: int(e.channelSet)
 
 func len*(ix: TraceIndex): int {.inline.} = ix.entries.len
 
@@ -117,22 +128,34 @@ func looksLikeSegdGh1(b: openArray[byte]): bool =
     code = code * 10 + d
   fileOk and (toSegdFormat(code, f) or code in [15, 22, 24, 42, 44, 48, 58, 1015, 1022])
 
+func printable(b: byte, ebcdic: bool): bool {.inline.} =
+  if ebcdic:
+    b == 0x40 or b in 0x4A'u8..0x50'u8 or b in 0x5A'u8..0x61'u8 or b in 0x6A'u8..0x6F'u8 or
+      b in 0x79'u8..0x7F'u8 or b in 0x81'u8..0x89'u8 or b in 0x91'u8..0x99'u8 or
+      b in 0xA1'u8..0xA9'u8 or b in 0xC0'u8..0xC9'u8 or b in 0xD0'u8..0xD9'u8 or
+      b in 0xE0'u8..0xE9'u8 or b in 0xF0'u8..0xF9'u8
+  else:
+    b in 0x20'u8..0x7E'u8
+
 func looksLikeSegy(head: openArray[byte], at: int): bool =
-  # A textual header starting with `C` at `at`, and, when the bytes are
-  # there, a defined format code in binary header bytes 3225-3226 (either
-  # byte order).
-  if head.len <= at or head[at] notin {0xC3'u8, 0x43'u8}: return false
-  if head.len < at + 3226: return true
-  var f: SampleFormat
-  toSampleFormat(int(getNum[uint16](head, at + 3224, boBig)), f) or
-    toSampleFormat(int(getNum[uint16](head, at + 3224, boLittle)), f)
+  # A 3200-byte textual header at `at` that starts with `C` and is mostly
+  # printable text in its character set (EBCDIC for 0xC3, ASCII for 0x43).
+  # The binary header is left to the reader, so a file with an undefined
+  # format code is still read as SEG-Y and gets the reader's diagnostics.
+  if head.len < at + 3600 or head[at] notin {0xC3'u8, 0x43'u8}: return false
+  let ebcdic = head[at] == 0xC3
+  var n = 0
+  for i in at ..< at + 3200:
+    if printable(head[i], ebcdic): inc n
+  n >= 3200 * 6 div 10
 
 func detectKind*(head: openArray[byte], kind: var SeismicKind): bool =
   ## Guesses the standard from the first bytes of a stream (pass at least
-  ## 3600). SEG-D: a storage unit label or a Table of Contents file. SEG-Y: a
-  ## textual header starting with `C` (EBCDIC or ASCII), possibly after a
-  ## 128-byte tape label, with a defined format code. Otherwise SEG-D if the
-  ## bytes are a plausible General Header #1. False if nothing fits.
+  ## 3728). SEG-D: a storage unit label or a Table of Contents file. SEG-Y: a
+  ## textual header starting with `C` that is mostly printable EBCDIC or
+  ## ASCII, possibly after a 128-byte tape label. Otherwise SEG-D if the bytes
+  ## are a plausible General Header #1 (a SEG-D file number 43xx starts with
+  ## ASCII `C`, but its next 3200 bytes are not text). False if nothing fits.
   result = true
   if isStorageUnitLabel(head) or isTocFile(head):
     kind = skSegd
@@ -156,7 +179,7 @@ proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
   while r.readTrace(t):
     let hb = TraceHeaderSize + (if t.hasExt1: TraceHeaderSize + t.proprietary.len else: 0)
     result.entries.add TraceEntry(offset: t.offset, headerBytes: uint32(hb),
-      numSamples: uint32(t.numSamples), channelSet: -1, scanType: -1)
+      numSamples: uint32(t.numSamples), channelSet: NoChannelSet, scanType: -1)
     result.maxSamples = max(result.maxSamples, t.numSamples)
     if keys: result.keys.add gr.traceKeys(t)
   result.segy = r.file
@@ -177,7 +200,8 @@ proc indexSegd(src: RecordSource, twosComplement8015, keys: bool): TraceIndex =
       let the = int(t.header.traceHeaderExtensions)
       result.entries.add TraceEntry(offset: t.offset,
         headerBytes: uint32(SegdTraceHeaderSize + SegdBlockSize * the),
-        numSamples: uint32(t.numSamples), record: ri, channelSet: int16(t.channelSet),
+        numSamples: uint32(t.numSamples), record: ri,
+        channelSet: if t.channelSet < 0: NoChannelSet else: uint16(t.channelSet),
         scanType: int8(t.scanType), channelType: channelTypeOf(r.record, t))
       result.maxSamples = max(result.maxSamples, t.numSamples)
       if keys: result.keys.add traceKeys(r.record, t)
@@ -195,9 +219,10 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
   ## indexes every trace; with `keys`, also collects each trace's geometry
   ## (for `gathers` and `componentGroups`). Problems go to `log`, as with the
   ## readers.
-  case kind
-  of skSegy: indexSegy(src, keys)
-  of skSegd: indexSegd(src, twosComplement8015, keys)
+  result = case kind
+    of skSegy: indexSegy(src, keys)
+    of skSegd: indexSegd(src, twosComplement8015, keys)
+  result.detected = true
 
 # ---------------------------------------------------------- range decode --
 
@@ -234,6 +259,9 @@ type
     path*: string
     map: MemFileSource
 
+proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
+  # A copy would share the map, and outlive `close` with a dangling view.
+
 proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
     writable = false): SeismicFile =
   ## Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
@@ -242,7 +270,7 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
   ## file cannot be opened or mapped. `writable` maps it read-write, for
   ## in-place header edits (`model/edit`).
   result = SeismicFile(path: path, map: openMemFileSource(path, writable))
-  let n = int(min(result.map.size, 4096))
+  let n = int(min(result.map.size, 8192))
   var kind: SeismicKind
   if n > 0 and detectKind(result.map.memory.toOpenArray(0, n - 1), kind):
     result.index = buildIndex(result.map, kind, twosComplement8015, keys)
@@ -282,18 +310,18 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, first, count: int, dst: var 
   ## of `dst` (a row-major `[rows, samples]` tensor), each truncated or
   ## zero-padded to `dst.shape[1]`. A trace that cannot be decoded is left
   ## zero, logged in `log`, and counted in the result.
-  doAssert f.map != nil, "the file is closed"
+  doAssert f.memory != nil or count == 0, "the file is closed"
   doAssert f.index.contiguous, "range reads need a plain disk file"
   doAssert first >= 0 and count >= 0 and first + count <= f.len, "trace range out of bounds"
   doAssert dst.rank == 2 and dst.is_C_contiguous and row >= 0 and row + count <= dst.shape[0],
     "need a row-major [traces, samples] tensor with room for the range"
   let cols = dst.shape[1]
-  let mem = f.map.memory
+  let mem = f.memory
   for k in 0..<count:
     let e = f.index.entries[first + k]
     let p = rowPtr(dst, row + k)
     try:
-      decodeEntry(mem, f.map.size, e, f.index.codecs[e.record], p, cols)
+      decodeEntry(mem, f.mappedSize, e, f.index.codecs[e.record], p, cols)
     except SegError as err:
       for c in 0..<cols: p[c] = T(0)
       log.report(sevError, if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat,

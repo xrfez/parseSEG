@@ -15,7 +15,9 @@
 ## p.close()
 ## ```
 ##
-## Ownership: the worker touches no managed memory. It reads the file's map
+## Ownership: the worker shares no managed memory with the consumer (the
+## only managed objects it makes are exceptions it raises and catches
+## itself). It reads the file's map
 ## and index through raw pointers and decodes into slot buffers that the
 ## consumer thread allocated (`decodeEntry`). When the consumer takes a chunk,
 ## it takes the slot's tensor and allocates a fresh one for the slot, so a
@@ -141,12 +143,14 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, first = 0, last = -1, chunkTr
   let stop = if last < 0: f.len else: last
   doAssert first >= 0 and first <= stop and stop <= f.len, "trace range out of bounds"
   let width = if cols >= 0: cols elif first < stop: f.maxSamples(first..<stop) else: 0
+  # No range (even after a seek) holds more traces than the file.
+  let rows = max(1, min(chunkTraces, f.len))
   let sh = createShared(Shared[T])
   sh.slots = cast[ptr UncheckedArray[Slot[T]]](createShared(Slot[T], depth))
   sh.depth = depth
   sh.start = first
   sh.stop = stop
-  sh.chunkTraces = chunkTraces
+  sh.chunkTraces = rows
   sh.cols = width
   sh.mem = f.memory
   sh.size = f.mappedSize
@@ -158,7 +162,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, first = 0, last = -1, chunkTr
   initCond(sh.ready)
   result = Prefetcher[T](sh: sh, last: f.len)
   for i in 0..<depth:
-    result.tensors.add newTensorUninit[T](chunkTraces, width)
+    result.tensors.add newTensorUninit[T](rows, width)
     sh.slots[i].data = rawData(result.tensors[i])
   createThread(sh.thread, worker[T], sh)
 
@@ -172,9 +176,13 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
   c.first = s.first
   c.count = s.count
   c.failed = s.failed
-  c.samples = if s.count == sh.chunkTraces: move(p.tensors[i])
-              else: p.tensors[i][0..<s.count, _].clone()
-  p.tensors[i] = newTensorUninit[T](sh.chunkTraces, sh.cols)
+  if s.count == sh.chunkTraces:
+    c.samples = move(p.tensors[i])
+    p.tensors[i] = newTensorUninit[T](sh.chunkTraces, sh.cols)
+  elif sh.cols == 0:
+    c.samples = newTensor[T](s.count, 0)
+  else:
+    c.samples = p.tensors[i][0..<s.count, _].clone() # the slot keeps its buffer
   acquire(sh.lock)
   s.data = rawData(p.tensors[i])
   s.state = ssFree
@@ -189,14 +197,16 @@ proc headReady[T](sh: ptr Shared[T]): bool {.inline.} =
   s.state == ssReady and s.chunk == sh.takeChunk and s.gen == sh.gen
 
 proc atEnd*[T](p: Prefetcher[T]): bool =
-  ## True when every chunk of the range has been taken.
+  ## True when every chunk of the range has been taken (or after `close`).
+  if p.sh == nil: return true
   acquire(p.sh.lock)
   result = p.sh.takeChunk >= p.sh.chunkCount
   release(p.sh.lock)
 
 proc tryNext*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   ## Takes the next chunk if it is decoded; never blocks. False if it is not
-  ## ready yet or the range is done (see `atEnd`).
+  ## ready yet, the range is done (see `atEnd`) or the prefetcher is closed.
+  if p.sh == nil: return false
   acquire(p.sh.lock)
   let ok = p.sh.takeChunk < p.sh.chunkCount and p.sh.headReady
   release(p.sh.lock)
@@ -205,7 +215,8 @@ proc tryNext*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
 
 proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   ## Takes the next chunk, waiting until it is decoded. False when the range
-  ## is done.
+  ## is done (or the prefetcher is closed).
+  if p.sh == nil: return false
   acquire(p.sh.lock)
   var more = p.sh.takeChunk < p.sh.chunkCount
   while more and not p.sh.headReady:
@@ -216,8 +227,10 @@ proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
 
 proc seek*[T](p: var Prefetcher[T], first: int, last = -1) =
   ## Restarts read-ahead at trace `first` (to `last`, exclusive; -1 = the end
-  ## of the file). Chunks decoded for the old position are dropped; one being
-  ## decoded finishes in the background and is discarded.
+  ## of the file; any negative value means the end). Chunks decoded for the old position are dropped; one being
+  ## decoded finishes in the background and is discarded. A no-op after
+  ## `close`.
+  if p.sh == nil: return
   let stop = if last < 0: p.last else: last
   doAssert first >= 0 and first <= stop and stop <= p.last, "trace range out of bounds"
   let sh = p.sh
