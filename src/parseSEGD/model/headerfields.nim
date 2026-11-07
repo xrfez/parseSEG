@@ -13,7 +13,7 @@
 ## `fvInt`, floats and fixed point as `fvFloat`, character fields as
 ## `fvText`. Raw byte fields are not fields here.
 
-import std/[macros, strutils]
+import std/[macros, math, strutils]
 import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
@@ -294,3 +294,37 @@ proc recordField*(f: SeismicFile, record: int, name: string, v: var FieldValue):
 proc fileField*(f: SeismicFile, name: string, v: var FieldValue): bool =
   var err: string
   f.fileField(name, v, err)
+
+# ---------------------------------------------------------- sample timing --
+
+proc sampleIntervalUs*(f: SeismicFile, trace: int): float64 =
+  ## The trace's sample interval in µs (Hz or m/ft for SEG-Y non-time
+  ## data), resolved as the readers do. SEG-Y: Ext1 bytes 145-152 when
+  ## non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
+  ## binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
+  ## interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
+  ## interval. NaN when unknown (a closed file, an out-of-range trace).
+  let ix = f.index
+  if trace < 0 or trace >= ix.len or f.memory == nil: return NaN
+  let e = ix.entries[trace]
+  if ix.kind == skSegy:
+    let b = ix.segy.binary
+    if ix.segy.revision.major >= 1 and b.fixedLengthTraces == 1:
+      return b.effectiveSampleInterval
+    var v: FieldValue
+    if int(e.headerBytes) >= 2 * TraceHeaderSize and
+        f.traceField(trace, "ext1.extSampleInterval", v) and v.toFloat != 0:
+      return v.toFloat
+    if f.traceField(trace, "trace.sampleInterval", v): v.toFloat else: NaN
+  else:
+    let rec = ix.segdRecords[e.record]
+    let cs = e.channelSetIndex
+    if rec.isRev3:
+      if cs >= 0 and int(e.scanType) >= 0:
+        float64(rec.scanTypes[e.scanType].descriptors3[cs].samplingInterval)
+      else:
+        baseScanIntervalUs(rec.gh1, rec.gh2r3)
+    elif cs >= 0 and int(e.scanType) >= 0:
+      rec.scanTypes[e.scanType].descriptors[cs].sampleIntervalMs(rec.gh1) * 1000
+    else:
+      rec.gh1.baseScanIntervalMs * 1000

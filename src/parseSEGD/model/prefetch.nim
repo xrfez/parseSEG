@@ -193,6 +193,10 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, selection: sink seq[int], chu
   signal(sh.work)
   release(sh.lock)
 
+func positions*[T](p: Prefetcher[T]): int {.inline.} =
+  ## Positions `seek` accepts: the file's trace count, or the selection's length.
+  p.last
+
 proc traceAt*[T](p: Prefetcher[T], pos: int): int =
   ## The trace index at position `pos` (the position itself in range mode).
   if p.selection.len > 0: p.selection[pos] else: pos

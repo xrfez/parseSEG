@@ -1,7 +1,7 @@
 ## Header fields by name (task 8.2): every named field read from the map
 ## equals the reader's decoded value, for every trace of the sample files.
 
-import std/[assertions, os, macros, strutils]
+import std/[assertions, os, macros, strutils, math]
 import parseSEGD/segy/[reader as segyreader]
 import parseSEGD/segd/[reader as segdreader]
 import parseSEGD/model/[traceindex, headerfields, edit]
@@ -86,3 +86,19 @@ block names_errors_and_edits:
   doAssert ed.setField(0, "trace.groupX", 4321)
   doAssert ed.file.traceField(0, "trace.groupX", v) and v.i == 4321
   ed.close()
+
+block sample_intervals:
+  for (n, us) in [("BO_3D-Inglewood_rev21_v7.sgy", 2000.0), ("Sweep0.sgy", 1000.0),
+      ("63.sgd", -1.0), ("inova_rev30_5traces.sgd", -1.0)]:
+    var f = openSeismic(exampleDir / n)
+    for i in 0..<f.len:
+      let dt = f.sampleIntervalUs(i)
+      doAssert dt > 0, n
+      if us > 0: doAssert dt == us, n & " " & $dt
+    doAssert f.sampleIntervalUs(f.len).isNaN
+    f.close()
+  # Against the readers: SEG-Y's trace interval, SEG-D's channel set.
+  let d = readSegyHeaders(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  doAssert f.sampleIntervalUs(3) == d.traces[3].sampleInterval
+  f.close()

@@ -21,9 +21,14 @@ per-function documentation.
 
 ## Decisions
 
-1. **Build.** `nim c --app:lib --noMain --mm:orc --threads:on -d:useMalloc -d:release`
-   `src/parseSEGD/capi.nim` (the nimble task `lib`). `useMalloc` lets any host thread call in
-   with no per-thread setup, and lets ASan and valgrind see every allocation.
+1. **Build.** `nim lib` runs `nim c --app:lib --noMain --mm:atomicArc --threads:on`
+   `-d:useMalloc -d:release src/parseSEGD/capi.nim`.
+   - `useMalloc` lets any host thread call in with no per-thread setup, and lets ASan and
+     valgrind see every allocation.
+   - `atomicArc` makes reference counts atomic, so a handle (for example a tensor shared
+     with a DLPack consumer) may be released from any thread. The library builds no
+     reference cycles, so it needs no cycle collector.
+   - Both test suites (prefetch, edit) pass under these flags.
 
 2. **Initialization.** The host calls `seg_init()` once before anything else. It runs `NimMain`,
    is idempotent and thread-safe, and returns `SEG_ABI_VERSION`. No teardown call is needed.

@@ -37,6 +37,17 @@ task zigDebug, "Build debug binary using Zig CC with debug symbols":
   ## Compiles debug binary using Zig toolchain preserving debug symbols.
   selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" --debuginfo:on src/parseSEGD.nim"
 
+const libName =
+  when defined(windows): "parseseg.dll"
+  elif defined(macosx): "libparseseg.dylib"
+  else: "libparseseg.so"
+
+task lib, "Build the C ABI shared library (bin/libparseseg.so, see include/parseseg.h)":
+  ## atomicArc: handles may be released from any host thread; useMalloc: host
+  ## threads need no allocator setup.
+  selfExec "c --app:lib --noMain --mm:atomicArc --threads:on -d:useMalloc -d:release " &
+    "--out:bin/" & libName & " src/parseSEGD/capi.nim"
+
 task test, "Run test suite":
   ## Executes unittest suite.
   selfExec "c -r --hints:off tests/tester.nim"
