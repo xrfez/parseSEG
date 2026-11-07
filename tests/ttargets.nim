@@ -65,6 +65,35 @@ when defined(linux):
     task "staticlib"
     runAbiTest("staticlib", quoteShell(root / "bin" / "libparseseg.a") & " -lpthread -lm -ldl")
 
+  block another_nim_library_in_the_host:
+    # Every Nim library exports NimMain; seg_init must run its own even when
+    # the host loaded another first (ELF interposition, Phase 8 review).
+    let d = tmp / "interpose"
+    createDir(d)
+    writeFile(d / "other.c", "#include <stdio.h>\nvoid NimMain(void) { puts(\"OTHER\"); }\n")
+    writeFile(d / "host.c", """
+#include <stdio.h>
+#include "parseseg.h"
+int main(int argc, char **argv) {
+    (void)argc;
+    if (seg_init() != SEG_ABI_VERSION) return 3;
+    SegFile *f = NULL;
+    if (seg_file_open(argv[1], 0, &f) != SEG_OK) return 4;
+    printf("traces %lld\n", (long long)seg_file_trace_count(f));
+    seg_file_release(f);
+    return 0;
+}
+""")
+    mustRun(cc & " -shared -fPIC -o " & quoteShell(d / "libother.so") & " " & quoteShell(d / "other.c"))
+    let lib = root / "bin"
+    mustRun(cc & " -I" & quoteShell(root / "include") & " -o " & quoteShell(d / "host") & " " &
+      quoteShell(d / "host.c") & " -Wl,--no-as-needed -L" & quoteShell(d) & " -lother -L" &
+      quoteShell(lib) & " -lparseseg -Wl,-rpath," & quoteShell(d) & ":" & quoteShell(lib))
+    let (o, code) = execCmdEx(quoteShell(d / "host") & " " &
+      quoteShell(exampleDir / "Sweep0.sgy"))
+    doAssert code == 0 and "OTHER" notin o and "traces 1" in o, o
+    echo "ttargets: seg_init runs its own NimMain beside another Nim library"
+
   block python_module:
     let py = findExe("python3")
     if py.len == 0 or findExe("git").len == 0:
@@ -88,6 +117,8 @@ when defined(linux):
       var cFiles = 0
       for f in walkFiles(d / "src" / "*.c"): inc cFiles
       doAssert cFiles > 50, t & ": " & $cFiles & " C files"
+      for f in walkFiles(d / "src" / "*.c"):
+        doAssert root notin readFile(f), f & " holds " & root
     if findExe("make").len == 0:
       echo "ttargets: no make; the bundle build is skipped"
     else:
@@ -129,5 +160,15 @@ when defined(linux):
           doAssert got == wanted, t & ": missing " & $(wanted - got) & ", extra " &
             $(got - wanted)
         echo "ttargets: every cross build exports the header's ", wanted.len, " functions"
+        # Loadable on older macOS, and no paths of this machine inside.
+        for t in ["macos-arm64", "macos-x64"]:
+          let p = execProcess(llvmObjdump & " --macho -p " &
+            quoteShell(root / "bin" / t / "libparseseg.dylib"))
+          doAssert "minos 15" notin p and ("minos 11.0" in p or "minos 10.15" in p), t
+        for t in ["linux-x64", "linux-arm64", "windows-x64", "macos-arm64", "macos-x64"]:
+          for f in walkFiles(root / "bin" / t / "*"):
+            if not f.endsWith(".h"):
+              doAssert root notin readFile(f), f & " holds " & root
+        echo "ttargets: cross builds carry no local paths; macOS minimums are 11.0 / 10.15"
 else:
   echo "ttargets: build targets are tested on Linux only for now"

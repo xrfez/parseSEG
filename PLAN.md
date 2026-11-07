@@ -554,4 +554,33 @@ Tasks:
       - invalid requests.
     - The C test and the Python test cover the new export.
   - Gap noticed (not fixed): `recordField` has no names for GH#2 (`gh2.*`) in either revision, nor for Rev 3 general blocks.
-
+- 2026-11-07: **Phase 8 review (8.7-8.9)**, by three parallel agents: SEG-D revision conversion; the Python module and shared core; build targets and CI. Everything they verified is fixed, with regression tests.
+  - SEG-D conversion (`tests/tsegdrevconvert.nim`, "review" blocks):
+    - **Within-layout conversions (2.x→2.y, 3.x→3.0) lost the general trailer.** The reader fills it only after the traces, so the output was fatal and truncated, or the trailer was silently dropped when the format changed.
+    - **Rev 2 channel set numbers > 99 (FF + extended) became 0**, aborting the conversion. It now uses the resolving `channelSetNumber(d)`.
+    - End-before-start descriptors raised a RangeDefect in the stream API.
+    - **A trace naming no descriptor aborted the whole file.** The scan now counts such traces and the record is skipped with an error.
+    - Extended record lengths over 71 minutes wrapped (now 64-bit, clamped and noted).
+    - A NaN filter value aborted Rev 3→2.
+    - Traces zeroed by an out-of-range value now get their own error.
+    - Undefined Rev 2 channel types are noted.
+    - 8015 padding copied stale samples.
+    - 2.0→2.1 carried 2.0's undefined GH#2 bytes 21-22 into the line sequence number.
+  - Python and C:
+    - **A wrong object passed to `apply_geometry`** made nimpy raise an uncaught Defect that broke every later call in the process. The argument is now a PPyObject checked against the Geometry type.
+    - **`component_groups(0, 2**40)` killed the process** (it allocated before checking the range).
+    - **File maps were never unmapped**, in Python and in C: 100 opens left 100 mappings. This predates Phase 8. `SeismicFile` now owns its map through `MapOwner`, whose destructor unmaps, and `HeaderEditor`'s journal closes through `JournalFile`.
+    - `read_into` leaked the fetched Python exception and traceback through nimpy's `getBuffer`. It now calls `PyObject_GetBuffer` directly, and a set Python error passes through as `PyErrorSet`.
+    - Counts below −1 are refused.
+    - `trace_field` out of range says "no trace".
+    - `first + count` overflow in the C range checks now uses `rangeOk`.
+    - Tests: `test_pyapi.py` covers all of these plus /proc maps and fd counts; abi_test has `test_release_unmaps`.
+  - Builds (`tests/ttargets.nim`):
+    - **macOS cross builds required macOS 15.** The targets are now `aarch64-macos.11.0` and `x86_64-macos.10.15`, checked through `minos`.
+    - zig builds carried DWARF, a .pdb and local paths. They now use `-g0 -s`, target directories are cleared first, and a "no local paths" check runs.
+    - **seg_init could call another Nim library's NimMain** through ELF interposition. Linux libraries now link with `-Bsymbolic` (zig lacks `-Bsymbolic-functions`) and an SONAME. A host test links a fake `libother.so` exporting NimMain; without the fix it prints OTHER.
+    - The C bundles had this machine's compiler command in every .c file; it is now blanked in place (string slicing is too slow in the NimScript VM).
+    - CMake defaults to Release and refuses MSVC.
+    - Makefile: LDFLAGS hook, SONAME, a Windows import library, and `libparseseg.a` on Windows too.
+    - CI: the no-op `nimpretty --check` is dropped, setup-python is used on Linux (PEP 668), Nim is pinned to 2.4.0, and the Windows build step runs under bash -e. README notes glibc and macOS minimums.
+  - Not done (noted): Rev 3 general blocks have no `recordField` names. `__dlpack__` ignores numpy 2's `copy`/`max_version`, which can't be tested with numpy 1.24. The native Windows and macOS CI jobs don't run abi_test. TSan on ubuntu-24.04 may need `vm.mmap_rnd_bits=28`.

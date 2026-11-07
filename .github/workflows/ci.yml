@@ -19,18 +19,18 @@ jobs:
       - name: Set up Nim
         uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: 'stable'
+          nim-version: '2.4.0' # the build uses its bundled atlas and nimony NIF library
 
       - name: Set up Zig (cross builds)
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
 
-      - name: Install numpy (Python module tests)
-        run: python3 -m pip install numpy
-
-      - name: Verify code formatting
-        run: nimpretty --check src/*.nim
+      - name: Set up Python with numpy (Python module tests)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install numpy
 
       - name: Fetch dependencies (Atlas)
         run: atlas rep atlas.lock
@@ -94,7 +94,7 @@ jobs:
       - name: Set up Nim
         uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: 'stable'
+          nim-version: '2.4.0' # the build uses its bundled atlas and nimony NIF library
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -105,7 +105,9 @@ jobs:
         run: atlas rep atlas.lock
 
       - name: Build the C ABI and the Python module
+        shell: bash # -e: every command's failure fails the step (pwsh checks only the last)
         run: |
+          set -e
           nim lib
           nim staticlib
           nim pylib

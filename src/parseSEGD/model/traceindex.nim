@@ -253,11 +253,25 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: 
 # ---------------------------------------------------------- seismic file --
 
 type
+  MapOwner = object
+    ## Owns a file's mapping: unmaps when it goes, so a `SeismicFile` that goes
+    ## out of scope without `close` leaves no mapping behind.
+    src: MemFileSource
+
+proc `=destroy`(m: MapOwner) =
+  if m.src != nil:
+    try: m.src.close()
+    except CatchableError: discard
+  `=destroy`(m.src)
+
+proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
+
+type
   SeismicFile* = object
     ## A memory-mapped disk file with its trace index.
     index*: TraceIndex
     path*: string
-    map: MemFileSource
+    map: MapOwner
 
 proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
   # A copy would share the map, and outlive `close` with a dangling view.
@@ -270,11 +284,11 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
   ## fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
   ## file cannot be opened or mapped. `writable` maps it read-write, for
   ## in-place header edits (`model/edit`).
-  result = SeismicFile(path: path, map: openMemFileSource(path, writable))
-  let n = int(min(result.map.size, 8192))
+  result = SeismicFile(path: path, map: MapOwner(src: openMemFileSource(path, writable)))
+  let n = int(min(result.map.src.size, 8192))
   var kind: SeismicKind
-  if n > 0 and detectKind(result.map.memory.toOpenArray(0, n - 1), kind):
-    result.index = buildIndex(result.map, kind, twosComplement8015, keys)
+  if n > 0 and detectKind(result.map.src.memory.toOpenArray(0, n - 1), kind):
+    result.index = buildIndex(result.map.src, kind, twosComplement8015, keys)
   else:
     result.index.contiguous = true
     result.index.log.report(sevFatal, dcUnsupportedFormat,
@@ -282,9 +296,9 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
 
 proc close*(f: var SeismicFile) =
   ## Unmaps the file. The index stays usable; range reads do not.
-  if f.map != nil:
-    f.map.close()
-    f.map = nil
+  if f.map.src != nil:
+    f.map.src.close()
+    f.map.src = nil
 
 func len*(f: SeismicFile): int {.inline.} = f.index.entries.len
 func kind*(f: SeismicFile): SeismicKind {.inline.} = f.index.kind
@@ -292,14 +306,14 @@ func log*(f: SeismicFile): lent DiagLog {.inline.} = f.index.log
 
 proc memory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
   ## The mapped bytes (nil after `close`).
-  if f.map != nil: f.map.memory else: nil
+  if f.map.src != nil: f.map.src.memory else: nil
 
 proc mappedSize*(f: SeismicFile): int64 {.inline.} =
-  if f.map != nil: f.map.size else: 0
+  if f.map.src != nil: f.map.src.size else: 0
 
 proc flush*(f: SeismicFile) =
   ## Writes modified pages of a writable map back to the file.
-  if f.map != nil: f.map.flush()
+  if f.map.src != nil: f.map.src.flush()
 
 proc rowPtr[T](t: Tensor[T], row: int): ptr UncheckedArray[T] {.inline.} =
   let base = cast[ptr UncheckedArray[T]](t.unsafe_raw_offset())

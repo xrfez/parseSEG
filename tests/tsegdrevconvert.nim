@@ -418,4 +418,122 @@ block record_length_in_bcd:
   doAssert recordLengthUs(g1, SegdGeneralHeader2Rev3()) == 512_000.0
   doAssert recordLengthMs(g1, SegdGeneralHeader2()) == 512.0
 
+# ------------------------------------------- Phase 8 review regressions --
+
+proc decodeAll(path: string): SegdData = readSegd(path)
+
+block review_trailers_within_a_layout:
+  # (1) 2.x → 2.y and 3.x → 3.0 kept no trailer (the reader fills it after the traces).
+  var d: SegdData
+  d.records.add makeRev2(1, sd8058)
+  toDisk(d, tmp / "tr21.sgd")
+  var log = convertSegdRevision(tmp / "tr21.sgd", tmp / "tr20.sgd", rev(2, 0))
+  doAssert log.clean, $log
+  let b = decodeAll(tmp / "tr20.sgd")
+  doAssert b.diagnostics.clean and b.records[0].record.trailer.len == 2
+  doAssert b.records[0].record.trailer[1].encoded == d.records[0].record.trailer[1].encoded
+  var r3 = makeRev3(sd8058, [1.0, 2.0, 3.0])
+  var td = SegdTrailerDescription(trailerBlockType: 0x10, asciiOrBinary: 2, blockSize: 2,
+    blockType: 0x70)
+  r3.records[0].record.trailerBytes = @(td.encoded) & newSeq[byte](64)
+  r3.records[0].record.trailerBytes[40] = byte('x')
+  computeRev3Sizes(r3.records[0].record, r3.records[0].traces)
+  toDisk(r3, tmp / "tr3.sgd")
+  for fmt in [0, 8038]:
+    var o = rev(3, 0)
+    o.format = fmt
+    log = convertSegdRevision(tmp / "tr3.sgd", tmp / "tr3b.sgd", o)
+    doAssert log.clean, $log
+    let x = decodeAll(tmp / "tr3b.sgd")
+    doAssert x.diagnostics.clean, $x.diagnostics
+    doAssert x.records[0].record.trailerBytes == r3.records[0].record.trailerBytes
+    doAssert int64(x.records[0].record.gh3.recordSize) == getFileSize(tmp / "tr3b.sgd")
+
+block review_extended_channel_set_numbers:
+  # (2) A Rev 2 channel set number > 99 (FF + extended) was written as 0.
+  var d: SegdData
+  d.records.add makeRev2(1, sd8058)
+  d.records[0].record.scanTypes[0].descriptors[1].channelSetNumber = BcdAllF
+  d.records[0].record.scanTypes[0].descriptors[1].extChannelSetNumber = 200
+  for t in d.records[0].traces.mitems:
+    if t.header.channelSetNumber == 2:
+      t.header.channelSetNumber = BcdAllF
+      t.header.extChannelSetNumber = 200
+  toDisk(d, tmp / "cs200.sgd")
+  let log = convertSegdRevision(tmp / "cs200.sgd", tmp / "cs200_r3.sgd", rev(3, 0))
+  doAssert log.clean, $log
+  let x = decodeAll(tmp / "cs200_r3.sgd")
+  doAssert x.diagnostics.clean and x.records[0].record.scanTypes[0].descriptors3[1].channelSetNumber == 200
+  doAssert convertSegdRevision(tmp / "cs200_r3.sgd", tmp / "cs200_r2.sgd", rev(2, 1)).clean
+  doAssert convertSegdRevision(tmp / "cs200_r2.sgd", tmp / "cs200_r3b.sgd", rev(3, 0)).clean
+
+block review_streams_and_odd_descriptors:
+  # (3) End before start: the stream API (no scan) raised a RangeDefect.
+  var d: SegdData
+  d.records.add makeRev2(1, sd8058)
+  d.records[0].record.scanTypes[0].descriptors[1].startTime = 60
+  d.records[0].record.scanTypes[0].descriptors[1].endTime = 10
+  toDisk(d, tmp / "neg2.sgd")
+  var src: RecordSource = openDiskSource(tmp / "neg2.sgd")
+  let sink = openDiskSink(tmp / "neg2_r3.sgd")
+  let log = try: convertSegdRevision(src, sink, rev(3, 0))
+            finally:
+              src.close()
+              sink.close()
+  doAssert not log.isFatal, $log
+  doAssert log.has("cut or zero-padded", sevWarning)
+
+block review_orphan_traces_skip_their_record:
+  # (4) A trace naming no descriptor stopped the whole conversion.
+  var d: SegdData
+  d.records.add makeRev2(1, sd8058)
+  d.records.add makeRev2(2, sd8058)
+  d.records[0].traces[4].header.channelSetNumber = 7
+  let sink = openDiskSink(tmp / "orph.sgd")
+  try: discard writeSegd(sink, d, SegdWriteOptions(lenient: true))
+  finally: sink.close()
+  let log = convertSegdRevision(tmp / "orph.sgd", tmp / "orph_r3.sgd", rev(3, 0))
+  doAssert log.has("record 0 cannot be written", sevError) and not log.isFatal, $log
+  let x = decodeAll(tmp / "orph_r3.sgd")
+  doAssert x.records.len == 1 and x.records[0].record.gh1.fileNumber == 2
+
+block review_value_edges:
+  # (5) Long record lengths wrapped; (8) undefined channel types were silent;
+  # (9) 8015 padding copied stale samples; 2.0 → 2.1 kept undefined bytes.
+  var d: SegdData
+  d.records.add makeRev2(1, sd8015, ns = 49)
+  d.records[0].record.gh2.extRecordLength = 5_000_000
+  d.records[0].record.scanTypes[0].descriptors[0].channelType = 0xE
+  d.records[0].record.scanTypes[0].descriptors[1].endTime = 52 # 52 samples per set
+  toDisk(d, tmp / "edge.sgd")
+  var src: RecordSource = openDiskSource(tmp / "edge.sgd")
+  let sink = openDiskSink(tmp / "edge_r3.sgd")
+  let log = try: convertSegdRevision(src, sink, rev(3, 0))
+            finally:
+              src.close()
+              sink.close()
+  doAssert log.has("over 4294 s") and log.has("undefined Rev 2 channel types"), $log
+  let x = decodeAll(tmp / "edge_r3.sgd")
+  doAssert x.records[0].record.gh2r3.extRecordLength == high(uint32)
+  let v = decodeF64(sd8015, x.records[0].traces[4].samples, 52)
+  doAssert v[49] == 0 and v[50] == 0 and v[51] == 0, $v[48..51]
+  var r20 = readBytes(exampleDir / "63.sgd")
+  r20[32 + 20] = 0x12 # GH#2 bytes 21-22, undefined in 2.0
+  writeBytes(tmp / "u20.sgd", r20)
+  doAssert convertSegdRevision(tmp / "u20.sgd", tmp / "u21.sgd", rev(2, 1)).clean
+  doAssert decodeAll(tmp / "u21.sgd").records[0].record.gh2.lineSequenceNumber == 0
+
+block review_nan_filters_and_zeroed_traces:
+  # (6) A NaN filter aborted Rev 3 → 2; (7) zeroed traces were reported as inexact.
+  var r3 = makeRev3(sd8058, [1.0, 2.0])
+  r3.records[0].record.scanTypes[0].descriptors3[0].aliasFilterFreq = NaN
+  toDisk(r3, tmp / "nanf.sgd")
+  var log = convertSegdRevision(tmp / "nanf.sgd", tmp / "nanf_r2.sgd", rev(2, 1))
+  doAssert not log.isFatal and log.has("filter frequencies"), $log
+  toDisk(makeRev3(sd8058, [1.0, 1e12, 3.0]), tmp / "big.sgd")
+  var o = rev(3, 0)
+  o.format = 8036
+  log = convertSegdRevision(tmp / "big.sgd", tmp / "big36.sgd", o)
+  doAssert log.has("written as zeros", sevError), $log
+
 echo "tsegdrevconvert: ok"

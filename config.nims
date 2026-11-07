@@ -55,8 +55,9 @@ const
     ("linux-x64", "linux", "amd64", "x86_64-linux-gnu.2.28"),
     ("linux-arm64", "linux", "arm64", "aarch64-linux-gnu.2.28"),
     ("windows-x64", "windows", "amd64", "x86_64-windows-gnu"),
-    ("macos-arm64", "macosx", "arm64", "aarch64-macos"),
-    ("macos-x64", "macosx", "amd64", "x86_64-macos")]
+    # A minimum OS version: zig's default is its newest (macOS 15).
+    ("macos-arm64", "macosx", "arm64", "aarch64-macos.11.0"),
+    ("macos-x64", "macosx", "amd64", "x86_64-macos.10.15")]
   abiFlags = "--mm:atomicArc --threads:on -d:useMalloc -d:release"
   capiFlags = "--noMain " & abiFlags & " -d:segCapi"
   capiMain = "src/parseSEGD/capi.nim"
@@ -67,18 +68,26 @@ func libFile(os: string): string =
   of "macosx": "libparseseg.dylib"
   else: "libparseseg.so"
 
-func staticFile(os: string): string =
-  if os == "windows": "parseseg.lib" else: "libparseseg.a"
+func staticFile(os: string): string = "libparseseg.a" # an ar archive, also from MinGW
 
 func osFlags(os: string): string =
   if os == "windows": " --tlsEmulation:off" else: ""
 
+func libLinkFlags(os: string): string =
+  ## Shared-library link flags:
+  ## - Linux: an SONAME, and `-Bsymbolic` so `seg_init` calls this
+  ##   library's NimMain even when the host loads another Nim library that
+  ##   exports one (ELF would otherwise bind the first);
+  ## - macOS: a relocatable install name (two-level namespaces bind locally).
+  case os
+  of "linux": " --passL:-Wl,-Bsymbolic --passL:-Wl,-soname,libparseseg.so"
+  of "macosx": " --passL:-Wl,-install_name,@rpath/libparseseg.dylib"
+  else: ""
+
 proc zigOsFlags(os: string): string =
   ## macOS: zig has the headers but no frameworks; a link-time stub stands in
   ## for Security.framework (see tools/macos-stubs).
-  if os == "macosx":
-    " --passL:-F" & thisDir() & "/tools/macos-stubs" &
-      " --passL:-Wl,-install_name,@rpath/libparseseg.dylib"
+  if os == "macosx": " --passL:\"-F" & thisDir() & "/tools/macos-stubs\""
   else: ""
 
 const hostOs = when defined(windows): "windows" elif defined(macosx): "macosx" else: "linux"
@@ -88,15 +97,19 @@ proc zigFlags(t: Target): string =
   "--cc:clang --clang.exe:" & zigccExe & " --clang.linkerexe:" & zigccExe &
     " --os:" & t.os & " --cpu:" & t.cpu & osFlags(t.os) & zigOsFlags(t.os) &
     " --passC:\"-target " & t.zig & "\" --passL:\"-target " & t.zig & "\"" &
+    # No debug info: zig emits it by default, with this machine's paths.
+    " --passC:-g0 --passL:-s" &
     " --nimcache:nimcache/" & t.triple
 
 proc crossLib(t: Target) =
+  rmDir "bin/" & t.triple # no stale files (e.g. an old .pdb) in the artifacts
   mkDir "bin/" & t.triple
   var extra = ""
   if t.os == "windows":
     # An import library, so MSVC and MinGW hosts can link the DLL.
     extra = " --passL:-Wl,--out-implib,bin/" & t.triple & "/parseseg.dll.lib"
-  selfExec "c --app:lib " & capiFlags & " " & zigFlags(t) & extra & " --out:bin/" & t.triple &
+  selfExec "c --app:lib " & capiFlags & " " & zigFlags(t) & libLinkFlags(t.os) & extra &
+    " --out:bin/" & t.triple &
     "/" & libFile(t.os) & " " & capiMain
   cpFile "include/parseseg.h", "bin/" & t.triple & "/parseseg.h"
 
@@ -105,8 +118,9 @@ proc crossLibs(os: string) =
     if t.os == os: crossLib(t)
 
 task lib, "Build the C ABI shared library for this host (bin/libparseseg.so, include/parseseg.h)":
-  selfExec "c --app:lib " & capiFlags & osFlags(hostOs) &
-    (when defined(macosx): " --passL:-Wl,-install_name,@rpath/libparseseg.dylib" else: "") &
+  ## Windows (MinGW): linked statically, so the DLL needs no libgcc/winpthread.
+  selfExec "c --app:lib " & capiFlags & osFlags(hostOs) & libLinkFlags(hostOs) &
+    (when defined(windows): " --passL:-static" else: "") &
     " --out:bin/" & libFile(hostOs) & " " & capiMain
 
 task libLinux, "Cross-build the C ABI for linux-x64 and linux-arm64 with zig (bin/<triple>/)":
@@ -146,18 +160,21 @@ func bundleFlags(os: string): tuple[cflags, libs, shared, sharedFlag: string] =
   ## The C flags Nim itself uses for `os`, and how to link a shared library.
   case os
   of "windows":
-    ("-mno-ms-bitfields -DWIN32_LEAN_AND_MEAN", "", "parseseg.dll", "-shared")
+    ("-mno-ms-bitfields -DWIN32_LEAN_AND_MEAN", "-static", "parseseg.dll",
+      "-shared -Wl,--out-implib,libparseseg.dll.a")
   of "macosx":
     ("-pthread", "-lpthread -lm -framework Security", "libparseseg.dylib",
       "-dynamiclib -install_name @rpath/libparseseg.dylib")
   else:
-    ("-pthread", "-lpthread -lm -ldl", "libparseseg.so", "-shared")
+    ("-pthread", "-lpthread -lm -ldl", "libparseseg.so",
+      "-shared -Wl,-soname,libparseseg.so -Wl,-Bsymbolic")
 
 proc bundleMakefile(t: Target): string =
   let b = bundleFlags(t.os)
   "# parseseg " & t.triple & ": builds the static and shared library from the generated C\n" &
-    "# with GCC or Clang, no Nim needed:  make  |  CC=clang make  |  make CFLAGS=-O2\n" &
-    "CC ?= cc\nAR ?= ar\nCFLAGS ?= -O3\n" &
+    "# with GCC or Clang, no Nim needed:  make  |  make CC=clang  |  make CFLAGS=-O2\n" &
+    "# (MinGW: make CC=gcc). LDFLAGS adds link options, e.g. -L or -F paths.\n" &
+    "CC ?= cc\nAR ?= ar\nCFLAGS ?= -O3\nLDFLAGS ?=\n" &
     "NIMFLAGS := -w -fno-strict-aliasing -fno-ident -fno-math-errno " & b.cflags &
     (if t.os == "windows": "" else: " -fPIC") & " -Isrc\n" &
     "LIBS := " & b.libs & "\n" &
@@ -165,24 +182,32 @@ proc bundleMakefile(t: Target): string =
     "all: " & staticFile(t.os) & " " & b.shared & "\n\n" &
     "%.o: %.c\n\t$(CC) -c $(NIMFLAGS) $(CFLAGS) -o $@ $<\n\n" &
     staticFile(t.os) & ": $(OBJS)\n\t$(AR) rcs $@ $^\n\n" &
-    b.shared & ": $(OBJS)\n\t$(CC) " & b.sharedFlag & " -o $@ $^ $(LIBS)\n\n" &
-    "clean:\n\trm -f $(OBJS) " & staticFile(t.os) & " " & b.shared & "\n\n" &
+    b.shared & ": $(OBJS)\n\t$(CC) " & b.sharedFlag & " -o $@ $^ $(LDFLAGS) $(LIBS)\n\n" &
+    "clean:\n\trm -f $(OBJS) " & staticFile(t.os) & " " & b.shared &
+    (if t.os == "windows": " libparseseg.dll.a" else: "") & "\n\n" &
     ".PHONY: all clean\n"
 
 proc bundleCmake(t: Target): string =
   let b = bundleFlags(t.os)
-  "# parseseg " & t.triple & ": the library from the generated C (GCC or Clang).\n" &
+  let libs = b.libs.replace("-static", "").strip
+  result = "# parseseg " & t.triple & ": the library from the generated C (GCC or Clang).\n" &
     "#   cmake -B build [-DBUILD_SHARED_LIBS=ON] && cmake --build build\n" &
     "cmake_minimum_required(VERSION 3.13)\nproject(parseseg C)\n" &
+    "if(MSVC)\n  message(FATAL_ERROR \"the generated C needs GCC or Clang, not MSVC\")\n" &
+    "endif()\n" &
+    "if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)\n" &
+    "  set(CMAKE_BUILD_TYPE Release)\nendif()\n" &
     "file(GLOB PARSESEG_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c)\n" &
     "add_library(parseseg ${PARSESEG_SOURCES})\n" &
     "set_target_properties(parseseg PROPERTIES POSITION_INDEPENDENT_CODE ON)\n" &
     "target_include_directories(parseseg PRIVATE src PUBLIC include)\n" &
     "target_compile_options(parseseg PRIVATE -w -fno-strict-aliasing -fno-ident " &
     "-fno-math-errno " & b.cflags & ")\n" &
-    (if b.libs.len > 0:
+    (if t.os == "linux": "target_link_options(parseseg PRIVATE -Wl,-Bsymbolic)\n"
+     else: "") &
+    (if libs.len > 0:
        "target_link_libraries(parseseg PUBLIC " &
-         b.libs.replace("-framework Security", "\"-framework Security\"") & ")\n"
+         libs.replace("-framework Security", "\"-framework Security\"") & ")\n"
      else: "")
 
 proc csources(t: Target) =
@@ -198,6 +223,17 @@ proc csources(t: Target) =
   cpFile "include/parseseg.h", dir & "/include/parseseg.h"
   for f in listFiles(dir & "/src"):
     if not (f.endsWith(".c") or f.endsWith(".h")): rmFile f
+    elif f.endsWith(".c"):
+      # Nim's header comment records this machine's compiler command and paths.
+      # Blanked in place: slicing megabyte strings is slow in the NimScript VM.
+      var c = readFile(f)
+      let i = c.find("/* Command for C compiler:")
+      if i >= 0:
+        let j = c.find("*/", i)
+        if j >= 0:
+          for k in i + 2 .. j - 1:
+            if c[k] notin {'\n', '\r'}: c[k] = ' '
+          writeFile(f, c)
   writeFile dir & "/Makefile", bundleMakefile(t)
   writeFile dir & "/CMakeLists.txt", bundleCmake(t)
   writeFile dir & "/README.txt", "parseseg " & t.triple & " C sources, generated by " &

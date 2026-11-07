@@ -133,11 +133,15 @@ proc raisePy(k: PyErrKind, msg: string, diagnostics: PPyObject = nil): PPyObject
     decRef diagnostics
   nil
 
+type PyErrorSet = object of CatchableError
+  ## A Python exception is already set (by the CPython API); pass it on.
+
 template mapErrors(res: var PPyObject, body: untyped) =
   ## Runs `body` (which sets `res`), mapping every Nim exception to the
   ## matching Python one (the table in `abi/core.nim`).
   try:
     body
+  except PyErrorSet: res = nil
   except SegTruncatedError as e: res = raisePy(peFormat, "truncated: " & e.msg)
   except SegFormatError as e: res = raisePy(peFormat, e.msg)
   except IOError as e: res = raisePy(peIO, e.msg)
@@ -499,7 +503,9 @@ proc fileField(self: SeismicFile, name: string): PPyObject {.segExport: "file_fi
   pyGuard: self.fileOf.fileField(name).toPy
 
 proc resolveCount(fo: FileObj, first, count: int): int64 =
-  if count < 0 and first >= 0: max(0'i64, fo.traceCount - first) else: int64(count)
+  ## count -1: to the end; other negative counts are refused.
+  if count < -1: raise newException(ValueError, "count must be >= -1")
+  if count == -1 and first >= 0: max(0'i64, fo.traceCount - first) else: int64(count)
 
 proc read(self: SeismicFile, first: int = 0, count: int = -1, dtype: string = "float32",
     cols: int = -1): PPyObject {.segExport.} =
@@ -543,7 +549,12 @@ proc bufferDtype(buf: RawPyBuffer): Dtype =
 
 proc readIntoBuffer(fo: FileObj, outArray: PyObject, sel: proc (rows: int): seq[int]): int =
   var buf: RawPyBuffer
-  outArray.getBuffer(buf, PyBUF_RECORDS)
+  # The CPython call directly: nimpy's getBuffer leaks the fetched exception
+  # and turns it into a Nim one; this keeps the real TypeError/BufferError.
+  if lib().PyObject_GetBuffer == nil:
+    raise newException(ValueError, "the Python buffer API is not available")
+  if lib().PyObject_GetBuffer(outArray.privateRawPyObj, buf, PyBUF_RECORDS) != 0:
+    raise newException(PyErrorSet, "")
   try:
     if buf.ndim != 2: raise newException(ValueError, "out must be 2-D [traces, samples]")
     let d = bufferDtype(buf)
@@ -601,17 +612,37 @@ proc componentGroupsPy(self: SeismicFile, first: int = 0, count: int = -1): PPyO
   ## (-1: in none), numbered from 0.
   pyGuard:
     let fo = self.fileOf
-    var g = newSeq[int64](max(0, fo.resolveCount(first, count)))
-    if count >= -1: discard fo.componentGroups(first, fo.resolveCount(first, count), KeysHint, g)
-    else: raise newException(ValueError, "count must be >= -1")
+    let n = fo.resolveCount(first, count)
+    fo.requireKeys(KeysHint)
+    if not rangeOk(first, n, fo.traceCount): raise newException(ValueError,
+      "trace range out of bounds")
+    var g = newSeq[int64](n) # bounded by the trace count
+    discard fo.componentGroups(first, n, KeysHint, g)
     g
 
-proc applyGeometryPy(self: SeismicFile, geometry: Geometry, overwrite: bool = false): PPyObject {.
+var geometryType: PPyObject # the Geometry class, found once
+
+proc isGeometry(o: PPyObject): bool =
+  # nimpy converts any parseseg object to a Geometry parameter and then fails
+  # with a Defect that poisons the module, so the type is checked here.
+  if geometryType == nil:
+    let probe = nimValueToPy(Geometry())
+    geometryType = cast[PPyObject](cast[ptr PyObjectObj](probe).ob_type)
+    incRef geometryType
+    decRef probe
+  api().isInstance(o, geometryType) == 1
+
+proc applyGeometryPy(self: SeismicFile, geometry: PPyObject, overwrite: bool = false): PPyObject {.
     segExport: "apply_geometry".} =
-  ## Fills the trace keys from `geometry`; returns how many traces changed.
+  ## Fills the trace keys from `geometry` (a `parseseg.Geometry`); returns how
+  ## many traces changed.
+  if geometry == nil or not isGeometry(geometry):
+    lib().PyErr_SetString(lib().PyExc_TypeError, "geometry must be a parseseg.Geometry")
+    return nil
+  var g: Geometry
+  pyValueToNim(geometry, g)
   pyGuard:
-    if geometry == nil: raise newException(ValueError, "geometry must be a parseseg.Geometry")
-    int(self.fileOf.applyGeometry(geometry.geometryOf, overwrite, KeysHint))
+    int(self.fileOf.applyGeometry(g.geometryOf, overwrite, KeysHint))
 
 # --------------------------------------------------------------- Prefetch --
 

@@ -208,8 +208,8 @@ template fieldCall(name: string, call: untyped): FieldValue =
   v
 
 proc traceField*(fo: FileObj, trace: int64, name: string): FieldValue =
-  fieldCall(name, trace >= 0 and trace < fo.traceCount and
-    fo.f.traceField(int(trace), name, v, err))
+  fo.checkTrace(trace) # else the reason would be empty
+  fieldCall(name, fo.f.traceField(int(trace), name, v, err))
 
 proc recordField*(fo: FileObj, record: int64, name: string): FieldValue =
   fieldCall(name, record >= 0 and record <= int64(high(int32)) and
@@ -335,8 +335,7 @@ proc componentGroups*(fo: FileObj, first, count: int64, how: string,
   ## Fills `groupOf[k]` with the component group of trace `first + k` (-1 for
   ## none) and returns the number of groups. `groupOf.len` must be `count`.
   fo.requireKeys(how)
-  if first < 0 or count < 0 or first + count > fo.traceCount:
-    raiseArg("trace range out of bounds")
+  if not rangeOk(first, count, fo.traceCount): raiseArg("trace range out of bounds")
   assert groupOf.len == count
   for k in 0..<int(count): groupOf[k] = -1
   let cg = fo.f.index.componentGroups(int(first) ..< int(first + count))

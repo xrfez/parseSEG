@@ -370,7 +370,7 @@ proc segComponentGroups(f: pointer, first, count: int64, groupOf: ptr UncheckedA
     else:
       let fo = fileOf(f)
       fo.requireKeys(NeedKeys)
-      if first < 0 or count < 0 or first + count > fo.traceCount:
+      if not rangeOk(first, count, fo.traceCount):
         fail(SEG_ERR_ARGUMENT, "trace range out of bounds")
       else:
         let n = fo.componentGroups(first, count, NeedKeys, toOpenArray(groupOf, 0, int(count) - 1))

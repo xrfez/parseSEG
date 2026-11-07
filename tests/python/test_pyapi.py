@@ -350,4 +350,52 @@ for _ in range(50):
 gc.collect()
 assert threading.active_count() == before
 
+# ------------------------------------------- Phase 8 review regressions --
+with parseseg.open(INGLEWOOD) as rf:
+    # A non-Geometry object raised a Defect that broke every later call.
+    for wrong in (parseseg.Samples(), rf.read(0, 1), rf, None, 3):
+        raises(TypeError, rf.apply_geometry, wrong)
+    assert rf.trace_count() == 200 and parseseg.Geometry() is not None
+    # Huge counts were allocated before being checked (the process died).
+    raises(parseseg.ArgumentError, rf.component_groups, 0, 2 ** 40)
+    raises(parseseg.ArgumentError, rf.component_groups, 0, 2 ** 62)
+    raises(parseseg.ArgumentError, rf.component_groups, 5, 2 ** 63 - 1)
+    # Only -1 means "to the end".
+    raises(parseseg.ArgumentError, rf.read, 0, -2)
+    err = raises(parseseg.ArgumentError, rf.trace_field, 10 ** 6, "trace.sourceX")
+    assert "no trace" in str(err)
+    # Buffer errors keep their Python class (and no longer leak).
+    raises(TypeError, rf.read_into, None)
+    raises(TypeError, rf.read_into, [1])
+    if np is not None:
+        ro = np.zeros((2, 10), np.float32)
+        ro.flags.writeable = False
+        e = raises(Exception, rf.read_into, ro)
+        assert isinstance(e, (BufferError, ValueError)) and not isinstance(e, parseseg.Error)
+
+if sys.platform.startswith("linux"):
+    def maps_of(path):
+        with open("/proc/self/maps") as m:
+            return sum(1 for line in m if line.rstrip().endswith(os.path.basename(path)))
+
+    def fds():
+        return len(os.listdir("/proc/self/fd"))
+
+    # Closed or dropped files and editors leave no mapping or descriptor.
+    base = maps_of(INGLEWOOD)
+    for _ in range(30):
+        with parseseg.open(INGLEWOOD) as lf:
+            lf.read(0, 1)
+        lf2 = parseseg.open(INGLEWOOD)
+        del lf2
+    gc.collect()
+    assert maps_of(INGLEWOOD) == base, (maps_of(INGLEWOOD), base)
+    ed_path = fresh(SWEEP)
+    before_fds = fds()
+    for _ in range(20):
+        e = parseseg.open_editor(ed_path, ed_path + ".j.nif")
+        del e
+    gc.collect()
+    assert fds() == before_fds and maps_of(ed_path) == 0
+
 print("python module: ok")

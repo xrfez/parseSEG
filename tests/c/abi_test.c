@@ -454,6 +454,41 @@ static void test_threads(void) {
     seg_file_release(shared_file);
 }
 
+/* Mappings of `name` in this process (Linux), or -1 if unknown. */
+static int maps_of(const char *name) {
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (m == NULL) return -1;
+    char line[4096];
+    int n = 0;
+    while (fgets(line, sizeof line, m)) {
+        if (strstr(line, name) != NULL) n++;
+    }
+    fclose(m);
+    return n;
+}
+
+/* ---- Phase 8 review regressions (2) ---------------------------------- */
+static void test_release_unmaps(void) {
+    /* Released files used to keep their mapping forever. */
+    const char *name = "Sweep0.sgy";
+    int before = maps_of(name);
+    for (int i = 0; i < 25; i++) {
+        SegFile *f = NULL;
+        OK(seg_file_open(path(dir, name), SEG_OPEN_KEYS, &f));
+        seg_file_release(f);
+    }
+    if (before >= 0) CHECK(maps_of(name) == before);
+    /* first + count overflowed into SEG_ERR_INTERNAL. */
+    SegFile *f = NULL;
+    OK(seg_file_open(path(dir, "inova_rev30_5traces.sgd"), SEG_OPEN_KEYS, &f));
+    int64_t groups = 0, g[1];
+    CHECK(seg_component_groups(f, 5, INT64_MAX, g, &groups) == SEG_ERR_ARGUMENT);
+    SegValue v;
+    CHECK(seg_trace_field(f, 1000000, "trace.traceNumber", &v) == SEG_ERR_ARGUMENT &&
+          strstr(seg_last_error(), "no trace") != NULL);
+    seg_file_release(f);
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: abi_test <exampleFiles> <scratch>\n"); return 2; }
     snprintf(dir, sizeof dir, "%s", argv[1]);
@@ -468,6 +503,7 @@ int main(int argc, char **argv) {
     test_gathers_and_prefetch();
     test_edits();
     test_convert();
+    test_release_unmaps();
     test_limits();
     test_threads();
     if (failures) { fprintf(stderr, "%d failures\n", failures); return 1; }

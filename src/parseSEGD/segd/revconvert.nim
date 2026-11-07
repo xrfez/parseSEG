@@ -74,6 +74,8 @@ type
       ## longest trace (-1 when the set has no trace).
     rev2Trailer*: int
       ## Rev 3: blocks of a wrapped Rev 2 trailer (see the module doc), or -1.
+    orphans*: int
+      ## Traces naming a channel set no descriptor has (the record is skipped).
 
   SkipRecord = object of CatchableError
     ## The record cannot be represented in the target revision.
@@ -85,6 +87,7 @@ type
     loc: Location
     opts: SegdConvertOptions
     inexact: int
+    zeroed: int
     adjusted: int
 
 const
@@ -129,7 +132,7 @@ proc outFormat(c: var Conv, f: SegdSampleFormat): SegdSampleFormat =
 proc samplesFor(c: var Conv, src: seq[byte], nIn, nOut: int, fIn, fOut: SegdSampleFormat):
     seq[byte] =
   ## The trace's samples in `fOut`, cut or zero-padded to `nOut` samples.
-  if fIn == fOut and (fIn != sd8015 or nOut mod 4 == 0):
+  if fIn == fOut and (fIn != sd8015 or nIn == nOut):
     let keep = min(dataBytes(fIn, min(nIn, nOut)), src.len)
     result = newSeq[byte](dataBytes(fOut, nOut))
     if keep > 0: copyMem(addr result[0], unsafeAddr src[0], keep)
@@ -143,7 +146,7 @@ proc samplesFor(c: var Conv, src: seq[byte], nIn, nOut: int, fIn, fOut: SegdSamp
     except SegFormatError:
       # A value out of the target's range: the trace is zeroed, and counted.
       for b in result.mitems: b = 0
-      inc c.inexact
+      inc c.zeroed
       return
     var back = newSeq[float64](nOut)
     decodeSegdSamples(fOut, result, back)
@@ -172,9 +175,9 @@ proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
   let siUs = si * 1000.0
   if siUs != round(siUs):
     c.note(1, "a sample interval of " & $siUs & " µs is rounded to whole µs (Rev 3 CSD)")
-  ns = if si > 0: int(round((d.endTimeMs - d.startTimeMs) / si)) else: 0
+  ns = if si > 0: max(0, int(round((d.endTimeMs - d.startTimeMs) / si))) else: 0
   result = SegdChannelSetDescriptor3(scanTypeNumber: bcd(d.scanTypeNumber),
-    channelSetNumber: uint16(max(0, d.channelSetNumber)),
+    channelSetNumber: uint16(max(0, headers.channelSetNumber(d))), # resolves FF + extended
     channelType: rev3ChannelType(d.channelType),
     startTime: int32(round(d.startTimeMs * 1000)), endTime: int32(round(d.endTimeMs * 1000)),
     numSamples: uint32(max(0, ns)), descaleMultiplier: float32(pow(2.0, d.mpFactor)),
@@ -189,6 +192,8 @@ proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
     notch1Freq: float32(bcd(d.notch1Freq)) / 10, notch2Freq: float32(bcd(d.notch2Freq)) / 10,
     notch3Freq: float32(bcd(d.notch3Freq)) / 10, blockType2: BtCsd2, blockType3: BtCsd3)
   for i in 0..<result.description.len: result.description[i] = ' '
+  if d.channelType notin {0'u8..9'u8, 0xC'u8}:
+    c.note(32, "undefined Rev 2 channel types (0xA, 0xB, 0xD-0xF) are written as 0x70 (other)")
 
 proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, scan: RecordScan,
     setSamples: var seq[seq[int]]): SegdRecord =
@@ -214,7 +219,10 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, scan: RecordSc
     g2.extChannelSetsPerScanType = o.extChannelSetsPerScanType
     g2.extExtendedHeaderBlocks = uint32(o.extExtendedHeaderBlocks)
     g2.extExternalHeaderBlocks = uint32(o.extExternalHeaderBlocks)
-    g2.extRecordLength = o.extRecordLength * 1000 # ms to µs
+    let us = uint64(o.extRecordLength) * 1000 # ms to µs
+    if us > uint64(high(uint32)):
+      c.note(33, "record lengths over 4294 s do not fit Rev 3's µs field and are clamped")
+    g2.extRecordLength = uint32(min(us, uint64(high(uint32))))
     if rec.revision.major == 2 and rec.revision.minor >= 1:
       g2.recordSetNumber = o.lineSequenceNumber
   # The trailer is read after the traces; GH#2 announces its size.
@@ -312,7 +320,7 @@ proc ghnFromSource(c: var Conv, b: openArray[byte], n: int): SegdGeneralHeaderN 
 
 proc toBcdUnits(c: var Conv, v: float32, scale: float64, digits: int): int =
   ## `v × scale` as a BCD field of `digits` digits (rounded and clamped, noted).
-  let x = round(float64(v) * scale)
+  let x = if v.isNaN: -1.0 else: round(float64(v) * scale) # NaN: noted, written as 0
   let top = float64(10 ^ digits - 1)
   if x != float64(v) * scale or x < 0 or x > top:
     c.note(14, "filter frequencies and slopes are rounded to Rev 2's BCD units")
@@ -514,6 +522,8 @@ proc scanRecords*(src: RecordSource, twosComplement8015 = false): seq[RecordScan
       if t.scanType >= 0 and t.channelSet >= 0:
         rs.setSamples[t.scanType][t.channelSet] =
           max(rs.setSamples[t.scanType][t.channelSet], t.numSamples)
+      else:
+        inc rs.orphans
     var blocks: seq[SegdTrailerBlock]
     if r.record.isRev3 and unwrapTrailer(r.record.trailerBytes, blocks):
       rs.rev2Trailer = blocks.len
@@ -562,6 +572,8 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
         var the: seq[seq[uint8]]
         let rs = if rec.index < scan.len: scan[rec.index] else: RecordScan(rev2Trailer: -1)
         try:
+          if rs.orphans > 0:
+            skipRecord($rs.orphans & " traces name a channel set no descriptor has")
           if target.major == 3 and not rec.isRev3:
             outRec = c.toRev3(rec, fOut, rs, setSamples)
           elif target.major == 2 and rec.isRev3:
@@ -569,6 +581,10 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
           elif target.major == 3:
             outRec = rec # 3.x to 3.0: the same layout
             outRec.gh2r3.revisionMinor = 0
+            # The trailer comes after the traces; a placeholder of the
+            # announced size until then (see setRev3Trailer).
+            let gt = rec.gh2r3.generalTrailerBlocks
+            outRec.trailerBytes = newSeq[byte](if gt == 0xFFFF_FFFF'u32: 0 else: 32 * int(gt))
             outRec.gh1.formatCode = ord(fOut)
             outRec.format = fOut
             if rec.revision.minor != 0:
@@ -584,6 +600,8 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
               outRec.gh2 = SegdGeneralHeader2(blockNumber: 2)
             outRec.gh2.revisionMajor = 2
             outRec.gh2.revisionMinor = target.minor
+            if target.minor >= 1 and not (rec.revision.major == 2 and rec.revision.minor >= 1):
+              outRec.gh2.lineSequenceNumber = 0 # bytes 21-22 are undefined before 2.1
             if target.minor == 0 and outRec.gh2.lineSequenceNumber != 0:
               c.note(18, "Rev 2.0 has no record set (line sequence) number; it is dropped")
               outRec.gh2.lineSequenceNumber = 0
@@ -593,21 +611,24 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
             "as Rev " & $target & ": " & e.msg & "; it is skipped", rec.offset, c.loc)
         if ok:
           if outRec.isRev3 and rec.isRev3 and fOut != rec.format:
-            # 3.x with a new format: sizes from the descriptors.
-            var traces: seq[SegdTrace]
-            computeRev3Sizes(outRec, traces)
-            var data = int64(outRec.gh3.headerSize)
+            # 3.x with a new format: sizes from the descriptors (the trailer,
+            # read after the traces, keeps the size GH#2 announces).
+            var data = rev3HeaderBytes(outRec)
             for st in outRec.scanTypes:
               for d in st.descriptors3:
                 data += int64(d.channelsInSet) * int64(traceBytes(d, dataBytes(fOut,
                   int(d.numSamples))))
+            outRec.gh3.headerSize = uint32(rev3HeaderBytes(outRec))
             outRec.gh3.dataSize = uint64(data)
-            outRec.gh3.recordSize = uint64(data + outRec.trailerBytes.len)
+            let gt = outRec.gh2r3.generalTrailerBlocks
+            outRec.gh3.recordSize = if gt == 0xFFFF_FFFF'u32 or rec.gh3.recordSize == 0: 0'u64
+                                    else: uint64(data + 32 * int64(gt))
           w.writeRecordHeaders(outRec)
           var t: SegdTrace
           while r.readTrace(t):
             if t.scanType < 0 or t.channelSet < 0:
-              raiseFormat("trace " & $t.index & " names a channel set no descriptor has")
+              raiseFormat("trace " & $t.index & " names a channel set no descriptor has " &
+                "(convert the file by path: its header scan skips such records)")
             if outRec.isRev3 and not rec.isRev3:
               w.writeTrace(c.traceToRev3(t, rec.format, fOut, setSamples[t.scanType][t.channelSet]))
             elif not outRec.isRev3 and rec.isRev3:
@@ -627,14 +648,20 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
               c.note(7, "Rev 3 general trailers (description-block groups) have no Rev 2 " &
                 "place and are dropped")
             w.endRecord(blocks)
-          else:
+          elif outRec.isRev3:
+            w.setRev3Trailer(r.record.trailerBytes) # read after the traces
             w.endRecord()
+          else:
+            w.endRecord(r.record.trailer)
     w.close()
   except CatchableError as e:
     c.log.report(sevFatal, dcValidation, "conversion stopped: " & e.msg, loc = c.loc)
   if c.adjusted > 0:
     c.log.report(sevWarning, dcValidation, $c.adjusted & " traces were cut or zero-padded " &
       "to their channel set's sample count (Rev 3 requires one count per set)", loc = c.loc)
+  if c.zeroed > 0:
+    c.log.report(sevError, dcValidation, $c.zeroed & " traces hold values the target " &
+      "format cannot represent and were written as zeros", loc = c.loc)
   if c.inexact > 0:
     c.log.report(sevWarning, dcValidation, $c.inexact & " traces could not be re-encoded " &
       "exactly in the target format", loc = c.loc)

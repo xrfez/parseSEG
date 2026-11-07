@@ -62,14 +62,26 @@ export headerfields
 type
   EditValue* = FieldValue ## A new field value: an integer, a float or text.
 
+  JournalFile = object
+    ## The open journal: closed when it goes, so an editor dropped without
+    ## `close` does not leak its descriptor (the file unmaps on its own).
+    f: File
+
   HeaderEditor* = object
     ## An open file with its journal. Call `close` to flush both.
     file*: SeismicFile   ## The mapped file and its index (headers as opened).
     log*: DiagLog        ## Refused edits and journal problems.
     journalPath*: string
-    journal: File
+    journal: JournalFile
     journalBroken: bool  ## A journal write failed part-way (see `journalLine`).
     edits: int
+
+proc `=destroy`(j: JournalFile) =
+  if j.f != nil:
+    try: j.f.close()
+    except CatchableError: discard
+
+proc `=copy`(dst: var JournalFile, src: JournalFile) {.error.}
 
 const
   MaxJournalLine = 1 shl 16 ## Longer journal lines are malformed.
@@ -106,22 +118,22 @@ func nifEscape(s: string): string =
 proc syncJournal(ed: var HeaderEditor) =
   # The entry must be on disk before the map is written: mapped pages can
   # reach the disk any time after.
-  ed.journal.flushFile()
+  ed.journal.f.flushFile()
   when defined(posix):
-    if fsync(getFileHandle(ed.journal)) != 0:
+    if fsync(getFileHandle(ed.journal.f)) != 0:
       raise newException(IOError, "fsync failed: " & ed.journalPath)
 
 proc journalLine(ed: var HeaderEditor, line: string) =
   # After a failed write the file may end in a partial line: start afresh so
   # the next entry does not merge into it.
-  if ed.journalBroken: ed.journal.write "\n"
+  if ed.journalBroken: ed.journal.f.write "\n"
   ed.journalBroken = true
-  ed.journal.writeLine line
+  ed.journal.f.writeLine line
   ed.syncJournal()
   ed.journalBroken = false
 
 proc openJournal(ed: var HeaderEditor) =
-  if not open(ed.journal, ed.journalPath, fmAppend):
+  if not open(ed.journal.f, ed.journalPath, fmAppend):
     raise newException(IOError, "cannot open the edit journal: " & ed.journalPath)
   ed.journalLine "(session (file \"" & nifEscape(ed.file.path) & "\") (size " &
     $ed.file.mappedSize & "))"
@@ -338,9 +350,9 @@ proc close*(ed: var HeaderEditor) =
     ed.file.flush()
   finally:
     ed.file.close()
-    if ed.journal != nil:
-      ed.journal.close()
-      ed.journal = nil
+    if ed.journal.f != nil:
+      ed.journal.f.close()
+      ed.journal.f = nil
 
 func edits*(ed: HeaderEditor): int {.inline.} =
   ## Edits written in this session (no-op edits excluded).
