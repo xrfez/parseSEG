@@ -900,3 +900,10 @@ These are informational (stored as f32 in CSD 41–48).
 10. **EM Src/Recv block (0x45) location**: §8.25 does not say whether it may appear in the general header (the E.10 figure shows it in
     trace headers and an "Electromagnetic Source" block in the GH) [p.124, p.179].
 11. **GTDB undefined length**: "6 bytes" vs bytes 25–31 (7) [p.126]. Use 7.
+
+## Resolutions (added in the review, task 1.5)
+- AMBIGUITY 1 (extended record length unit): **µs**, confirmed by the real sample (see `segd_rev3_0_verified.md`).
+- Open question 2 (leap seconds): the correct dates are **2015-06-30 and 2016-12-31** (not 2017).
+  GPS−UTC = 18 s since 2017-01-01, confirmed by the real sample.
+- Open question 6 (header-size formula): **confirmed** on real data.
+- Open question 3 (optional block order): confirmed as any order, dispatched on byte 32.

@@ -897,3 +897,11 @@ Other gotchas:
   0x20 both in its block ID table (3.1 text p.42) and in §8.10 byte 32 (3.1 text p.110).
   The 0x1A in the 3.0 §7.10 table is a typo. Readers should accept 0x1A as a legacy alias;
   writers emit 0x20.
+- **Leap seconds: RESOLVED.** Append 2015-06-30 (+1) and 2016-12-31 (+1) to the §6.1 table.
+  GPS−UTC = 18 s from 2017-01-01, confirmed by the real 3.0 sample (`segd_rev3_0_verified.md`).
+  Keep the table data-driven.
+- **Trace order: CORRECTION.** §2.2 "for scan type, for channel set, for trace" is the *nominal*
+  order only. The real file interleaves auxiliary channel sets (CS1, CS3, CS2, CS4). Resolve
+  each trace's channel set from its own header.
+- **headerSize formula §6.4: CONFIRMED** on real data (4544 bytes), as are dataSize and recordSize.
+- **GH2 17-20 extended record length: µs CONFIRMED** (also resolves part B AMBIGUITY 1).

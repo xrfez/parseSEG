@@ -729,3 +729,15 @@ Skew block count (App. E example) [p.62]:
 8. GH#3+ layout may be manufacturer-specific; validate block number byte 19.
 9. Contents of unused bytes at the end of the last skew block, and FIXREC padding bytes: unspecified (ignore on read; write zeros).
 10. Polarity codes 0x9-0xF and other undefined code points: pass through as raw values.
+
+## Resolutions (added in the review, task 1.5)
+- AMBIGUITY "Figure 1 missing" / block order: **confirmed** on the real Rev 2.0 file `63.sgd`
+  (`segd_rev2_0_delta.md` §4). There's no need to render the image-only pages 14-17.
+- Open question 1 (disk label): disk files in practice have **no** label. Auto-detect `SD\d.\d` at bytes 5-9.
+- Open question 7: the extended copies (CSD 27-28, trace 16-20) are filled even when the BCD fields
+  are valid. Accept them, and warn if they disagree.
+- Open question 5 (trace order): do not assume an order. Identify each trace's channel set from
+  its own header (the 3.0 sample interleaves channel sets).
+- Open question 6 (multiplexed codes): raise `SegUnsupportedError` (owner decision, never silent).
+- Open question 3 (samples without THE): App. E p.61 is image-only. Rule: use THE bytes 8-10 when
+  THE ≥ 1, else (TE−TF)/SI. Revisit if a real file disagrees.
