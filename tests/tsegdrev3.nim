@@ -1,7 +1,8 @@
 ## SEG-D Rev 3 header blocks and timestamps (task 5.1).
 
 import std/[assertions, os, times, math, strutils]
-import parseSEGD/segd/[headers, rev3]
+import parseSEGD/segd/[headers, rev3, reader]
+import parseSEGD/io/[records, diskio]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const bigFile = exampleDir / "00000151_12900_11300.sgd" # local only, not in git
@@ -112,3 +113,37 @@ block table_of_contents:
   doAssert t.revision == "SD3.0" and t.serialNumber == "TAPE7" and t.clientId == "ACME CLIENT"
   doAssert t.entries.len == 2 and t.entries[0].segdFileNumber == "151"
   doAssert t.entries[1].timeOfShot == "1474994765504000" and t.entries[0].lineId == "L100"
+
+block real_rev3_reader:
+  if not fileExists(bigFile):
+    echo "  (skipped: ", bigFile, " is not present)"
+  else:
+    var src: RecordSource = openDiskSource(bigFile)
+    var r = openSegd(src)
+    doAssert r.nextRecord()
+    let rec = r.record
+    doAssert rec.isRev3 and rec.revision == SegdRevision(major: 3, minor: 0)
+    doAssert rec.traceCount == 3957 and rec.generalBlocks.len == 14 * 32
+    doAssert rec.external.len == 113 * 32 and rec.scanTypes[0].descriptors3.len == 4
+    var t: SegdTrace
+    var n = 0
+    var order: seq[int]
+    var userBlocks = 0
+    var t0 = newTraceTensor[float32](1, 4001)
+    while r.readTrace(t):
+      if order.len == 0 or order[^1] != t.channelSet: order.add t.channelSet
+      doAssert t.hasExt1 and t.numSamples == 4001 and t.extensions.len == 12 * 32
+      for (i, bt) in blocks(t.extensions):
+        if isUserBlock(bt): inc userBlocks
+      if t.offset == 53864: # the first seismic trace
+        doAssert t.ext1r3.receiverLine == 100.0 and t.ext1r3.receiverPoint == 101.0
+        doAssert t.ext1r3.receiverLineNumber == -1 # FFFFFF sentinel
+        rec.decodeInto(t, t0, 0)
+        doAssert t0[0, 0] == 9.369352937937947e-07'f32 and t0[0, 3] == 1.7749355265550548e-06'f32
+      inc n
+    doAssert n == 3957 and order == @[0, 2, 1, 3] # CS1, CS3, CS2, CS4
+    doAssert t.offset == 65041184 and t.ext1r3.receiverPoint == 225.0
+    doAssert userBlocks == 9 * 3957 # INOVA blocks 0xB0-0xB8 on every trace
+    doAssert r.log.len == 0, $r.log[0]
+    doAssert not r.nextRecord()
+    src.close()
