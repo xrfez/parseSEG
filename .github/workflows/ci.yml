@@ -22,6 +22,22 @@ jobs:
         run: |
           nimpretty --check src/*.nim
 
-      - name: Run test suite
+      - name: Fetch dependencies (Atlas)
+        run: |
+          atlas rep atlas.lock
+
+      - name: Run test suite (includes the C ABI test, tests/tcapi.nim)
         run: |
           nim test
+
+      - name: Build the C ABI shared library
+        run: |
+          nim lib
+
+      - name: Upload the library and header
+        uses: actions/upload-artifact@v4
+        with:
+          name: libparseseg-linux-x64
+          path: |
+            bin/libparseseg.so
+            include/parseseg.h

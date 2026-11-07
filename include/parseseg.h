@@ -160,7 +160,9 @@ typedef struct SegTraceKeys {
     uint8_t component;    /* distinguishes the components of one station */
 } SegTraceKeys;
 
-/* A typed header value. `text` is owned by the SegFile it came from. */
+/* A typed header value. `text` is owned by the SegFile it came from and holds
+   the field's characters as stored (EBCDIC or ASCII as in the file); a field
+   padded with NUL bytes reads shorter than its width. */
 typedef struct SegValue {
     int32_t     kind; /* SEG_VALUE_INT, SEG_VALUE_FLOAT or SEG_VALUE_TEXT */
     int32_t     reserved;

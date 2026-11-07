@@ -216,8 +216,11 @@ proc segFileOpen(path: cstring, flags: uint32, outFile: ptr pointer): SegStatus 
     if path == nil or outFile == nil: fail(SEG_ERR_ARGUMENT, "path and out must not be NULL")
     else:
       outFile[] = nil
-      let fo = FileObj(f: openSeismic($path, (flags and SEG_OPEN_8015_TWOS) != 0,
-        keys = (flags and SEG_OPEN_KEYS) != 0), log: LogObj())
+      # Open first: an exception inside the object constructor would leak the
+      # half-built handle.
+      var sf = openSeismic($path, (flags and SEG_OPEN_8015_TWOS) != 0,
+        keys = (flags and SEG_OPEN_KEYS) != 0)
+      let fo = FileObj(f: move sf, log: LogObj())
       outFile[] = keep(fo)
       SEG_OK
 
@@ -626,8 +629,8 @@ proc segEditorOpen(path, journal: cstring, outEditor: ptr pointer): SegStatus {.
     if path == nil or outEditor == nil: fail(SEG_ERR_ARGUMENT, "path and out must not be NULL")
     else:
       outEditor[] = nil
-      let eo = EditorObj(ed: openEditor($path, if journal == nil: "" else: $journal),
-        log: LogObj())
+      var ed = openEditor($path, if journal == nil: "" else: $journal) # see seg_file_open
+      let eo = EditorObj(ed: move ed, log: LogObj())
       outEditor[] = keep(eo)
       SEG_OK
 
