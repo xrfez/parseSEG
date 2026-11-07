@@ -27,9 +27,20 @@ proc openDiskSource*(path: string): DiskSource =
     discard
   DiskSource(f: f, name: path, size: size)
 
+proc refreshSize(s: DiskSource) =
+  # The size is cached at open; a file still being written may have grown.
+  try:
+    s.size = getFileSize(s.f)
+  except IOError:
+    discard
+
 method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKind =
-  buf.setLen maxLen
-  let n = if maxLen > 0: readBuffer(s.f, addr buf[0], maxLen) else: 0
+  # Never size the buffer beyond the bytes left: a 4 KB file must not cost a
+  # zeroed 1 MB buffer per open.
+  if s.size >= 0 and s.offset >= s.size: s.refreshSize()
+  let want = if s.size >= 0: int(max(0'i64, min(int64(maxLen), s.size - s.offset))) else: maxLen
+  buf.setLen want
+  let n = if want > 0: readBuffer(s.f, addr buf[0], want) else: 0
   buf.setLen n
   s.dataOffset = s.offset
   s.offset += n
@@ -39,6 +50,7 @@ method hasRecordBoundaries*(s: DiskSource): bool = false
 
 method seekForward*(s: DiskSource; n: int64): int64 =
   if s.size < 0: return -1
+  if s.offset + n > s.size: s.refreshSize()
   result = max(0'i64, min(n, s.size - s.offset))
   setFilePos(s.f, s.offset + result)
   s.offset += result

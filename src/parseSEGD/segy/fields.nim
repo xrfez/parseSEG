@@ -97,15 +97,81 @@ proc fieldValue*(f: SegyFile, t: SegyTrace, name: string, value: var float64): b
   ## trace `t`. False if the layout has no applicable entry.
   evaluate(f.layoutOf, initView(f, t), t, name, value)
 
-proc geometry*(f: SegyFile, t: SegyTrace): TraceGeometry =
-  ## The common values of trace `t`, resolved through the file's layout.
+type
+  GeometryField = enum
+    gfFfid = "ffid", gfChan = "chan", gfEspnum = "espnum", gfCdp = "cdp", gfCdptrc = "cdptrc",
+    gfIline = "iline", gfXline = "xline", gfOffset = "offset", gfShtX = "sht_x",
+    gfShtY = "sht_y", gfRecX = "rec_x", gfRecY = "rec_y", gfCdpX = "cdp_x", gfCdpY = "cdp_y",
+    gfRelev = "relev", gfSelev = "selev", gfSdepth = "sdepth", gfCoorunit = "coorunit",
+    gfSp = "sp"
+
+  Resolved = object
+    entry: LayoutEntry
+    scalar: seq[LayoutEntry] # entries of the entry's scalar; empty when unscaled
+
+  GeometryReader* = object
+    ## The layout lookups of `geometry`, resolved once per file: reading a
+    ## trace's geometry then does no name lookups and no allocation.
+    order: ByteOrder
+    plans: array[GeometryField, seq[Resolved]]
+
+func scalarName(k: LayoutType): string =
+  case k
+  of ltCoor4: "co_scal"
+  of ltElev4: "ed_scal"
+  of ltTime2: "tm_scal"
+  of ltSpNum4: "sp_scal"
+  else: ""
+
+func initGeometryReader*(f: SegyFile): GeometryReader =
+  ## Resolves the file's layout for `geometry`.
   let lay = f.layoutOf
-  let v = initView(f, t)
-  template get(name: string): float64 =
-    (var x: float64; if evaluate(lay, v, t, name, x): x else: NaN)
-  TraceGeometry(fieldRecord: get("ffid"), channel: get("chan"), energySourcePoint: get("espnum"),
-    ensemble: get("cdp"), traceInEnsemble: get("cdptrc"), inline: get("iline"),
-    crossline: get("xline"), offset: get("offset"), sourceX: get("sht_x"),
-    sourceY: get("sht_y"), groupX: get("rec_x"), groupY: get("rec_y"), cdpX: get("cdp_x"),
-    cdpY: get("cdp_y"), receiverElevation: get("relev"), sourceSurfaceElevation: get("selev"),
-    sourceDepth: get("sdepth"), coordinateUnits: get("coorunit"), shotpoint: get("sp"))
+  result.order = f.byteOrder
+  for g in GeometryField:
+    for e in lay.find($g):
+      let sn = scalarName(e.kind)
+      result.plans[g].add Resolved(entry: e, scalar: if sn.len > 0: lay.find(sn) else: @[])
+
+func evalPlain(es: openArray[LayoutEntry], v: TraceView, t: SegyTrace, value: var float64): bool =
+  result = false
+  for e in es:
+    var x: float64
+    if raw(v, t, e, x) and (not e.ifNonZero or x != 0):
+      value = x
+      result = true
+
+func evalResolved(rs: openArray[Resolved], v: TraceView, t: SegyTrace,
+    value: var float64): bool =
+  # As `evaluate`, with the lookups done in advance.
+  result = false
+  for r in rs:
+    var x: float64
+    if raw(v, t, r.entry, x) and (not r.entry.ifNonZero or x != 0):
+      var s: float64
+      if r.scalar.len > 0 and evalPlain(r.scalar, v, t, s) and s == trunc(s) and
+          s >= -32768.0 and s <= 32767.0:
+        x = applyScalar(x, int16(s))
+      value = x
+      result = true
+
+proc geometry*(g: GeometryReader, t: SegyTrace): TraceGeometry =
+  ## The common values of trace `t` of the file `g` was made for.
+  var v = TraceView(order: g.order)
+  t.header.encode(v.std, g.order)
+  if t.hasExt1:
+    v.hasExt1 = true
+    t.ext1.encode(v.ext1, g.order)
+  template get(f: GeometryField): float64 =
+    (var x: float64; if evalResolved(g.plans[f], v, t, x): x else: NaN)
+  TraceGeometry(fieldRecord: get(gfFfid), channel: get(gfChan),
+    energySourcePoint: get(gfEspnum), ensemble: get(gfCdp), traceInEnsemble: get(gfCdptrc),
+    inline: get(gfIline), crossline: get(gfXline), offset: get(gfOffset),
+    sourceX: get(gfShtX), sourceY: get(gfShtY), groupX: get(gfRecX), groupY: get(gfRecY),
+    cdpX: get(gfCdpX), cdpY: get(gfCdpY), receiverElevation: get(gfRelev),
+    sourceSurfaceElevation: get(gfSelev), sourceDepth: get(gfSdepth),
+    coordinateUnits: get(gfCoorunit), shotpoint: get(gfSp))
+
+proc geometry*(f: SegyFile, t: SegyTrace): TraceGeometry =
+  ## The common values of trace `t`, resolved through the file's layout. For
+  ## many traces, make one `initGeometryReader(f)` and use it instead.
+  initGeometryReader(f).geometry(t)

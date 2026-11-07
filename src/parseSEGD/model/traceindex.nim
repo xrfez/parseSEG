@@ -22,7 +22,7 @@
 
 import ../common/[endians, errors, diagnostics, bcd]
 import ../io/[records, memsource]
-import ../segy/[reader as segyreader]
+import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
 import ./[tensors, keys]
 
@@ -151,13 +151,14 @@ proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
   result.codecs.add TraceCodec(kind: skSegy, known: r.file.formatKnown,
     segyFormat: r.file.format, order: r.file.byteOrder)
+  let gr = if keys: initGeometryReader(r.file) else: GeometryReader()
   var t: SegyTrace
   while r.readTrace(t):
     let hb = TraceHeaderSize + (if t.hasExt1: TraceHeaderSize + t.proprietary.len else: 0)
     result.entries.add TraceEntry(offset: t.offset, headerBytes: uint32(hb),
       numSamples: uint32(t.numSamples), channelSet: -1, scanType: -1)
     result.maxSamples = max(result.maxSamples, t.numSamples)
-    if keys: result.keys.add traceKeys(r.file, t)
+    if keys: result.keys.add gr.traceKeys(t)
   result.segy = r.file
   result.log = r.log
 

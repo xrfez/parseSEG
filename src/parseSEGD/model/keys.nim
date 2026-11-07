@@ -50,9 +50,10 @@ func isComponentCode(code: int): bool {.inline.} =
 
 func unset(x: float64): bool {.inline.} = x == 0 or x.isNaN
 
-proc traceKeys*(f: SegyFile, t: SegyTrace): TraceKeys =
-  ## The keys of a SEG-Y trace, resolved through the file's layout.
-  let g = f.geometry(t)
+proc traceKeys*(gr: GeometryReader, t: SegyTrace): TraceKeys =
+  ## The keys of a SEG-Y trace, resolved through its file's layout
+  ## (`initGeometryReader(file)`, made once per file).
+  let g = gr.geometry(t)
   result = initTraceKeys()
   result.record = g.fieldRecord
   result.ensemble = g.ensemble
@@ -113,3 +114,7 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
       result.rcvIndex = int16(t.ext1.receiverPointIndex)
       result.sensorType = t.ext1.sensorType
       result.component = t.ext1.sensorType
+
+proc traceKeys*(f: SegyFile, t: SegyTrace): TraceKeys =
+  ## The keys of a SEG-Y trace (resolves the layout on every call).
+  initGeometryReader(f).traceKeys(t)

@@ -192,3 +192,18 @@ block memfile_source_basics:
   doAssert c.skip(100) == 10 and c.stoppedAt == rkTapeMark
   c.skipTapeMark()
   doAssert c.skip(3) == 3 and c.skip(100) == 2
+
+block disk_source_sees_a_growing_file:
+  # The size is cached at open, but a file being appended to keeps reading.
+  writeBytes(tmp / "grow", [1'u8, 2, 3])
+  let src = openDiskSource(tmp / "grow")
+  var buf: seq[byte]
+  doAssert src.readRecord(buf) == rkData and buf.len == 3
+  block:
+    var f = open(tmp / "grow", fmAppend)
+    f.write("abcd")
+    f.close()
+  doAssert src.seekForward(1) == 1
+  doAssert src.readRecord(buf) == rkData and buf.len == 3 and buf[0] == byte('b')
+  doAssert src.readRecord(buf) == rkEndOfData
+  src.close()
