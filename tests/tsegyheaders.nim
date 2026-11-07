@@ -51,6 +51,7 @@ block layouts_tile_their_blocks:
   bin.add FieldSpec(name: "surveyType", specByte: 3509, size: 2, kind: fkUInt)
   checkTiling(bin, 3201, 3600)
   checkTiling(traceHeaderFields, 1, 240)
+  checkTiling(traceHeaderExt1Fields, 1, 240)
   doAssert traceHeaderFields[^1].kind == fkText
 
 block text_header_basics:
@@ -216,3 +217,26 @@ block header_name_text:
   let e = encodeText("SEG00001", teEbcdic)
   for i in 0..7: th.headerName[i] = char(e[i])
   doAssert th.headerNameText == "SEG00001"
+
+block ext1_round_trips_in_every_order:
+  var e = initTraceHeaderExt1()
+  e.extTraceSeqLine = 12_345_678_901'u64
+  e.extFieldRecord = -7
+  e.receiverDepth = 12.5
+  e.extSourceX = 512_345.678
+  e.extNumSamples = 100_000
+  e.nanoseconds = -250
+  e.extSampleInterval = 0.125
+  e.numAddlTraceHeaders = 2
+  e.lastTraceFlag = LastInFile or LastInLine
+  e.extCdpY = -1.0e-3
+  for order in ByteOrder:
+    var b = newSeq[byte](240)
+    e.encode(b, order)
+    doAssert decodeTraceHeaderExt1(b, order) == e
+    doAssert b[232..239] == @[byte('S'), byte('E'), byte('G'), byte('0'), byte('0'),
+      byte('0'), byte('0'), byte('1')] # names are never reordered
+  doAssert e.headerNameText == "SEG00001"
+  var raw = newSeq[byte](240)
+  for i, c in "ACME0001": raw[232 + i] = byte(c)
+  doAssert headerBlockName(raw) == "ACME0001"

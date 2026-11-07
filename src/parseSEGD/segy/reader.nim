@@ -73,9 +73,11 @@ type
     ## One trace record. `readTrace` reuses the buffers of the `SegyTrace` it
     ## is given, so a loop over one variable allocates once.
     header*: SegyTraceHeader
-    extraHeaders*: seq[byte]
-      ## Raw additional 240-byte headers (Rev 2: Ext1 first, then proprietary),
-      ## in the file's byte order.
+    hasExt1*: bool                  ## The trace has Rev 2 additional headers.
+    ext1*: SegyTraceHeaderExt1      ## Trace Header Extension 1, valid when `hasExt1`.
+    proprietary*: seq[byte]
+      ## Raw proprietary 240-byte headers after Ext1, in the file's byte order
+      ## (their layout is user-defined; see `headerBlockName`).
     numSamples*: int                ## Samples in `samples`.
     sampleInterval*: float64        ## Effective sample interval (µs for time data).
     samples*: seq[byte]             ## Raw sample bytes in the file's byte order.
@@ -374,23 +376,26 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   # Rev 2 additional trace headers; Ext1 comes first.
   var extNs = 0'u32
   var extDt = 0.0
-  t.extraHeaders.setLen 0
+  t.hasExt1 = false
+  t.proprietary.setLen 0
   if f.revision.major >= 2 and f.binary.maxAddlTraceHeaders > 0:
-    r.readInto(t.extraHeaders, TraceHeaderSize)
-    if not r.ext1Warned and not isExt1Name(t.extraHeaders):
+    var raw: array[TraceHeaderSize, byte]
+    if r.readAvail(raw) < TraceHeaderSize:
+      raiseTruncated("trace header extension 1 ends early", r.offset)
+    t.hasExt1 = true
+    t.ext1 = decodeTraceHeaderExt1(raw, order)
+    if not r.ext1Warned and not isExt1Name(raw):
       r.ext1Warned = true
       r.log.report(sevWarning, dcBadValue, "the first additional trace header is not named " &
         "SEG00001; reading it as Trace Header Extension 1 anyway (reported once)",
         t.offset + TraceHeaderSize + 232, r.loc(t.index, "ext1.headerName"))
-    let declared = getNum[uint16](t.extraHeaders, 156, order)
+    let declared = t.ext1.numAddlTraceHeaders
     let k = if declared != 0: int64(declared) else: int64(f.binary.maxAddlTraceHeaders)
     if k > 1:
-      var more: seq[byte]
-      r.readInto(more, (k - 1) * TraceHeaderSize)
-      t.extraHeaders.add more
-    extNs = getNum[uint32](t.extraHeaders, 136, order)
-    extDt = getNum[float64](t.extraHeaders, 144, order)
-    if (getNum[uint16](t.extraHeaders, 158, order) and 4) != 0:
+      r.readInto(t.proprietary, (k - 1) * TraceHeaderSize)
+    extNs = t.ext1.extNumSamples
+    extDt = t.ext1.extSampleInterval
+    if (t.ext1.lastTraceFlag and LastInFile) != 0:
       r.lastTraceSeen = true
 
   let traceNs = if extNs != 0: int(extNs) else: int(t.header.numSamples)

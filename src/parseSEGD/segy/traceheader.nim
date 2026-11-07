@@ -6,8 +6,8 @@
 ## still decode into the Rev 1+ fields and re-encode unchanged. Bytes 233-240
 ## (`headerName`) are text and are never byte-swapped.
 ##
-## The Rev 2 Trace Header Extension 1 (`SEG00001`) is a separate block and is
-## not decoded here.
+## The Rev 2 Trace Header Extension 1 (`SEG00001`) is `SegyTraceHeaderExt1`,
+## also fully mapped.
 
 import ../common/[endians, fieldlayout, ebcdic]
 
@@ -147,19 +147,88 @@ func shotpoint*(h: SegyTraceHeader): float64 {.inline.} =
   ## The shotpoint number (197-200) with its scalar (201-202) applied.
   applyScalar(h.shotpointNumber, h.shotpointScalar)
 
-func headerNameText*(h: SegyTraceHeader): string =
-  ## `headerName` as text: ASCII as stored, EBCDIC decoded, or "" when it is
-  ## all zero bytes.
+# ---------------------------------------------------------------------------
+# Rev 2 Trace Header Extension 1 (spec note `segy_rev2_1.md` §3.5).
+
+type
+  SegyTraceHeaderExt1* = object
+    ## Trace Header Extension 1 (`SEG00001`), the first additional 240-byte
+    ## header of a Rev 2 trace. The `ext*` fields override their standard
+    ## header counterparts when non-zero; the f64 fields are unscaled.
+    extTraceSeqLine* {.at: 1.}: uint64
+    extTraceSeqFile* {.at: 9.}: uint64
+    extFieldRecord* {.at: 17.}: int64
+    extEnsembleNumber* {.at: 25.}: int64
+    extReceiverElevation* {.at: 33.}: float64
+    receiverDepth* {.at: 41.}: float64          ## Below the receiver's surface; no std counterpart.
+    extSourceSurfaceElevation* {.at: 49.}: float64
+    extSourceDepth* {.at: 57.}: float64
+    extReceiverDatumElevation* {.at: 65.}: float64
+    extSourceDatumElevation* {.at: 73.}: float64
+    extSourceWaterDepth* {.at: 81.}: float64
+    extGroupWaterDepth* {.at: 89.}: float64
+    extSourceX* {.at: 97.}: float64
+    extSourceY* {.at: 105.}: float64
+    extGroupX* {.at: 113.}: float64
+    extGroupY* {.at: 121.}: float64
+    extOffset* {.at: 129.}: float64
+    extNumSamples* {.at: 137.}: uint32
+    nanoseconds* {.at: 141.}: int32             ## Added to `second`; may be negative.
+    extSampleInterval* {.at: 145.}: float64
+    cableNumber* {.at: 153.}: int32             ## Cable, or recording device/sensor ID.
+    numAddlTraceHeaders* {.at: 157.}: uint16    ## Including this one; 0 = binary 3507.
+    lastTraceFlag* {.at: 159.}: uint16          ## 1 ensemble, 2 line, 4 file, 8 survey.
+    extCdpX* {.at: 161.}: float64
+    extCdpY* {.at: 169.}: float64
+    reserved* {.at: 177.}: array[56, byte]
+    headerName* {.at: 233.}: array[8, char]     ## `SEG00001`, ASCII or EBCDIC.
+
+const
+  traceHeaderExt1Fields* = fieldTable(SegyTraceHeaderExt1)
+    ## Layout of Trace Header Extension 1.
+  LastInEnsemble* = 1'u16 ## `lastTraceFlag` bits.
+  LastInLine* = 2'u16
+  LastInFile* = 4'u16
+  LastInSurvey* = 8'u16
+
+func decodeTraceHeaderExt1*(b: openArray[byte], order: ByteOrder): SegyTraceHeaderExt1 =
+  ## Decodes Extension 1 from the first 240 bytes of `b`.
+  doAssert b.len >= TraceHeaderSize, "trace header extension needs 240 bytes"
+  decodeFields(result, b, 1, order)
+
+func encode*(h: SegyTraceHeaderExt1, b: var openArray[byte], order: ByteOrder) =
+  ## Writes Extension 1 to the first 240 bytes of `b`.
+  doAssert b.len >= TraceHeaderSize, "trace header extension needs 240 bytes"
+  encodeFields(h, b, 1, order)
+
+func blockName(name: array[8, char]): string =
+  # An 8-character header name as text: ASCII as stored, EBCDIC decoded,
+  # "" for all zero bytes.
   var allZero = true
-  for c in h.headerName:
+  for c in name:
     if c != '\0': allZero = false
   if allZero:
     result = ""
-  elif h.headerName[0] >= '\xC1':
-    # EBCDIC upper-case letters and digits sit at 0xC1-0xF9; ASCII text is below 0x80.
-    result = newString(8)
-    for i, c in h.headerName:
-      result[i] = char(ebcdicToLatin1[uint8(c)])
   else:
     result = newString(8)
-    for i, c in h.headerName: result[i] = c
+    let ebcdic = name[0] >= '\xC1'
+    for i, c in name:
+      result[i] = if ebcdic: char(ebcdicToLatin1[uint8(c)]) else: c
+
+func headerNameText*(h: SegyTraceHeader): string = blockName(h.headerName)
+  ## `headerName` as text: ASCII as stored, EBCDIC decoded, or "" when it is
+  ## all zero bytes.
+
+func headerNameText*(h: SegyTraceHeaderExt1): string = blockName(h.headerName)
+  ## `headerName` as text (normally `SEG00001`).
+
+func initTraceHeaderExt1*(): SegyTraceHeaderExt1 =
+  ## An empty Extension 1 named `SEG00001` (ASCII).
+  for i, c in "SEG00001": result.headerName[i] = c
+
+func headerBlockName*(b: openArray[byte]): string =
+  ## Name (bytes 233-240) of a raw 240-byte additional header, e.g. a
+  ## proprietary extension; "" for zero bytes.
+  var name: array[8, char]
+  for i in 0..7: name[i] = char(b[232 + i])
+  blockName(name)

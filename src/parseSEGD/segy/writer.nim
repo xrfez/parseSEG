@@ -15,12 +15,12 @@
 ##   written back as it came in, and errors when they are new or edited.
 ## With `lenient`, every problem is a warning in `log`.
 ##
-## `byteOrder` chooses the output order (default: the file's). Header fields
-## and samples are reordered; text blocks never are. Rev 2 additional trace
-## headers are kept raw, so they can only be written in the order they were
-## read until task 3.4 decodes them.
+## `byteOrder` chooses the output order (default: the file's). Header fields,
+## Trace Header Extension 1 and samples are reordered; text blocks never are.
+## Proprietary trace headers have no known layout: changing their byte order
+## is refused unless lenient (they are then copied unchanged).
 
-import ../common/[endians, errors, diagnostics, ebcdic]
+import ../common/[endians, errors, diagnostics]
 import ../io/records
 import ./[binheader, traceheader, samples, exttext, reader]
 
@@ -170,37 +170,31 @@ func reorderSamples(src: openArray[byte], width: int, srcOrder, dstOrder: ByteOr
       else:
         for j in 0..2: result[i+j] = src[i+2-j]
 
-func isExt1Name(b: openArray[byte]): bool =
-  const ascii = "SEG00001"
-  var a, e = true
-  for i, c in ascii:
-    if b[232 + i] != byte(c): a = false
-    if b[232 + i] != latin1ToEbcdic[uint8(c)]: e = false
-  a or e
-
 proc checkTrace(w: var SegyWriter, t: SegyTrace) =
   # The reader must recover exactly this trace from what is written.
   let b = w.file.binary
-  let order = w.file.byteOrder # extra headers are raw, in the file's order
   var extNs = 0'u32
   if w.rev.major >= 2 and b.maxAddlTraceHeaders > 0:
-    if t.extraHeaders.len == 0 or t.extraHeaders.len mod TraceHeaderSize != 0:
-      w.problem("the binary header announces additional trace headers; this trace needs " &
-        "whole 240-byte headers, it has " & $t.extraHeaders.len & " bytes",
-        "trace.extraHeaders", t.index)
+    if not t.hasExt1:
+      w.problem("the binary header announces additional trace headers, but this trace " &
+        "has no Trace Header Extension 1", "trace.ext1", t.index)
     else:
-      if not isExt1Name(t.extraHeaders):
+      if t.ext1.headerNameText != "SEG00001":
         w.problem("the first additional trace header must be named SEG00001",
           "ext1.headerName", t.index, asRead = w.wasRead)
-      let declared = getNum[uint16](t.extraHeaders, 156, order)
+      if t.proprietary.len mod TraceHeaderSize != 0:
+        w.problem("proprietary trace headers must be whole 240-byte blocks, this trace has " &
+          $t.proprietary.len & " bytes", "trace.proprietary", t.index)
+      let declared = t.ext1.numAddlTraceHeaders
       let k = if declared != 0: int(declared) else: int(b.maxAddlTraceHeaders)
-      if k * TraceHeaderSize != t.extraHeaders.len:
-        w.problem("the trace declares " & $k & " additional headers but carries " &
-          $(t.extraHeaders.len div TraceHeaderSize), "ext1.numAddlTraceHeaders", t.index)
-      extNs = getNum[uint32](t.extraHeaders, 136, order)
-  elif t.extraHeaders.len > 0:
+      let have = 1 + t.proprietary.len div TraceHeaderSize
+      if k != have:
+        w.problem("the trace declares " & $k & " additional headers but carries " & $have,
+          "ext1.numAddlTraceHeaders", t.index)
+      extNs = t.ext1.extNumSamples
+  elif t.hasExt1 or t.proprietary.len > 0:
     w.problem("additional trace headers need Rev 2 and a non-zero binary header count " &
-      "(3507)", "trace.extraHeaders", t.index)
+      "(3507)", "trace.ext1", t.index)
   if w.rev.major >= 1 and b.fixedLengthTraces == 1:
     if uint32(t.numSamples) != b.effectiveSamplesPerTrace:
       w.problem("fixed-length file with " & $b.effectiveSamplesPerTrace &
@@ -214,18 +208,20 @@ proc checkTrace(w: var SegyWriter, t: SegyTrace) =
   if t.samples.len != t.numSamples * size:
     w.problem("the trace has " & $t.samples.len & " sample bytes, " &
       $(t.numSamples * size) & " expected", "trace.samples", t.index)
+  if t.proprietary.len > 0 and w.order != w.file.byteOrder:
+    w.problem("proprietary trace headers have no known layout, so they cannot be converted " &
+      "to " & $w.order & " byte order (they are copied unchanged)", "trace.proprietary", t.index)
 
 proc writeTrace*(w: var SegyWriter, t: SegyTrace) =
   ## Validates and writes one trace record. Raises `SegFormatError` if the
   ## trace is inconsistent with the file headers (unless lenient) or cannot be
   ## expressed in the output byte order.
   w.checkTrace(t)
-  var rec = newSeq[byte](TraceHeaderSize)
+  var rec = newSeq[byte](TraceHeaderSize * (if t.hasExt1: 2 else: 1))
   t.header.encode(rec, w.order)
-  if t.extraHeaders.len > 0:
-    if w.order != w.file.byteOrder:
-      raiseFormat("additional trace headers cannot be byte-reordered yet (task 3.4)")
-    rec.add t.extraHeaders
+  if t.hasExt1:
+    t.ext1.encode(rec.toOpenArray(TraceHeaderSize, 2 * TraceHeaderSize - 1), w.order)
+  rec.add t.proprietary
   if w.order == w.file.byteOrder:
     rec.add t.samples
   else:

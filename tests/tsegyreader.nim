@@ -178,11 +178,11 @@ proc rev2File(numTraces: uint64, trailerRecords: int32, lastFlag: bool): SegyDat
     var t = SegyTrace(index: k, numSamples: 5 + k)
     t.header.traceSeqFile = int32(k + 1)
     t.header.numSamples = 1 # overridden by Ext1
-    t.extraHeaders = newSeq[byte](240)
-    putNum(t.extraHeaders, 136, uint32(t.numSamples), boBig)
-    putNum(t.extraHeaders, 156, 1'u16, boBig)
-    for i, c in "SEG00001": t.extraHeaders[232 + i] = byte(c)
-    if lastFlag and k == 2: putNum(t.extraHeaders, 158, 4'u16, boBig)
+    t.hasExt1 = true
+    t.ext1 = initTraceHeaderExt1()
+    t.ext1.extNumSamples = uint32(t.numSamples)
+    t.ext1.numAddlTraceHeaders = 1
+    if lastFlag and k == 2: t.ext1.lastTraceFlag = LastInFile
     t.samples = newSeq[byte](2 * t.numSamples)
     for i in 0..<t.numSamples: putNum(t.samples, 2 * i, int16(100 * k + i), boBig)
     result.traces.add t
@@ -382,3 +382,51 @@ block as_read_missing_endtext_is_written_back:
   doAssert not d.file.extended.hasEndText
   discard writeLog(d, tmp / "noendtext.sgy", initSegyWriteOptions(d.file))
   doAssert readBytes(tmp / "noendtext.sgy") == readBytes(path)
+
+# ----------------------------------------------- Extension 1 (3.4c) --
+
+block ext1_and_proprietary_headers:
+  var d = rev2File(3, 0, false)
+  d.file.trailer = initExtendedTextHeader()
+  d.file.binary.maxAddlTraceHeaders = 2
+  for k in 0..<3:
+    d.traces[k].ext1.numAddlTraceHeaders = 2
+    d.traces[k].ext1.extSourceX = 400_000.25 + float64(k)
+    d.traces[k].ext1.nanoseconds = -int32(k)
+    d.traces[k].proprietary = newSeq[byte](240)
+    for i, c in "ACME0001": d.traces[k].proprietary[232 + i] = byte(c)
+    putNum(d.traces[k].proprietary, 0, uint32(0xDEADBEEF'u32), boBig)
+  let path = tmp / "ext1_prop.sgy"
+  d.copyTo(path, initSegyWriteOptions(d.file))
+  let e = readSegy(path)
+  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+  doAssert e.traces.len == 3
+  for k in 0..<3:
+    let t = e.traces[k]
+    doAssert t.hasExt1 and t.ext1.extSourceX == 400_000.25 + float64(k)
+    doAssert t.ext1.nanoseconds == -int32(k) and t.ext1.headerNameText == "SEG00001"
+    doAssert t.proprietary.len == 240 and headerBlockName(t.proprietary) == "ACME0001"
+    doAssert t.numSamples == 5 + k
+  # Proprietary blocks have no known layout: no silent byte-order change.
+  doAssertRaises SegFormatError:
+    e.copyTo(tmp / "ext1_prop_le.sgy", SegyWriteOptions(byteOrder: boLittle))
+  e.copyTo(tmp / "ext1_prop_le.sgy", SegyWriteOptions(byteOrder: boLittle, lenient: true))
+  let le = readSegy(tmp / "ext1_prop_le.sgy")
+  doAssert le.traces[2].ext1.extSourceX == 400_002.25
+  doAssert le.traces[2].proprietary == e.traces[2].proprietary # copied unchanged
+
+block ext1_byte_order_conversion:
+  var d = rev2File(3, 0, true)
+  d.file.trailer = initExtendedTextHeader()
+  let path = tmp / "ext1_be.sgy"
+  d.copyTo(path, initSegyWriteOptions(d.file))
+  var prev = readSegy(path)
+  for order in [boLittle, boPairSwapped, boBig]:
+    let next = tmp / ("ext1_" & $order & ".sgy")
+    prev.copyTo(next, SegyWriteOptions(byteOrder: order))
+    let e = readSegy(next)
+    doAssert e.file.byteOrder == order and e.diagnostics.len == 0
+    doAssert e.traces.len == 3 and e.samples == prev.samples
+    for k in 0..<3: doAssert e.traces[k].ext1 == prev.traces[k].ext1
+    prev = e
+  doAssert readBytes(tmp / "ext1_big.sgy") == readBytes(path)
