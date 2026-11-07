@@ -181,7 +181,7 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       Nim 2.4 with `--noNimblePath` (update `nimble.paths`), and do a smoke test of
       allocating a `Tensor[float32]` and writing into its raw buffer. If it fails, record why
       and pick a fallback (pinned version or our own thin tensor type with the same shape API).
-- [ ] 2.3 Diagnostics: `Diagnostic`/`DiagLog`, the severity and code catalog, **NIF** serialization
+- [x] 2.3 Diagnostics: `Diagnostic`/`DiagLog`, the severity and code catalog, **NIF** serialization
       (+ a NIF reader for round-trip tests), the exception→diagnostic boundary helper. Add
       `--path:"$nim/dist/nimony/src/lib"` to `config.nims` and `tests/config.nims`.
 - [ ] 2.2 I/O layer: the record source/sink interface (records + tape marks); disk-file,
@@ -245,3 +245,4 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - 2026-11-07: NIF confirmed for the error log. Vendor maps were designed as declarative NIF plugins (`docs/design/vendor_maps.md`). The toolchain nifbuilder/nifreader were smoke-tested OK on Nim 2.4. **The next session starts at task 2.0.**
 - 2026-11-07: Task 2.0 done. Arraymancer 0.7.33 builds and runs on Nim 2.4 (debug and `-d:danger`) under `--noNimblePath`. `import arraymancer/tensor` needs only `nimblas` at compile time, and no system BLAS is linked or installed (BLAS loads only if matmul is called). Writing raw buffers via `unsafe_raw_offset` works (`tests/ttensor.nim`). `nimble setup` generates `nimble.paths` (machine-specific, now gitignored and untracked) and `config.nims` includes it; tests pick it up through the root config. **Next: task 2.3.**
 - 2026-11-07: Switched dependency management from `nimble setup` to **Atlas** (owner request: agents can read library sources in `deps/`). `nim.cfg` holds the Atlas paths, `atlas.lock` is committed, and `deps/atlas.config` is tracked. Tests pass, and nimsuggest resolves into `deps/`. **Next: task 2.3.**
+- 2026-11-07: Task 2.3 done: `common/diagnostics.nim` (`Severity`, a `DiagCode` catalog with stable NIF spellings, `Location`, `Diagnostic`, `DiagLog`, `toNif`/`writeNif`/`parseDiagnostics`/`readDiagnostics`, and `tryRecord`, a boundary template that maps truncation and I/O to fatal, format violations to error, and anything else to internal). `SegError` now carries `offset`, and `SegTruncatedError`/`raiseTruncated` were added. The nimony lib path is in `config.nims`; import `nifcore` and `stringviews` alongside `nifreader`. Tests: `tests/tdiagnostics.nim`. **Next: task 2.2 (I/O layer).**

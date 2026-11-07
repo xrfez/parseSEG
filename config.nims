@@ -1,6 +1,9 @@
 # Strict build configuration and task orchestrator for parseSEGD
 
 switch("outdir", "bin")
+# NIF reader/builder ship with the Nim toolchain (used for the diagnostics log
+# and vendor maps); no extra package is needed.
+switch("path", "$nim/dist/nimony/src/lib")
 
 let zigccExe =
   if findExe("zigcc").len > 0:

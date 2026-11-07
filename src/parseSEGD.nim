@@ -3,5 +3,5 @@
 ## This umbrella module re-exports the public API. See `PLAN.md` for the
 ## roadmap and implementation status.
 
-import parseSEGD/common/[errors, endians, bcd, ibmfloat, ebcdic]
-export errors, endians, bcd, ibmfloat, ebcdic
+import parseSEGD/common/[errors, diagnostics, endians, bcd, ibmfloat, ebcdic]
+export errors, diagnostics, endians, bcd, ibmfloat, ebcdic
