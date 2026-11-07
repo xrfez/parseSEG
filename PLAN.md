@@ -289,7 +289,7 @@ Findings of a probe (2026-11-07, `--app:lib --noMain --header`, Nim 2.4):
   without copying.
 - The header includes `nimbase.h` from the compiler: ship it, or make the header self-contained.
 Tasks:
-- [ ] 8.1 Research and decide the ABI: naming (`seg_*`), handles versus structs, a DLPack versus
+- [x] 8.1 Research and decide the ABI: naming (`seg_*`), handles versus structs, a DLPack versus
       our own tensor view, how errors and diagnostics are reported (codes plus a NIF/struct log),
       ownership and release functions for every allocation, thread-safety rules (prefetch, one
       editor per file), NimMain/init and teardown, and ORC across the boundary
@@ -414,3 +414,4 @@ Tasks:
   - From the plausible list: journal lines are fsync'd before the map is written; after a failed journal write the next line starts on a fresh line; prefetch slots are capped at the file's trace count; a short chunk is cloned without reallocating its slot.
   - Not done, and noted as limits: `HeaderEditor` has no destructor (call `close`); the journal's `(session ...)` identity line is not checked on replay; a BCD -1 (all F) is accepted for every BCD field.
 - 2026-11-07: Owner decisions: Phase 8 (embeddable library and C ABI) comes before Phase 7 (CLI); Phase 9 renames the project to parseSEG; Phase 10 adds SEG P1 and SPS survey files. A probe confirmed that `--app:lib --noMain --header` works: plain structs export as-is, objects with seq/ref become opaque, and tensors cross as a data pointer plus shape and strides (DLPack-style) with a release handle. Sorting is to be done by permutation views (see Future). Cross-format conversion is task 8.6. **Next: task 8.1.**
+- 2026-11-07: Task 8.1 done: `docs/design/c_abi.md`. Probes showed host threads **segfault** under the default thread-local allocator unless each thread calls `setupForeignThreadGc`; with `-d:useMalloc` 4 pthreads × 2000 alloc/release cycles work, so the library is built `--app:lib --noMain --mm:orc --threads:on -d:useMalloc`. Defects inside an export are caught by `except Exception` (panics off). `GC_ref`'d refs work as handles. Decisions: `seg_` prefix (survives the Phase 9 rename); a curated, self-contained, commented `include/parseseg.h`, checked by a C layout test (sizeof/offsetof against Nim), a symbol cross-check against the `.so`, and C and Python ctypes tests; opaque handles (File, Tensor, Prefetch, Editor, Log, Gathers) plus bycopy structs (`SegTraceEntry` = `TraceEntry`, `SegTraceKeys`, ...); tensors leave zero-copy as a `SegTensorView`, as DLPack, or by decoding into a caller buffer; `SegStatus` codes plus a thread-local `seg_last_error`; diagnostics through `SegLog`; `seg_init` runs NimMain.
