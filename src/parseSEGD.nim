@@ -6,8 +6,8 @@
 import parseSEGD/common/[errors, diagnostics, endians, bcd, ibmfloat, ebcdic, fieldlayout]
 export errors, diagnostics, endians, bcd, ibmfloat, ebcdic, fieldlayout
 
-import parseSEGD/segy/[textheader, binheader, traceheader, samples, exttext]
-export textheader, binheader, traceheader, samples, exttext
+import parseSEGD/segy/[textheader, binheader, traceheader, samples, exttext, reader, writer]
+export textheader, binheader, traceheader, samples, exttext, reader, writer
 
 import parseSEGD/model/tensors
 export tensors
