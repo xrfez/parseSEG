@@ -331,6 +331,22 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 
       Update `SegTraceKeys` in the C ABI (append the field, keeping the ABI version rules) and
       `trace_keys` in Python.
+- [ ] 6.10 Header listing for a viewer's headers tab (owner, 2026-11-07). One call per scope
+      returns every header of trace `i` / record `r` / the file as ordered rows:
+      - API: `traceHeaders(f, i)`, `recordHeaders(f, r)`, `fileHeaders(f)`.
+      - Row contents: (block, field, value, byte offset, size), with a block's raw bytes
+        available for a hex pane via `copyBytes`.
+      - Covers whatever blocks that trace actually has in its format and revision: SEG-Y
+        `trace`/`ext1`; SEG-D `trace`/`ext1`/Rev 3 extension blocks; `gh1`/`gh3`/... per record.
+      - Exposure: Python (list of dicts, plus `field_names(block)`), C ABI (an iterator), and
+        CLI `dump`.
+
+      Owner rule: **the listing is read-only.** A viewer never edits the file. Edits made in a
+      viewer are collected in memory as a pending change set and saved as a NIF patch (the
+      `exportHeaders` format). Applying one is a separate explicit action: `importHeaders`
+      with `dryRun` first, preferably with `outPath` (a copy). Add a helper that writes a
+      change set as a NIF patch (`writeHeaderPatch(changes, path)`), so viewers do not build NIF
+      by hand. Values in the rows use the same field names as `HeaderEditor` and NIF.
 
 ### Phase 8: Embeddable library (Nim import, C ABI `.so`/`.dll`), done BEFORE Phase 7
 (Owner decision, 2026-11-07: Phase 8 first, then Phase 7, whose CLI is built on Phase 8's API.
@@ -836,3 +852,4 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
 - 2026-11-07: Owner rule added to "Owner decisions": files change only on an explicit write. Confirmed that `applySurvey`/`applyGeometry` only change in-memory `TraceKeys`, and `openSeismic` maps read-only unless `writable = true` (`HeaderEditor`). New tasks: 6.8 `FileSummary` (format-independent metadata) and 6.9 trace time in `TraceKeys` (so viewers need no per-format branches); 10.5 explicit, journaled write-back of joined geometry. Still open: 4.7 (needs a decision), Phase 11.
 - 2026-11-07: 4.7 decided by the agent as a default (the owner had no preference): demultiplex into a temporary demux file on open, original never touched; rationale and costs in the 4.7 entry. Revisit if a real multiplexed file shows a problem. Also confirmed for the owner: `readTraces` decodes into a new tensor (a copy), so processing never touches the mapped file.
 - 2026-11-07: Closed the raw-memory hole (owner rule: files change only on an explicit write). `SeismicFile.memory` is now `unsafeMemory`, internal and not exported by `parseSEG` (`export traceindex except unsafeMemory`); a write through it on a `writable` map would have bypassed the `HeaderEditor` journal. Public replacements: `isOpen` and `copyBytes(offset, n)` (a bounds-checked copy). `tumbrella` checks that the pointer is not reachable. C ABI and Python never exposed it. `nim test` passes; lib/pylib/cli build.
+- 2026-11-07: Task 6.10 added: read-only header listing per trace/record/file for a viewer's headers tab. Owner rule recorded: viewers never edit files; viewer edits become a NIF patch (`writeHeaderPatch`), applied only by an explicit `importHeaders` (dry run first, preferably to a copy).
