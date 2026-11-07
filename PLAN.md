@@ -173,7 +173,7 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 
 ### Phase 2: Core infrastructure
 - [x] 2.1 endians, bcd, ibmfloat, ebcdic, errors (`tests/tcommon.nim`)
-- [ ] 2.0 Add Arraymancer: `requires "arraymancer"` in the nimble file, check that it builds on
+- [x] 2.0 Add Arraymancer: `requires "arraymancer"` in the nimble file, check that it builds on
       Nim 2.4 with `--noNimblePath` (update `nimble.paths`), and do a smoke test of
       allocating a `Tensor[float32]` and writing into its raw buffer. If it fails, record why
       and pick a fallback (pinned version or our own thin tensor type with the same shape API).
@@ -239,3 +239,4 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - 2026-11-07: Tasks 1.5 and 1.6b done. segd_rev2_0.md (858 lines) is word-identical to 2.1 except for 11 listed items. 8015 = one's complement per spec. Samples without THE = (TE-TF)/SI. Real files contain spec-invalid zeros: warn, never reject. **Phase 1 complete.**
 - 2026-11-07: Owner corrections: tape read/write is first-class (Linux and Windows); Tensor (Arraymancer) storage; diagnostics log instead of exceptions (NIF?); gather-agnostic (receiver gathers); multi-component grouping; rotational data is vendor-specific; viewer-ready chunked/prefetch I/O. Phases were reordered: **next is task 2.0 (Arraymancer check)**, then 2.3, then 2.2.
 - 2026-11-07: NIF confirmed for the error log. Vendor maps were designed as declarative NIF plugins (`docs/design/vendor_maps.md`). The toolchain nifbuilder/nifreader were smoke-tested OK on Nim 2.4. **The next session starts at task 2.0.**
+- 2026-11-07: Task 2.0 done. Arraymancer 0.7.33 builds and runs on Nim 2.4 (debug and `-d:danger`) under `--noNimblePath`. `import arraymancer/tensor` needs only `nimblas` at compile time, and no system BLAS is linked or installed (BLAS loads only if matmul is called). Writing raw buffers via `unsafe_raw_offset` works (`tests/ttensor.nim`). `nimble setup` generates `nimble.paths` (machine-specific, now gitignored and untracked) and `config.nims` includes it; tests pick it up through the root config. A fresh clone needs `nimble install -d && nimble setup`. **Next: task 2.3.**

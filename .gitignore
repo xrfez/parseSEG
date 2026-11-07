@@ -2,3 +2,6 @@ bin/
 htmldocs/
 nimcache/
 /SEG Spec/exampleFiles/00000151_12900_11300.sgd
+nimble.develop
+nimble.paths
+nimbledeps
