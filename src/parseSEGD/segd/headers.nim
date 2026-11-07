@@ -11,7 +11,7 @@
 
 import std/[math, strutils]
 import ../common/[endians, fieldlayout, errors]
-export fieldlayout
+export FieldSpec, FieldKind, BcdAllF, BcdInvalid, fieldTable
 
 const
   SegdBlockSize* = 32           ## Bytes in a general header, CSD, extension or trailer block.

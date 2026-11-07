@@ -56,6 +56,7 @@ type
     size: int64
     entries: ptr UncheckedArray[TraceEntry]
     codecs: ptr UncheckedArray[TraceCodec]
+    sel: ptr UncheckedArray[int] # selection mode: positions index this list; nil = ranges
     thread: Thread[ptr Shared[T]]
 
   Prefetcher*[T: SampleType] = object
@@ -63,9 +64,12 @@ type
     sh: ptr Shared[T]
     tensors: seq[Tensor[T]] # slot storage, consumer side
     last: int               # end of the whole range (exclusive)
+    selection: seq[int]     # selection mode: the trace list (fixed for the prefetcher's life)
 
   PrefetchChunk*[T: SampleType] = object
-    first*: int         ## Index of the chunk's first trace.
+    first*: int
+      ## Position of the chunk's first row: its trace index, or in selection
+      ## mode its position in the selection (`traceAt` maps it).
     count*: int         ## Traces in the chunk.
     samples*: Tensor[T] ## `[count, cols]`; shorter traces are zero-padded.
     failed*: int        ## Traces that could not be decoded (left zero).
@@ -99,7 +103,8 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) =
   s.failed = 0
   for k in 0..<s.count:
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
-    let e = sh.entries[s.first + k]
+    let pos = s.first + k
+    let e = sh.entries[if sh.sel != nil: sh.sel[pos] else: pos]
     try:
       decodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols)
     except CatchableError:
@@ -165,6 +170,32 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, first = 0, last = -1, chunkTr
     result.tensors.add newTensorUninit[T](rows, width)
     sh.slots[i].data = rawData(result.tensors[i])
   createThread(sh.thread, worker[T], sh)
+
+proc newPrefetcher*[T: SampleType](f: SeismicFile, selection: sink seq[int], chunkTraces = 256,
+    depth = 4, cols = -1): Prefetcher[T] =
+  ## Read-ahead over a list of trace indices (a gather, a component group, a
+  ## sort order), decoded in list order. Positions (`first`, `seek`) index
+  ## the list; `traceAt` maps them to traces. The list is fixed for the
+  ## prefetcher's life (for another list, make another prefetcher).
+  for i in selection:
+    doAssert i >= 0 and i < f.len, "trace " & $i & " is out of bounds"
+  let width = if cols >= 0: cols else: f.maxSamples(selection)
+  # Build in range mode over positions, then switch the worker to the list
+  # before it can run: the lock orders the hand-over.
+  result = newPrefetcher[T](f, 0, 0, chunkTraces, depth, width)
+  result.selection = selection
+  result.last = result.selection.len
+  let sh = result.sh
+  acquire(sh.lock)
+  if result.selection.len > 0:
+    sh.sel = cast[ptr UncheckedArray[int]](addr result.selection[0])
+  sh.stop = result.selection.len
+  signal(sh.work)
+  release(sh.lock)
+
+proc traceAt*[T](p: Prefetcher[T], pos: int): int =
+  ## The trace index at position `pos` (the position itself in range mode).
+  if p.selection.len > 0: p.selection[pos] else: pos
 
 proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
   # Called with the head slot ready; hands its tensor over and gives the slot

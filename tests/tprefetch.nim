@@ -120,3 +120,33 @@ block random_seeks_and_polls:
         doAssert expect == f.len
   p.close()
   f.close()
+
+block selections:
+  # A trace list (e.g. a sort order) is read ahead in list order.
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var sel: seq[int]
+  for i in countdown(199, 0, 3): sel.add i
+  sel.add [5, 5, 0]                               # repeats are fine
+  let want = f.readTraces(sel)
+  doAssert want.shape[0] == sel.len
+  let all = f.readTraces(0..<f.len)
+  for k, i in sel: doAssert want[k, _] == all[i, _]
+  var p = newPrefetcher[float32](f, sel, chunkTraces = 7, depth = 2)
+  var c: PrefetchChunk[float32]
+  var pos = 0
+  while p.next(c):
+    doAssert c.first == pos and c.samples == want[pos ..< pos + c.count, _]
+    doAssert p.traceAt(pos) == sel[pos]
+    pos += c.count
+  doAssert pos == sel.len
+  p.seek(60)
+  doAssert p.next(c) and c.first == 60 and c.samples[0, _] == all[sel[60], _]
+  p.close()
+  # Raw decode into a caller buffer with a row stride (the C ABI path).
+  var buf = newSeq[float32](3 * 2100)
+  var log: DiagLog
+  doAssert f.readTracesRaw([7, 3, 7], cast[ptr UncheckedArray[float32]](addr buf[0]), 2001,
+    2100, log) == 0
+  for j in 0..<2001:
+    doAssert buf[j] == all[7, j] and buf[2100 + j] == all[3, j] and buf[4200 + j] == all[7, j]
+  f.close()

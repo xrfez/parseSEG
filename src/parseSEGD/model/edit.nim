@@ -55,17 +55,12 @@ when defined(posix):
 import ../common/[endians, errors, diagnostics, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
-import ./traceindex
+import ./[traceindex, headerfields]
+
+export headerfields
 
 type
-  EditKind = enum ekInt, ekFloat, ekText
-
-  EditValue* = object
-    ## A new field value: an integer, a float or text.
-    case kind: EditKind
-    of ekInt: i: int64
-    of ekFloat: f: float64
-    of ekText: s: string
+  EditValue* = FieldValue ## A new field value: an integer, a float or text.
 
   HeaderEditor* = object
     ## An open file with its journal. Call `close` to flush both.
@@ -93,15 +88,8 @@ const
     "externalHeaderBlocks"]
   segdGhNStructural = ["blockNumber"]
 
-func toEditValue*(v: SomeInteger): EditValue = EditValue(kind: ekInt, i: int64(v))
-func toEditValue*(v: SomeFloat): EditValue = EditValue(kind: ekFloat, f: float64(v))
-func toEditValue*(v: string): EditValue = EditValue(kind: ekText, s: v)
-
-func `$`*(v: EditValue): string =
-  case v.kind
-  of ekInt: $v.i
-  of ekFloat: $v.f
-  of ekText: v.s.escape
+func toEditValue*(v: SomeInteger | SomeFloat | string): EditValue {.inline.} =
+  toFieldValue(v)
 
 # ---------------------------------------------------------------- journal --
 
@@ -355,22 +343,17 @@ func edits*(ed: HeaderEditor): int {.inline.} =
   ## Edits written in this session (no-op edits excluded).
   ed.edits
 
-template isLayoutField(f: untyped): bool =
-  f.hasCustomPragma(fieldlayout.at) or f.hasCustomPragma(bcdAt) or f.hasCustomPragma(bcdAtL) or
-    f.hasCustomPragma(nibAt) or f.hasCustomPragma(nibAtL) or f.hasCustomPragma(at24) or
-    f.hasCustomPragma(fix40) or f.hasCustomPragma(fix24)
-
 proc assign[F](f: var F, v: EditValue, err: var string): bool =
   when F is SomeInteger:
     var i: int64
     case v.kind
-    of ekInt: i = v.i
-    of ekFloat:
+    of fvInt: i = v.i
+    of fvFloat:
       if not (v.f == trunc(v.f) and abs(v.f) < 9.2e18):
         err = $v & " is not an integer"
         return false
       i = int64(v.f)
-    of ekText:
+    of fvText:
       err = "expects a number"
       return false
     when F is uint64:
@@ -386,9 +369,9 @@ proc assign[F](f: var F, v: EditValue, err: var string): bool =
   elif F is SomeFloat:
     var x: float64
     case v.kind
-    of ekInt: x = float64(v.i)
-    of ekFloat: x = v.f
-    of ekText:
+    of fvInt: x = float64(v.i)
+    of fvFloat: x = v.f
+    of fvText:
       err = "expects a number"
       return false
     when F is float32:
@@ -399,7 +382,7 @@ proc assign[F](f: var F, v: EditValue, err: var string): bool =
     f = F(x)
     true
   elif F is array and typeof(f[0]) is char:
-    if v.kind != ekText or v.s.len > f.len:
+    if v.kind != fvText or v.s.len > f.len:
       err = "expects text of at most " & $f.len & " characters"
       return false
     for k in 0..<f.len: f[k] = (if k < v.s.len: v.s[k] else: ' ')
@@ -419,31 +402,42 @@ proc setByName[T](h: var T, name: string, v: EditValue, err: var string): bool =
     err = "is not an editable field"
     result = false
 
-proc editBlock[T](ed: var HeaderEditor, at: int64, size: int, firstByte: static int,
-    order: ByteOrder, blockName, field: string, structural: openArray[string],
+func structural(k: HeaderBlock): seq[string] =
+  case k
+  of hbSegyBinary: @segyBinaryStructural
+  of hbSegyTrace: @segyTraceStructural
+  of hbSegyExt1: @segyExt1Structural
+  of hbSegdTrace: @segdTraceStructural
+  of hbSegdExt1, hbSegdExt1Rev3: @segdExt1Structural
+  of hbSegdGh1: @segdGh1Structural
+  of hbSegdGhN: @segdGhNStructural
+
+proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, field: string,
     v: EditValue, loc: Location): bool =
-  # Decodes the block at `at`, sets the field, re-encodes only what changed,
-  # journals the changed span and writes it.
+  # Decodes the block, sets the field, re-encodes only what changed, journals
+  # the changed span and writes it.
+  let at = b.offset
+  let size = b.size
   template refuse(msg: string) =
     var l = loc
-    l.field = blockName & "." & field
-    ed.log.report(sevError, dcValidation, blockName & "." & field & ": " & msg, at, l)
+    l.field = b.name & "." & field
+    ed.log.report(sevError, dcValidation, b.name & "." & field & ": " & msg, at, l)
     return false
   if ed.file.memory == nil: refuse "the file is closed"
   if not ed.file.index.detected: refuse "the file is neither SEG-Y nor SEG-D"
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
-  if field in structural:
+  if field in structural(b.kind):
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
   let mem = ed.file.memory
   let a = int(at)
   var h: T
-  decodeFields(h, mem.toOpenArray(a, a + size - 1), firstByte, order)
+  decodeFields(h, mem.toOpenArray(a, a + size - 1), firstByte, b.order)
   var err = ""
   if not setByName(h, field, v, err): refuse err
   var buf = newSeq[byte](size)
   copyMem(addr buf[0], addr mem[a], size)
   try:
-    encodeChanged(h, buf, firstByte, order)
+    encodeChanged(h, buf, firstByte, b.order)
   except SegFormatError as e:
     refuse e.msg
   var first = 0
@@ -453,7 +447,7 @@ proc editBlock[T](ed: var HeaderEditor, at: int64, size: int, firstByte: static 
   while buf[last] == mem[a + last]: dec last
   let label = (if loc.trace >= 0: "trace " & $loc.trace & " "
                elif loc.record >= 0: "record " & $loc.record & " " else: "") &
-    blockName & "." & field
+    b.name & "." & field
   try:
     ed.journalEdit(at + first, mem.toOpenArray(a + first, a + last),
       buf.toOpenArray(first, last), label)
@@ -463,12 +457,10 @@ proc editBlock[T](ed: var HeaderEditor, at: int64, size: int, firstByte: static 
   inc ed.edits
   true
 
-func splitName(name: string, blockName, field: var string): bool =
-  let dot = name.find('.')
-  if dot <= 0 or dot == name.len - 1: return false
-  blockName = name[0 ..< dot]
-  field = name[dot + 1 .. ^1]
-  true
+proc editLocated(ed: var HeaderEditor, b: BlockRef, field: string, v: EditValue,
+    loc: Location): bool =
+  withBlockType(b.kind):
+    result = ed.editBlock[:BlockT](b, firstByte, field, v, loc)
 
 proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
   var l = loc
@@ -479,96 +471,52 @@ proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
 proc setField*(ed: var HeaderEditor, trace: int, name: string, value: EditValue): bool =
   ## Sets field `name` (`trace.<field>` or `ext1.<field>`) of trace `trace`.
   ## False, with a diagnostic in `log`, if the edit is refused.
-  let ix = addr ed.file.index
   var loc = Location(file: ed.file.path, trace: trace)
-  var blockName, field: string
+  var blockName, field, err: string
+  var b: BlockRef
   if not splitName(name, blockName, field):
     return ed.refuseName(name, "expected <block>.<field>", loc)
-  if trace < 0 or trace >= ix[].len:
-    return ed.refuseName(name, "no trace " & $trace, loc)
-  let e = ix.entries[trace]
-  loc.record = int(e.record)
-  if ix.kind == skSegy:
-    let order = ix.segy.byteOrder
-    case blockName
-    of "trace":
-      ed.editBlock[:SegyTraceHeader](e.offset, TraceHeaderSize, 1, order, blockName, field,
-        segyTraceStructural, value, loc)
-    of "ext1":
-      if int(e.headerBytes) < 2 * TraceHeaderSize:
-        ed.refuseName(name, "the trace has no Trace Header Extension 1", loc)
-      else:
-        ed.editBlock[:SegyTraceHeaderExt1](e.offset + TraceHeaderSize, TraceHeaderSize, 1,
-          order, blockName, field, segyExt1Structural, value, loc)
-    else: ed.refuseName(name, "SEG-Y trace blocks are trace and ext1", loc)
-  else:
-    case blockName
-    of "trace":
-      ed.editBlock[:SegdTraceHeader](e.offset, SegdTraceHeaderSize, 1, boBig, blockName, field,
-        segdTraceStructural, value, loc)
-    of "ext1":
-      if int(e.headerBytes) < SegdTraceHeaderSize + SegdBlockSize:
-        ed.refuseName(name, "the trace has no Trace Header Extension #1", loc)
-      elif ix.segdRecords[e.record].isRev3:
-        ed.editBlock[:SegdTraceHeaderExt1Rev3](e.offset + SegdTraceHeaderSize, SegdBlockSize, 1,
-          boBig, blockName, field, segdExt1Structural, value, loc)
-      else:
-        ed.editBlock[:SegdTraceHeaderExt1](e.offset + SegdTraceHeaderSize, SegdBlockSize, 1,
-          boBig, blockName, field, segdExt1Structural, value, loc)
-    else: ed.refuseName(name, "SEG-D trace blocks are trace and ext1", loc)
+  if not ed.file.index.locateTraceBlock(trace, blockName, b, err):
+    return ed.refuseName(name, err, loc)
+  loc.record = int(ed.file.index.entries[trace].record)
+  ed.editLocated(b, field, value, loc)
 
 proc setField*(ed: var HeaderEditor, name: string, value: EditValue): bool =
   ## Sets a SEG-Y binary header field (`binary.<field>`); the index's copy of
   ## the binary header is refreshed.
-  let ix = addr ed.file.index
   let loc = Location(file: ed.file.path)
-  var blockName, field: string
-  if not splitName(name, blockName, field) or blockName != "binary" or ix.kind != skSegy:
-    return ed.refuseName(name, "file-level fields are SEG-Y binary.<field>", loc)
-  let at = int64(ix.segy.tapeLabel.len + TextHeaderSize)
-  let order = ix.segy.byteOrder
-  result = ed.editBlock[:SegyBinaryHeader](at, BinaryHeaderSize, 3201, order, blockName, field,
-    segyBinaryStructural, value, loc)
+  var blockName, field, err: string
+  var b: BlockRef
+  if not splitName(name, blockName, field):
+    return ed.refuseName(name, "expected <block>.<field>", loc)
+  if not ed.file.index.locateFileBlock(blockName, b, err):
+    return ed.refuseName(name, err, loc)
+  result = ed.editLocated(b, field, value, loc)
   if result:
-    ix.segy.binary = decodeBinaryHeader(ed.file.memory.toOpenArray(int(at),
-      int(at) + BinaryHeaderSize - 1), order)
+    ed.file.index.segy.binary = decodeBinaryHeader(ed.file.memory.toOpenArray(int(b.offset),
+      int(b.offset) + b.size - 1), b.order)
 
 proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     value: EditValue): bool =
   ## Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
   ## for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
   ## copy of the record's headers is refreshed.
-  let ix = addr ed.file.index
   let loc = Location(file: ed.file.path, record: record)
-  var blockName, field: string
+  var blockName, field, err: string
+  var b: BlockRef
   if not splitName(name, blockName, field):
     return ed.refuseName(name, "expected <block>.<field>", loc)
-  if ix.kind != skSegd or record < 0 or record >= ix.segdRecords.len:
-    return ed.refuseName(name, "no SEG-D record " & $record, loc)
-  let rec = addr ix.segdRecords[record]
-  if blockName == "gh1":
-    result = ed.editBlock[:SegdGeneralHeader1](rec.offset, SegdBlockSize, 1, boBig, blockName,
-      field, segdGh1Structural, value, loc)
-    if result:
-      rec.gh1 = decodeBlock[SegdGeneralHeader1](ed.file.memory.toOpenArray(int(rec.offset),
-        int(rec.offset) + SegdBlockSize - 1))
-  elif blockName.len in 3..6 and blockName.startsWith("gh") and
-      blockName[2..^1].allCharsInSet(Digits):
-    let n = parseInt(blockName[2..^1])
-    if rec.isRev3 or not rec.hasGh2:
-      result = ed.refuseName(name, "only Rev 1/2 records have source blocks gh3, gh4, ... " &
-        "(Rev 3 general header blocks after GH#1 are not editable in place yet)", loc)
-    elif n < 3 or n - 3 >= rec.sourceHeaders.len:
-      result = ed.refuseName(name, "the record has no general header #" & $n & " source block", loc)
+  if not ed.file.index.locateRecordBlock(record, blockName, b, err):
+    return ed.refuseName(name, err, loc)
+  result = ed.editLocated(b, field, value, loc)
+  if result:
+    let (a, z) = (int(b.offset), int(b.offset) + b.size - 1)
+    if b.kind == hbSegdGh1:
+      ed.file.index.segdRecords[record].gh1 =
+        decodeBlock[SegdGeneralHeader1](ed.file.memory.toOpenArray(a, z))
     else:
-      let at = rec.offset + int64(SegdBlockSize) * int64(n - 1)
-      result = ed.editBlock[:SegdGeneralHeaderN](at, SegdBlockSize, 1, boBig, blockName, field,
-        segdGhNStructural, value, loc)
-      if result:
-        rec.sourceHeaders[n - 3] = decodeBlock[SegdGeneralHeaderN](
-          ed.file.memory.toOpenArray(int(at), int(at) + SegdBlockSize - 1))
-  else:
-    result = ed.refuseName(name, "SEG-D record blocks are gh1 and gh3, gh4, ...", loc)
+      ed.file.index.segdRecords[record].sourceHeaders[b.sourceIndex] =
+        decodeBlock[SegdGeneralHeaderN](ed.file.memory.toOpenArray(a, z))
 
 proc setField*(ed: var HeaderEditor, trace: int, name: string,
     value: SomeNumber | string): bool {.inline.} =

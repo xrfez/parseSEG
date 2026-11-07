@@ -13,7 +13,7 @@
 import std/[strutils, math]
 import ../common/[endians, fieldlayout]
 import ./headers
-export fieldlayout
+export FieldSpec, FieldKind, BcdAllF, BcdInvalid, fieldTable
 
 type
   SegdGeneralHeader2Rev3* = object

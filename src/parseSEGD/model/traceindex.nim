@@ -304,29 +304,76 @@ proc rowPtr[T](t: Tensor[T], row: int): ptr UncheckedArray[T] {.inline.} =
   let base = cast[ptr UncheckedArray[T]](t.unsafe_raw_offset())
   cast[ptr UncheckedArray[T]](addr base[row * t.strides[0]])
 
+template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: int,
+    log: var DiagLog, T: typedesc): int =
+  # Decodes `count` traces: trace `traceAt(k)` into row pointer `rowAt(k)`.
+  var failed = 0
+  let mem = f.memory
+  let size = f.mappedSize
+  for k in 0..<count:
+    let i = traceAt(k)
+    let e = f.index.entries[i]
+    let p = rowAt(k)
+    try:
+      decodeEntry(mem, size, e, f.index.codecs[e.record], p, cols)
+    except SegError as err:
+      for c in 0..<cols: p[c] = T(0)
+      log.report(sevError, if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat,
+        err.msg, e.offset, Location(file: f.path, record: int(e.record), trace: i))
+      inc failed
+  failed
+
+proc checkReadable(f: SeismicFile, count: int) {.inline.} =
+  doAssert f.memory != nil or count == 0, "the file is closed"
+  doAssert f.index.contiguous, "range reads need a plain disk file"
+
+proc checkSelection(f: SeismicFile, traces: openArray[int]) =
+  for i in traces:
+    doAssert i >= 0 and i < f.len, "trace " & $i & " is out of bounds"
+
+proc checkRows[T](dst: Tensor[T], row, count: int) {.inline.} =
+  doAssert dst.rank == 2 and dst.is_C_contiguous and row >= 0 and row + count <= dst.shape[0],
+    "need a row-major [traces, samples] tensor with room for the traces"
+
 proc readTracesInto*[T: SampleType](f: SeismicFile, first, count: int, dst: var Tensor[T],
     row = 0, log: var DiagLog): int =
   ## Decodes traces `first ..< first + count` into rows `row ..< row + count`
   ## of `dst` (a row-major `[rows, samples]` tensor), each truncated or
   ## zero-padded to `dst.shape[1]`. A trace that cannot be decoded is left
   ## zero, logged in `log`, and counted in the result.
-  doAssert f.memory != nil or count == 0, "the file is closed"
-  doAssert f.index.contiguous, "range reads need a plain disk file"
+  f.checkReadable(count)
   doAssert first >= 0 and count >= 0 and first + count <= f.len, "trace range out of bounds"
-  doAssert dst.rank == 2 and dst.is_C_contiguous and row >= 0 and row + count <= dst.shape[0],
-    "need a row-major [traces, samples] tensor with room for the range"
-  let cols = dst.shape[1]
-  let mem = f.memory
-  for k in 0..<count:
-    let e = f.index.entries[first + k]
-    let p = rowPtr(dst, row + k)
-    try:
-      decodeEntry(mem, f.mappedSize, e, f.index.codecs[e.record], p, cols)
-    except SegError as err:
-      for c in 0..<cols: p[c] = T(0)
-      log.report(sevError, if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat,
-        err.msg, e.offset, Location(file: f.path, record: int(e.record), trace: first + k))
-      inc result
+  dst.checkRows(row, count)
+  template trace(k: int): int = first + k
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, count, trace, rowOf, dst.shape[1], log, T)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
+    dst: var Tensor[T], row = 0, log: var DiagLog): int =
+  ## Decodes the selected traces, in list order, into rows `row ..< row +
+  ## traces.len` of `dst`: a gather, a component group, or a sort order (a
+  ## sort is a list of trace indices; no data is moved). Otherwise as the
+  ## range form.
+  f.checkReadable(traces.len)
+  f.checkSelection(traces)
+  dst.checkRows(row, traces.len)
+  template trace(k: int): int = traces[k]
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], log, T)
+
+proc readTracesRaw*[T: SampleType](f: SeismicFile, traces: openArray[int],
+    dst: ptr UncheckedArray[T], cols, rowStride: int, log: var DiagLog): int =
+  ## Decodes the selected traces into a buffer the caller owns: trace
+  ## `traces[k]` into `dst[k * rowStride ..< k * rowStride + cols]`. For hosts
+  ## that decode straight into their own arrays (the C ABI, numpy). The
+  ## caller guarantees the buffer's size; `rowStride >= cols`.
+  f.checkReadable(traces.len)
+  f.checkSelection(traces)
+  doAssert cols >= 0 and rowStride >= cols
+  template trace(k: int): int = traces[k]
+  template rowOf(k: int): ptr UncheckedArray[T] =
+    cast[ptr UncheckedArray[T]](addr dst[k * rowStride])
+  decodeLoop(f, traces.len, trace, rowOf, cols, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, first, count: int, dst: var Tensor[T],
     row = 0): int {.discardable.} =
@@ -334,12 +381,30 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, first, count: int, dst: var 
   var log: DiagLog
   f.readTracesInto(first, count, dst, row, log)
 
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
+    dst: var Tensor[T], row = 0): int {.discardable.} =
+  ## As above, without a log; returns the number of undecodable traces.
+  var log: DiagLog
+  f.readTracesInto(traces, dst, row, log)
+
 func maxSamples*(f: SeismicFile, s: Slice[int]): int =
   ## Largest sample count in the trace range.
   for i in s: result = max(result, int(f.index.entries[i].numSamples))
+
+func maxSamples*(f: SeismicFile, traces: openArray[int]): int =
+  ## Largest sample count of the selected traces.
+  for i in traces: result = max(result, int(f.index.entries[i].numSamples))
 
 proc readTraces*(f: SeismicFile, s: Slice[int], T: typedesc[SampleType] = float32): Tensor[T] =
   ## Traces `s` as a new `[s.len, maxSamples]` tensor (shorter traces are
   ## zero-padded; undecodable ones stay zero).
   result = newTraceTensor[T](s.len, f.maxSamples(s))
   if s.len > 0: f.readTracesInto(s.a, s.len, result)
+
+proc readTraces*(f: SeismicFile, traces: openArray[int],
+    T: typedesc[SampleType] = float32): Tensor[T] =
+  ## The selected traces, in list order, as a new `[traces.len, maxSamples]`
+  ## tensor.
+  f.checkSelection(traces)
+  result = newTraceTensor[T](traces.len, f.maxSamples(traces))
+  if traces.len > 0: f.readTracesInto(traces, result)
