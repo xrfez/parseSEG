@@ -864,3 +864,18 @@ One stanza per source type/orientation.
 | Q10 | Must extended textual headers use the same encoding as the textual header? | Detect independently. |
 | Q11 | Vertical sum code semantics ("N = M−1 sum"). | Store raw. |
 | Q12 | Offset (37-40) units/scalar unspecified. | Raw; units per 3255-3256, no scalar. |
+
+## Resolutions (added in the review, task 1.5)
+- **Verified on `Sweep0.sgy`** (51,844 B, INOVA, Rev 0, ASCII text, **little-endian**): the
+  binary and trace header tables decode correctly when every multi-byte field is byte-swapped.
+  Binary: SI 1000 µs, NS 12001, format 5, aux traces 1, units 2 (feet). Trace 1: seq 1/1, FFID 1,
+  channel 1, **trace ID 6 (sweep)**, NS 12001, SI 1000, date fields 0. Size 3600 + 240 + 12001×4 = file size.
+- **Byte-order detection rule** (owner decision): try big-endian. If the format code (3225-3226) is
+  not a known code, or the sample count/interval is implausible, try little-endian. Rev 2 files also
+  carry the 3297-3300 marker (see `segy_rev2_1.md`). Store the detected order as metadata. Writers
+  default to big-endian.
+- **Text encoding detection:** byte 0 = 0x43 ('C' in ASCII) ⇒ ASCII; 0xC3 ⇒ EBCDIC. Sweep0 uses
+  ASCII ("C 1 ", with a space instead of a zero pad), so don't require the exact "C01" form.
+- Q1 (u16 vs i16 for NS/SI): **read as u16.** Values over 32767 are legal in practice, and Rev 2
+  makes them unsigned.
+- Q7 (IBM float bits): **24-bit fraction** (implemented in `common/ibmfloat.nim`).
