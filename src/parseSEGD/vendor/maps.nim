@@ -598,12 +598,17 @@ func specificity(m: VendorMatch, ctx: VendorContext): int =
     if s notin ctx.text: return -1
     inc result
 
+func headerKey(name: string): string =
+  # A proprietary header name without its space/NUL padding.
+  name.strip(chars = {' ', '\0'})
+
 func targetMatches(t: VendorTarget, a: VendorArea): bool =
   t.kind == a.kind and
     t.blockIndex == a.blockIndex and
     (t.blockType < 0 or t.blockType == a.blockType) and
     (t.where.len == 0 or cmpIgnoreCase(t.where, a.where) == 0) and
-    (t.headerName.len == 0 or cmpIgnoreCase(t.headerName, a.headerName) == 0) and
+    (t.headerName.len == 0 or
+      cmpIgnoreCase(headerKey(t.headerName), headerKey(a.headerName)) == 0) and
     (t.stanza.len == 0 or cmpIgnoreCase(t.stanza.replace(" ", ""), a.stanza.replace(" ", "")) == 0) and
     (t.extIndex < 0 or t.extIndex == a.extIndex)
 

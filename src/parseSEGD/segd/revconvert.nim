@@ -679,6 +679,7 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
       return
   except OSError:
     discard
+  let tmp = dstPath & ".tmp" # renamed when complete (see convert.finishOutput)
   var src: RecordSource
   var sink: RecordSink
   try:
@@ -687,10 +688,18 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
     src.close()
     src = nil
     src = openDiskSource(srcPath)
-    sink = openDiskSink(dstPath)
+    sink = openDiskSink(tmp)
     result = convertSegdRevision(src, sink, opts, scan)
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finally:
     if src != nil: src.close()
     if sink != nil: sink.close()
+  try:
+    if result.isFatal:
+      if fileExists(tmp): removeFile(tmp)
+    elif fileExists(tmp):
+      moveFile(tmp, dstPath)
+  except OSError as e:
+    result.report(sevFatal, dcIo, "cannot move the output into place: " & e.msg,
+      loc = Location(file: dstPath))

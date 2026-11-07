@@ -261,7 +261,7 @@ type
 proc `=destroy`(m: MapOwner) =
   if m.src != nil:
     try: m.src.close()
-    except CatchableError: discard
+    except Exception: discard # a destructor must not raise (methods may raise anything)
   `=destroy`(m.src)
 
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}

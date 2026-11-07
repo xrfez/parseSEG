@@ -71,7 +71,10 @@ type Args = object
   pos: seq[string]
   opts: seq[(string, string)]
 
-const Flags = ["keys", "all", "nif", "descale", "no-station-header", "fields-only", "dry-run",
+const ValueOptions = ["o", "out", "journal", "traces", "fields", "rev", "format", "to",
+  "byte-order", "text", "min", "map", "name"]
+
+const Flags = ["force", "keys", "all", "nif", "descale", "no-station-header", "fields-only", "dry-run",
   "help", "h"]
 
 proc parseArgs(args: seq[string]): Args =
@@ -88,15 +91,20 @@ proc parseArgs(args: seq[string]): Args =
     else:
       let body = if x.startsWith("--"): x[2..^1] else: x[1..^1]
       let sep = body.find({'=', ':'})
+      let key = if sep >= 0: body[0 ..< sep] else: body
+      var val = ""
       if sep >= 0:
-        result.opts.add (body[0 ..< sep], body[sep + 1 .. ^1])
-      elif body in Flags:
-        result.opts.add (body, "")
-      elif i + 1 < args.len and not args[i + 1].startsWith("-"):
-        result.opts.add (body, args[i + 1])
+        val = body[sep + 1 .. ^1]
+      elif key notin Flags and key in ValueOptions and i + 1 < args.len and
+          not (args[i + 1].startsWith("-") and args[i + 1].len > 1 and
+               args[i + 1][1] notin Digits):
+        val = args[i + 1]
         inc i
-      else:
-        result.opts.add (body, "") # an unknown option is reported by its command
+      if key in ValueOptions and val.len == 0:
+        usage("option " & x & " needs a value")
+      if key in Flags and sep >= 0:
+        usage("option --" & key & " takes no value")
+      result.opts.add (key, val) # an unknown option is reported by its command
     inc i
 
 func has(a: Args, key: string): bool = a.opts.anyIt(it[0] == key)
@@ -131,12 +139,25 @@ proc printLog(log: DiagLog, minSeverity = sevWarning, toErr = true) =
         (if where.len > 0: " [" & where.join(", ") & "]" else: "")
       if toErr: stderr.writeLine line else: stdout.writeLine line
 
-proc openFile(path: string, keys = false): SeismicFile =
+proc checkInput(path: string) =
+  if dirExists(path): usage(path & " is a directory")
   if not fileExists(path): usage("no such file: " & path)
+  try:
+    var fh = open(path, fmRead)
+    fh.close()
+  except IOError:
+    quit("parseSEGD: cannot read " & path & " (" & osErrorMsg(osLastError()) & ")", 1)
+
+proc openFile(path: string, keys = false): SeismicFile =
+  checkInput(path)
   result = openSeismic(path, keys = keys)
   if not result.index.detected:
     printLog(result.index.log, sevError)
     quit("parseSEGD: " & path & " is neither SEG-Y nor SEG-D", 1)
+
+proc refuseSame(output, input: string) =
+  if output == input or (fileExists(output) and fileExists(input) and sameFile(output, input)):
+    usage("the output " & output & " is the input file")
 
 # ------------------------------------------------------------------- info --
 
@@ -191,32 +212,46 @@ proc info(a: Args): int =
     echo "gathers:     ", kinds.mapIt($it[1] & " " & $it[0]).join(", ")
   echo "diagnostics: ", ix.log.count(sevFatal), " fatal, ", ix.log.count(sevError), " error, ",
     ix.log.count(sevWarning), " warning, ", ix.log.count(sevInfo), " info"
+  printLog(ix.log, sevError)
   if ix.log.failed: 1 else: 0
 
 # ------------------------------------------------------------------- dump --
 
-proc parseSelection(s: string, n: int): seq[int] =
-  if s.len == 0: return toSeq(0..<n)
+proc parseSelection(s: string, n: int, unit = "trace", all = true): seq[int] =
+  ## `5`, `0..9`, `1,4,7` (or every index when `s` is empty and `all`); each
+  ## index is checked against `n` before anything is expanded.
+  if s.len == 0:
+    if all: return toSeq(0..<n)
+    usage("empty " & unit & " selection")
+  template check(i: int) =
+    if i < 0 or i >= n:
+      usage(unit & " " & $i & " out of range (the file has " & $n & " " & unit & "s)")
   for part in s.split(','):
     let p = part.strip
     let dots = p.find("..")
+    var a, b: int
     try:
       if dots >= 0:
-        let a = parseInt(p[0 ..< dots])
-        let b = parseInt(p[dots + 2 .. ^1])
-        for i in a..b: result.add i
+        a = parseInt(p[0 ..< dots])
+        b = parseInt(p[dots + 2 .. ^1])
       else:
-        result.add parseInt(p)
+        a = parseInt(p)
+        b = a
     except ValueError:
-      usage("bad trace selection '" & p & "' (use 5, 0..9 or 1,4,7)")
-  for i in result:
-    if i < 0 or i >= n: usage("trace " & $i & " out of range (the file has " & $n & ")")
+      usage("bad " & unit & " selection '" & p & "' (use 5, 0..9 or 1,4,7)")
+    if a > b: usage("empty " & unit & " range '" & p & "' (" & $a & " > " & $b & ")")
+    check(a)
+    check(b)
+    for i in a..b: result.add i
 
 proc dump(a: Args): int =
+  ## Exit 1 when the index has errors or a requested field is unknown.
   a.onlyOptions(["traces", "fields", "all"])
   a.needArgs(1, "dump <file>")
   var f = openFile(a.pos[0])
   defer: f.close()
+  printLog(f.index.log, sevError)
+  result = if f.index.log.failed: 1 else: 0
   let sel = parseSelection(a.get("traces"), f.len)
   if a.has("all"):
     for t in sel:
@@ -228,7 +263,10 @@ proc dump(a: Args): int =
           for n in fieldNames(b.kind):
             var v: FieldValue
             if f.readBlockField(b, n, v, err): echo "  ", blockName, ".", n, " = ", v
-    return 0
+            else:
+              echo "  ", blockName, ".", n, " = ? (", err, ")"
+              result = 1
+    return
   let fields = if a.has("fields"): a.get("fields").split(',').mapIt(it.strip)
                else: @[]
   var header = @["trace", "offset", "samples", "record", "chset"]
@@ -247,8 +285,8 @@ proc dump(a: Args): int =
     var v: FieldValue
     var err: string
     if sel.len > 0 and not f.traceField(sel[0], name, v, err):
-      stderr.writeLine "warning: ", name, ": ", err
-  0
+      stderr.writeLine "error: ", name, ": ", err
+      result = 1
 
 # ------------------------------------------------------------------- diag --
 
@@ -273,30 +311,49 @@ proc diag(a: Args): int =
 proc isSegdName(p: string): bool = p.toLowerAscii.endsWith(".sgd") or
   p.toLowerAscii.endsWith(".segd")
 
+proc sourceKind(path: string): SeismicKind =
+  ## What the file is, from its content.
+  var head = newString(8192)
+  var fh = open(path, fmRead)
+  head.setLen fh.readBuffer(addr head[0], head.len)
+  fh.close()
+  if not detectKind(head.toOpenArrayByte(0, head.len - 1), result):
+    quit("parseSEGD: " & path & " is neither SEG-Y nor SEG-D", 1)
+
+proc parseRev(s: string, minParts, maxParts: int, what: string): (uint8, uint8) =
+  let parts = s.split('.')
+  if parts.len notin minParts..maxParts: usage("--rev must look like " & what)
+  var n: array[2, int]
+  for i, p in parts:
+    if p.len == 0 or not p.allCharsInSet(Digits): usage("--rev must look like " & what)
+    n[i] = try: parseInt(p) except ValueError: 256
+    if n[i] > 255: usage("--rev parts are 0..255, not " & p)
+  (uint8(n[0]), uint8(n[1]))
+
 proc convertCmd(a: Args): int =
   a.onlyOptions(["to", "rev", "format", "byte-order", "text", "descale", "no-station-header"])
   a.needArgs(2, "convert <src> <dst>")
   let (src, dst) = (a.pos[0], a.pos[1])
-  if not fileExists(src): usage("no such file: " & src)
-  let to = a.get("to", if isSegdName(src) and isSegdName(dst): "segd" else: "segy")
+  checkInput(src)
+  refuseSame(dst, src)
+  let kind = sourceKind(src)
+  let to = a.get("to", if kind == skSegd and isSegdName(dst): "segd" else: "segy")
   var log: DiagLog
   case to
   of "segd":
+    if kind != skSegd: usage("--to=segd needs a SEG-D input; " & src & " is SEG-Y")
     for k in ["byte-order", "text", "descale", "no-station-header"]:
       if a.has(k): usage("--" & k & " applies to SEG-Y output only")
     var o = SegdConvertOptions()
-    let rev = a.get("rev", "3.0").split('.')
-    if rev.len != 2: usage("--rev for SEG-D is 2.0, 2.1 or 3.0")
-    o.revision = SegdRevision(major: uint8(parseIntOpt(rev[0], "rev")),
-      minor: uint8(parseIntOpt(rev[1], "rev")))
+    let (ma, mi) = parseRev(a.get("rev", "3.0"), 2, 2, "2.0, 2.1 or 3.0")
+    o.revision = SegdRevision(major: ma, minor: mi)
     o.format = parseIntOpt(a.get("format", "0"), "format")
     log = convertSegdRevision(src, dst, o)
   of "segy":
     var o = ConvertOptions()
     if a.has("rev"):
-      let rev = a.get("rev").split('.')
-      o.revision = SegyRevision(major: uint8(parseIntOpt(rev[0], "rev")),
-        minor: uint8(if rev.len > 1: parseIntOpt(rev[1], "rev") else: 0))
+      let (ma, mi) = parseRev(a.get("rev"), 1, 2, "0, 1, 2.0 or 2.1")
+      o.revision = SegyRevision(major: ma, minor: mi)
     o.format = parseIntOpt(a.get("format", "0"), "format")
     try:
       o.byteOrder = parseEnum[ByteOrder](a.get("byte-order", "big"))
@@ -309,7 +366,8 @@ proc convertCmd(a: Args): int =
   else: usage("--to is segy or segd")
   printLog(log, sevWarning)
   if log.failed:
-    stderr.writeLine "parseSEGD: conversion ", (if log.isFatal: "failed" else: "had errors")
+    stderr.writeLine "parseSEGD: conversion ", (if log.isFatal: "failed; " & dst &
+      " was not written" else: "had errors")
     1
   else:
     echo dst, ": written (", log.count(sevInfo), " notes, ", log.count(sevWarning),
@@ -326,33 +384,66 @@ proc parseValue(s: string): EditValue =
   except ValueError: discard
   toEditValue(s)
 
+type Assignment = object
+  scope: char        ## 't', 'r' or 'f' (file)
+  targets: seq[int]  ## traces or records
+  name: string
+  value: EditValue
+
+proc parseAssignments(f: SeismicFile, args: seq[string]): seq[Assignment] =
+  ## Every assignment checked (syntax, scope, selection, field) before any edit.
+  for asg in args:
+    let colon = asg.find(':')
+    let eq = asg.find('=')
+    if colon <= 0 or eq < colon or eq == colon + 1:
+      usage("bad assignment '" & asg & "' (want <scope>:<block>.<field>=<value>)")
+    let scope = asg[0 ..< colon]
+    var x = Assignment(name: asg[colon + 1 ..< eq])
+    let raw = asg[eq + 1 .. ^1]
+    if raw.len == 0: usage("assignment '" & asg & "' has no value")
+    x.value = parseValue(raw)
+    var cur: FieldValue
+    var err: string
+    if scope == "file":
+      x.scope = 'f'
+      if not f.fileField(x.name, cur, err): usage(x.name & ": " & err)
+    elif scope.len > 1 and scope[0] == 't':
+      x.scope = 't'
+      x.targets = parseSelection(scope[1..^1], f.len, "trace", all = false)
+      if not f.traceField(x.targets[0], x.name, cur, err): usage(x.name & ": " & err)
+    elif scope.len > 1 and scope[0] == 'r':
+      x.scope = 'r'
+      if f.kind != skSegd: usage("record scopes (r0, ...) are for SEG-D; SEG-Y has none")
+      x.targets = parseSelection(scope[1..^1], f.index.segdRecords.len, "record", all = false)
+      if not f.recordField(x.targets[0], x.name, cur, err): usage(x.name & ": " & err)
+    else:
+      usage("bad scope '" & scope & "' (t5, t0..9, r0 or file)")
+    # A text field takes the value as written, even when it looks like a number.
+    if cur.kind == fvText and x.value.kind != fvText:
+      x.value = toEditValue(if raw.len >= 2 and raw[0] == '"' and raw[^1] == '"': raw[1 .. ^2]
+                            else: raw)
+    result.add x
+
 proc edit(a: Args): int =
   a.onlyOptions(["journal"])
   if a.pos.len < 2: usage("expected edit <file> <assignment>...")
   let path = a.pos[0]
-  if not fileExists(path): usage("no such file: " & path)
+  var plan: seq[Assignment]
+  block:
+    var f = openFile(path) # checked read-only first: nothing is written on a usage error
+    plan = parseAssignments(f, a.pos[1..^1])
   var ed = openEditor(path, a.get("journal"))
   var refused = 0
   try:
-    for asg in a.pos[1..^1]:
-      let colon = asg.find(':')
-      let eq = asg.find('=')
-      if colon <= 0 or eq < colon:
-        usage("bad assignment '" & asg & "' (want <scope>:<block>.<field>=<value>)")
-      let scope = asg[0 ..< colon]
-      let name = asg[colon + 1 ..< eq]
-      let value = parseValue(asg[eq + 1 .. ^1])
+    ed.beginBatch()
+    for x in plan:
       var ok = true
-      if scope == "file":
-        ok = ed.setField(name, value)
-      elif scope.len > 1 and scope[0] in {'t', 'r'}:
-        let sel = parseSelection(scope[1..^1],
-          if scope[0] == 't': ed.file.len else: ed.file.index.segdRecords.len)
-        for i in sel:
-          if scope[0] == 't': ok = ed.setField(i, name, value) and ok
-          else: ok = ed.setRecordField(i, name, value) and ok
+      case x.scope
+      of 'f': ok = ed.setField(x.name, x.value)
+      of 't':
+        for i in x.targets: ok = ed.setField(i, x.name, x.value) and ok
       else:
-        usage("bad scope '" & scope & "' (t5, t0..9, r0 or file)")
+        for i in x.targets: ok = ed.setRecordField(i, x.name, x.value) and ok
       if not ok: inc refused
   finally:
     ed.close()
@@ -369,22 +460,30 @@ proc headers(a: Args): int =
     var f = openFile(a.pos[1])
     defer: f.close()
     let outPath = a.get("o", a.get("out", a.pos[1] & ".headers.nif"))
+    refuseSame(outPath, a.pos[1])
     exportHeaders(f, outPath, raw = not a.has("fields-only"))
     echo outPath, ": ", f.len, " traces exported"
     0
   of "import":
-    a.onlyOptions(["o", "out", "journal", "dry-run"])
+    a.onlyOptions(["o", "out", "journal", "dry-run", "force"])
     if a.pos.len != 3: usage("expected headers import <file> <patch.nif>")
-    if not fileExists(a.pos[1]): usage("no such file: " & a.pos[1])
-    if not fileExists(a.pos[2]): usage("no such file: " & a.pos[2])
-    let (changes, log) = importHeaders(a.pos[1], a.pos[2], a.get("o", a.get("out")),
-      a.get("journal"), a.has("dry-run"))
-    for c in changes:
-      echo c.scope, " ", c.index, " ", c.name, ": ", c.old, " -> ", c.new
-    printLog(log, sevWarning)
-    echo changes.len, " changed fields", (if a.has("dry-run"): " (dry run: nothing written)"
-                                           else: "")
-    if log.failed: 1 else: 0
+    checkInput(a.pos[1])
+    checkInput(a.pos[2])
+    let dry = a.has("dry-run")
+    let r = importHeaders(a.pos[1], a.pos[2], ImportOptions(outPath: a.get("o", a.get("out")),
+      journal: a.get("journal"), dryRun: dry, force: a.has("force"),
+      onChange: proc (c: HeaderChange) =
+        echo c.scope, " ", c.index, " ", c.name, ": ", c.old, " -> ", c.new))
+    printLog(r.log, sevWarning)
+    if dry:
+      echo r.applied, " changed fields (dry run: nothing written)"
+    elif r.log.isFatal and r.applied == 0:
+      echo "nothing written"
+    else:
+      echo r.applied, " fields written", (if r.refused > 0: ", " & $r.refused & " refused"
+                                          else: ""),
+        (if r.log.isFatal: " before the import stopped" else: "")
+    if r.log.failed: 1 else: 0
   else: usage("expected headers export|import")
 
 proc journal(a: Args): int =
@@ -409,22 +508,30 @@ proc loadRegistry(a: Args, log: var DiagLog): VendorRegistry =
     if k == "map": paths.add v
   result.loadVendorMaps(paths, log)
 
+func nifStr(s: string): string =
+  ## A NIF string literal (`"`, `\`, control and non-ASCII bytes as `\HH`).
+  result = "\""
+  for c in s:
+    if c in {'"', '\\'} or ord(c) < 0x20 or ord(c) >= 0x7F: result.add "\\" & toHex(ord(c), 2)
+    else: result.add c
+  result.add '"'
+
 func `$`(v: VendorValue): string =
   result = case v.kind
     of vvInt: $v.intVal
     of vvFloat: $v.floatVal
-    of vvText: v.text.escape
+    of vvText: nifStr(v.text)
     of vvBytes:
       var h = "\""
       for b in v.bytes: h.add toHex(b, 2)
       h & "\""
-  if v.label.len > 0: result.add " (label " & v.label.escape & ")"
+  if v.label.len > 0: result.add " (label " & nifStr(v.label) & ")"
   if v.flags.len > 0: result.add " (flags " & v.flags.join(" ") & ")"
-  if v.unit.len > 0: result.add " (unit " & v.unit.escape & ")"
+  if v.unit.len > 0: result.add " (unit " & nifStr(v.unit) & ")"
 
 proc printBlocks(indent: string, blocks: seq[VendorBlock]) =
   for b in blocks:
-    stdout.write indent, "(block ", b.mapName.escape, " ", b.name
+    stdout.write indent, "(block ", nifStr(b.mapName), " ", b.name
     for (n, v) in b.fields: stdout.write "\n", indent, "  (f ", n, " ", $v, ")"
     stdout.write ")\n"
 
@@ -465,7 +572,11 @@ proc vendormap(a: Args): int =
       else:
         ctx = segyContext(f.index.segy)
         haveCtx = true
-    if reg.maps.len == 0: echo "no vendor maps on the search path: ", vendorSearchPath().join(", ")
+    if reg.maps.len == 0:
+      var paths = vendorSearchPath()
+      for (k, v) in a.opts:
+        if k == "map": paths.add v
+      echo "no vendor maps found in: ", paths.join(", ")
     for m in reg.maps:
       echo m.name, " (version ", m.version, ", ", m.targets.len, " targets) ", m.source,
         (if haveCtx: (if m.applies(ctx): "  [matches]" else: "  [does not match]") else: "")
@@ -483,7 +594,7 @@ proc vendormap(a: Args): int =
     let sel = parseSelection(a.get("traces"), n)
     var want = newSeq[bool](n)
     for i in sel: want[i] = true
-    echo "(.nif27)\n(vendor ", path.extractFilename.escape
+    echo "(.nif27)\n(vendor ", nifStr(path.extractFilename)
     var src: RecordSource = openDiskSource(path)
     try:
       var k = 0
@@ -522,18 +633,20 @@ proc vendormap(a: Args): int =
   of "scaffold":
     a.onlyOptions(["map", "o", "out", "name"])
     if a.pos.len != 2: usage("expected vendormap scaffold <file> [-o map.nif]")
-    if not fileExists(a.pos[1]): usage("no such file: " & a.pos[1])
+    checkInput(a.pos[1])
+    let outPath = a.get("o", a.get("out"))
+    if outPath.len > 0: refuseSame(outPath, a.pos[1])
     var log: DiagLog
     let reg = loadRegistry(a, log)
     printLog(log, sevWarning)
     let s = scaffold(a.pos[1], reg)
-    let text = s.toNif(a.get("name"))
-    let outPath = a.get("o", a.get("out"))
-    if outPath.len == 0: stdout.write text
+    if s.len == 0:
+      echo "no unmapped vendor areas", (if outPath.len > 0: "; " & outPath & " not written" else: "")
+    elif outPath.len == 0: stdout.write s.toNif(a.get("name"))
     else:
-      writeFile(outPath, text)
+      writeFile(outPath, s.toNif(a.get("name")))
       echo outPath, ": ", s.len, " unmapped vendor areas"
-    result = 0
+    result = if log.failed: 1 else: 0
   else: usage("expected vendormap check|list|apply|scaffold")
 
 # ------------------------------------------------------------------- main --
@@ -543,9 +656,14 @@ proc run*(args: seq[string]): int =
   if args.len == 0:
     stdout.write Usage
     return 2
-  let cmd = args[0]
+  # Options may come before the command: the command is the first argument.
+  var k = 0
+  while k < args.len and args[k].startsWith("-") and args[k] notin ["--help", "-h", "--version"]:
+    inc k
+  if k == args.len: k = 0
+  let cmd = args[k]
   try:
-    let a = parseArgs(args[1..^1])
+    let a = parseArgs(args[0 ..< k] & args[k + 1 .. ^1])
     if a.has("help") or a.has("h"):
       stdout.write Usage
       return 0

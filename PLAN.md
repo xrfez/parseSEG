@@ -614,4 +614,41 @@ Tasks:
   - README: rewritten introduction (Nim, CLI, C and Python entry points), CLI examples, the real directory layout, and the build modes now building the CLI.
   - `docs/api.md`: SEG-D revision conversion, header NIF documents, vendor scaffolding, files that unmap themselves.
   - CI: builds `nim cli` on every OS, smoke-tests it on Windows and macOS (`info`, `convert`), and uploads it with the libraries.
+- 2026-11-07: **Phase 7 review**, by two parallel agents (the CLI; header NIF and scaffold). Everything they verified is fixed, with regression tests: "review" blocks in `tests/tcli.nim` and the new `tests/theadernif.nim`.
+  - Data safety:
+    - **`headers export -o <input>` and `vendormap scaffold -o <input>` overwrote the seismic file**, and `import -o <document>` overwrote the patch. All are refused (CLI `refuseSame`, `exportHeaders`, `importHeaders`).
+    - **`-o` with no value silently edited in place.** Value options now need a value, and flags take none.
+    - **`edit` wrote the assignments before a bad one.** Every assignment (syntax, scope, selection, field) is checked against a read-only open first.
+    - A journal that is the data file is refused (`openEditor`).
+    - **A failed convert emptied an existing destination**, or left a partial file. `convertFile` and `convertSegdRevision(path)` now write `<dst>.tmp` and rename only on success (`convert.finishOutput`).
+    - An import into a copy appended to a stale journal; it now starts a fresh one, and a copy is made even when nothing changes.
+  - Header NIF, rewritten I/O:
+    - **A malformed document could kill the process.** nifreader `quit`s on an empty or unmappable file and on out-of-range line info, and asserts on `1E`. Import now uses its own strict streaming tokenizer, which bounds depth, strings and numbers and only raises SegFormatError.
+    - **Export held the whole document in memory** (nifbuilder writes only at close). It now streams through a 1 MB buffer into `.tmp`, then renames.
+    - Import applies each entry as it is read, through a batched editor, so the last entry wins.
+    - Floats compare by bit pattern (-0.0 ≠ 0.0, NaN = NaN). An integral float on an integer field is no change.
+    - **A document for another file** (standard, trace or record count) is refused unless `force` (`--force`).
+    - Entry errors are capped at 50 plus a count. Applied and refused edits are counted separately. Messages carry the document path and a 1-based line.
+    - The API is `importHeaders(path, nif, ImportOptions(outPath, journal, dryRun, force, onChange)): ImportResult`.
+  - Editor: `beginBatch`/`endBatch` gives one journal fsync per up to 4096 edits; a pending write that overlaps flushes first, and index copies refresh after a flush. Before, it was about 5 ms per edit, over an hour for a million. `currentField`/`currentRecordField`/`currentFileField` read edits made so far.
+  - Scaffold:
+    - Proprietary header names are now written exactly (NIF `\HH` escaping). Names are matched without their space/NUL padding on both sides (`maps.headerKey`). Target names are reduced to identifier characters.
+    - Comments are sanitized.
+    - An empty scaffold writes nothing.
+    - Every unassigned binary range is covered: 3261-3500 and 3507-3600 for Rev 0/1; 3301-3500 and 3533-3600 for Rev 2. Trace bytes are 181-232 for Rev 2.
+    - Areas are looked up in a table, so the scan is no longer quadratic.
+  - CLI:
+    - `--rev` is strict (0..255 parts, the right number of them).
+    - Selections are checked before they are expanded (`0..99999999999` exhausted memory), and `5..2` is an error.
+    - The output kind follows the input's content, and `--to=segd` on SEG-Y is refused.
+    - A text field takes number-like values as text.
+    - `dump` exits 1 on index errors or unknown fields, `info` prints fatal messages, and directory and unreadable-file messages are clearer.
+    - `vendormap list` names the `--map` paths, `scaffold` returns its status, and `apply` prints valid NIF strings.
+    - Options may come before the command.
+  - Not done (noted): a scaffold for files with thousands of extended blocks can exceed the map loader's 1 MB limit. `vendormap apply --traces` counts readTrace calls (fine unless the file is damaged).
+- 2026-11-07: **Session hand-off.** Phases 8 and 7 are done, and both reviews' fixes are committed. **Next: Phase 9** (rename the project to parseSEG; the repository rename is an owner action), then Phase 10 (survey files; the owner needs to supply the P1/SPS specs). Open items: tasks 1.7/1.8 (Rev 3.1 and older-revision spec notes); `recordField` names for GH#2 and Rev 3 general blocks; the CI workflow has never run on GitHub; the macOS builds have not run on a Mac. Notes for the next session:
+  - Python module: `nim pylib`; the nimpy patch in `tools/patches/` is applied automatically.
+  - CLI: `nim cli`.
+  - Every build target: `tests/ttargets.nim`.
+  - `nim test` takes about 3.5 minutes.
 

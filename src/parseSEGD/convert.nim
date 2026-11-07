@@ -666,6 +666,18 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
 
 # ------------------------------------------------------------------- files --
 
+proc finishOutput*(tmp, dstPath: string, log: var DiagLog) =
+  ## Renames a complete output into place, or removes it after a fatal
+  ## problem (logged: "not written").
+  try:
+    if log.isFatal:
+      if fileExists(tmp): removeFile(tmp)
+    elif fileExists(tmp):
+      moveFile(tmp, dstPath)
+  except OSError as e:
+    log.report(sevFatal, dcIo, "cannot move the output into place: " & e.msg,
+      loc = Location(file: dstPath))
+
 proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog =
   ## Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
   ## file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
@@ -704,11 +716,14 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog =
         m.close()
     except CatchableError:
       discard # the conversion itself reports what is wrong with the file
+  # Written to `<dst>.tmp` and renamed when complete: a failed conversion
+  # leaves an existing `dstPath` untouched and no partial file behind.
+  let tmp = dstPath & ".tmp"
   var src: RecordSource
   var sink: RecordSink
   try:
     src = openDiskSource(srcPath)
-    sink = openDiskSink(dstPath)
+    sink = openDiskSink(tmp)
     result = if kind == skSegy: convertSegy(src, sink, opts)
              else: convertSegdToSegy(src, sink, opts, formats)
   except CatchableError as e:
@@ -716,3 +731,4 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog =
   finally:
     if src != nil: src.close()
     if sink != nil: sink.close()
+  finishOutput(tmp, dstPath, result)

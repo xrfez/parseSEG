@@ -49,7 +49,7 @@
 ## hold the target are skipped, and bytes that hold neither the original
 ## nor the edited value are a conflict, logged and left alone.
 
-import std/[algorithm, macros, math, strutils, tables]
+import std/[algorithm, macros, math, os, strutils, tables]
 when defined(posix):
   import std/posix
 import ../common/[endians, errors, diagnostics, fieldlayout]
@@ -75,6 +75,12 @@ type
     journal: JournalFile
     journalBroken: bool  ## A journal write failed part-way (see `journalLine`).
     edits: int
+    batch: bool          ## Inside `beginBatch` / `endBatch`.
+    pending: seq[PendingWrite] ## Batched writes, journaled but not yet on the map.
+
+  PendingWrite = object
+    at: int64
+    bytes: seq[byte]
 
 proc `=destroy`(j: JournalFile) =
   if j.f != nil:
@@ -125,12 +131,39 @@ proc syncJournal(ed: var HeaderEditor) =
 
 proc journalLine(ed: var HeaderEditor, line: string) =
   # After a failed write the file may end in a partial line: start afresh so
-  # the next entry does not merge into it.
+  # the next entry does not merge into it. In a batch the sync waits for
+  # `flushBatch` (the map is written only after it).
   if ed.journalBroken: ed.journal.f.write "\n"
   ed.journalBroken = true
   ed.journal.f.writeLine line
-  ed.syncJournal()
+  if not ed.batch: ed.syncJournal()
   ed.journalBroken = false
+
+const MaxPending = 4096 ## Batched edits held before a flush.
+
+proc flushBatch(ed: var HeaderEditor) =
+  # One fsync for every journaled edit of the batch, then the map writes.
+  if ed.pending.len == 0: return
+  ed.syncJournal()
+  let mem = ed.file.memory
+  for p in ed.pending:
+    copyMem(addr mem[p.at], unsafeAddr p.bytes[0], p.bytes.len)
+  ed.pending.setLen 0
+
+proc overlapsPending(ed: HeaderEditor, at: int64, size: int): bool =
+  for p in ed.pending:
+    if at < p.at + p.bytes.len and p.at < at + size: return true
+
+proc beginBatch*(ed: var HeaderEditor) =
+  ## Starts a batch: edits are journaled at once but synced and written to the
+  ## map together, up to 4096 at a time (one fsync instead of one per edit).
+  ## Reads through `file` may not see an edit until `endBatch`.
+  ed.batch = true
+
+proc endBatch*(ed: var HeaderEditor) =
+  ## Syncs the journal and writes the batch's edits; ends the batch.
+  ed.flushBatch()
+  ed.batch = false
 
 proc openJournal(ed: var HeaderEditor) =
   if not open(ed.journal.f, ed.journalPath, fmAppend):
@@ -339,14 +372,17 @@ proc openEditor*(path: string, journalPath = ""): HeaderEditor =
   ## if either cannot be opened. Problems reading the file are in
   ## `file.index.log`; a file whose index has a fatal problem can still be
   ## edited where its headers were located.
-  result = HeaderEditor(file: openSeismic(path, writable = true),
-    journalPath: if journalPath.len > 0: journalPath else: path & ".edits.nif")
+  let jp = if journalPath.len > 0: journalPath else: path & ".edits.nif"
+  if jp == path or (fileExists(jp) and fileExists(path) and sameFile(jp, path)):
+    raise newException(IOError, "the journal " & jp & " is the file being edited")
+  result = HeaderEditor(file: openSeismic(path, writable = true), journalPath: jp)
   result.openJournal()
 
 proc close*(ed: var HeaderEditor) =
-  ## Flushes the map and the journal and closes both. Both are closed even
-  ## when the flush fails (the error then propagates).
+  ## Ends a batch, flushes the map and the journal and closes both. Both are
+  ## closed even when the flush fails (the error then propagates).
   try:
+    if ed.batch: ed.endBatch()
     ed.file.flush()
   finally:
     ed.file.close()
@@ -443,6 +479,7 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
   if field in structural(b.kind):
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
+  if ed.batch and ed.overlapsPending(at, size): ed.flushBatch() # decode current bytes
   let mem = ed.file.memory
   let a = int(at)
   var h: T
@@ -468,7 +505,11 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
       buf.toOpenArray(first, last), label)
   except IOError as e:
     refuse "the journal cannot be written (" & e.msg & "); nothing changed"
-  copyMem(addr mem[a + first], addr buf[first], last - first + 1)
+  if ed.batch:
+    ed.pending.add PendingWrite(at: at + first, bytes: buf[first .. last])
+    if ed.pending.len >= MaxPending: ed.flushBatch()
+  else:
+    copyMem(addr mem[a + first], addr buf[first], last - first + 1)
   inc ed.edits
   true
 
@@ -482,6 +523,42 @@ proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
   l.field = name
   ed.log.report(sevError, dcValidation, name & ": " & msg, loc = l)
   false
+
+proc currentBlock(ed: var HeaderEditor, b: BlockRef, field: string, v: var FieldValue,
+    err: var string): bool =
+  if ed.batch and ed.overlapsPending(b.offset, b.size): ed.flushBatch()
+  ed.file.readBlockField(b, field, v, err)
+
+proc currentField*(ed: var HeaderEditor, trace: int, name: string, v: var FieldValue,
+    err: var string): bool =
+  ## Reads `trace.<field>` / `ext1.<field>` of trace `trace` as edited so far
+  ## (batched edits included).
+  var blockName, field: string
+  var b: BlockRef
+  if not splitName(name, blockName, field):
+    err = "expected <block>.<field>"
+    return false
+  ed.file.index.locateTraceBlock(trace, blockName, b, err) and ed.currentBlock(b, field, v, err)
+
+proc currentRecordField*(ed: var HeaderEditor, record: int, name: string, v: var FieldValue,
+    err: var string): bool =
+  ## Reads a SEG-D record field as edited so far.
+  var blockName, field: string
+  var b: BlockRef
+  if not splitName(name, blockName, field):
+    err = "expected <block>.<field>"
+    return false
+  ed.file.index.locateRecordBlock(record, blockName, b, err) and ed.currentBlock(b, field, v, err)
+
+proc currentFileField*(ed: var HeaderEditor, name: string, v: var FieldValue,
+    err: var string): bool =
+  ## Reads a SEG-Y binary header field as edited so far.
+  var blockName, field: string
+  var b: BlockRef
+  if not splitName(name, blockName, field):
+    err = "expected <block>.<field>"
+    return false
+  ed.file.index.locateFileBlock(blockName, b, err) and ed.currentBlock(b, field, v, err)
 
 proc setField*(ed: var HeaderEditor, trace: int, name: string, value: EditValue): bool =
   ## Sets field `name` (`trace.<field>` or `ext1.<field>`) of trace `trace`.
@@ -508,6 +585,7 @@ proc setField*(ed: var HeaderEditor, name: string, value: EditValue): bool =
     return ed.refuseName(name, err, loc)
   result = ed.editLocated(b, field, value, loc)
   if result:
+    ed.flushBatch() # the index copy is refreshed from the map
     ed.file.index.segy.binary = decodeBinaryHeader(ed.file.memory.toOpenArray(int(b.offset),
       int(b.offset) + b.size - 1), b.order)
 
@@ -525,6 +603,7 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     return ed.refuseName(name, err, loc)
   result = ed.editLocated(b, field, value, loc)
   if result:
+    ed.flushBatch() # the index copy is refreshed from the map
     let (a, z) = (int(b.offset), int(b.offset) + b.size - 1)
     if b.kind == hbSegdGh1:
       ed.file.index.segdRecords[record].gh1 =

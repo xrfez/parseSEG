@@ -63,7 +63,7 @@ block info:
   doAssert "5 (up to 4001 samples" in ok("info", inova)
 
 block dump:
-  let d = ok("dump", inglewood, "--traces=4..5", "--fields=trace.sourceX,trace.bogus")
+  let d = fails(1, "dump", inglewood, "--traces=4..5", "--fields=trace.sourceX,trace.bogus")
   let lines = d.strip.splitLines
   doAssert lines[0].startsWith("trace\toffset\tsamples") and "trace.sourceX" in lines[0]
   doAssert lines[2].startsWith("5\t374420\t2001") and "\t1704188\t?" in lines[2]
@@ -99,7 +99,7 @@ block convert:
     fails(2, "convert", s63, tmp / "x.sgd", "--to=segd", "--descale")
   doAssert "--to is segy or segd" in fails(2, "convert", s63, tmp / "x.sgy", "--to=segx")
   discard fails(1, "convert", s63, tmp / "x.sgd", "--to=segd", "--rev=1.0")
-  discard fails(1, "convert", inglewood, inglewood)
+  discard fails(2, "convert", inglewood, inglewood)
   doAssert "--byte-order is" in fails(2, "convert", inglewood, tmp / "x.sgy", "--byte-order=up")
 
 # -------------------------------------------------------- 7.3: editing --
@@ -132,7 +132,7 @@ block headers_export_and_import:
   doAssert "200 traces exported" in ok("headers", "export", f, "-o", tmp / "h.nif")
   let h = readFile(tmp / "h.nif")
   doAssert h.startsWith("(.nif27)") and "(standard segy)" in h and "(raw " in h
-  doAssert "0 changed fields" in ok("headers", "import", f, tmp / "h.nif") # a lossless round trip
+  doAssert "0 fields written" in ok("headers", "import", f, tmp / "h.nif") # a lossless round trip
   discard ok("headers", "export", f, "-o", tmp / "fo.nif", "--fields-only")
   doAssert "(raw " notin readFile(tmp / "fo.nif")
   # Edit two values in the document; import as a dry run, into a copy, in place.
@@ -183,5 +183,80 @@ block vendormaps:
   doAssert "(target" notin again # everything is mapped now
   doAssert "(kind extendedHeader) (blockIndex 1)" in ok("vendormap", "scaffold", s63)
   doAssert "expected vendormap" in fails(2, "vendormap", "frob")
+
+# ------------------------------------------- Phase 7 review regressions --
+
+block review_outputs_never_clobber_inputs:
+  let f = fresh(inglewood)
+  doAssert "is the input file" in fails(2, "headers", "export", f, "-o", f)
+  doAssert "is the input file" in fails(2, "vendormap", "scaffold", f, "-o", f)
+  doAssert "is the input file" in fails(2, "convert", f, f)
+  discard fails(1, "edit", f, "--journal=" & f, "t0:trace.sourceX=1")
+  doAssert readFile(f) == readFile(inglewood)
+  # A failed conversion leaves an existing destination alone and no partial file.
+  writeFile(tmp / "keep.sgy", "precious")
+  discard fails(1, "convert", inglewood, tmp / "keep.sgy", "--format=99")
+  doAssert readFile(tmp / "keep.sgy") == "precious"
+  doAssert not fileExists(tmp / "keep.sgy.tmp")
+  writeFile(tmp / "half.sgy", readFile(inglewood)[0 ..< 1_000_000])
+  discard run("convert", tmp / "half.sgy", tmp / "fromhalf.sgy")
+
+block review_option_values_are_required:
+  let f = fresh(inglewood)
+  doAssert "needs a value" in fails(2, "headers", "import", f, tmp / "h.nif", "-o")
+  doAssert readFile(f) == readFile(inglewood)
+  doAssert "needs a value" in fails(2, "dump", f, "--traces")
+  doAssert "needs a value" in fails(2, "headers", "export", f, "-o")
+  doAssert "takes no value" in fails(2, "info", f, "--keys=1")
+  doAssert "SEG-Y rev 2.1" in ok("--keys", "info", f) # options before the command
+
+block review_edit_validates_first:
+  let f = fresh(inglewood)
+  for bad in ["bad", "q9:trace.sourceX=1", "t999:trace.sourceX=1", "t5..2:trace.sourceX=1",
+      "t0:trace.nope=1", "t0:trace.sourceX=", "r0:binary.jobId=7"]:
+    discard fails(2, "edit", f, "t0:trace.sourceX=1200", bad)
+    doAssert readFile(f) == readFile(inglewood), bad
+    doAssert not fileExists(f & ".edits.nif"), bad
+  doAssert "SEG-Y has none" in fails(2, "edit", f, "r0:binary.jobId=7")
+  doAssert "out of range (the file has 200 traces)" in fails(2, "edit", f, "t200:trace.sourceX=1")
+  writeFile(tmp / "empty.sgy", "")
+  doAssert "neither SEG-Y nor SEG-D" in fails(1, "edit", tmp / "empty.sgy", "t0:trace.sourceX=1")
+  doAssert not fileExists(tmp / "empty.sgy.edits.nif")
+  # Number-like text, and big edit batches (one journal sync per batch).
+  discard ok("edit", f, "t0:trace.headerName=12345678", "t0..199:trace.groupStatic=3")
+  let d = ok("dump", f, "--traces=0", "--all")
+  doAssert "trace.headerName = \"12345678\"" in d and "trace.groupStatic = 3" in d
+  discard ok("journal", "rollback", f, f & ".edits.nif")
+  doAssert readFile(f) == readFile(inglewood)
+
+block review_ranges_and_revisions:
+  doAssert "out of range" in fails(2, "dump", inglewood, "--traces=0..99999999999")
+  doAssert "empty trace range" in fails(2, "dump", inglewood, "--traces=5..2")
+  for r in ["256", "258.1", "300", "-1", "2.1.1", "x.y", "2."]:
+    discard fails(2, "convert", inglewood, tmp / "r.sgy", "--rev=" & r)
+  doAssert "--rev parts are 0..255" in fails(2, "convert", s63, tmp / "r.sgd", "--rev=256.0")
+  doAssert "needs a SEG-D input" in fails(2, "convert", inglewood, tmp / "r.sgd", "--to=segd")
+  # The output kind follows the input's content, not its name.
+  copyFile(s63, tmp / "d.raw")
+  discard ok("convert", tmp / "d.raw", tmp / "fromraw.sgd")
+  doAssert "SEG-D rev 3.0" in ok("info", tmp / "fromraw.sgd")
+
+block review_exit_codes_and_messages:
+  writeFile(tmp / "t3600.sgy", readFile(inglewood)[0 ..< 3600])
+  discard fails(1, "dump", tmp / "t3600.sgy")
+  doAssert "fatal" in fails(1, "info", tmp / "t3600.sgy")
+  discard fails(1, "dump", inglewood, "--fields=trace.bogus")
+  createDir(tmp / "adir")
+  doAssert "is a directory" in fails(2, "info", tmp / "adir")
+  writeFile(tmp / "empty.nif", "")
+  doAssert "the document is empty" in fails(1, "headers", "import", inglewood, tmp / "empty.nif")
+  doAssert "no vendor maps found in" in ok("vendormap", "list", "--map=" & tmp / "adir")
+  doAssert "no unmapped vendor areas" in ok("vendormap", "scaffold", inglewood, "-o",
+    tmp / "none.nif")
+  doAssert not fileExists(tmp / "none.nif")
+  let f = fresh(inglewood)
+  discard ok("headers", "export", f, "-o", tmp / "self.nif")
+  doAssert "nothing written" in fails(1, "headers", "import", f, tmp / "self.nif", "-o",
+    tmp / "self.nif")
 
 echo "tcli: ok"
