@@ -6,8 +6,11 @@
 import parseSEGD/common/[errors, diagnostics, endians, bcd, ibmfloat, ebcdic, fieldlayout]
 export errors, diagnostics, endians, bcd, ibmfloat, ebcdic, fieldlayout
 
-import parseSEGD/segy/[textheader, binheader, traceheader]
-export textheader, binheader, traceheader
+import parseSEGD/segy/[textheader, binheader, traceheader, samples, exttext]
+export textheader, binheader, traceheader, samples, exttext
+
+import parseSEGD/model/tensors
+export tensors
 
 import parseSEGD/io/[records, diskio, tapeimage, tapedevice]
 export records, diskio, tapeimage, tapedevice

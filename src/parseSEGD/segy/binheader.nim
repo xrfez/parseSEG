@@ -199,3 +199,57 @@ proc validate*(h: SegyBinaryHeader, log: var DiagLog, severity = sevWarning,
     check h.isRev20 or h.maxAddlTraceHeaders <= high(uint16), dcBadValue, 3507,
       "maxAddlTraceHeaders", "additional trace header count " & $h.maxAddlTraceHeaders &
       " does not fit in 16 bits"
+
+# ---------------------------------------------------------------------------
+# Byte-order detection (spec note `segy_rev2_1.md` §6.1, `segy_rev1.md`
+# Resolutions).
+
+type
+  ByteOrderDetection* = object
+    ## Result of `detectByteOrder`.
+    order*: ByteOrder
+    fromMarker*: bool ## The Rev 2 marker at 3297-3300 declared the order.
+    plausible*: bool  ## The header decodes to plausible values in `order`.
+
+func plausibility(h: SegyBinaryHeader): int =
+  # Counts header values that look sane; the right byte order scores highest.
+  let rev = h.revision
+  if bytesPerSample(h.formatCode, SegyRevision(major: 2, minor: 1)) != 0: inc result, 4
+  if bytesPerSample(h.formatCode, rev) != 0: inc result
+  if h.samplesPerTrace in 1'u16..32767'u16: inc result
+  if h.sampleInterval in 1'u16..32767'u16: inc result
+  if h.fixedLengthTraces in 0..1: inc result
+  if h.numExtTextHeaders in -1..1000: inc result
+  if h.measurementSystem in 0..2: inc result
+  if h.dataTracesPerEnsemble >= 0 and h.auxTracesPerEnsemble >= 0: inc result
+  # Little-endian and pair-swapped agree on every 16-bit field; a 32-bit field
+  # that should repeat a 16-bit one separates them.
+  if h.extSamplesPerTrace == 0 or h.extSamplesPerTrace == h.samplesPerTrace: inc result
+
+func detectByteOrder*(b: openArray[byte]): ByteOrderDetection =
+  ## Detects the byte order of a binary header (the first 400 bytes of `b`).
+  ## The Rev 2 marker decides when present; otherwise each order is scored on
+  ## the plausibility of the format code, sample count and interval and other
+  ## fields, and big-endian wins ties, then little-endian. Without the marker,
+  ## pair-swapping is only recognized when the Rev 2 extended sample count is
+  ## set, since it matches little-endian on every 16-bit field. `plausible` is false when even the best
+  ## order has an undefined format code.
+  doAssert b.len >= BinaryHeaderSize, "binary header needs 400 bytes"
+  let m = 3297 - BinaryHeaderFirstByte
+  let marker = [b[m], b[m+1], b[m+2], b[m+3]]
+  var declared = true
+  if marker == [1'u8, 2, 3, 4]: result.order = boBig
+  elif marker == [4'u8, 3, 2, 1]: result.order = boLittle
+  elif marker == [2'u8, 1, 4, 3]: result.order = boPairSwapped
+  else: declared = false
+  if declared:
+    result.fromMarker = true
+  else:
+    var best = -1
+    for order in [boBig, boLittle, boPairSwapped]:
+      let score = plausibility(decodeBinaryHeader(b, order))
+      if score > best:
+        best = score
+        result.order = order
+  let h = decodeBinaryHeader(b, result.order)
+  result.plausible = bytesPerSample(h.formatCode, SegyRevision(major: 2, minor: 1)) != 0
