@@ -41,14 +41,14 @@ per-function documentation.
    self-contained (C99 `<stdint.h>`, `<stddef.h>`, no `nimbase.h`) and fully commented, and it
    compiles as C and C++. It is kept honest by tests:
    - a C program checks `sizeof`/`offsetof` of every struct against values that Nim reports
-     for its own types (`seg_layout_check`);
+     for its own types (`seg_sizeof`, `seg_offsetof`);
    - a script checks that every `seg_*` symbol in the shared library is declared in the
      header, and the other way round;
    - a C test program and a Python `ctypes` smoke test exercise every function.
    Nim's `--header` output is used only to cross-check the signatures.
 
 5. **Objects cross as opaque handles.** `SegFile*` (a mapped file with its index and
-   keys), `SegTensor*`, `SegPrefetch*`, `SegEditor*`, `SegLog*` and `SegGathers*`.
+   keys), `SegTensor*`, `SegPrefetch*`, `SegEditor*`, `SegLog*` and `SegGeometry*`.
    - Each handle is a Nim `ref` kept alive with `GC_ref` and released by its
      `seg_<object>_release` (or `close`). Releasing NULL is a no-op.
    - Using a handle after releasing it is undefined, as with `free`.
@@ -72,14 +72,29 @@ per-function documentation.
      example a numpy array's data pointer), given its row stride.
 
 8. **Errors never cross as exceptions.**
-   - Every export runs inside `try`/`except Exception`, so no Nim exception or Defect
-     unwinds into C.
+   - Every export that can fail runs inside `try`/`except Exception`, so no Nim exception or
+     Defect unwinds into C. The trivial accessors are marked `{.raises: [].}` instead, so the
+     compiler enforces that they cannot raise.
+   - Nim's allocator terminates the process when the system refuses memory. An
+     out-of-memory hook cannot raise through the C backend's goto-based exceptions: the
+     hook is declared not to raise, so no caller checks the error, and the allocator quits.
+     So large buffers (64 MiB and up) are first probed with `malloc`/`free`, and a refusal
+     is `SEG_ERR_IO`. The system can still run out later; overcommit cannot be predicted.
+     Sizes from C are bounded first:
+     tensors and prefetch rings are at most 1 TiB, and selections at most 2^34 entries. Every
+     selection is checked before anything is allocated.
    - Functions return a `SegStatus` (`int32_t`): `SEG_OK` = 0, `SEG_END`, `SEG_NOT_READY`,
      `SEG_ERR_ARGUMENT`, `SEG_ERR_IO`, `SEG_ERR_FORMAT`, `SEG_ERR_STATE`,
      `SEG_ERR_REFUSED`, `SEG_ERR_INTERNAL`.
    - Arguments are checked explicitly before any Nim call that would assert.
-   - `seg_last_error()` returns the message of the calling thread's last failed call (a
-     thread-local string, valid until that thread's next call).
+   - `seg_last_error()` returns the message of the calling thread's last failed call. It is
+     kept in a fixed 1 KiB thread-local buffer, valid until that thread's next call. A Nim
+     `string` threadvar would leak, because host threads never run Nim threadvar
+     destructors.
+   - `seg_init` is a lock-free once guard (compare-and-swap; the others spin). It must not
+     touch a Nim lock, because module initialization runs inside `NimMain`. A review found
+     that re-initializing a lock which waiters were already blocked on deadlocked every
+     concurrent `seg_init`.
 
 9. **Diagnostics are data, not errors.** Opening a damaged file succeeds. Problems go into
    the handle's log, which is the library's "never silent, never interrupting" contract.

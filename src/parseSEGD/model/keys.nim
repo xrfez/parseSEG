@@ -132,7 +132,10 @@ proc positionsFrom(area: openArray[byte], k: var TraceKeys, generalArea: bool) =
         if generalArea or isSourceBlock(after):
           if not k.hasSourceXY: (k.srcX, k.srcY, k.srcZ) = (x, y, z)
         elif not k.hasReceiverXY: (k.rcvX, k.rcvY, k.rcvZ) = (x, y, z)
-    elif bt notin {0x51'u8, 0x52'u8, 0x56'u8}: # parts of a position, relative positions
+    elif bt notin {0x51'u8, 0x52'u8, 0x56'u8, 0x20'u8, 0x1A'u8, 0x21'u8}:
+      # Position parts, relative positions, and a source's Additional Source
+      # Info / Aux Channel Reference blocks (§6.5: they sit between the
+      # source description and its position) keep the block described.
       after = bt
 
 proc sourceFrom(area: openArray[byte], k: var TraceKeys): bool =
@@ -232,14 +235,19 @@ proc applyGeometry*(k: var TraceKeys, g: GeometryTable, overwrite = false): bool
   ## Fills the trace's source and receiver coordinates from `g` (only where
   ## unknown, unless `overwrite`), then its offset and midpoint. True if
   ## anything changed.
+  ## A table z of NaN keeps a known elevation. With `overwrite`, the offset
+  ## and midpoint are recomputed from the new coordinates; otherwise only
+  ## unknown ones are filled (a signed SEG-Y header offset stays).
   var c: Coordinates
   result = false
   if (overwrite or not k.hasSourceXY) and
       g.sources.lookup(k.srcLine, k.srcPoint, k.srcIndex, c):
-    (k.srcX, k.srcY, k.srcZ) = (c.x, c.y, c.z)
+    (k.srcX, k.srcY) = (c.x, c.y)
+    if not c.z.isNaN: k.srcZ = c.z
     result = true
   if (overwrite or not k.hasReceiverXY) and
       g.receivers.lookup(k.rcvLine, k.rcvPoint, k.rcvIndex, c):
-    (k.rcvX, k.rcvY, k.rcvZ) = (c.x, c.y, c.z)
+    (k.rcvX, k.rcvY) = (c.x, c.y)
+    if not c.z.isNaN: k.rcvZ = c.z
     result = true
-  if result: k.deriveGeometry(overwrite = true)
+  if result: k.deriveGeometry(overwrite)

@@ -139,7 +139,6 @@ proc locateTraceBlock*(ix: TraceIndex, trace: int, blockName: string, b: var Blo
     err = "no trace " & $trace
     return false
   let e = ix.entries[trace]
-  b.name = blockName
   case blockName
   of "trace":
     if ix.kind == skSegy:
@@ -191,7 +190,7 @@ proc locateRecordBlock*(ix: TraceIndex, record: int, blockName: string, b: var B
       name: blockName)
     true
   elif blockName.len in 3..6 and blockName.startsWith("gh") and
-      blockName[2..^1].allCharsInSet(Digits):
+      blockName[2..^1].allCharsInSet(Digits) and blockName[2] != '0':
     let n = parseInt(blockName[2..^1])
     if rec.isRev3 or not rec.hasGh2:
       err = "only Rev 1/2 records have source blocks gh3, gh4, ... (Rev 3 general header " &

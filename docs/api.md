@@ -35,7 +35,7 @@ Conventions that hold throughout:
 | `readTraces(f, traces: openArray[int], T)` | A **selection** (gather, component group, sort order) in list order. |
 | `readTracesInto(f, first, count, var tensor, row, log)` and `readTracesInto(f, traces, var tensor, row, log)` | Decode into an existing tensor. |
 | `readTracesRaw(f, traces, ptr, cols, rowStride, log)` | Decode into a caller-owned buffer (numpy, C). |
-| `newPrefetcher[T](f, first, last, chunkTraces, depth, cols)` and `newPrefetcher[T](f, selection, ...)` | Read-ahead on a worker thread: `tryNext` (never blocks), `next`, `seek`, `atEnd`, `traceAt`, `close`. |
+| `newPrefetcher[T](f, first, last, chunkTraces, depth, cols)` and `newPrefetcher[T](f, selection, ...)` | Read-ahead on a worker thread: `tryNext` (never blocks), `next`, `seek`, `atEnd`, `traceAt`, `positions`, `close`. |
 
 Sorting is a selection: a sort produces a list of trace indices, and no data is moved
 (PLAN.md, "Future").

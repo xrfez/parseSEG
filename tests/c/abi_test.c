@@ -10,6 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { \
@@ -285,9 +288,9 @@ static void test_edits(void) {
     CHECK(seg_editor_set_trace(e, 0, "trace.groupX", &v) == SEG_ERR_REFUSED);
     v.kind = SEG_VALUE_INT; v.i = 7;
     OK(seg_editor_set_file(e, "binary.jobId", &v));
-    CHECK(seg_editor_set_record(e, 0, "gh1.year", &v) == SEG_ERR_REFUSED);
+    CHECK(seg_editor_set_record(e, 0, "gh1.year", &v) == SEG_ERR_ARGUMENT); /* SEG-Y: no records */
     CHECK(seg_editor_edits(e) == 2);
-    CHECK(seg_log_count_severity(seg_editor_log(e), SEG_SEV_ERROR) == 3);
+    CHECK(seg_log_count_severity(seg_editor_log(e), SEG_SEV_ERROR) == 2);
     OK(seg_editor_close(e));
     SegFile *f = NULL;
     OK(seg_file_open(copy, 0, &f));
@@ -328,6 +331,78 @@ static void test_convert(void) {
     OK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "sw.sgy"), NULL, NULL));
 }
 
+/* ---- review regressions (Phase 8) ----------------------------------- */
+static void test_limits(void) {
+    SegFile *f = NULL;
+    OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), 0, &f));
+    SegTensor *t = (SegTensor *)1;
+    /* r2: hostile sizes are refused, never fatal. */
+    CHECK(seg_read_range(f, 0, 1, SEG_F32, (int64_t)1 << 42, &t) == SEG_ERR_ARGUMENT && t == NULL);
+    CHECK(seg_read_range(f, 0, 2, SEG_F32, INT64_MAX, &t) == SEG_ERR_ARGUMENT);
+    CHECK(seg_read_range(f, 0, 1, SEG_F32, -2, &t) == SEG_ERR_ARGUMENT);
+    CHECK(seg_read_range(f, 0, INT64_MAX, SEG_F32, -1, &t) == SEG_ERR_ARGUMENT);
+    float one[4];
+    CHECK(seg_read_range_into(f, 0, 2, SEG_F32, one, 2, INT64_MAX / 2, NULL) == SEG_ERR_ARGUMENT);
+    SegPrefetch *p = (SegPrefetch *)1;
+    CHECK(seg_prefetch_open(f, 0, -1, 16, 4, (int64_t)1 << 40, SEG_F32, &p) == SEG_ERR_ARGUMENT);
+    CHECK(p == NULL);
+    CHECK(seg_prefetch_open(f, 0, -1, 1 << 24, 1024, 1 << 20, SEG_F64, &p) == SEG_ERR_ARGUMENT);
+    /* A request under the limit but beyond memory: SEG_ERR_IO, the host lives on.
+       In a child capped at 4 GiB of address space, so it is deterministic (not
+       under sanitizers, whose shadow memory needs the address space). */
+    if (!getenv("ASAN_OPTIONS") && !getenv("TSAN_OPTIONS")) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            struct rlimit lim = {(rlim_t)4 << 30, (rlim_t)4 << 30};
+            setrlimit(RLIMIT_AS, &lim);
+            SegTensor *big = NULL;
+            SegStatus st = seg_read_range(f, 0, 1, SEG_F32, (int64_t)1 << 32, &big);
+            _exit(st == SEG_ERR_IO && big == NULL ? 0 : 3);
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    /* r3: a huge selection count is refused before any allocation. */
+    int64_t tr[1] = {999999};
+    CHECK(seg_read_selection(f, tr, (int64_t)1 << 60, SEG_F32, -1, &t) == SEG_ERR_ARGUMENT);
+    tr[0] = 5;
+    CHECK(seg_read_selection(f, tr, -1, SEG_F32, -1, &t) == SEG_ERR_ARGUMENT);
+    seg_file_release(f);
+    /* Out-of-range editor indices are argument errors. */
+    SegEditor *e = NULL;
+    FILE *w = fopen(path(tmp, "lim.sgy"), "wb");
+    unsigned char *b;
+    long n = file_bytes(path(dir, "Sweep0.sgy"), &b);
+    fwrite(b, 1, (size_t)n, w);
+    fclose(w);
+    free(b);
+    remove(path(tmp, "lim.sgy.edits.nif"));
+    OK(seg_editor_open(path(tmp, "lim.sgy"), NULL, &e));
+    SegValue v = {SEG_VALUE_INT, 0, 1, 0, NULL};
+    CHECK(seg_editor_set_trace(e, -1, "trace.sourceX", &v) == SEG_ERR_ARGUMENT);
+    CHECK(seg_editor_set_trace(e, 1000000000, "trace.sourceX", &v) == SEG_ERR_ARGUMENT);
+    CHECK(seg_editor_set_record(e, 0, "gh1.year", &v) == SEG_ERR_ARGUMENT); /* SEG-Y */
+    OK(seg_editor_close(e));
+}
+
+static void *init_and_fail(void *arg) {
+    (void)arg;
+    CHECK(seg_init() == SEG_ABI_VERSION);
+    SegFile *f = (SegFile *)1;
+    CHECK(seg_file_open("/nonexistent/zz", 0, &f) == SEG_ERR_IO && f == NULL);
+    CHECK(strlen(seg_last_error()) > 0);
+    return NULL;
+}
+
+/* r1 / r4: concurrent seg_init (deadlocked), and error strings on threads
+   that exit (leaked). Run first, before main's own seg_init. */
+static void test_concurrent_init(void) {
+    pthread_t th[8];
+    for (int i = 0; i < 8; i++) pthread_create(&th[i], NULL, init_and_fail, NULL);
+    for (int i = 0; i < 8; i++) pthread_join(th[i], NULL);
+}
+
 /* ---- host threads ---------------------------------------------------- */
 static SegFile *shared_file;
 
@@ -364,6 +439,7 @@ int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: abi_test <exampleFiles> <scratch>\n"); return 2; }
     snprintf(dir, sizeof dir, "%s", argv[1]);
     snprintf(tmp, sizeof tmp, "%s", argv[2]);
+    test_concurrent_init();
     CHECK(seg_init() == SEG_ABI_VERSION);
     CHECK(seg_init() == SEG_ABI_VERSION && seg_abi_version() == SEG_ABI_VERSION);
     CHECK(strcmp(seg_version(), "0.2.0") == 0);
@@ -373,6 +449,7 @@ int main(int argc, char **argv) {
     test_gathers_and_prefetch();
     test_edits();
     test_convert();
+    test_limits();
     test_threads();
     if (failures) { fprintf(stderr, "%d failures\n", failures); return 1; }
     printf("abi_test: all checks passed\n");

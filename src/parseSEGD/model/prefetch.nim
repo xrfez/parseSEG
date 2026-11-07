@@ -92,6 +92,7 @@ proc `=destroy`*[T](p: Prefetcher[T]) =
   # join it before the slot tensors go.
   if p.sh != nil: shutdown(p.sh)
   `=destroy`(p.tensors)
+  `=destroy`(p.selection) # after the shutdown: the worker reads it
 
 proc `=copy`*[T](dst: var Prefetcher[T], src: Prefetcher[T]) {.error.}
 
@@ -262,7 +263,8 @@ proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
 
 proc seek*[T](p: var Prefetcher[T], first: int, last = -1) =
   ## Restarts read-ahead at trace `first` (to `last`, exclusive; -1 = the end
-  ## of the file; any negative value means the end). Chunks decoded for the old position are dropped; one being
+  ## of the file; any negative value means the end). Chunks decoded for the old position are
+  ## dropped; one being
   ## decoded finishes in the background and is discarded. A no-op after
   ## `close`.
   if p.sh == nil: return
@@ -286,3 +288,4 @@ proc close*[T](p: var Prefetcher[T]) =
     shutdown(p.sh)
     p.sh = nil
     p.tensors.setLen 0
+    p.selection.setLen 0

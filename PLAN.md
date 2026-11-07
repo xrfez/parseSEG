@@ -474,3 +474,22 @@ Tasks:
   - C ABI: `SegConvertOptions`, `seg_convert_options_default`, `seg_convert` (layout test and abi_test updated).
   - Tests (`tests/tconvert.nim`): 63.sgd → Rev 2.1 (samples, header and station values) and → Rev 1; INOVA Rev 3 → Rev 2.1 (Ext1 coordinates, scalar -1000, offset, aux trace ID, UTC time); descaling; an 8038 record → format 2 exactly; a forced int8 overflow; Inglewood IBM Rev 2.1 → Rev 1 IEEE (equal samples and headers) and → Rev 0; Sweep0 LE Rev 0 → Rev 2.1 LE → Rev 1 BE; invalid targets and inputs.
 - 2026-11-07: Owner additions to Phase 8: **8.8** nimpy Python bindings, with a define-switched export pragma (`-d:segCapi` / `-d:segPython`) so the C ABI and the Python module share one source, and **8.9** an ongoing task to keep build tasks for every target (`lib`, cross-builds per OS, `pylib`, `staticlib`, the CLI) plus a CI matrix. Order: fix the Phase 8 review findings, then 8.8 and 8.9, then 8.7.
+- 2026-11-07: Independent review of Phase 8 (8.1-8.6), by two parallel agents (C ABI; Nim API and conversion), found 13 verified issues. All are fixed, with regression tests in `tests/tphase8review.nim` (b1-b9 plus geometry) and `tests/c/abi_test.c` (`test_concurrent_init`, `test_limits`).
+  - C ABI:
+    - (1) **Concurrent `seg_init` deadlocked every time**: a Nim lock created by module init, i.e. inside the very `NimMain` call it guarded. It is now a lock-free compare-and-swap once guard.
+    - (2) Hostile `cols` sizes **terminated the host** ("out of memory"). Buffers and prefetch rings are now bounded (≤ 1 TiB, overflow-safe checks; `cols < -1` refused), and buffers of 64 MiB and up are probed with `malloc`/`free` (a refusal is `SEG_ERR_IO`). Found on the way: an out-of-memory hook cannot raise through goto-based exceptions, so the allocator still quits. A forked, RLIMIT_AS-capped child tests the refusal.
+    - (3) A huge selection `n` segfaulted: entries are checked before anything is allocated, with n ≤ 2^34.
+    - (4) `lastError` (a string threadvar) leaked on every host-thread exit; it is now a fixed 1 KiB thread-local char buffer.
+    - Minor: out-of-range editor indices are `SEG_ERR_ARGUMENT`; handle out-parameters are NULL on failure; `seg_tensor_to_dlpack` clears the last error; the trivial accessors are `{.raises: [].}`; `HeaderEditor.close` closes the journal even when the flush fails; header and c_abi.md corrections (SegGeometry, borrowed logs are snapshots, SegValue.text lifetime, record count 0).
+  - Nim:
+    - (b1) **Multi-record SEG-D with mixed formats was silently corrupted.** `convertFile` now scans the record formats first and picks a common lossless one (float64 in Rev 2). Every encoded trace is decoded back and compared, and inexact traces are counted in a warning, which also covers tape input, explicit formats, descaling and SEG-Y → SEG-Y.
+    - (b2) An out-of-range Rev 3 time zero raised a RangeDefect out of `convertFile`; the time fields are now left 0, with a note.
+    - (b3) A Position block after Source Description + Additional Source Info (0x20/0x21, §6.5) was taken as the receiver's.
+    - (b4) Selection prefetchers leaked their list on destroy.
+    - (b5) 8036 → pair-swapped zeroed every trace; it now goes to int32, and 3-byte formats with pair-swapped order are refused.
+    - (b6) Descaled values now use float64 on Rev 2, and 8048 → IBM copies words exactly.
+    - (b7) A fractional sample interval in a Rev 1 binary header became 0; it is now rounded.
+    - (b8) SEG-Y → SEG-Y byte-order changes now reorder proprietary headers described by the file's Layout (PSEGD001 survives).
+    - (b9) `convertFile(p, p)` truncated the input; it is now refused.
+    - Also: `applyGeometry` keeps a signed SEG-Y offset and known elevations unless `overwrite`; accelerometer/time-counter/reference-sweep trace IDs; `convertSegy` no longer duplicates the reader's diagnostics (found while fixing); `gh0N` names are refused; `positions` documented.
+  - Not done (noted): coordinate units for geographic CRS (needs the 0x55 stanza parsed); EM channel types → SEG-Y 27-38 codes.

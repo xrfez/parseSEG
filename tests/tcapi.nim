@@ -98,6 +98,8 @@ when defined(linux):
           quoteShell(root / "include") & " -o " & quoteShell(exe) & " " &
           quoteShell(root / "tests" / "c" / "abi_test.c") & " -L" & quoteShell(dir) &
           " -lparseseg -lpthread -lm -Wl,-rpath," & quoteShell(dir))
-        mustRun(quoteShell(exe) & " " & quoteShell(exampleDir) & " " & quoteShell(tmp))
+        # The out-of-memory test asks the allocator for 512 GiB.
+        mustRun("ASAN_OPTIONS=allocator_may_return_null=1 TSAN_OPTIONS=allocator_may_return_null=1 " &
+          quoteShell(exe) & " " & quoteShell(exampleDir) & " " & quoteShell(tmp))
 else:
   echo "tcapi: the C ABI test runs on Linux only for now"

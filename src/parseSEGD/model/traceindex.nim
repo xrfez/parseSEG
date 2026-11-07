@@ -265,7 +265,8 @@ proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
 proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
     writable = false): SeismicFile =
   ## Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
-  ## index (with per-trace geometry when `keys`). Format problems are in `index.log`; an undetectable file gives a
+  ## index (with per-trace geometry when `keys`). Format problems are in `index.log`; an
+  ## undetectable file gives a
   ## fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
   ## file cannot be opened or mapped. `writable` maps it read-write, for
   ## in-place header edits (`model/edit`).

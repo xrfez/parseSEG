@@ -16,7 +16,8 @@
  *   calls are harmless. After that, any thread may call into the library.
  *
  * Handles
- *   SegFile, SegTensor, SegPrefetch, SegEditor and SegLog are opaque. A
+ *   SegFile, SegTensor, SegPrefetch, SegEditor, SegGeometry and SegLog are
+ *   opaque. A
  *   handle returned through an `out` parameter is owned by the caller, who
  *   must release it with the matching function. Releasing NULL is a no-op.
  *   Using a released handle is undefined behaviour, as with free().
@@ -25,7 +26,11 @@
  *   Functions returning SegStatus give SEG_OK (0) on success, a positive
  *   value for a normal non-error outcome (SEG_END, SEG_NOT_READY) and a
  *   negative SEG_ERR_* on failure. After a failure, seg_last_error() holds
- *   the reason. No C++ exception or longjmp ever leaves the library.
+ *   the reason, and every handle `out` parameter is NULL. No C++ exception
+ *   or longjmp ever leaves the library. Allocations are bounded (a tensor
+ *   or prefetch ring is at most 1 TiB; larger requests are SEG_ERR_ARGUMENT)
+ *   and a request the system refuses is SEG_ERR_IO, not a terminated
+ *   process.
  *
  * Diagnostics are not errors
  *   Opening a damaged file succeeds. Every problem found while reading is a
@@ -167,7 +172,9 @@ typedef struct SegTraceKeys {
     uint8_t component;    /* distinguishes the components of one station */
 } SegTraceKeys;
 
-/* A typed header value. `text` is owned by the SegFile it came from and holds
+/* A typed header value. `text` is owned by the SegFile it came from (valid
+   until the next field read on that file, through any of the three
+   seg_*_field functions) and holds
    the field's characters as stored (EBCDIC or ASCII as in the file); a field
    padded with NUL bytes reads shorter than its width. */
 typedef struct SegValue {
@@ -261,7 +268,7 @@ void seg_file_release(SegFile *file);
 
 int32_t seg_file_kind(const SegFile *file);          /* SEG_KIND_* */
 int64_t seg_file_trace_count(const SegFile *file);   /* -1 for NULL */
-int64_t seg_file_record_count(const SegFile *file);  /* SEG-D records; 1 for SEG-Y */
+int64_t seg_file_record_count(const SegFile *file);  /* SEG-D records; 1 for SEG-Y; 0 if neither */
 int64_t seg_file_max_samples(const SegFile *file);   /* the longest trace */
 
 SegStatus seg_file_trace_entry(const SegFile *file, int64_t trace, SegTraceEntry *out);
@@ -274,7 +281,7 @@ SegStatus seg_file_trace_keys(const SegFile *file, int64_t trace, SegTraceKeys *
 double seg_file_sample_interval(const SegFile *file, int64_t trace);
 
 /* The file's diagnostics, borrowed: valid until the file is released.
-   Do not release it. */
+   Do not release it. A borrowed log is a snapshot taken by this call. */
 SegLog *seg_file_log(SegFile *file);
 
 /* ---- header fields by name ------------------------------------------- */
@@ -387,7 +394,9 @@ void seg_prefetch_release(SegPrefetch *prefetch);
    that size the file's structure (sample counts, formats, header counts,
    ...) are refused, and the original bytes are written (and flushed) to the
    journal before the file changes. Field names are as for seg_trace_field.
-   A refused edit returns SEG_ERR_REFUSED and leaves the file unchanged. */
+   A refused edit returns SEG_ERR_REFUSED, logs why in the editor's log and
+   leaves the file unchanged; a trace or record number out of range is
+   SEG_ERR_ARGUMENT. */
 
 /* `journal` NULL means path + ".edits.nif". */
 SegStatus seg_editor_open(const char *path, const char *journal, SegEditor **out);
@@ -397,8 +406,10 @@ SegStatus seg_editor_set_record(SegEditor *editor, int64_t record, const char *n
                                 const SegValue *value);
 SegStatus seg_editor_set_file(SegEditor *editor, const char *name, const SegValue *value);
 int64_t   seg_editor_edits(const SegEditor *editor); /* edits written so far */
-SegLog   *seg_editor_log(SegEditor *editor);         /* borrowed, like seg_file_log */
-/* Flushes the file and journal, then releases the editor. */
+/* Borrowed, like seg_file_log: a snapshot; call again to see later edits. */
+SegLog   *seg_editor_log(SegEditor *editor);
+/* Flushes the file and journal, then releases the editor. The editor is
+   released even when the flush fails (SEG_ERR_IO): do not close it twice. */
 SegStatus seg_editor_close(SegEditor *editor);
 
 /* Undo (newest first) or redo (oldest first) a journal's edits. Both can be

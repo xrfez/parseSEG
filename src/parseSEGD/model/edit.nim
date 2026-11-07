@@ -332,12 +332,15 @@ proc openEditor*(path: string, journalPath = ""): HeaderEditor =
   result.openJournal()
 
 proc close*(ed: var HeaderEditor) =
-  ## Flushes the map and the journal and closes both.
-  ed.file.flush()
-  ed.file.close()
-  if ed.journal != nil:
-    ed.journal.close()
-    ed.journal = nil
+  ## Flushes the map and the journal and closes both. Both are closed even
+  ## when the flush fails (the error then propagates).
+  try:
+    ed.file.flush()
+  finally:
+    ed.file.close()
+    if ed.journal != nil:
+      ed.journal.close()
+      ed.journal = nil
 
 func edits*(ed: HeaderEditor): int {.inline.} =
   ## Edits written in this session (no-op edits excluded).

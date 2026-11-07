@@ -136,17 +136,37 @@ type
   GeometryObj = ref object
     g: GeometryTable
 
-var lastError {.threadvar.}: string
-var initLock: Lock
-var initialized: bool
-initLock.initLock()
+const LastErrorCap = 1024
+
+var lastErrorBuf {.threadvar.}: array[LastErrorCap, char]
+  # A plain thread-local array: threads the host created never run Nim
+  # threadvar destructors, so a `string` here would leak on every thread exit.
+var initState: int # 0 not started, 1 running NimMain, 2 done (atomic)
+
+proc cMalloc(size: csize_t): pointer {.importc: "malloc", header: "<stdlib.h>".}
+proc cFree(p: pointer) {.importc: "free", header: "<stdlib.h>".}
+
+proc canAllocate(bytes: int64): bool =
+  # Nim's allocator terminates the process when the system refuses memory
+  # (an out-of-memory hook cannot raise through goto-based exceptions), so a
+  # large buffer is first probed with malloc/free. The system may still run
+  # out later; this catches requests it refuses outright.
+  if bytes < 64 shl 20: return true
+  let p = cMalloc(csize_t(bytes))
+  result = p != nil
+  if result: cFree(p)
+
+proc setLastError(msg: string) =
+  let n = min(msg.len, LastErrorCap - 1)
+  if n > 0: copyMem(addr lastErrorBuf[0], unsafeAddr msg[0], n)
+  lastErrorBuf[n] = '\0'
 
 proc NimMain() {.importc, cdecl.}
 
 # ---------------------------------------------------------------- helpers --
 
 proc fail(code: SegStatus, msg: string): SegStatus =
-  lastError = msg
+  setLastError(msg)
   code
 
 template guarded(body: untyped): SegStatus =
@@ -154,7 +174,7 @@ template guarded(body: untyped): SegStatus =
   ## status and `lastError`.
   var st: SegStatus
   try:
-    lastError.setLen 0
+    lastErrorBuf[0] = '\0'
     st = body
   except SegTruncatedError as e: st = fail(SEG_ERR_FORMAT, "truncated: " & e.msg)
   except SegFormatError as e: st = fail(SEG_ERR_FORMAT, e.msg)
@@ -180,36 +200,52 @@ proc syncLog(l: LogObj, log: DiagLog) =
 
 func validDtype(d: int32): bool {.inline.} = d == SEG_F32 or d == SEG_F64
 
+const
+  MaxSelection = 1'i64 shl 34 ## Longest trace list accepted.
+  MaxBufferBytes = 1'i64 shl 40 ## Largest tensor or prefetch ring the library allocates.
+
 proc selection(traces: ptr UncheckedArray[int64], n: int64, f: SeismicFile,
     sel: var seq[int]): bool =
-  if n < 0 or (n > 0 and traces == nil): return false
-  sel = newSeq[int](n)
+  # Every entry is checked before anything is allocated.
+  if n < 0 or n > MaxSelection or (n > 0 and traces == nil): return false
   for k in 0..<int(n):
-    let i = traces[k]
-    if i < 0 or i >= f.len: return false
-    sel[k] = int(i)
+    if traces[k] < 0 or traces[k] >= f.len: return false
+  sel = newSeq[int](n)
+  for k in 0..<int(n): sel[k] = int(traces[k])
   true
+
+func fitsBuffer(rows, cols, elem: int64): bool =
+  # rows × cols × elem ≤ MaxBufferBytes, without overflowing.
+  rows >= 0 and cols >= 0 and (rows == 0 or cols == 0 or
+    cols <= MaxBufferBytes div elem div rows)
+
+func elemSize(dtype: int32): int64 = (if dtype == SEG_F32: 4 else: 8)
+
+func rangeOk(first, count, n: int64): bool =
+  first >= 0 and count >= 0 and first <= n and count <= n - first
 
 # ------------------------------------------------------------ the library --
 
 proc segInit(): int32 {.exportc: "seg_init", capi.} =
-  try:
-    acquire(initLock)
-    if not initialized:
-      NimMain()
-      initialized = true
-    release(initLock)
-  except Exception:
-    discard
+  # Touches no Nim runtime before NimMain has run: one thread wins the
+  # compare-and-swap and runs it, the others spin until it is done.
+  var expected = 0
+  if atomicCompareExchangeN(addr initState, addr expected, 1, false, ATOMIC_ACQ_REL,
+      ATOMIC_ACQUIRE):
+    NimMain()
+    atomicStoreN(addr initState, 2, ATOMIC_RELEASE)
+  else:
+    while atomicLoadN(addr initState, ATOMIC_ACQUIRE) != 2: cpuRelax()
   SegAbiVersion
 
-proc segAbiVersion(): int32 {.exportc: "seg_abi_version", capi.} = SegAbiVersion
+proc segAbiVersion(): int32 {.exportc: "seg_abi_version", capi, raises: [].} = SegAbiVersion
 
-proc segVersion(): cstring {.exportc: "seg_version", capi.} = cstring(PackageVersion)
+proc segVersion(): cstring {.exportc: "seg_version", capi, raises: [].} = cstring(PackageVersion)
 
-proc segLastError(): cstring {.exportc: "seg_last_error", capi.} = cstring(lastError)
+proc segLastError(): cstring {.exportc: "seg_last_error", capi, raises: [].} =
+  cast[cstring](addr lastErrorBuf[0])
 
-proc segStatusName(s: SegStatus): cstring {.exportc: "seg_status_name", capi.} =
+proc segStatusName(s: SegStatus): cstring {.exportc: "seg_status_name", capi, raises: [].} =
   case s
   of SEG_OK: "SEG_OK"
   of SEG_END: "SEG_END"
@@ -224,7 +260,8 @@ proc segStatusName(s: SegStatus): cstring {.exportc: "seg_status_name", capi.} =
 
 # ------------------------------------------------------------------ files --
 
-proc segFileOpen(path: cstring, flags: uint32, outFile: ptr pointer): SegStatus {.exportc: "seg_file_open",
+proc segFileOpen(path: cstring, flags: uint32, outFile: ptr pointer): SegStatus {.
+    exportc: "seg_file_open",
     capi.} =
   guarded:
     if path == nil or outFile == nil: fail(SEG_ERR_ARGUMENT, "path and out must not be NULL")
@@ -248,24 +285,25 @@ proc segFileRelease(f: pointer) {.exportc: "seg_file_release", capi.} =
 
 proc fileOf(f: pointer): FileObj {.inline.} = handle[FileObj](f)
 
-proc segFileKind(f: pointer): int32 {.exportc: "seg_file_kind", capi.} =
+proc segFileKind(f: pointer): int32 {.exportc: "seg_file_kind", capi, raises: [].} =
   if f == nil: return 0
   let fo = fileOf(f)
   if not fo.f.index.detected: 0'i32 elif fo.f.kind == skSegy: 1'i32 else: 2'i32
 
-proc segFileTraceCount(f: pointer): int64 {.exportc: "seg_file_trace_count", capi.} =
+proc segFileTraceCount(f: pointer): int64 {.exportc: "seg_file_trace_count", capi, raises: [].} =
   if f == nil: -1 else: int64(fileOf(f).f.len)
 
-proc segFileRecordCount(f: pointer): int64 {.exportc: "seg_file_record_count", capi.} =
+proc segFileRecordCount(f: pointer): int64 {.exportc: "seg_file_record_count", capi, raises: [].} =
   if f == nil: return -1
   let fo = fileOf(f)
   if fo.f.kind == skSegd: int64(fo.f.index.segdRecords.len)
   elif fo.f.index.detected: 1 else: 0
 
-proc segFileMaxSamples(f: pointer): int64 {.exportc: "seg_file_max_samples", capi.} =
+proc segFileMaxSamples(f: pointer): int64 {.exportc: "seg_file_max_samples", capi, raises: [].} =
   if f == nil: -1 else: int64(fileOf(f).f.index.maxSamples)
 
-proc segFileTraceEntry(f: pointer, i: int64, outEntry: ptr TraceEntry): SegStatus {.exportc: "seg_file_trace_entry",
+proc segFileTraceEntry(f: pointer, i: int64, outEntry: ptr TraceEntry): SegStatus {.
+    exportc: "seg_file_trace_entry",
     capi.} =
   guarded:
     if f == nil or outEntry == nil: fail(SEG_ERR_ARGUMENT, "NULL argument")
@@ -274,7 +312,8 @@ proc segFileTraceEntry(f: pointer, i: int64, outEntry: ptr TraceEntry): SegStatu
       outEntry[] = fileOf(f).f.index.entries[i]
       SEG_OK
 
-proc segFileTraceKeys(f: pointer, i: int64, outKeys: ptr TraceKeys): SegStatus {.exportc: "seg_file_trace_keys",
+proc segFileTraceKeys(f: pointer, i: int64, outKeys: ptr TraceKeys): SegStatus {.
+    exportc: "seg_file_trace_keys",
     capi.} =
   guarded:
     if f == nil or outKeys == nil: fail(SEG_ERR_ARGUMENT, "NULL argument")
@@ -337,7 +376,8 @@ proc segRecordField(f: pointer, record: int64, name: cstring,
   fieldRead(f, name, outValue,
     record >= 0 and record <= int64(high(int32)) and fo.f.recordField(int(record), $name, v, err))
 
-proc segFileField(f: pointer, name: cstring, outValue: ptr SegValue): SegStatus {.exportc: "seg_file_field",
+proc segFileField(f: pointer, name: cstring, outValue: ptr SegValue): SegStatus {.
+    exportc: "seg_file_field",
     capi.} =
   fieldRead(f, name, outValue, fo.f.fileField($name, v, err))
 
@@ -376,6 +416,7 @@ proc dlpackDeleter(self: ptr DLManagedTensor) {.cdecl.} =
 
 proc segTensorToDlpack(t: pointer): ptr DLManagedTensor {.exportc: "seg_tensor_to_dlpack",
     capi.} =
+  lastErrorBuf[0] = '\0'
   try:
     if t == nil: return nil
     let to = handle[TensorObj](t)
@@ -388,14 +429,19 @@ proc segTensorToDlpack(t: pointer): ptr DLManagedTensor {.exportc: "seg_tensor_t
     result.managerCtx = keep(to)
     result.deleter = dlpackDeleter
   except Exception:
-    lastError = getCurrentExceptionMsg()
+    setLastError(getCurrentExceptionMsg())
     result = nil
 
 # ------------------------------------------------------------------ reads --
 
 proc readNew(fo: FileObj, sel: seq[int], dtype: int32, cols: int64,
     outTensor: ptr pointer): SegStatus =
+  if cols < -1: return fail(SEG_ERR_ARGUMENT, "cols must be >= -1")
   let width = if cols >= 0: int(cols) else: fo.f.maxSamples(sel)
+  if not fitsBuffer(int64(sel.len), int64(width), elemSize(dtype)):
+    return fail(SEG_ERR_ARGUMENT, "rows x cols exceeds the library's buffer limit (1 TiB)")
+  if not canAllocate(int64(sel.len) * int64(width) * elemSize(dtype)):
+    return fail(SEG_ERR_IO, "out of memory")
   template go(T: typedesc) =
     var t = newTraceTensor[T](sel.len, width)
     if sel.len > 0: discard fo.f.readTracesInto(sel, t)
@@ -414,8 +460,9 @@ proc segReadRange(f: pointer, first, count: int64, dtype: int32, cols: int64,
     outTensor: ptr pointer): SegStatus {.exportc: "seg_read_range", capi.} =
   guarded:
     let bad = checkRead(f, dtype)
+    if outTensor != nil: outTensor[] = nil
     if bad.len > 0 or outTensor == nil: fail(SEG_ERR_ARGUMENT, if bad.len > 0: bad else: "NULL out")
-    elif first < 0 or count < 0 or first + count > int64(fileOf(f).f.len):
+    elif not rangeOk(first, count, int64(fileOf(f).f.len)):
       fail(SEG_ERR_ARGUMENT, "trace range out of bounds")
     else:
       var sel = newSeq[int](count)
@@ -427,6 +474,7 @@ proc segReadSelection(f: pointer, traces: ptr UncheckedArray[int64], n: int64, d
   guarded:
     let bad = checkRead(f, dtype)
     var sel: seq[int]
+    if outTensor != nil: outTensor[] = nil
     if bad.len > 0 or outTensor == nil: fail(SEG_ERR_ARGUMENT, if bad.len > 0: bad else: "NULL out")
     elif not selection(traces, n, fileOf(f).f, sel):
       fail(SEG_ERR_ARGUMENT, "the selection holds a trace out of bounds")
@@ -443,7 +491,7 @@ proc readInto(fo: FileObj, sel: seq[int], dtype: int32, buffer: pointer, cols,
             fo.f.readTracesRaw(sel, cast[ptr UncheckedArray[float64]](buffer), int(cols),
               int(rowStride), log)
   if failed != nil: failed[] = int64(n)
-  if n > 0: lastError = log[0].msg & " (" & $n & " traces left zero)"
+  if n > 0: setLastError(log[0].msg & " (" & $n & " traces left zero)")
   SEG_OK
 
 proc segReadRangeInto(f: pointer, first, count: int64, dtype: int32, buffer: pointer,
@@ -452,9 +500,10 @@ proc segReadRangeInto(f: pointer, first, count: int64, dtype: int32, buffer: poi
   guarded:
     let bad = checkRead(f, dtype)
     if bad.len > 0: fail(SEG_ERR_ARGUMENT, bad)
-    elif first < 0 or count < 0 or first + count > int64(fileOf(f).f.len):
+    elif not rangeOk(first, count, int64(fileOf(f).f.len)):
       fail(SEG_ERR_ARGUMENT, "trace range out of bounds")
-    elif cols < 0 or rowStride < cols or (count > 0 and buffer == nil):
+    elif cols < 0 or rowStride < cols or (count > 0 and buffer == nil) or
+        not fitsBuffer(count, rowStride, elemSize(dtype)):
       fail(SEG_ERR_ARGUMENT, "need cols >= 0, row_stride >= cols and a buffer")
     else:
       var sel = newSeq[int](count)
@@ -470,7 +519,8 @@ proc segReadSelectionInto(f: pointer, traces: ptr UncheckedArray[int64], n: int6
     if bad.len > 0: fail(SEG_ERR_ARGUMENT, bad)
     elif not selection(traces, n, fileOf(f).f, sel):
       fail(SEG_ERR_ARGUMENT, "the selection holds a trace out of bounds")
-    elif cols < 0 or rowStride < cols or (n > 0 and buffer == nil):
+    elif cols < 0 or rowStride < cols or (n > 0 and buffer == nil) or
+        not fitsBuffer(n, rowStride, elemSize(dtype)):
       fail(SEG_ERR_ARGUMENT, "need cols >= 0, row_stride >= cols and a buffer")
     else:
       readInto(fileOf(f), sel, dtype, buffer, cols, rowStride, failed)
@@ -493,7 +543,8 @@ proc segFileGatherCount(f: pointer, count: ptr int64): SegStatus {.exportc: "seg
       count[] = int64(fileOf(f).gathers.len)
       SEG_OK
 
-proc segFileGather(f: pointer, i: int64, outGather: ptr SegGather): SegStatus {.exportc: "seg_file_gather",
+proc segFileGather(f: pointer, i: int64, outGather: ptr SegGather): SegStatus {.
+    exportc: "seg_file_gather",
     capi.} =
   guarded:
     if f == nil or outGather == nil: fail(SEG_ERR_ARGUMENT, "NULL argument")
@@ -525,6 +576,7 @@ proc segComponentGroups(f: pointer, first, count: int64, groupOf: ptr UncheckedA
 
 proc segGeometryNew(outGeometry: ptr pointer): SegStatus {.exportc: "seg_geometry_new", capi.} =
   guarded:
+    if outGeometry != nil: outGeometry[] = nil
     if outGeometry == nil: fail(SEG_ERR_ARGUMENT, "NULL out")
     else:
       outGeometry[] = keep(GeometryObj())
@@ -568,17 +620,29 @@ proc segFileApplyGeometry(f, g: pointer, overwrite: int32, updated: ptr int64): 
 
 # --------------------------------------------------------------- prefetch --
 
+proc ringOk(fo: FileObj, depth, chunkTraces, width: int64, dtype: int32): bool =
+  # The prefetch ring (depth slots of min(chunk, traces) rows) fits the limit.
+  let rows = max(1'i64, min(chunkTraces, int64(fo.f.len)))
+  width >= 0 and depth > 0 and depth <= MaxBufferBytes div max(1'i64, rows) and
+    fitsBuffer(depth * rows, width, elemSize(dtype)) and
+    canAllocate(depth * rows * width * elemSize(dtype))
+
 proc segPrefetchOpen(f: pointer, first, last, chunkTraces, depth, cols: int64, dtype: int32,
     outPrefetch: ptr pointer): SegStatus {.exportc: "seg_prefetch_open", capi.} =
   guarded:
     let bad = checkRead(f, dtype)
     let n = if f != nil: int64(fileOf(f).f.len) else: 0
     let stop = if last < 0: n else: last
+    if outPrefetch != nil: outPrefetch[] = nil
     if bad.len > 0 or outPrefetch == nil:
       fail(SEG_ERR_ARGUMENT, if bad.len > 0: bad else: "NULL out")
     elif first < 0 or first > stop or stop > n: fail(SEG_ERR_ARGUMENT, "trace range out of bounds")
-    elif chunkTraces <= 0 or depth <= 0 or chunkTraces > 1 shl 24 or depth > 1024:
-      fail(SEG_ERR_ARGUMENT, "need 0 < chunk_traces <= 2^24 and 0 < depth <= 1024")
+    elif chunkTraces <= 0 or depth <= 0 or chunkTraces > 1 shl 24 or depth > 1024 or cols < -1:
+      fail(SEG_ERR_ARGUMENT, "need 0 < chunk_traces <= 2^24, 0 < depth <= 1024, cols >= -1")
+    elif (let w = (if cols >= 0: cols elif first < stop:
+                     int64(fileOf(f).f.maxSamples(int(first) ..< int(stop))) else: 0);
+          not ringOk(fileOf(f), depth, chunkTraces, w, dtype)):
+      fail(SEG_ERR_ARGUMENT, "depth x chunk x cols exceeds the library's buffer limit (1 TiB)")
     else:
       let po = PrefetchObj(file: fileOf(f), dtype: dtype)
       if dtype == SEG_F32:
@@ -591,17 +655,21 @@ proc segPrefetchOpen(f: pointer, first, last, chunkTraces, depth, cols: int64, d
       SEG_OK
 
 proc segPrefetchOpenSelection(f: pointer, traces: ptr UncheckedArray[int64], n: int64,
-    chunkTraces, depth, cols: int64, dtype: int32, outPrefetch: ptr pointer): SegStatus {.exportc: "seg_prefetch_open_selection",
-    capi.} =
+    chunkTraces, depth, cols: int64, dtype: int32, outPrefetch: ptr pointer): SegStatus {.
+    exportc: "seg_prefetch_open_selection", capi.} =
   guarded:
     let bad = checkRead(f, dtype)
     var sel: seq[int]
+    if outPrefetch != nil: outPrefetch[] = nil
     if bad.len > 0 or outPrefetch == nil:
       fail(SEG_ERR_ARGUMENT, if bad.len > 0: bad else: "NULL out")
+    elif chunkTraces <= 0 or depth <= 0 or chunkTraces > 1 shl 24 or depth > 1024 or cols < -1:
+      fail(SEG_ERR_ARGUMENT, "need 0 < chunk_traces <= 2^24, 0 < depth <= 1024, cols >= -1")
     elif not selection(traces, n, fileOf(f).f, sel):
       fail(SEG_ERR_ARGUMENT, "the selection holds a trace out of bounds")
-    elif chunkTraces <= 0 or depth <= 0 or chunkTraces > 1 shl 24 or depth > 1024:
-      fail(SEG_ERR_ARGUMENT, "need 0 < chunk_traces <= 2^24 and 0 < depth <= 1024")
+    elif not ringOk(fileOf(f), depth, chunkTraces,
+        (if cols >= 0: cols else: int64(fileOf(f).f.maxSamples(sel))), dtype):
+      fail(SEG_ERR_ARGUMENT, "depth x chunk x cols exceeds the library's buffer limit (1 TiB)")
     else:
       let po = PrefetchObj(file: fileOf(f), dtype: dtype)
       if dtype == SEG_F32:
@@ -627,7 +695,8 @@ template takeChunk(p: pointer, outChunk: ptr SegChunk, call: untyped): SegStatus
         else: SEG_NOT_READY
       if po.dtype == SEG_F32: body(po.p32, float32) else: body(po.p64, float64)
 
-proc segPrefetchTryNext(p: pointer, outChunk: ptr SegChunk): SegStatus {.exportc: "seg_prefetch_try_next",
+proc segPrefetchTryNext(p: pointer, outChunk: ptr SegChunk): SegStatus {.
+    exportc: "seg_prefetch_try_next",
     capi.} =
   takeChunk(p, outChunk, tryNext)
 
@@ -682,7 +751,8 @@ proc toEdit(v: ptr SegValue, e: var EditValue): bool =
   else: return false
   true
 
-proc segEditorOpen(path, journal: cstring, outEditor: ptr pointer): SegStatus {.exportc: "seg_editor_open",
+proc segEditorOpen(path, journal: cstring, outEditor: ptr pointer): SegStatus {.
+    exportc: "seg_editor_open",
     capi.} =
   guarded:
     if path == nil or outEditor == nil: fail(SEG_ERR_ARGUMENT, "path and out must not be NULL")
@@ -708,19 +778,23 @@ template editCall(e: pointer, name: cstring, value: ptr SegValue, call: untyped)
 
 proc segEditorSetTrace(e: pointer, trace: int64, name: cstring,
     value: ptr SegValue): SegStatus {.exportc: "seg_editor_set_trace", capi.} =
-  editCall(e, name, value, trace >= 0 and trace <= int64(high(int32)) * 1024 and
-    eo.ed.setField(int(trace), $name, v))
+  if e != nil and (trace < 0 or trace >= int64(handle[EditorObj](e).ed.file.len)):
+    return fail(SEG_ERR_ARGUMENT, "no trace " & $trace)
+  editCall(e, name, value, eo.ed.setField(int(trace), $name, v))
 
 proc segEditorSetRecord(e: pointer, record: int64, name: cstring,
     value: ptr SegValue): SegStatus {.exportc: "seg_editor_set_record", capi.} =
-  editCall(e, name, value, record >= 0 and record <= int64(high(int32)) and
-    eo.ed.setRecordField(int(record), $name, v))
+  if e != nil and (record < 0 or
+      record >= int64(handle[EditorObj](e).ed.file.index.segdRecords.len)):
+    return fail(SEG_ERR_ARGUMENT, "no SEG-D record " & $record)
+  editCall(e, name, value, eo.ed.setRecordField(int(record), $name, v))
 
-proc segEditorSetFile(e: pointer, name: cstring, value: ptr SegValue): SegStatus {.exportc: "seg_editor_set_file",
+proc segEditorSetFile(e: pointer, name: cstring, value: ptr SegValue): SegStatus {.
+    exportc: "seg_editor_set_file",
     capi.} =
   editCall(e, name, value, eo.ed.setField($name, v))
 
-proc segEditorEdits(e: pointer): int64 {.exportc: "seg_editor_edits", capi.} =
+proc segEditorEdits(e: pointer): int64 {.exportc: "seg_editor_edits", capi, raises: [].} =
   if e == nil: -1 else: int64(handle[EditorObj](e).ed.edits)
 
 proc segEditorLog(e: pointer): pointer {.exportc: "seg_editor_log", capi.} =
@@ -744,6 +818,7 @@ proc segEditorClose(e: pointer): SegStatus {.exportc: "seg_editor_close", capi.}
 
 template journalCall(path, journal: cstring, outLog: ptr pointer, call: untyped): SegStatus =
   guarded:
+    if outLog != nil: outLog[] = nil
     if path == nil or journal == nil: fail(SEG_ERR_ARGUMENT, "path and journal must not be NULL")
     else:
       let log = call($path, $journal)
@@ -753,11 +828,13 @@ template journalCall(path, journal: cstring, outLog: ptr pointer, call: untyped)
         " journal entries could not be applied (see the log)")
       else: SEG_OK
 
-proc segJournalRollback(path, journal: cstring, outLog: ptr pointer): SegStatus {.exportc: "seg_journal_rollback",
+proc segJournalRollback(path, journal: cstring, outLog: ptr pointer): SegStatus {.
+    exportc: "seg_journal_rollback",
     capi.} =
   journalCall(path, journal, outLog, rollbackJournal)
 
-proc segJournalApply(path, journal: cstring, outLog: ptr pointer): SegStatus {.exportc: "seg_journal_apply",
+proc segJournalApply(path, journal: cstring, outLog: ptr pointer): SegStatus {.
+    exportc: "seg_journal_apply",
     capi.} =
   journalCall(path, journal, outLog, applyJournal)
 
@@ -770,15 +847,16 @@ const codeNames = block:
 
 proc logOf(l: pointer): LogObj {.inline.} = cast[LogObj](l)
 
-proc segLogCount(l: pointer): int64 {.exportc: "seg_log_count", capi.} =
+proc segLogCount(l: pointer): int64 {.exportc: "seg_log_count", capi, raises: [].} =
   if l == nil: -1 else: int64(logOf(l).log.len)
 
 proc segLogCountSeverity(l: pointer, severity: int32): int64 {.exportc: "seg_log_count_severity",
-    capi.} =
+    capi, raises: [].} =
   if l == nil or severity < 0 or severity > ord(high(Severity)): -1
   else: int64(logOf(l).log.count(Severity(severity)))
 
-proc segLogGet(l: pointer, i: int64, outDiag: ptr SegDiagnostic): SegStatus {.exportc: "seg_log_get",
+proc segLogGet(l: pointer, i: int64, outDiag: ptr SegDiagnostic): SegStatus {.
+    exportc: "seg_log_get",
     capi.} =
   guarded:
     if l == nil or outDiag == nil: fail(SEG_ERR_ARGUMENT, "NULL argument")
@@ -819,6 +897,7 @@ proc segConvertOptionsDefault(o: ptr SegConvertOptions) {.exportc: "seg_convert_
 proc segConvert(src, dst: cstring, opts: ptr SegConvertOptions,
     outLog: ptr pointer): SegStatus {.exportc: "seg_convert", capi.} =
   guarded:
+    if outLog != nil: outLog[] = nil
     if src == nil or dst == nil: fail(SEG_ERR_ARGUMENT, "src and dst must not be NULL")
     elif opts != nil and (opts.revMajor notin 0..2 or opts.revMinor notin 0..1 or
         opts.byteOrder notin 0..2 or opts.textEncoding notin 0..1 or
