@@ -26,6 +26,12 @@ from the history sections of the later documents.
   - SEG-D uses **one** `SegdRecord` type for Rev 1-3.1, whose optional blocks are variant
     objects keyed by block type.
   - An auto-detecting `openSeismic(path)` covers both standards.
+- **Files change only on an explicit write (owner, 2026-11-07).** Opening, indexing,
+  joining survey geometry (`applySurvey`/`applyGeometry`) and every other read-side call work
+  on in-memory state only, and files are mapped read-only. Bytes on disk change only through
+  a call whose purpose is writing: the writers (`writeSegy`, `writeSegd`, `writeSps`,
+  `writeP1`, `convertFile`) or the journaled `HeaderEditor` (`openSeismic(writable = true)`).
+  New APIs follow this rule; persisting derived data is always a separate, named call.
 - **Sample storage: Arraymancer `Tensor`.** Trace samples live in `Tensor[float32]` (or
   `float64` for 8080 / SEG-Y format 6), shaped `[traces, samples]` per channel set or gather.
   This sets the library up for HPC processing.
@@ -286,6 +292,24 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       undo journal (apply/rollback), refuse size-changing edits; tests on synthetic SEG-Y/SEG-D
 - [x] 6.7 Large-file test: a sparse synthetic file larger than 4 GB (index build, a range read
       near the end, an in-place edit near the end) to prove 64-bit offsets work
+- [ ] 6.8 Format-independent file summary (owner, 2026-11-07), so that a viewer or processing
+      job never branches on `f.kind` or the revision for common metadata. `FileSummary`
+      (`f.summary`):
+      - standard and revision;
+      - sample interval and record length (when uniform, else per channel set / NaN);
+      - trace count, record count, and first/last field record;
+      - coordinate units (SEG-Y binary 3255-3256 / trace bytes 89-90; SEG-D Rev 3 CRS) and
+        CRS text when present (`crsFormat`);
+      - byte order and sample format(s).
+
+      Exposed through the C ABI (`seg_file_summary`), Python (`summary()`) and `info`.
+- [ ] 6.9 Trace time in `TraceKeys` (`time`: UTC seconds as float64, NaN if unknown):
+      - SEG-Y: trace bytes 157-170 (year/day/h/m/s, time basis code);
+      - SEG-D Rev 1/2: GH1 date/time;
+      - SEG-D Rev 3: the GH UTC time stamp and per-trace THE time when present.
+
+      Update `SegTraceKeys` in the C ABI (append the field, keeping the ABI version rules) and
+      `trace_keys` in Python.
 
 ### Phase 8: Embeddable library (Nim import, C ABI `.so`/`.dll`), done BEFORE Phase 7
 (Owner decision, 2026-11-07: Phase 8 first, then Phase 7, whose CLI is built on Phase 8's API.
@@ -406,6 +430,21 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
       midpoints, especially for SEG-D 2.x, which has no coordinates in its headers. Exposed in
       the public API, C ABI, Python and the CLI (`info --sps`/`--p1`).
 - [x] 10.4 Review by an agent; fix its findings.
+- [ ] 10.5 Explicit write-back of joined geometry (owner rule: files change only on an explicit
+      write). `applySurvey` stays in memory. A separate, named call persists it:
+      - `writeGeometry(editor, ix, fields)` through the journaled `HeaderEditor` (in place,
+        same-size fields only, undoable);
+      - or as part of `convertFile` into a new file.
+
+      Targets:
+      - SEG-Y: source/group X/Y with the coordinate scalar, elevations, line/point via the
+        layout;
+      - SEG-D Rev 1/2: THE#1 receiver line/point/index;
+      - SEG-D Rev 3: THE#1, plus Position blocks only where they already exist.
+
+      Fields with no slot in the target are reported, not dropped silently. Exposed in the C
+      ABI, Python and the CLI (`survey-apply <file> --sps ... [-o out | --in-place]`); without
+      `-o` or `--in-place` the CLI only reports what would change.
 
 ### Phase 11: SEG-2 (queued after Phase 10)
 - [ ] 11.1 `Seg2File` reader (descriptor blocks, keyword strings, formats 1-5, byte order),
@@ -773,3 +812,4 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
     - Phase 11 (SEG-2).
   - Owner: real SPS/P1 and SEG-2 files, and a multiplexed SEG-D file, would let these be verified.
 
+- 2026-11-07: Owner rule added to "Owner decisions": files change only on an explicit write. Confirmed that `applySurvey`/`applyGeometry` only change in-memory `TraceKeys`, and `openSeismic` maps read-only unless `writable = true` (`HeaderEditor`). New tasks: 6.8 `FileSummary` (format-independent metadata) and 6.9 trace time in `TraceKeys` (so viewers need no per-format branches); 10.5 explicit, journaled write-back of joined geometry. Still open: 4.7 (needs a decision), Phase 11.
