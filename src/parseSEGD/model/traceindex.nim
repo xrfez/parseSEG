@@ -408,3 +408,11 @@ proc readTraces*(f: SeismicFile, traces: openArray[int],
   f.checkSelection(traces)
   result = newTraceTensor[T](traces.len, f.maxSamples(traces))
   if traces.len > 0: f.readTracesInto(traces, result)
+
+proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): int =
+  ## Joins external geometry (survey files, a host's database) to every
+  ## trace's keys on (line, point, index); see `keys.applyGeometry`. Returns
+  ## the number of traces changed. Needs an index built with `keys = true`.
+  doAssert ix.keys.len == ix.entries.len, "build the index with keys = true"
+  for k in ix.keys.mitems:
+    if k.applyGeometry(g, overwrite): inc result

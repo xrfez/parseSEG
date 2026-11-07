@@ -131,6 +131,7 @@ typedef struct SegTensor SegTensor;     /* a 2-D sample array owned by the libra
 typedef struct SegPrefetch SegPrefetch; /* read-ahead on a worker thread */
 typedef struct SegEditor SegEditor;     /* in-place header edits with an undo journal */
 typedef struct SegLog SegLog;           /* a list of diagnostics */
+typedef struct SegGeometry SegGeometry; /* source/receiver coordinates by station */
 
 /* ---- structs (filled by the library through out pointers) ------------ */
 
@@ -145,7 +146,11 @@ typedef struct SegTraceEntry {
     uint8_t  channel_type; /* SEG-D channel type (Rev 1/2: 1 = seismic; Rev 3: 0x10 = seismic) */
 } SegTraceEntry;
 
-/* A trace's geometry (with SEG_OPEN_KEYS). NaN or 0 where unknown. */
+/* A trace's geometry (with SEG_OPEN_KEYS). NaN or 0 where unknown.
+   Coordinates come from SEG-Y headers (through the file's Layout), SEG-D Rev 3
+   Position blocks (axis order as the CRS stores them), or a SegGeometry
+   table (seg_file_apply_geometry). `offset` is SEG-Y's header offset, else the
+   source-receiver distance once both positions are known. */
 typedef struct SegTraceKeys {
     double  record;     /* SEG-Y field record; SEG-D file number */
     double  ensemble;   /* SEG-Y ensemble (CDP) number */
@@ -154,6 +159,8 @@ typedef struct SegTraceKeys {
     double  src_x, src_y;
     double  rcv_line, rcv_point;
     double  rcv_x, rcv_y;
+    double  src_z, rcv_z;  /* elevations (SEG-Y scaled; SEG-D Rev 3 coordinate 3) */
+    double  cmp_x, cmp_y;  /* midpoint: SEG-Y CDP X/Y, else halfway source-receiver */
     int16_t src_index, rcv_index;    /* SEG-D point indices */
     uint8_t depth_index, reshoot_index; /* SEG-D Rev 3 THE#1 bytes 10 and 8 */
     uint8_t sensor_type;  /* SEG-D THE#1 byte 21 */
@@ -329,6 +336,24 @@ SegStatus seg_file_gather(SegFile *file, int64_t index, SegGather *out);
    number of groups. group_of must hold `count` entries. */
 SegStatus seg_component_groups(SegFile *file, int64_t first, int64_t count, int64_t *group_of,
                                int64_t *groups);
+
+/* ---- external geometry (needs SEG_OPEN_KEYS) ------------------------- */
+/* Coordinates by station (line, point, index), e.g. from SPS or SEG P1
+   files or a project database, joined to the traces' keys. A station added
+   with index 0 matches any point index; an exact index wins. z may be NaN. */
+
+SegStatus seg_geometry_new(SegGeometry **out);
+SegStatus seg_geometry_add_source(SegGeometry *geometry, double line, double point,
+                                  int32_t index, double x, double y, double z);
+SegStatus seg_geometry_add_receiver(SegGeometry *geometry, double line, double point,
+                                    int32_t index, double x, double y, double z);
+void seg_geometry_release(SegGeometry *geometry);
+
+/* Fills each trace's unknown source and receiver coordinates (all of them
+   if `overwrite`), then its offset and midpoint, and refreshes the gathers.
+   `updated` (may be NULL) receives the number of traces changed. */
+SegStatus seg_file_apply_geometry(SegFile *file, const SegGeometry *geometry,
+                                  int32_t overwrite, int64_t *updated);
 
 /* ---- read-ahead ------------------------------------------------------ */
 /* A worker thread decodes chunks of `chunk_traces` rows, at most `depth`

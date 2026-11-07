@@ -2,7 +2,7 @@
 
 import std/[assertions, os, math]
 import parseSEGD/io/diskio
-import parseSEGD/segy/[reader as segyreader, writer as segywriter]
+import parseSEGD/segy/[reader as segyreader, writer as segywriter, fields]
 import parseSEGD/segd/[reader as segdreader, writer as segdwriter]
 import parseSEGD/model/[traceindex, gathers]
 
@@ -175,3 +175,41 @@ block segd_rev3_receiver_gather:
   # Traces without their own source block fall back to the record's.
   doAssert f.index.keys[0].srcPoint == 113
   f.close()
+
+block segd_rev3_positions_offsets_and_midpoints:
+  # Task 8.5: Rev 3 Position blocks give coordinates; the record-level one
+  # (INOVA writes it before the Source Description) is the source's.
+  var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd", keys = true)
+  let k = f.index.keys[3]
+  doAssert k.rcvX == 1826232.375 and k.rcvY == 446233.8125 and k.rcvZ == 1061.800048828125
+  doAssert k.srcX == 1834704.375 and k.srcY == 445679.53125
+  doAssert abs(k.offset - hypot(1834704.375 - 1826232.375, 445679.53125 - 446233.8125)) < 1e-9
+  doAssert k.cmpX == (k.srcX + k.rcvX) / 2 and k.cmpY == (k.srcY + k.rcvY) / 2
+  # Auxiliary traces' Position blocks are flagged invalid: no receiver coordinates.
+  doAssert f.index.keys[0].rcvX.isNaN and f.index.keys[0].offset.isNaN
+  f.close()
+
+block external_geometry_joins_on_stations:
+  # SEG-D 2.x has no coordinates: join them from a table (SPS in Phase 10).
+  var f = openSeismic(exampleDir / "63.sgd", keys = true)
+  let k0 = f.index.keys[0]
+  doAssert k0.rcvX.isNaN and k0.srcX.isNaN and k0.offset.isNaN
+  var g: GeometryTable
+  g.addSource(13, 99.5, 1, 1000, 2000, 5)
+  g.addReceiver(13, 104, 0, 1300, 2400) # index 0 matches any point index
+  doAssert f.index.applyGeometry(g) == 1
+  let k = f.index.keys[0]
+  doAssert k.srcX == 1000 and k.srcZ == 5 and k.rcvX == 1300 and k.rcvZ.isNaN
+  doAssert k.offset == 500 and k.cmpX == 1150 and k.cmpY == 2200
+  doAssert f.index.applyGeometry(g) == 0 # already filled, not overwritten
+  g.addReceiver(13, 104, 1, 1000, 2000)  # an exact index wins over the wildcard
+  doAssert f.index.applyGeometry(g, overwrite = true) == 1
+  doAssert f.index.keys[0].offset == 0 and f.index.keys[0].cmpX == 1000
+  f.close()
+  # SEG-Y: the header's CDP coordinates are the midpoint.
+  var y = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy", keys = true)
+  let d = readSegyHeaders(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  for i in [0, 57, 199]:
+    let gm = d.file.geometry(d.traces[i]) # Inglewood's Layout maps cdp_x to byte 73
+    doAssert y.index.keys[i].cmpX == gm.cdpX and y.index.keys[i].cmpY == gm.cdpY
+  y.close()

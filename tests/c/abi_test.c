@@ -41,7 +41,9 @@ static void test_layout(void) {
     OFF(SegTraceKeys, record); OFF(SegTraceKeys, ensemble); OFF(SegTraceKeys, offset);
     OFF(SegTraceKeys, src_line); OFF(SegTraceKeys, src_point); OFF(SegTraceKeys, src_x);
     OFF(SegTraceKeys, src_y); OFF(SegTraceKeys, rcv_line); OFF(SegTraceKeys, rcv_point);
-    OFF(SegTraceKeys, rcv_x); OFF(SegTraceKeys, rcv_y); OFF(SegTraceKeys, src_index);
+    OFF(SegTraceKeys, rcv_x); OFF(SegTraceKeys, rcv_y); OFF(SegTraceKeys, src_z);
+    OFF(SegTraceKeys, rcv_z); OFF(SegTraceKeys, cmp_x); OFF(SegTraceKeys, cmp_y);
+    OFF(SegTraceKeys, src_index);
     OFF(SegTraceKeys, rcv_index); OFF(SegTraceKeys, depth_index);
     OFF(SegTraceKeys, reshoot_index); OFF(SegTraceKeys, sensor_type); OFF(SegTraceKeys, component);
     OFF(SegTensorView, data); OFF(SegTensorView, dtype); OFF(SegTensorView, rank);
@@ -189,9 +191,28 @@ static void test_gathers_and_prefetch(void) {
     SegGather g;
     OK(seg_file_gather(f, 0, &g));
     CHECK(g.kind == SEG_GATHER_SHOT && g.first == 0 && g.count == 5 && g.receivers == 2);
+    SegTraceKeys k;
+    OK(seg_file_trace_keys(f, 3, &k));
+    CHECK(k.rcv_x == 1826232.375 && k.src_x == 1834704.375 && k.offset > 8000 && k.offset < 9000);
+    CHECK(k.cmp_x == (k.src_x + k.rcv_x) / 2);
     int64_t group_of[5], groups = -1;
     OK(seg_component_groups(f, 0, 5, group_of, &groups));
     CHECK(groups == 2 && group_of[0] == -1 && group_of[3] == 0 && group_of[4] == 1);
+    seg_file_release(f);
+
+    /* External geometry: SEG-D 2.0 has no coordinates in its headers. */
+    OK(seg_file_open(path(dir, "63.sgd"), SEG_OPEN_KEYS, &f));
+    SegGeometry *geo = NULL;
+    OK(seg_geometry_new(&geo));
+    OK(seg_geometry_add_source(geo, 13, 99.5, 1, 1000, 2000, NAN));
+    OK(seg_geometry_add_receiver(geo, 13, 104, 0, 1300, 2400, 7));
+    CHECK(seg_geometry_add_receiver(geo, 1, 1, 70000, 0, 0, 0) == SEG_ERR_ARGUMENT);
+    int64_t updated = -1;
+    OK(seg_file_apply_geometry(f, geo, 0, &updated));
+    CHECK(updated == 1);
+    OK(seg_file_trace_keys(f, 0, &k));
+    CHECK(k.offset == 500 && k.cmp_y == 2200 && k.rcv_z == 7 && isnan(k.src_z));
+    seg_geometry_release(geo);
     seg_file_release(f);
 
     OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), 0, &f));

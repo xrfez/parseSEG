@@ -303,7 +303,7 @@ Tasks:
       struct names, a documented header (generated, then commented or wrapped), version symbol.
 - [x] 8.4 C test program (and a Python ctypes/numpy smoke test) against the shipped header and
       `.so`; CI builds the `.so`/`.dll`.
-- [ ] 8.5 Geometry for processing: coordinates for SEG-D (Rev 3 position blocks), offsets and
+- [x] 8.5 Geometry for processing: coordinates for SEG-D (Rev 3 position blocks), offsets and
       midpoints from coordinates, and a hook to attach external geometry (filled by Phase 10).
 - [ ] 8.6 Cross-standard and cross-revision conversion as library procs (used by `convert`).
       Samples go through Tensors (decode, then encode in the target format). Headers go through
@@ -421,3 +421,9 @@ Tasks:
   - `abi_test.c` checks every struct's sizeof and every field's offsetof against `seg_sizeof`/`seg_offsetof`, and exercises every function: SEG-Y/SEG-D/junk files, fields, logs, reads into tensors and caller buffers, selections, DLPack (released after the source tensor), gathers, component groups, prefetch (with its file released first), seek and try_next, edits with refusals, rollback (byte-identical) and apply, plus 4 pthreads reading one `SegFile` concurrently.
   - `-d:capiSanitize` reruns it under ASan and TSan; both are clean. ASan found a leak, now fixed: `FileObj(f: openSeismic(...))` leaked the half-built handle when `openSeismic` raised (a missing file), so the open now happens into a local first (also in `seg_editor_open`).
   - CI fetches Atlas deps, runs `nim test`, builds `nim lib` and uploads the `.so` and header.
+- 2026-11-07: Task 8.5 done.
+  - `TraceKeys` gains `srcZ`, `rcvZ`, `cmpX` and `cmpY`. `deriveGeometry` fills the offset (the source-receiver distance) and the midpoint once both ends have coordinates; SEG-Y's signed header offset is kept unless 0.
+  - SEG-D Rev 3 Position blocks (0x50-0x52): the first valid, not-bad tuple with finite coordinates 1-2 is used, in the CRS's own axis order. In trace extensions a block after a source description is the source's, after a measurement block (0x61) it is ignored, else it is the receiver's. In the general headers it is the source's, because INOVA writes it *before* the 0x16 Source Description. On the INOVA fixture the receivers are at (1826232.4, 446233.8, z 1061.8) and the source at (1834704.4, 445679.5), giving an offset of about 8490 m; the aux traces' blocks are flagged invalid.
+  - SEG-Y: elevations, and the CDP X/Y as the midpoint, come through the Layout.
+  - External geometry hook: `GeometryTable` (`addSource`/`addReceiver` by (line, point, index); index 0 matches any index, an exact index wins), and `applyGeometry(keys | index, table, overwrite)`. Phase 10 fills it from SPS/P1.
+  - C ABI: `SegTraceKeys` gains the 4 fields (layout test updated), plus `SegGeometry` (`seg_geometry_new`/`add_source`/`add_receiver`/`release`) and `seg_file_apply_geometry`, which also invalidates the cached gathers.

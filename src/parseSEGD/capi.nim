@@ -122,6 +122,9 @@ type
     ed: HeaderEditor
     log: LogObj
 
+  GeometryObj = ref object
+    g: GeometryTable
+
 var lastError {.threadvar.}: string
 var initLock: Lock
 var initialized: bool
@@ -507,6 +510,51 @@ proc segComponentGroups(f: pointer, first, count: int64, groupOf: ptr UncheckedA
       if groups != nil: groups[] = int64(cg.len)
       SEG_OK
 
+# --------------------------------------------------------------- geometry --
+
+proc segGeometryNew(outGeometry: ptr pointer): SegStatus {.exportc: "seg_geometry_new", capi.} =
+  guarded:
+    if outGeometry == nil: fail(SEG_ERR_ARGUMENT, "NULL out")
+    else:
+      outGeometry[] = keep(GeometryObj())
+      SEG_OK
+
+template addStation(g: pointer, index: int32, call: untyped): SegStatus =
+  guarded:
+    if g == nil: fail(SEG_ERR_ARGUMENT, "NULL geometry")
+    elif index < int32(low(int16)) or index > int32(high(int16)):
+      fail(SEG_ERR_ARGUMENT, "point index out of range")
+    else:
+      let go {.inject.} = handle[GeometryObj](g)
+      call
+      SEG_OK
+
+proc segGeometryAddSource(g: pointer, line, point: float64, index: int32,
+    x, y, z: float64): SegStatus {.exportc: "seg_geometry_add_source", capi.} =
+  addStation(g, index, go.g.addSource(line, point, int16(index), x, y, z))
+
+proc segGeometryAddReceiver(g: pointer, line, point: float64, index: int32,
+    x, y, z: float64): SegStatus {.exportc: "seg_geometry_add_receiver", capi.} =
+  addStation(g, index, go.g.addReceiver(line, point, int16(index), x, y, z))
+
+proc segGeometryRelease(g: pointer) {.exportc: "seg_geometry_release", capi.} =
+  try:
+    if g != nil: GC_unref(handle[GeometryObj](g))
+  except Exception: discard
+
+proc segFileApplyGeometry(f, g: pointer, overwrite: int32, updated: ptr int64): SegStatus {.
+    exportc: "seg_file_apply_geometry", capi.} =
+  guarded:
+    if f == nil or g == nil: fail(SEG_ERR_ARGUMENT, "NULL argument")
+    elif fileOf(f).f.index.keys.len != fileOf(f).f.len:
+      fail(SEG_ERR_STATE, "open the file with SEG_OPEN_KEYS")
+    else:
+      let fo = fileOf(f)
+      let n = fo.f.index.applyGeometry(handle[GeometryObj](g).g, overwrite != 0)
+      fo.gathersDone = false # sources and receivers may now be told apart
+      if updated != nil: updated[] = int64(n)
+      SEG_OK
+
 # --------------------------------------------------------------- prefetch --
 
 proc segPrefetchOpen(f: pointer, first, last, chunkTraces, depth, cols: int64, dtype: int32,
@@ -785,6 +833,10 @@ proc segOffsetof(name, field: cstring): int64 {.exportc: "seg_offsetof", capi.} 
   of "SegTraceKeys.rcv_point": o(TraceKeys, rcvPoint)
   of "SegTraceKeys.rcv_x": o(TraceKeys, rcvX)
   of "SegTraceKeys.rcv_y": o(TraceKeys, rcvY)
+  of "SegTraceKeys.src_z": o(TraceKeys, srcZ)
+  of "SegTraceKeys.rcv_z": o(TraceKeys, rcvZ)
+  of "SegTraceKeys.cmp_x": o(TraceKeys, cmpX)
+  of "SegTraceKeys.cmp_y": o(TraceKeys, cmpY)
   of "SegTraceKeys.src_index": o(TraceKeys, srcIndex)
   of "SegTraceKeys.rcv_index": o(TraceKeys, rcvIndex)
   of "SegTraceKeys.depth_index": o(TraceKeys, depthIndex)
