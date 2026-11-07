@@ -127,7 +127,7 @@ writers validate before emitting.
       (text: `seg_y_rev2_1-oct2023.txt` plus `seg-y_rev2-1_clarification_2025-05-01.txt`; skip
       the superseded Rev 2.0 doc). It must cover the byte-order marker (3297-3300), extended
       text count −1, additional trace headers, data trailers, and new formats.
-- [ ] 1.6b **SEG-D Rev 2.0 full note** (blocked until the owner adds the PDF to `SEG Spec/`). Steps:
+- [ ] 1.6b **SEG-D Rev 2.0 full note**. The PDF was added and its text extracted (pages 13-16 are image-only figures; the block order is confirmed by `63.sgd`). Distiller running. Steps:
       (1) run `tools/extract_specs.sh` (local, no tokens; install `poppler-utils` first if missing);
       (2) one subagent distills `SEG Spec/text/<2.0 file>.txt` into `docs/spec/segd_rev2_0.md` per
       CONVENTIONS.md, and **cross-checks it against `segd_rev2_0_delta.md` and the `63.sgd` walk**
@@ -182,3 +182,4 @@ writers validate before emitting.
 - 2026-11-07: The owner added sample files and answered the questions (tape = tape-ready output; never fail silently). The sample headers were inspected and the plan updated: Rev 2.0 SEG-D, Rev 0 LE SEG-Y and the Rev 2.1 SEG-Y note were added. The 65 MB Rev 3.0 sample is git-ignored.
 - 2026-11-07: Owner priorities were recorded: SEG-D 2.0 is the most important; one data model for all revisions; byte-order option on write; extended/user blocks are first-class; tape low priority; 1-trace fixture from the 65 MB file.
 - 2026-11-07: The owner asked for the SEG-D 2.0 PDF to be extracted, but the PDF is not in the workspace yet. Task 1.6b was added (blocked).
+- 2026-11-07: The SEG-D Rev 2 PDF (Dec 1996, manufacturer list rev. Jan 2006) was added, extracted and committed. A subagent is writing segd_rev2_0.md.
