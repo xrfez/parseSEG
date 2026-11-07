@@ -362,7 +362,7 @@ Tasks:
 - [x] 7.3 NIF header export/import: streamed export (fields + raw, or fields only); import as
       a patch (diff → in-place journaled edits, or rewrite with the original samples). CLI:
       `parseSEGD headers|edit|export|import`
-- [ ] 7.2 Docs and CI updates
+- [x] 7.2 Docs and CI updates
 
 ### Phase 9: Rename the project to parseSEG
 - [ ] 9.1 Rename `parseSEGD` to `parseSEG` everywhere: package, nimble file, `src/parseSEGD*`,
@@ -610,4 +610,8 @@ Tasks:
     - CLI: `vendormap check|list|apply|scaffold` (with `--map`).
     - The INOVA sample scaffolds 122 areas, including the 9 trace blocks 0xB0-0xB8. The skeleton checks ok and `apply` decodes them; scaffolding again with it finds nothing unmapped.
   - Tests: `tests/tcli.nim` builds the CLI and runs every command on the samples, covering outputs, written files, journals, bad input and exit codes.
+- 2026-11-07: Task 7.2 done.
+  - README: rewritten introduction (Nim, CLI, C and Python entry points), CLI examples, the real directory layout, and the build modes now building the CLI.
+  - `docs/api.md`: SEG-D revision conversion, header NIF documents, vendor scaffolding, files that unmap themselves.
+  - CI: builds `nim cli` on every OS, smoke-tests it on Windows and macOS (`info`, `convert`), and uploads it with the libraries.
 
