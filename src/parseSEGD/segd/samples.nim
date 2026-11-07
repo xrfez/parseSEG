@@ -1,0 +1,200 @@
+## SEG-D demultiplexed sample codecs on byte buffers (spec notes
+## `segd_rev2_0.md` §5, `segd_rev3_0_a.md` §5). All formats are big-endian.
+##
+## Decoders give the recorded value; multiply by `2^mpFactor` (Rev 2 CSD) for
+## millivolts. Rev 2 multiplexed codes (0015 ... 0058) are not supported:
+## `toSegdFormat` rejects them and readers keep such traces raw.
+##
+## | Code | Format | Bytes |
+## |---|---|---|
+## | 8015 | 20-bit binary exponent, one's complement fraction | 10 per 4 samples |
+## | 8022 / 8024 | quaternary exponent, one's complement 4 / 12-bit fraction | 1 / 2 |
+## | 8042 / 8044 | hexadecimal exponent, sign-magnitude 5 / 13-bit fraction | 1 / 2 |
+## | 8048 | hexadecimal excess-64 (IBM-like, 23-bit fraction) | 4 |
+## | 8036 / 8038 | two's complement integer | 3 / 4 |
+## | 8058 / 8080 | IEEE single / double (8080 from Rev 3.0) | 4 / 8 |
+
+import std/math
+import ../common/[endians, ibmfloat, errors]
+
+type
+  SegdSampleFormat* = enum
+    sd8015 = 8015, sd8022 = 8022, sd8024 = 8024, sd8036 = 8036, sd8038 = 8038,
+    sd8042 = 8042, sd8044 = 8044, sd8048 = 8048, sd8058 = 8058, sd8080 = 8080
+
+  SegdSampleType* = float32 | float64
+
+const segdSampleFormats* = [sd8015, sd8022, sd8024, sd8036, sd8038, sd8042, sd8044, sd8048,
+  sd8058, sd8080]
+  ## Every supported code (the enum has holes and cannot be iterated).
+
+func toSegdFormat*(code: int, f: var SegdSampleFormat): bool =
+  ## Converts a format code; false for undefined or multiplexed codes.
+  result = false
+  for x in segdSampleFormats:
+    if ord(x) == code:
+      f = x
+      result = true
+
+func dataBytes*(f: SegdSampleFormat, samples: int): int =
+  ## Bytes holding `samples` samples. 8015 packs 4 samples in 10 bytes; a
+  ## count that is not a multiple of 4 (spec-invalid) is rounded up.
+  case f
+  of sd8015: (samples + 3) div 4 * 10
+  of sd8022, sd8042: samples
+  of sd8024, sd8044: 2 * samples
+  of sd8036: 3 * samples
+  of sd8038, sd8048, sd8058: 4 * samples
+  of sd8080: 8 * samples
+
+func prefersFloat64*(f: SegdSampleFormat): bool =
+  ## True when float32 would lose precision: 8080 and 32-bit integers.
+  f in {sd8080, sd8038}
+
+func onesFraction(q, mask: uint32, negative: bool): int {.inline.} =
+  # One's complement fraction: a negative value stores the inverted magnitude.
+  # Negative zero (all bits set) reads as 0.
+  if negative: -int((not q) and mask) else: int(q)
+
+proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
+    dst: var openArray[T], twosComplement8015 = false) =
+  ## Decodes `dst.len` samples of format `f` from the start of `src`.
+  ## `twosComplement8015` reads 8015 fractions as two's complement, as some
+  ## field systems write them (the spec says one's complement). Raises
+  ## `SegTruncatedError` if `src` is too short.
+  let n = dst.len
+  if src.len < dataBytes(f, n):
+    raiseTruncated("trace data has " & $src.len & " bytes, " & $dataBytes(f, n) &
+      " needed for " & $n & " samples")
+  case f
+  of sd8015:
+    var i = 0
+    while i < n:
+      let g = 10 * (i div 4)
+      for k in 0..3:
+        if i + k < n:
+          let e = if k mod 2 == 0: src[g + k div 2] shr 4 else: src[g + k div 2] and 0xF
+          let w = uint32(beU16(src, g + 2 + 2 * k))
+          let m = if twosComplement8015: int(cast[int16](uint16(w)))
+                  else: onesFraction(w and 0x7FFF, 0x7FFF, (w and 0x8000) != 0)
+          dst[i + k] = T(float64(m) / 32768.0 * float64(1 shl e))
+      i += 4
+  of sd8022:
+    for i in 0..<n:
+      let b = uint32(src[i])
+      let m = onesFraction(b and 0xF, 0xF, (b and 0x80) != 0)
+      dst[i] = T(float64(m) / 16.0 * pow(4.0, float64((b shr 4) and 7)))
+  of sd8024:
+    for i in 0..<n:
+      let w = uint32(beU16(src, 2 * i))
+      let m = onesFraction(w and 0xFFF, 0xFFF, (w and 0x8000) != 0)
+      dst[i] = T(float64(m) / 4096.0 * pow(4.0, float64((w shr 12) and 7)))
+  of sd8042:
+    for i in 0..<n:
+      let b = uint32(src[i])
+      let v = float64(b and 0x1F) / 32.0 * pow(16.0, float64((b shr 5) and 3))
+      dst[i] = T(if (b and 0x80) != 0: -v else: v)
+  of sd8044:
+    for i in 0..<n:
+      let w = uint32(beU16(src, 2 * i))
+      let v = float64(w and 0x1FFF) / 8192.0 * pow(16.0, float64((w shr 13) and 3))
+      dst[i] = T(if (w and 0x8000) != 0: -v else: v)
+  of sd8048:
+    for i in 0..<n:
+      when T is float64: dst[i] = ibmToFloat64(beU32(src, 4 * i))
+      else: dst[i] = ibmToFloat32(beU32(src, 4 * i))
+  of sd8036:
+    for i in 0..<n: dst[i] = T(beI24(src, 3 * i))
+  of sd8038:
+    for i in 0..<n: dst[i] = T(beI32(src, 4 * i))
+  of sd8058:
+    for i in 0..<n: dst[i] = T(beF32(src, 4 * i))
+  of sd8080:
+    for i in 0..<n: dst[i] = T(beF64(src, 8 * i))
+
+proc expFraction(x: float64, base: float64, maxExp, fracBits: int, i: int):
+    tuple[e: int, mag: uint32] =
+  # The smallest exponent whose fraction fits `fracBits` bits (most
+  # precision); clamps at the largest exponent.
+  if x != x:
+    raiseFormat("sample " & $i & " is NaN, which this format cannot hold")
+  let full = float64(1 shl fracBits)
+  let a = abs(x)
+  for e in 0..maxExp:
+    let m = round(a / pow(base, float64(e)) * full)
+    if m < full or e == maxExp:
+      return (e, uint32(min(m, full - 1)))
+
+proc toInt(x: float64, lo, hi: int64, i: int): int64 =
+  let r = round(x)
+  if not (r >= float64(lo) and r <= float64(hi)):
+    raiseFormat("sample " & $i & " = " & $x & " does not fit the integer format")
+  int64(r)
+
+proc encodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
+    dst: var openArray[byte]) =
+  ## Encodes `src` as format `f` into the start of `dst`. Exponent formats
+  ## quantize (rounding to nearest) and clamp at full scale; integer formats
+  ## round and refuse values out of range; NaN is refused by every format
+  ## except the IEEE ones. Raises `SegFormatError`.
+  let n = src.len
+  doAssert dst.len >= dataBytes(f, n), "destination too short"
+  case f
+  of sd8015:
+    for g in 0..<(n + 3) div 4:
+      dst[10 * g] = 0
+      dst[10 * g + 1] = 0
+      for k in 0..3:
+        let i = 4 * g + k
+        var w = 0'u16
+        var e = 0
+        if i < n:
+          let x = float64(src[i])
+          let (ee, mag) = expFraction(x, 2.0, 15, 15, i)
+          e = ee
+          w = if x < 0 and mag != 0: uint16((not mag) and 0xFFFF) else: uint16(mag)
+        if k mod 2 == 0: dst[10 * g + k div 2] = dst[10 * g + k div 2] or byte(e shl 4)
+        else: dst[10 * g + k div 2] = dst[10 * g + k div 2] or byte(e)
+        putBeU16(dst, 10 * g + 2 + 2 * k, w)
+  of sd8022, sd8024:
+    let bits = if f == sd8022: 4 else: 12
+    for i in 0..<n:
+      let x = float64(src[i])
+      let (e, mag) = expFraction(x, 4.0, 7, bits, i)
+      let mask = (1'u32 shl bits) - 1
+      let neg = x < 0 and mag != 0
+      let q = if neg: (not mag) and mask else: mag
+      let s = if neg: 1'u32 else: 0'u32
+      if f == sd8022: dst[i] = byte((s shl 7) or (uint32(e) shl 4) or q)
+      else: putBeU16(dst, 2 * i, uint16((s shl 15) or (uint32(e) shl 12) or q))
+  of sd8042, sd8044:
+    let bits = if f == sd8042: 5 else: 13
+    for i in 0..<n:
+      let x = float64(src[i])
+      let (e, mag) = expFraction(x, 16.0, 3, bits, i)
+      let s = if x < 0 and mag != 0: 1'u32 else: 0'u32
+      if f == sd8042: dst[i] = byte((s shl 7) or (uint32(e) shl 5) or mag)
+      else: putBeU16(dst, 2 * i, uint16((s shl 15) or (uint32(e) shl 13) or mag))
+  of sd8048:
+    for i in 0..<n:
+      if src[i] != src[i]:
+        raiseFormat("sample " & $i & " is NaN, which format 8048 cannot hold")
+      var w = float32ToIbm(float32(src[i]))
+      if (w and 1) != 0:
+        # Round the 24-bit fraction to 23 bits; a carry renormalizes.
+        var frac = (w and 0xFF_FFFF'u32) + 1
+        var expo = (w shr 24) and 0x7F
+        if frac == 0x100_0000'u32:
+          frac = 0x10_0000'u32
+          expo = min(expo + 1, 0x7F)
+        w = (w and 0x8000_0000'u32) or (expo shl 24) or frac
+      putBeU32(dst, 4 * i, w and not 1'u32)
+  of sd8036:
+    for i in 0..<n: putBeI24(dst, 3 * i, int32(toInt(float64(src[i]), -0x80_0000, 0x7F_FFFF, i)))
+  of sd8038:
+    for i in 0..<n:
+      putBeI32(dst, 4 * i, int32(toInt(float64(src[i]), int64(low(int32)), int64(high(int32)), i)))
+  of sd8058:
+    for i in 0..<n: putBeF32(dst, 4 * i, float32(src[i]))
+  of sd8080:
+    for i in 0..<n: putBeF64(dst, 8 * i, float64(src[i]))
