@@ -9,6 +9,10 @@ export errors, diagnostics, endians, bcd, ibmfloat, ebcdic, fieldlayout
 import parseSEGD/segy/[textheader, binheader, traceheader, samples, exttext, layout, reader, writer, fields]
 export textheader, binheader, traceheader, samples, exttext, layout, reader, writer, fields
 
+import parseSEGD/segd/[headers as segdheaders, samples as segdsamples,
+  reader as segdreader, writer as segdwriter]
+export segdheaders, segdsamples, segdreader, segdwriter
+
 import parseSEGD/model/tensors
 export tensors
 

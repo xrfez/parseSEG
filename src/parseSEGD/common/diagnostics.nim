@@ -137,15 +137,24 @@ func isFatal*(log: DiagLog): bool {.inline.} =
 # ---------------------------------------------------------------- boundary --
 
 proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError) =
-  ## Converts a caught exception into a diagnostic. Truncation and I/O failures
-  ## are fatal; format violations are errors; anything else is an internal error.
+  ## Converts a caught exception into a diagnostic. Truncation, unlocatable
+  ## data and I/O failures are fatal; format violations are errors; anything
+  ## else is an internal error.
   let offset = if e of SegError: (ref SegError)(e).offset else: -1'i64
   let (severity, code) =
     if e of SegTruncatedError: (sevFatal, dcTruncated)
+    elif e of SegUnlocatableError:
+      let c = (ref SegUnlocatableError)(e).diagCode
+      (sevFatal, if c in ord(DiagCode.low)..ord(DiagCode.high): DiagCode(c) else: dcBadValue)
     elif e of SegFormatError: (sevError, dcBadValue)
     elif e of IOError or e of OSError: (sevFatal, dcIo)
     else: (sevError, dcInternal)
   log.report(severity, code, e.msg, offset, loc)
+
+proc raiseUnlocatable*(code: DiagCode, msg: string, offset: int64 = -1) {.noinline, noreturn.} =
+  ## Raises `SegUnlocatableError`: the reader cannot locate the rest of the
+  ## data and stops; `tryRecord` logs it as `fatal` with `code`.
+  raise (ref SegUnlocatableError)(msg: msg, offset: offset, diagCode: ord(code))
 
 template tryRecord*(log: var DiagLog; loc: Location; body: untyped): bool =
   ## Runs `body`; if it raises a `CatchableError`, records it in `log` (see

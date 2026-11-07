@@ -14,8 +14,8 @@ import ../common/[endians, fieldlayout]
 export fieldlayout
 
 const
-  BlockSize* = 32           ## Bytes in a general header, CSD, extension or trailer block.
-  TraceHeaderSize* = 20     ## Bytes in a demux trace header.
+  SegdBlockSize* = 32           ## Bytes in a general header, CSD, extension or trailer block.
+  SegdTraceHeaderSize* = 20     ## Bytes in a demux trace header.
 
 type
   SegdGeneralHeader1* = object
@@ -43,7 +43,7 @@ type
     skewBlocks* {.bcdAt(30, 2).}: int
     extendedHeaderBlocks* {.bcdAt(31, 2).}: int   ## `BcdAllF`: see GH#2.
     externalHeaderBlocks* {.bcdAt(32, 2).}: int   ## `BcdAllF`: see GH#2.
-    raw*: array[BlockSize, byte]
+    raw*: array[SegdBlockSize, byte]
 
   SegdGeneralHeader2* = object
     ## General Header Block #2 (Rev 1 and later).
@@ -61,7 +61,7 @@ type
     undef20* {.at: 20.}: uint8
     lineSequenceNumber* {.at: 21.}: uint16    ## Rev 2.1; undefined (kept raw) in 2.0.
     undef23* {.at: 23.}: array[10, byte]
-    raw*: array[BlockSize, byte]
+    raw*: array[SegdBlockSize, byte]
 
   SegdGeneralHeaderN* = object
     ## General Header Block #N, N ≥ 3: a source position.
@@ -75,7 +75,7 @@ type
     blockNumber* {.at: 19.}: uint8            ## N.
     sourceSetNumber* {.at: 20.}: uint8
     undef21* {.at: 21.}: array[12, byte]
-    raw*: array[BlockSize, byte]
+    raw*: array[SegdBlockSize, byte]
 
   SegdChannelSetDescriptor* = object
     ## Channel Set Descriptor (one per channel set and scan type).
@@ -104,7 +104,7 @@ type
     verticalStack* {.at: 30.}: uint8
     streamerNumber* {.at: 31.}: uint8
     arrayForming* {.at: 32.}: uint8
-    raw*: array[BlockSize, byte]
+    raw*: array[SegdBlockSize, byte]
 
   SegdTraceHeader* = object
     ## Demux Trace Header (20 bytes).
@@ -119,7 +119,7 @@ type
     timeBreakWindow* {.fix24(13).}: float64   ## ms.
     extChannelSetNumber* {.at: 16.}: uint16
     extFileNumber* {.at24(18).}: uint32
-    raw*: array[TraceHeaderSize, byte]
+    raw*: array[SegdTraceHeaderSize, byte]
 
   SegdTraceHeaderExt1* = object
     ## Trace Header Extension #1 (Rev 1 / 2.x layout).
@@ -131,16 +131,16 @@ type
     extReceiverPointNumber* {.fix40(16).}: float64
     sensorType* {.at: 21.}: uint8             ## 1 hydrophone, 2-5 geophone, 6-9 accelerometer.
     undef22* {.at: 22.}: array[11, byte]
-    raw*: array[BlockSize, byte]
+    raw*: array[SegdBlockSize, byte]
 
 
 const
-  generalHeader1Fields* = fieldTable(SegdGeneralHeader1)
-  generalHeader2Fields* = fieldTable(SegdGeneralHeader2)
-  generalHeaderNFields* = fieldTable(SegdGeneralHeaderN)
-  channelSetDescriptorFields* = fieldTable(SegdChannelSetDescriptor)
-  traceHeaderFields* = fieldTable(SegdTraceHeader)
-  traceHeaderExt1Fields* = fieldTable(SegdTraceHeaderExt1)
+  segdGeneralHeader1Fields* = fieldTable(SegdGeneralHeader1)
+  segdGeneralHeader2Fields* = fieldTable(SegdGeneralHeader2)
+  segdGeneralHeaderNFields* = fieldTable(SegdGeneralHeaderN)
+  segdChannelSetDescriptorFields* = fieldTable(SegdChannelSetDescriptor)
+  segdTraceHeaderFields* = fieldTable(SegdTraceHeader)
+  segdTraceHeaderExt1Fields* = fieldTable(SegdTraceHeaderExt1)
 
 # ---------------------------------------------------------------------------
 # Resolved values: BCD fields with their extended alternatives, units.
@@ -222,7 +222,7 @@ type
     channelType* {.nibAt(11).}: uint8      ## 0xC for a general trailer.
     undef11L* {.nibAtL(11).}: uint8
     undef12* {.at: 12.}: array[21, byte]
-    raw*: array[BlockSize, byte]
+    raw*: array[SegdBlockSize, byte]
 
   SegdStorageUnitLabel* = object
     ## Storage Unit Label (128 ASCII bytes), the first record of a SEG-D tape
@@ -244,7 +244,7 @@ type
   SegdHeaderBlock* = SegdGeneralHeader1 | SegdGeneralHeader2 | SegdGeneralHeaderN |
     SegdChannelSetDescriptor | SegdTraceHeader | SegdTraceHeaderExt1 | SegdTrailerBlock
 
-const trailerBlockFields* = fieldTable(SegdTrailerBlock)
+const segdTrailerBlockFields* = fieldTable(SegdTrailerBlock)
 
 func isStorageUnitLabel*(b: openArray[byte]): bool =
   ## True when bytes 5-9 read `SD<digit>.<digit>`: a SEG-D label rather than

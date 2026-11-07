@@ -13,6 +13,11 @@ type
     ## cannot be represented in the encoding being written.
   SegTruncatedError* = object of SegFormatError
     ## The data ends before a structure that the headers announce is complete.
+  SegUnlocatableError* = object of SegFormatError
+    ## The rest of the data cannot be located (e.g. an unknown sample format
+    ## leaves trace lengths unknown): readers stop. Raise it with
+    ## `diagnostics.raiseUnlocatable`, which records the diagnostic code.
+    diagCode*: int ## `ord` of the `DiagCode` to report.
 
 proc raiseFormat*(msg: string; offset: int64 = -1) {.noinline, noreturn.} =
   ## Raises `SegFormatError` with `msg` and the byte `offset` (-1 if unknown).

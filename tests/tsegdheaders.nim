@@ -23,12 +23,12 @@ proc checkNibbleTiling(fields: openArray[FieldSpec], blockBytes: int) =
     doAssert o != "", "nibble " & $i & " (byte " & $(i div 2 + 1) & ") is not covered"
 
 block layouts_tile_their_blocks:
-  checkNibbleTiling(generalHeader1Fields, 32)
-  checkNibbleTiling(generalHeader2Fields, 32)
-  checkNibbleTiling(generalHeaderNFields, 32)
-  checkNibbleTiling(channelSetDescriptorFields, 32)
-  checkNibbleTiling(traceHeaderFields, 20)
-  checkNibbleTiling(traceHeaderExt1Fields, 32)
+  checkNibbleTiling(segdGeneralHeader1Fields, 32)
+  checkNibbleTiling(segdGeneralHeader2Fields, 32)
+  checkNibbleTiling(segdGeneralHeaderNFields, 32)
+  checkNibbleTiling(segdChannelSetDescriptorFields, 32)
+  checkNibbleTiling(segdTraceHeaderFields, 20)
+  checkNibbleTiling(segdTraceHeaderExt1Fields, 32)
 
 let f = readBytes("63.sgd")
 
@@ -116,7 +116,7 @@ block fixed_point_and_mp:
   doAssert tb[6..8] == @[0x00'u8, 0x01, 0x09] and decodeBlock[SegdTraceHeader](tb).firstTimingWord == 1.03515625
 
 block trailer_and_label:
-  checkNibbleTiling(trailerBlockFields, 32)
+  checkNibbleTiling(segdTrailerBlockFields, 32)
   var tb = SegdTrailerBlock(trailerNumber: 1, channelType: 0xC)
   let b = tb.encoded
   doAssert b[0] == 0 and b[1] == 1 and b[10] == 0xC0
