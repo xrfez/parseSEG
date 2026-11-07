@@ -340,6 +340,27 @@ func crsText*(area: openArray[byte]): string =
     if t == BtCrs:
       for k in 0..30: result.add char(area[i + k])
 
+type
+  CrsTextFormat* = enum
+    ctNone = "none"       ## No CRS text.
+    ctStanza = "stanza"   ## SEG Location Data stanzas (3.0; deprecated in 3.1).
+    ctP1_11 = "P1/11"     ## OGP P1/11 header records (3.1 App. D1).
+    ctUnknown = "unknown"
+
+func crsFormat*(text: string): CrsTextFormat =
+  ## Which format a `crsText` is in (`segd_rev3_1_delta.md` §6.3): text
+  ## starting with `((OGP:P1/11 CRS))` (case and blanks ignored) is P1/11,
+  ## `((SEG:` starts a stanza. Position blocks' bytes 57-58 / 89-90 then
+  ## name a P1/11 CRS number or a stanza ID.
+  var squeezed = ""
+  for c in text:
+    if c notin {' ', '\t', '\r', '\n', '\0'}: squeezed.add c.toLowerAscii
+    if squeezed.len >= 17: break
+  if squeezed.len == 0: ctNone
+  elif squeezed.startsWith("((ogp:p1/11crs))"): ctP1_11
+  elif squeezed.startsWith("((seg:"): ctStanza
+  else: ctUnknown
+
 # ---------------------------------------------------------------------------
 # Resolved values.
 

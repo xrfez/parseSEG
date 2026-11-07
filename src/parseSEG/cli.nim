@@ -50,7 +50,7 @@ Converting
           [--descale] [--no-station-header]
                                 SEG-Y/SEG-D to SEG-Y (revision 0, 1, 2.0, 2.1;
                                 default 2.1), or SEG-D to SEG-D (--to=segd,
-                                revision 2.0, 2.1 or 3.0; default 3.0). The
+                                revision 2.0, 2.1, 3.0 or 3.1; default 3.0). The
                                 target is segd when both files end in .sgd/.segd
 
 Editing (in place, size-preserving, journaled; see `journal`)
@@ -419,7 +419,7 @@ proc convertCmd(a: Args): int =
     for k in ["byte-order", "text", "descale", "no-station-header"]:
       if a.has(k): usage("--" & k & " applies to SEG-Y output only")
     var o = SegdConvertOptions()
-    let (ma, mi) = parseRev(a.get("rev", "3.0"), 2, 2, "2.0, 2.1 or 3.0")
+    let (ma, mi) = parseRev(a.get("rev", "3.0"), 2, 2, "2.0, 2.1, 3.0 or 3.1")
     o.revision = SegdRevision(major: ma, minor: mi)
     o.format = parseIntOpt(a.get("format", "0"), "format")
     log = convertSegdRevision(src, dst, o)

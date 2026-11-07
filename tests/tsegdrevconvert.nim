@@ -6,6 +6,7 @@ import std/[assertions, os, strutils, math]
 import parseSEG/common/diagnostics
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer, headers, samples, rev3, revconvert]
+import parseSEG/model/traceindex
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 let tmp = getTempDir() / "parseseg_tsegdrevconvert"
@@ -224,7 +225,7 @@ proc makeRev2(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData =
       t.extensions[0] = byte(k)
     var vals = newSeq[float64](ns)
     for i in 0..<ns:
-      vals[i] = float64((i mod 9) - 4) * (if format in {sd8036, sd8038}: 1000.0 else: 0.125)
+      vals[i] = float64((i mod 9) - 4) * (if format in {sd8036, sd8038, sd9036, sd9038}: 1000.0 else: 0.125)
     t.samples = newSeq[byte](dataBytes(format, ns))
     encodeSegdSamples(format, vals, t.samples)
     result.traces.add t
@@ -232,7 +233,7 @@ proc makeRev2(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData =
 block synthetic_rev2_every_format_to_rev3_and_back:
   var d: SegdData
   for i, f in segdSampleFormats:
-    if f != sd8080: d.records.add makeRev2(100 + i, f)
+    if f != sd8080 and not f.isLittleEndian: d.records.add makeRev2(100 + i, f)
   toDisk(d, tmp / "multi_r2.sgd")
   let log = convertSegdRevision(tmp / "multi_r2.sgd", tmp / "multi_r3.sgd", rev(3, 0))
   doAssert log.clean, $log
@@ -368,6 +369,40 @@ block rev3_8080_to_rev2_and_format_changes:
   doAssert decodeF64(sd8038, i32.records[0].traces[0].samples, 5) ==
     @[1.0, -2.0, 300.0, 4.0, 5.0]
 
+block rev31_target_and_little_endian_formats:
+  # INOVA 3.0 -> 3.1 in 9058 (little-endian) -> 3.0 (back to 8058).
+  let src = exampleDir / "inova_rev30_5traces.sgd"
+  var o = rev(3, 1)
+  o.format = 9058
+  var log = convertSegdRevision(src, tmp / "inova31.sgd", o)
+  doAssert not log.isFatal and log.count(sevError) == 0, $log
+  let d = readSegd(tmp / "inova31.sgd")
+  doAssert d.diagnostics.count(sevWarning) == 0, $d.diagnostics
+  let r = d.records[0].record
+  doAssert r.revision.major == 3 and r.revision.minor == 1 and r.format == sd9058
+  let orig = readSegd(src)
+  for i, t in d.records[0].traces:
+    let n = t.samples.len div 4
+    doAssert decodeF64(sd9058, t.samples, n) ==
+      decodeF64(sd8058, orig.records[0].traces[i].samples, n)
+  log = convertSegdRevision(tmp / "inova31.sgd", tmp / "inova30.sgd", rev(3, 0))
+  doAssert not log.isFatal and log.count(sevError) == 0, $log
+  doAssert readFile(tmp / "inova30.sgd") == readFile(src), "3.0 -> 3.1/9058 -> 3.0 is exact"
+  block indexed:
+    var f = openSeismic(tmp / "inova31.sgd")
+    var g = openSeismic(src)
+    doAssert f.index.detected and f.len == 5 and f.index.log.len == 0, $f.index.log
+    doAssert f.readTraces(0..4) == g.readTraces(0..4)
+    f.close()
+    g.close()
+  # 90xx has no code before 3.1: refused as an explicit target format.
+  o = rev(3, 0)
+  o.format = 9058
+  doAssert convertSegdRevision(src, tmp / "x.sgd", o).isFatal
+  # 9058 to Rev 2.1 becomes 8058.
+  log = convertSegdRevision(tmp / "inova31.sgd", tmp / "inova21.sgd", rev(2, 1))
+  doAssert not log.isFatal and readSegd(tmp / "inova21.sgd").records[0].record.format == sd8058
+
 block records_rev2_cannot_hold_are_skipped:
   # A negative start time (legal in Rev 3) has no Rev 2 encoding.
   var d = makeRev3(sd8058, [1.0, 2.0])
@@ -397,9 +432,9 @@ block records_rev2_cannot_hold_are_skipped:
   doAssert log2.has("10000 channels; Rev 2 holds 9999", sevError), $log2
 
 block invalid_requests:
-  for (ma, mi) in [(1, 0), (3, 1), (2, 5), (4, 0)]:
+  for (ma, mi) in [(1, 0), (3, 2), (2, 5), (4, 0)]:
     let log = convertSegdRevision(exampleDir / "63.sgd", tmp / "x.sgd", rev(ma, mi))
-    doAssert log.isFatal and log.has("is not 2.0, 2.1 or 3.0", sevFatal)
+    doAssert log.isFatal and log.has("is not 2.0, 2.1, 3.0 or 3.1", sevFatal)
   var o = rev(2, 1)
   o.format = 8080
   doAssert convertSegdRevision(exampleDir / "63.sgd", tmp / "x.sgd", o).has(

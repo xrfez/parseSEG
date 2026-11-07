@@ -45,7 +45,7 @@ block bit_patterns:
 
 block exact_values_round_trip:
   for f in segdSampleFormats:
-    let exact = if f in {sd8036, sd8038}: @[0.0, 1.0, -1.0, 2.0, -2.0, 8.0, -8.0, 8388607.0]
+    let exact = if f in {sd8036, sd8038, sd9036, sd9038}: @[0.0, 1.0, -1.0, 2.0, -2.0, 8.0, -8.0, 8388607.0]
                 else: @[0.0, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, 8.0, -8.0]
     var b = newSeq[byte](dataBytes(f, exact.len))
     encodeSegdSamples(f, exact, b)
@@ -72,12 +72,32 @@ block quantization_is_stable:
       of sd8042: 0.5 / 32 * 16
       of sd8044: 0.5 / 8192 * 16
       of sd8048: 2e-6 # float32, then 24 -> 23-bit fraction: two roundings
-      of sd8058: 1e-7
+      of sd8058, sd9058: 1e-7
       else: 0.0
-    let absTol = if f in {sd8036, sd8038}: 0.5 else: 0.0
+    let absTol = if f in {sd8036, sd8038, sd9036, sd9038}: 0.5 else: 0.0
     for i in 0..<xs.len:
       doAssert abs(ys[i] - xs[i]) <= abs(xs[i]) * rel + absTol + 1e-12,
         $f & " " & $xs[i] & " " & $ys[i]
+
+block rev31_little_endian:
+  # The 90xx formats are the 80xx ones with their bytes reversed.
+  var f: SegdSampleFormat
+  doAssert toSegdFormat(9058, f) and f == sd9058 and f.isLittleEndian
+  doAssert bigEndianOf(sd9080) == sd8080 and bigEndianOf(sd8058) == sd8058
+  doAssert dataBytes(sd9036, 2) == 6 and dataBytes(sd9080, 1) == 8 and prefersFloat64(sd9038)
+  doAssert decode1(sd9036, [0xFE'u8, 0xFF, 0xFF], 1) == @[-2.0]
+  doAssert decode1(sd9036, [0x01'u8, 0x02, 0x03], 1) == @[float64(0x030201)]
+  doAssert decode1(sd9038, [0'u8, 0, 0, 0x80], 1) == @[-2147483648.0]
+  doAssert decode1(sd9080, [0x18'u8, 0x2D, 0x44, 0x54, 0xFB, 0x21, 0x09, 0x40], 1) == @[PI]
+  for (le, be) in [(sd9036, sd8036), (sd9038, sd8038), (sd9058, sd8058), (sd9080, sd8080)]:
+    let xs = @[1.0, -2.0, 1000.0, -8388608.0]
+    var a = newSeq[byte](dataBytes(le, xs.len))
+    var b = newSeq[byte](a.len)
+    encodeSegdSamples(le, xs, a)
+    encodeSegdSamples(be, xs, b)
+    let w = dataBytes(le, 1)
+    for i in 0..<xs.len:
+      for k in 0..<w: doAssert a[i * w + k] == b[i * w + w - 1 - k], $le
 
 block refusals:
   var b = newSeq[byte](16)

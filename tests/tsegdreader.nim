@@ -122,7 +122,7 @@ proc makeRecord(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData 
       t.extensions = newSeq[byte](32)
       t.extensions[0] = byte(k)
     var vals = newSeq[float64](ns)
-    for i in 0..<ns: vals[i] = float64((i mod 9) - 4) * (if format in {sd8036, sd8038}: 1000.0 else: 0.125)
+    for i in 0..<ns: vals[i] = float64((i mod 9) - 4) * (if format in {sd8036, sd8038, sd9036, sd9038}: 1000.0 else: 0.125)
     t.samples = newSeq[byte](dataBytes(format, ns))
     encodeSegdSamples(format, vals, t.samples)
     result.traces.add t
@@ -131,22 +131,25 @@ proc makeStream(formats: openArray[SegdSampleFormat]): SegdData =
   for i, f in formats: result.records.add makeRecord(100 + i, f)
 
 block synthetic_records_every_format_on_disk:
-  let d = makeStream(segdSampleFormats)
+  var rev2Formats: seq[SegdSampleFormat]
+  for f in segdSampleFormats:
+    if not f.isLittleEndian: rev2Formats.add f
+  let d = makeStream(rev2Formats)
   let path = tmp / "multi.sgd"
   doAssert d.toDisk(path).len == 0
   let e = readSegd(path)
   doAssert e.diagnostics.len == 0, $e.diagnostics[0]
-  doAssert e.records.len == segdSampleFormats.len
+  doAssert e.records.len == rev2Formats.len
   for i, rd in e.records:
-    doAssert rd.record.format == segdSampleFormats[i] and rd.traces.len == 5
+    doAssert rd.record.format == rev2Formats[i] and rd.traces.len == 5
     doAssert rd.record.trailer.len == 1 and rd.record.extended == d.records[i].record.extended
     doAssert rd.record.scanTypes[0].skew == d.records[i].record.scanTypes[0].skew
     doAssert rd.record.scanTypes[0].descriptors[0].mpFactor == -2.5
     doAssert rd.record.sourceHeaders[0].sourcePointNumber == -12.25
     doAssert rd.traces[0].numSamples == 52 and not rd.traces[0].hasExt1 # sized from the CSD
     doAssert rd.traces[4].ext1.receiverPointNumber == 104 and rd.traces[4].extensions[0] == 4
-    doAssert rd.samples[3, 0] == float32(-4 * (if rd.record.format in {sd8036, sd8038}: 1000 else: 1)) /
-      (if rd.record.format in {sd8036, sd8038}: 1'f32 else: 8'f32)
+    doAssert rd.samples[3, 0] == float32(-4 * (if rd.record.format in {sd8036, sd8038, sd9036, sd9038}: 1000 else: 1)) /
+      (if rd.record.format in {sd8036, sd8038, sd9036, sd9038}: 1'f32 else: 8'f32)
 
   # Rewriting what was read is byte-identical.
   doAssert e.toDisk(tmp / "multi2.sgd").len == 0

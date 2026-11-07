@@ -1,5 +1,5 @@
-## SEG-D revision conversion (task 8.7): Rev 1 / 2.x to Rev 3.0, Rev 3.x to
-## Rev 2.0 / 2.1, and within a layout (2.x to 2.y, 3.x to 3.0, format
+## SEG-D revision conversion (tasks 8.7, 5.5): Rev 1 / 2.x to Rev 3.0 or 3.1, Rev 3.x to
+## Rev 2.0 / 2.1, and within a layout (2.x to 2.y, 3.x to 3.y, format
 ## changes). The conversion streams record by record, so files of any size
 ## convert in bounded memory.
 ##
@@ -61,7 +61,7 @@ import ./[headers, samples, reader, writer, rev3]
 type
   SegdConvertOptions* = object
     revision*: SegdRevision = SegdRevision(major: 3, minor: 0)
-      ## Target revision: 2.0, 2.1 or 3.0.
+      ## Target revision: 2.0, 2.1, 3.0 or 3.1.
     format*: int = 0
       ## Target sample format code; 0 keeps each record's (8080 becomes 8058
       ## for Rev 2).
@@ -103,7 +103,13 @@ proc skipRecord(msg: string) {.noinline, noreturn.} =
   raise newException(SkipRecord, msg)
 
 func validTarget(r: SegdRevision): bool =
-  (r.major == 2 and r.minor in {0'u8, 1}) or (r.major == 3 and r.minor == 0)
+  (r.major == 2 and r.minor in {0'u8, 1}) or (r.major == 3 and r.minor in {0'u8, 1})
+
+func definedIn(f: SegdSampleFormat, r: SegdRevision): bool =
+  ## Whether format `f` exists in revision `r` (8080 from 3.0, 90xx from 3.1).
+  if f.isLittleEndian: r.major > 3 or (r.major == 3 and r.minor >= 1)
+  elif f == sd8080: r.major >= 3
+  else: true
 
 func bcd(x: int): int {.inline.} = max(x, 0) # BcdAllF / BcdInvalid count as 0
 
@@ -126,8 +132,10 @@ func rev2ChannelType(t: uint8, exact: var bool): uint8 =
 
 proc outFormat(c: var Conv, f: SegdSampleFormat): SegdSampleFormat =
   if c.opts.format != 0: discard toSegdFormat(c.opts.format, result) # checked up front
-  elif f == sd8080 and c.opts.revision.major < 3: result = sd8058
-  else: result = f
+  else:
+    result = f
+    if not result.definedIn(c.opts.revision): result = bigEndianOf(result) # 90xx before 3.1
+    if not result.definedIn(c.opts.revision): result = sd8058              # 8080 before 3.0
 
 proc samplesFor(c: var Conv, src: seq[byte], nIn, nOut: int, fIn, fOut: SegdSampleFormat):
     seq[byte] =
@@ -202,12 +210,13 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, scan: RecordSc
   ## one, else from the descriptor. The trailer is a placeholder of the right
   ## size (filled once the traces are read).
   result = SegdRecord(index: rec.index, isRev3: true, hasGh2: true, format: fOut,
-    formatKnown: true, revision: SegdRevision(major: 3, minor: 0))
+    formatKnown: true, revision: SegdRevision(major: 3, minor: c.opts.revision.minor))
   var g1 = rec.gh1
   g1.formatCode = ord(fOut)
   for g in rec.sourceHeaders: result.generalBlocks.add sourceFromGhn(g)
   let after = 2 + result.generalBlocks.len div 32 # GH#2, GH#3, sources
-  var g2 = SegdGeneralHeader2Rev3(revisionMajor: 3, revisionMinor: 0, blockType: BtGeneralHeader2)
+  var g2 = SegdGeneralHeader2Rev3(revisionMajor: 3, revisionMinor: c.opts.revision.minor,
+    blockType: BtGeneralHeader2)
   if after > 14:
     g1.additionalGhBlocks = 0xF
     g2.extAdditionalGhBlocks = uint16(after)
@@ -544,10 +553,9 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
   var f: SegdSampleFormat
   if not validTarget(target):
     c.log.report(sevFatal, dcValidation, "target SEG-D revision " & $target &
-      " is not 2.0, 2.1 or 3.0", loc = c.loc)
+      " is not 2.0, 2.1, 3.0 or 3.1", loc = c.loc)
     return c.log
-  if opts.format != 0 and (not toSegdFormat(opts.format, f) or
-      (f == sd8080 and target.major < 3)):
+  if opts.format != 0 and (not toSegdFormat(opts.format, f) or not f.definedIn(target)):
     c.log.report(sevFatal, dcValidation, "SEG-D format " & $opts.format &
       " is not defined in Rev " & $target, loc = c.loc)
     return c.log
@@ -579,17 +587,17 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
           elif target.major == 2 and rec.isRev3:
             outRec = c.toRev2(rec, fOut, target.minor, rs, the)
           elif target.major == 3:
-            outRec = rec # 3.x to 3.0: the same layout
-            outRec.gh2r3.revisionMinor = 0
+            outRec = rec # 3.x to 3.y: the same layout
+            outRec.gh2r3.revisionMinor = target.minor
             # The trailer comes after the traces; a placeholder of the
             # announced size until then (see setRev3Trailer).
             let gt = rec.gh2r3.generalTrailerBlocks
             outRec.trailerBytes = newSeq[byte](if gt == 0xFFFF_FFFF'u32: 0 else: 32 * int(gt))
             outRec.gh1.formatCode = ord(fOut)
             outRec.format = fOut
-            if rec.revision.minor != 0:
-              c.note(30, "Rev 3." & $rec.revision.minor & " records are written as 3.0 " &
-                "unchanged; 3.1 additions are not checked")
+            if rec.revision.minor > target.minor:
+              c.note(30, "Rev 3." & $rec.revision.minor & " records are written as 3." &
+                $target.minor & " unchanged; their CRS text (P1/11 in 3.1) is not converted")
           else:
             outRec = rec # 1/2.x to 2.y
             outRec.gh1.formatCode = ord(fOut)

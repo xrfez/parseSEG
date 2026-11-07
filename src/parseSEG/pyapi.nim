@@ -873,8 +873,9 @@ proc convertPy(src, dst: string, revision: string = "2.1", byte_order: string = 
 proc convertSegdPy(src, dst: string, revision: string = "3.0", format: int = 0): PPyObject {.
     segExport: "convert_segd".} =
   ## Converts the SEG-D file `src` to the SEG-D file `dst` in revision "2.0",
-  ## "2.1" or "3.0" (Rev 1/2 to 3.0, Rev 3 to 2.x, or within a layout).
-  ## `format` is a SEG-D format code (0: keep; 8080 becomes 8058 for Rev 2).
+  ## "2.1", "3.0" or "3.1" (Rev 1/2 to 3.x, Rev 3 to 2.x, or within a layout).
+  ## `format` is a SEG-D format code (0: keep; 8080 becomes 8058 for Rev 2, and
+  ## the little-endian 90xx their 80xx twins before 3.1).
   ## Returns the diagnostics (dropped and approximated values, skipped
   ## records); a failure raises with them attached.
   var log: DiagLog

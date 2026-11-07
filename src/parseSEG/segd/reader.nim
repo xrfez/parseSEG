@@ -252,8 +252,8 @@ proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
   if rec.gh2r3.blockType != BtGeneralHeader2:
     r.note(sevWarning, dcBadValue, "General Header #2 block type is " & $rec.gh2r3.blockType &
       ", not 2", gh2Offset + 31, r.loc(field = "gh2.blockType"))
-  if rec.revision.major > 3 or rec.revision.minor > 0:
-    r.note(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision & " read as Rev 3.0",
+  if rec.revision.major > 3 or rec.revision.minor > 1:
+    r.note(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision & " read as Rev 3.1",
       gh2Offset + 10, r.loc(field = "gh2.revision"))
   let nGh = generalHeaderCount(rec.gh1, rec.gh2r3)
   if nGh < 3 or nGh > MaxCount:
@@ -320,6 +320,10 @@ proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
   if toSegdFormat(rec.gh1.formatCode, f):
     rec.format = f
     rec.formatKnown = true
+    if f.isLittleEndian and rec.revision.major == 3 and rec.revision.minor == 0:
+      r.note(sevWarning, dcBadValue, "format " & $ord(f) & " (little-endian) is defined from " &
+        "Rev 3.1, but the record says 3.0; decoded as little-endian", rec.offset + 2,
+        r.loc(field = "gh1.formatCode"))
   else:
     raiseUnlocatable(dcUnsupportedFormat, "sample format code " & $rec.gh1.formatCode &
       " is undefined or multiplexed, so trace lengths are unknown", rec.offset + 2)
@@ -402,6 +406,9 @@ proc readRecordHeaders(r: var SegdReader) =
   if toSegdFormat(rec.gh1.formatCode, f):
     rec.format = f
     rec.formatKnown = true
+    if f.isLittleEndian:
+      r.note(sevWarning, dcBadValue, "format " & $ord(f) & " (little-endian) is defined from " &
+        "Rev 3.1; decoded anyway", rec.offset + 2, r.loc(field = "gh1.formatCode"))
   else:
     raiseUnlocatable(dcUnsupportedFormat, "sample format code " & $rec.gh1.formatCode &
       " is undefined or multiplexed, so trace lengths are unknown", rec.offset + 2)

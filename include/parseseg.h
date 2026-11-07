@@ -477,9 +477,9 @@ SegStatus seg_convert(const char *src, const char *dst, const SegConvertOptions 
                       SegLog **log);
 
 /* Converts the SEG-D file `src` to the SEG-D file `dst` in revision
-   `rev_major`.`rev_minor` (2.0, 2.1 or 3.0): Rev 1/2 to 3.0, Rev 3 to 2.x, or
+   `rev_major`.`rev_minor` (2.0, 2.1, 3.0 or 3.1): Rev 1/2 to 3.x, Rev 3 to 2.x, or
    within a layout. `format` is the target SEG-D format code (e.g. 8058);
-   0 keeps each record's (8080 becomes 8058 for Rev 2). Samples are copied
+   0 keeps each record's (8080 becomes 8058 for Rev 2, 90xx 80xx before 3.1). Samples are copied
    byte for byte unless re-encoded. Dropped and approximated values are
    reported in the log, and records the target cannot represent are skipped
    with an error (the mapping is in src/parseSEG/segd/revconvert.nim).

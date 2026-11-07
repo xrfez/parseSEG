@@ -1,5 +1,7 @@
 ## SEG-D demultiplexed sample codecs on byte buffers (spec notes
-## `segd_rev2_0.md` §5, `segd_rev3_0_a.md` §5). All formats are big-endian.
+## `segd_rev2_0.md` §5, `segd_rev3_0_a.md` §5, `segd_rev3_1_delta.md` §5). All
+## formats are big-endian except Rev 3.1's 90xx, the little-endian twins of
+## 8036/8038/8058/8080.
 ##
 ## Decoders give the recorded value; multiply by `2^mpFactor` (Rev 2 CSD) for
 ## millivolts. Rev 2 multiplexed codes (0015 ... 0058) are not supported:
@@ -13,6 +15,7 @@
 ## | 8048 | hexadecimal excess-64 (IBM-like, 23-bit fraction) | 4 |
 ## | 8036 / 8038 | two's complement integer | 3 / 4 |
 ## | 8058 / 8080 | IEEE single / double (8080 from Rev 3.0) | 4 / 8 |
+## | 9036 / 9038 / 9058 / 9080 | as 80xx, little-endian (Rev 3.1) | 3 / 4 / 4 / 8 |
 
 import std/math
 import ../common/[endians, ibmfloat, errors]
@@ -20,13 +23,28 @@ import ../common/[endians, ibmfloat, errors]
 type
   SegdSampleFormat* = enum
     sd8015 = 8015, sd8022 = 8022, sd8024 = 8024, sd8036 = 8036, sd8038 = 8038,
-    sd8042 = 8042, sd8044 = 8044, sd8048 = 8048, sd8058 = 8058, sd8080 = 8080
+    sd8042 = 8042, sd8044 = 8044, sd8048 = 8048, sd8058 = 8058, sd8080 = 8080,
+    sd9036 = 9036, sd9038 = 9038, sd9058 = 9058, sd9080 = 9080
 
   SegdSampleType* = float32 | float64
 
 const segdSampleFormats* = [sd8015, sd8022, sd8024, sd8036, sd8038, sd8042, sd8044, sd8048,
-  sd8058, sd8080]
+  sd8058, sd8080, sd9036, sd9038, sd9058, sd9080]
   ## Every supported code (the enum has holes and cannot be iterated).
+
+func isLittleEndian*(f: SegdSampleFormat): bool {.inline.} =
+  ## The Rev 3.1 little-endian formats (90xx).
+  f in {sd9036, sd9038, sd9058, sd9080}
+
+func bigEndianOf*(f: SegdSampleFormat): SegdSampleFormat =
+  ## The big-endian twin of a 90xx format (8036 for 9036, ...); `f` itself
+  ## for the others.
+  case f
+  of sd9036: sd8036
+  of sd9038: sd8038
+  of sd9058: sd8058
+  of sd9080: sd8080
+  else: f
 
 func toSegdFormat*(code: int, f: var SegdSampleFormat): bool =
   ## Converts a format code; false for undefined or multiplexed codes.
@@ -43,13 +61,23 @@ func dataBytes*(f: SegdSampleFormat, samples: int): int =
   of sd8015: (samples + 3) div 4 * 10
   of sd8022, sd8042: samples
   of sd8024, sd8044: 2 * samples
-  of sd8036: 3 * samples
-  of sd8038, sd8048, sd8058: 4 * samples
-  of sd8080: 8 * samples
+  of sd8036, sd9036: 3 * samples
+  of sd8038, sd8048, sd8058, sd9038, sd9058: 4 * samples
+  of sd8080, sd9080: 8 * samples
 
 func prefersFloat64*(f: SegdSampleFormat): bool =
   ## True when float32 would lose precision: 8080 and 32-bit integers.
-  f in {sd8080, sd8038}
+  f in {sd8080, sd8038, sd9080, sd9038}
+
+func leI24(b: openArray[byte], pos: int): int32 {.inline.} =
+  let u = uint32(b[pos]) or (uint32(b[pos + 1]) shl 8) or (uint32(b[pos + 2]) shl 16)
+  cast[int32](u shl 8) shr 8
+
+func putLeI24(b: var openArray[byte], pos: int, v: int32) {.inline.} =
+  let u = cast[uint32](v)
+  b[pos] = byte(u and 0xFF)
+  b[pos + 1] = byte((u shr 8) and 0xFF)
+  b[pos + 2] = byte((u shr 16) and 0xFF)
 
 func onesFraction(q, mask: uint32, negative: bool): int {.inline.} =
   # One's complement fraction: a negative value stores the inverted magnitude.
@@ -111,6 +139,14 @@ proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[b
     for i in 0..<n: dst[i] = T(beF32(src, 4 * i))
   of sd8080:
     for i in 0..<n: dst[i] = T(beF64(src, 8 * i))
+  of sd9036:
+    for i in 0..<n: dst[i] = T(leI24(src, 3 * i))
+  of sd9038:
+    for i in 0..<n: dst[i] = T(getNum[int32](src, 4 * i, boLittle))
+  of sd9058:
+    for i in 0..<n: dst[i] = T(getNum[float32](src, 4 * i, boLittle))
+  of sd9080:
+    for i in 0..<n: dst[i] = T(getNum[float64](src, 8 * i, boLittle))
 
 proc expFraction(x: float64, base: float64, maxExp, fracBits: int, i: int):
     tuple[e: int, mag: uint32] =
@@ -203,3 +239,13 @@ proc encodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T
     for i in 0..<n: putBeF32(dst, 4 * i, float32(src[i]))
   of sd8080:
     for i in 0..<n: putBeF64(dst, 8 * i, float64(src[i]))
+  of sd9036:
+    for i in 0..<n: putLeI24(dst, 3 * i, int32(toInt(float64(src[i]), -0x80_0000, 0x7F_FFFF, i)))
+  of sd9038:
+    for i in 0..<n:
+      putNum(dst, 4 * i, int32(toInt(float64(src[i]), int64(low(int32)), int64(high(int32)), i)),
+        boLittle)
+  of sd9058:
+    for i in 0..<n: putNum(dst, 4 * i, float32(src[i]), boLittle)
+  of sd9080:
+    for i in 0..<n: putNum(dst, 8 * i, float64(src[i]), boLittle)

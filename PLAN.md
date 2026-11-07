@@ -274,7 +274,7 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [x] 5.4 Validate against `00000151_12900_11300.sgd` (local only), then write a few-trace copy
       with all headers to `SEG Spec/exampleFiles/` and commit it as a permanent fixture
 
-- [ ] 5.5 SEG-D Rev 3.1 from the 1.7 delta: revision handling and any new or changed blocks
+- [x] 5.5 SEG-D Rev 3.1 from the 1.7 delta: revision handling and any new or changed blocks
 
 ### Phase 6: Data model for viewers and HPC
 - [x] 6.1 Trace index (header-only walk) and range reads into Tensor slices, memfiles backend
@@ -716,4 +716,10 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
   - Python: `Geometry.load_sps|load_p1|map_line|set_options|counts`.
   - CLI: `survey <file> [-o] [--rev]`, `keys <file> [--traces]`, and SURVEY options on `info`/`keys` (`--sps`, `--p1`, `--decimals`, `--elevation`, `--line-map`, `--trailing-digits`, `--multi-component`, `--overwrite`).
   - Tests: `tests/tsurvey.nim` (records rebuilt at exact columns from the spec examples), plus survey blocks in abi_test, test_pyapi and tcli.
+- 2026-11-07: Task 5.5 done: SEG-D Rev 3.1.
+  - Formats 9036/9038/9058/9080 (little-endian twins of 80xx) are decoded and encoded (`isLittleEndian`, `bigEndianOf`), so 3.1 files are detected, indexed and read.
+  - Revision 3.1 is read without the "read as 3.0" warning.
+  - A 90xx code in a record that says 3.0 is decoded with a warning (also in Rev 2). Writers refuse it unless lenient.
+  - `convertSegdRevision` targets 3.1. Before 3.1, 90xx maps to 80xx (and 8080 to 8058 for 2.x). An explicit format must exist in the target. The INOVA file converts 3.0 → 3.1/9058 → 3.0 byte-exactly.
+  - `crsFormat(crsText)` tells P1/11 CRS text from SEG stanzas. A P1/11 parser is not written (noted).
 

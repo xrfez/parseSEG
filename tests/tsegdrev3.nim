@@ -147,3 +147,9 @@ block real_rev3_reader:
     doAssert r.log.len == 0, $r.log[0]
     doAssert not r.nextRecord()
     src.close()
+
+block rev31_crs_text_format:
+  doAssert crsFormat("((OGP:P1/11 CRS))\nOGP,OGP P1,1,1.1") == ctP1_11
+  doAssert crsFormat("  ((ogp : p1/11crs))") == ctP1_11
+  doAssert crsFormat("((SEG: Location Data ver 1.0))") == ctStanza
+  doAssert crsFormat("\0\0  ") == ctNone and crsFormat("WGS 84") == ctUnknown

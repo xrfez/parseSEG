@@ -146,6 +146,10 @@ proc checkRev3Record(w: var SegdWriter, rec: SegdRecord) =
   if not rec.formatKnown or not toSegdFormat(g1.formatCode, f) or f != rec.format:
     w.problem("format code " & $g1.formatCode & " is undefined or does not match the " &
       "record's sample format", "gh1.formatCode")
+  elif f.isLittleEndian and (rec.gh2r3.revisionMajor < 3 or
+      (rec.gh2r3.revisionMajor == 3 and rec.gh2r3.revisionMinor < 1)):
+    w.problem("format " & $ord(f) & " (little-endian) needs Rev 3.1, the record says " &
+      $rec.gh2r3.revisionMajor & "." & $rec.gh2r3.revisionMinor, "gh1.formatCode")
   if rec.gh3.headerSize != 0 and int64(rec.gh3.headerSize) != rev3HeaderBytes(rec):
     w.problem("General Header #3 header size is " & $rec.gh3.headerSize & ", the header " &
       "blocks take " & $rev3HeaderBytes(rec) & " bytes", "gh3.headerSize")
@@ -204,6 +208,8 @@ proc checkRecord(w: var SegdWriter, rec: SegdRecord) =
   if not rec.formatKnown or not toSegdFormat(g1.formatCode, f) or f != rec.format:
     w.problem("format code " & $g1.formatCode & " is undefined or does not match the " &
       "record's sample format", "gh1.formatCode")
+  elif f.isLittleEndian:
+    w.problem("format " & $ord(f) & " (little-endian) needs Rev 3.1", "gh1.formatCode")
   if rec.hasGh2 and rec.gh2.revisionMajor >= 3:
     w.problem("Rev 3 records use another layout and are not written by this writer",
       "gh2.revision")

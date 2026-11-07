@@ -317,7 +317,7 @@ func losslessFormat(f: SegdSampleFormat, rev: SegyRevision, descale: bool,
     # A descaled value (recorded × MP / DSM) needs float64 to stay exact.
     (if rev.major >= 2: sfFloat64 else: sfFloat32)
   else:
-    case f
+    case bigEndianOf(f)
     of sd8048: sfIbm32
     of sd8036: (if rev.major >= 2 and order != boPairSwapped: sfInt24 else: sfInt32)
     of sd8038: sfInt32

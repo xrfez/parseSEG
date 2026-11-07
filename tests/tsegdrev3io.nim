@@ -61,7 +61,7 @@ proc makeRev3Record(fileNo: int, format: SegdSampleFormat, ns = 40): SegdRecordD
     scanTypesPerRecord: 1, channelSetsPerScanType: 2, skewBlocks: 0,
     extendedHeaderBlocks: 1, externalHeaderBlocks: 2)
   r.gh2r3 = SegdGeneralHeader2Rev3(extFileNumber: uint32(fileNo), revisionMajor: 3,
-    extRecordLength: uint32(1000 * (ns - 1)), blockType: 2)
+    revisionMinor: (if format.isLittleEndian: 1'u8 else: 0'u8), extRecordLength: uint32(1000 * (ns - 1)), blockType: 2)
   r.gh3 = SegdGeneralHeader3(timeZero: 1474994765504000, blockType: 3)
   var aux = SegdChannelSetDescriptor3(scanTypeNumber: 1, channelSetNumber: 1,
     channelType: 0x20, endTime: int32(1000 * (ns - 1)), numSamples: uint32(ns),
@@ -100,7 +100,7 @@ proc makeRev3Record(fileNo: int, format: SegdSampleFormat, ns = 40): SegdRecordD
       p.tuple1Coord1 = 600_000.0 + float64(k)
       t.extensions = @(p.encoded)
     var vals = newSeq[float64](ns)
-    for i in 0..<ns: vals[i] = float64((i mod 7) - 3) * (if format in {sd8036, sd8038}: 100.0 else: 0.25)
+    for i in 0..<ns: vals[i] = float64((i mod 7) - 3) * (if format in {sd8036, sd8038, sd9036, sd9038}: 100.0 else: 0.25)
     t.samples = newSeq[byte](dataBytes(format, ns))
     encodeSegdSamples(format, vals, t.samples)
     traces.add t
@@ -335,13 +335,23 @@ block r5_large_areas_are_skipped_and_huge_traces_stop:
   doAssert not r2.readTrace(t) and r2.log.isFatal
   src.close()
 
-block r6_rev31_warns:
+block r6_rev32_warns:
+  # 3.1 is read as itself (task 5.5); a later minor revision warns.
   var d = stream([sd8058])
   d.records[0].record.gh2r3.revisionMinor = 1
   discard d.toDisk(tmp / "rev31.sgd")
-  let e = readSegd(tmp / "rev31.sgd")
+  doAssert readSegd(tmp / "rev31.sgd").diagnostics.len == 0
+  d.records[0].record.gh2r3.revisionMinor = 2
+  discard d.toDisk(tmp / "rev32.sgd")
+  let e = readSegd(tmp / "rev32.sgd")
   doAssert e.records[0].traces.len == 4
   doAssert e.diagnostics.len == 1 and e.diagnostics[0].code == dcUnsupportedRevision
+  # A 90xx format in a record that says 3.0 is decoded, with a warning.
+  var l = stream([sd9058])
+  l.records[0].record.gh2r3.revisionMinor = 0
+  discard l.toDisk(tmp / "rev30le.sgd", SegdWriteOptions(lenient: true))
+  let le = readSegd(tmp / "rev30le.sgd")
+  doAssert le.records[0].traces.len == 4 and le.diagnostics.count(sevWarning) == 1
 
 block r7_minor_time_fields_checked:
   var g1 = SegdGeneralHeader1(year: 26, julianDay: 999, hour: 1)
