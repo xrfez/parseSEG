@@ -266,17 +266,10 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [x] 6.7 Large-file test: a sparse synthetic file larger than 4 GB (index build, a range read
       near the end, an in-place edit near the end) to prove 64-bit offsets work
 
-### Phase 7: Tooling
-- [ ] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF log)
-- [ ] 7.1b CLI: `parseSEGD vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
-      `.nif` map for every unmapped vendor area (e.g. the 9 INOVA blocks 0xB0-0xB8 in the 3.0
-      sample, and the 3 Geo Space extended blocks in `63.sgd`)
-- [ ] 7.3 NIF header export/import: streamed export (fields + raw, or fields only); import as
-      a patch (diff → in-place journaled edits, or rewrite with the original samples). CLI:
-      `parseSEGD headers|edit|export|import`
-- [ ] 7.2 Docs and CI updates
-
-### Phase 8: Embeddable library (Nim import, C ABI `.so`/`.dll`)
+### Phase 8: Embeddable library (Nim import, C ABI `.so`/`.dll`), done BEFORE Phase 7
+(Owner decision, 2026-11-07: Phase 8 first, then Phase 7, whose CLI is built on Phase 8's API.
+Direction: we *export* a C ABI for hosts to call. The nim-c-bindings/nim-c-wrappers skills cover
+the opposite direction, Nim calling C libraries; consult them only for the C-side conventions.)
 Goal: the internal model (Tensors, index, keys, gathers, prefetch, edits) is used by a future GUI
 library and a processing library (filters, FFT, gains, geometry QC by linear moveout, brute
 stacks), from Nim directly or through a shared library with a shipped, well-commented C header.
@@ -302,14 +295,36 @@ Tasks:
       editor per file), NimMain/init and teardown, and ORC across the boundary
       (`--mm:orc`, `-d:useMalloc` when the host frees memory). Write `docs/design/c_abi.md`.
 - [ ] 8.2 Define the stable public Nim API (the umbrella exports too much); keep internals private.
+      Include **trace selections**: `readTraces`/`readTracesInto` and the prefetcher also take a
+      list of trace indices (`openArray[int32]`), not only a range, decoding rows in list order
+      straight from the map. Gathers and component groups need this already, and it is the hook
+      for sorting (see Future): a sort only produces such a list.
 - [ ] 8.3 Export layer (`src/parseSEGD/capi.nim`): exportc procs over the public API, readable
       struct names, a documented header (generated, then commented or wrapped), version symbol.
 - [ ] 8.4 C test program (and a Python ctypes/numpy smoke test) against the shipped header and
       `.so`; CI builds the `.so`/`.dll`.
 - [ ] 8.5 Geometry for processing: coordinates for SEG-D (Rev 3 position blocks), offsets and
       midpoints from coordinates, and a hook to attach external geometry (filled by Phase 10).
+- [ ] 8.6 Cross-standard and cross-revision conversion as library procs (used by `convert`).
+      Samples go through Tensors (decode, then encode in the target format). Headers go through
+      documented mapping tables: SEG-D → SEG-Y (file number → field record, trace number →
+      channel, ns/dt, receiver/source line, point and coordinates where SEG-Y has a field or a
+      Layout entry), SEG-D Rev 2 ↔ Rev 3, and SEG-Y revision changes (the writer already does
+      these). It is lossy by nature, so every dropped or approximated value is logged as a
+      diagnostic, and raw blocks are kept where the target has room (SEG-Y extended text or
+      User Data, SEG-D extended headers).
 - Phase 7's CLI should be written against the 8.2 public API, so it doubles as an end-to-end test.
 - Processing itself (filters, FFT, gains, LMO/NMO, stacks) is a separate library consuming this one.
+
+### Phase 7: Tooling
+- [ ] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF log)
+- [ ] 7.1b CLI: `parseSEGD vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
+      `.nif` map for every unmapped vendor area (e.g. the 9 INOVA blocks 0xB0-0xB8 in the 3.0
+      sample, and the 3 Geo Space extended blocks in `63.sgd`)
+- [ ] 7.3 NIF header export/import: streamed export (fields + raw, or fields only); import as
+      a patch (diff → in-place journaled edits, or rewrite with the original samples). CLI:
+      `parseSEGD headers|edit|export|import`
+- [ ] 7.2 Docs and CI updates
 
 ### Phase 9: Rename the project to parseSEG
 - [ ] 9.1 Rename `parseSEGD` to `parseSEG` everywhere: package, nimble file, `src/parseSEGD*`,
@@ -324,9 +339,14 @@ Tasks:
       and midpoints, especially for SEG-D 2.x, which has no coordinates in its headers.
 
 ### Future (noted, not scheduled)
-- Sorting traces by header fields (offset, receiver, CMP, ...) as a *view*: a permutation over the
-  trace index that `readTraces` and prefetch can follow, never rewriting the file. Today
-  `gathers`/`componentGroups` only return trace index lists; nothing is reordered.
+- Sorting traces by header fields (offset, receiver, CMP, ...), decided 2026-11-07: a sort
+  returns a **permutation** (a trace index list, 4 B/trace) over the index and never moves data.
+  Neither the file nor a whole-file tensor is reordered; that would not scale to 40 GB.
+  Samples are decoded in sorted order on demand (8.2 selections): a viewer's visible window, a
+  processing job's gather. Decoding produces a new buffer anyway, so sorted reads cost nothing
+  extra. An optional `permuteRows(var Tensor, perm)` helper reorders a tensor the caller
+  already holds, in place, with one row of scratch memory. Today `gathers`/`componentGroups`
+  only return index lists; nothing is reordered.
 
 ## Open questions for the owner
 - A sample file with **rotational data**, and one with **receiver-gather** SEG-D, would let us verify these paths.
@@ -393,3 +413,4 @@ Tasks:
   - (b7) Prefetch consumer procs segfaulted after `close`.
   - From the plausible list: journal lines are fsync'd before the map is written; after a failed journal write the next line starts on a fresh line; prefetch slots are capped at the file's trace count; a short chunk is cloned without reallocating its slot.
   - Not done, and noted as limits: `HeaderEditor` has no destructor (call `close`); the journal's `(session ...)` identity line is not checked on replay; a BCD -1 (all F) is accepted for every BCD field.
+- 2026-11-07: Owner decisions: Phase 8 (embeddable library and C ABI) comes before Phase 7 (CLI); Phase 9 renames the project to parseSEG; Phase 10 adds SEG P1 and SPS survey files. A probe confirmed that `--app:lib --noMain --header` works: plain structs export as-is, objects with seq/ref become opaque, and tensors cross as a data pointer plus shape and strides (DLPack-style) with a release handle. Sorting is to be done by permutation views (see Future). Cross-format conversion is task 8.6. **Next: task 8.1.**
