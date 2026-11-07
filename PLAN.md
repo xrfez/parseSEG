@@ -5,15 +5,45 @@
 ## Goal
 An idiomatic Nim library to **read and write** SEG seismic data files on **disk and
 tape**. Priority formats:
-1. SEG-Y Rev 1.0
-2. SEG-D Rev 2.1
-3. SEG-D Rev 3.0
+1. **SEG-D Rev 2.0** (the owner's most important format; see `63.sgd`)
+2. SEG-Y Rev 1.0 (plus Rev 0, which it is a superset of)
+3. SEG-D Rev 2.1 and 3.0
+4. SEG-Y Rev 2.1
+
+**Long-term goal: spec out and support every revision of both standards** (SEG-Y 0/1/2.0/2.1,
+SEG-D 1/2.0/2.1/3.0/3.1). We have no standalone PDF for SEG-D 2.0 or 1. The 2.0 rules
+are reconstructed from the "changes introduced in Rev 2.1 / 2.0 / 1" history sections of
+the 2.1 and 3.0 documents, and verified against `63.sgd`.
 
 Also required by the sample files: reading SEG-D **Rev 2.0**, SEG-Y **Rev 0 little-endian**,
 and the SEG-Y **Rev 2.1** features (needed to read the Inglewood sample).
 Later: SEG-D 3.1 (a small delta on 3.0) and SEG-D Rev 1.
 
 ## Owner decisions (2026-11-07)
+- **One data model, many revisions.** The revision is always identified from the
+  headers (SEG-Y bytes 3501-3502; SEG-D GH2 bytes 11-12), so readers dispatch on it.
+  - SEG-Y uses **one** `SegyFile` type for Rev 0-2.1, where revision-specific fields
+    are simply optional or zero.
+  - SEG-D uses **one** `SegdRecord` type for Rev 1-3.1, whose optional blocks are
+    variant objects keyed by block type.
+  - A shared `Trace` view (header essentials plus `seq[float32]`/`float64` samples)
+    and an auto-detecting `openSeismic(path)` cover both standards.
+- **Byte order.** Decoded values are native Nim values, so byte order is not stored in
+  the data. Readers detect it: the SEG-Y Rev 2 byte-order marker if present, otherwise
+  plausibility of the format code and sample counts (e.g. little-endian format 5 read
+  big-endian is 1280). The detected order is kept as file metadata. Writers default to
+  the spec (big-endian), with an explicit `byteOrder` option for little-endian output.
+- **Extended / external / user-defined blocks** are first-class:
+  - every byte is preserved losslessly (raw `seq[byte]`), even when also parsed;
+  - spec-defined blocks are parsed into typed objects, and unknown SEG-D 3.x block
+    types (byte 32) are kept as raw blocks rather than rejected;
+  - manufacturer-specific decoders can be registered at runtime, keyed by
+    manufacturer code (GH1) and block kind, so vendor layouts plug in without
+    forking the library;
+  - writers re-emit raw blocks unchanged.
+- **Tape is low priority.** All the owner's real data is on disk. Follow the spec for tape
+  layout and keep the device sink minimal.
+
 - **Tape:** the goal is **tape-ready output**, not a full tape-drive stack. The format
   layer emits a stream of *records* and *tape marks*, and pluggable sinks write it:
   (a) a plain disk file (records concatenated; tape marks dropped or mapped to file
@@ -30,8 +60,8 @@ Later: SEG-D 3.1 (a small delta on 3.0) and SEG-D Rev 1.
 | File | Size | What the headers say | In git? |
 |---|---|---|---|
 | `63.sgd` | 4.3 KB | SEG-D **Rev 2.0** (GH2 bytes 11-12 = 02 00), format 8058, no storage unit label, GH1 has 2 extra GH blocks | yes |
-| `00000151_12900_11300.sgd` | 65 MB | SEG-D **Rev 3.0** (03 00), format 8058, no label, 2026 day 275, GH count extended (nibble F) | **no** (too big for git; ignored, and tests skip it if absent) |
-| `Sweep0.sgy` | 51 KB | SEG-Y **Rev 0**, **little-endian**, ASCII text, format 5 (IEEE), 1 trace × 12001 samples @ 1000 µs | yes |
+| `00000151_12900_11300.sgd` | 65 MB | SEG-D **Rev 3.0** (03 00), format 8058, no label, 2026 day 275, GH count extended (nibble F) | **no** (too big for git). Once it reads correctly, write a 1-trace subset as a committed fixture (task 5.4) |
+| `Sweep0.sgy` | 51 KB | SEG-Y **Rev 0** (bytes 3501-3502 = 0, text C4 says "Rev. 0"), **little-endian** (SeiSee agrees), ASCII text, format 5 (IEEE), 1 trace × 12001 samples @ 1000 µs | yes |
 | `BO_3D-Inglewood_rev21_v7.sgy` | 2 MB | SEG-Y **Rev 2.1** (0x0201), EBCDIC, format 1 (IBM), 2001 samples @ 2000 µs, ext. text count −1 (Rev 2 "variable") | yes |
 Both SEG-D samples use format 8058 (IEEE float), so the 8015 one's vs two's complement
 question remains open. Implement per spec (one's complement) and test with synthetic data.
@@ -89,13 +119,16 @@ writers validate before emitting.
 - [x] 1.2 `docs/spec/segd_rev2_1.md`: SEG-D Rev 2.1 (text: `seg_d_rev2.1_.txt`)
 - [x] 1.3 `docs/spec/segd_rev3_0_a.md`: SEG-D 3.0 pages 1-86 (structure, label, TOC, data body, header tables 7.x)
 - [x] 1.4 `docs/spec/segd_rev3_0_b.md`: SEG-D 3.0 pages 87-188 (parameters 8.x, trailer, appendices)
-- [ ] 1.5 Review the notes: resolve AMBIGUITY items (2.1: pages 14-17 and 61 are image-only figures;
+- [ ] 1.5 Review the notes. Verify segd_rev2_1.md and derive the **Rev 2.0 differences**
+      (`docs/spec/segd_rev2_0_delta.md`) by decoding `63.sgd` header by header. Check the
+      3.0 header-size formula against the 3.0 sample. Add leap seconds 2015/2017. Resolve AMBIGUITY items (2.1: pages 14-17 and 61 are image-only figures;
       render them with `pdftoppm -f N -l N -r 80 -png` and view only those pages) and write `docs/spec/README.md` (index plus a cross-format summary)
 - [ ] 1.6 `docs/spec/segy_rev2_1.md` (subagent): SEG-Y Rev 2.1 as a **delta on segy_rev1.md**
       (text: `seg_y_rev2_1-oct2023.txt` plus `seg-y_rev2-1_clarification_2025-05-01.txt`; skip
       the superseded Rev 2.0 doc). It must cover the byte-order marker (3297-3300), extended
       text count −1, additional trace headers, data trailers, and new formats.
 - [ ] 1.7 (later) `segd_rev3_1_delta.md`
+- [ ] 1.8 (later) The remaining revisions (SEG-Y 2.0 vs 2.1 differences, SEG-D Rev 1), so all types are specced
 
 ### Phase 2: Core primitives (with unit tests)
 - [x] 2.1 endians, bcd, ibmfloat, ebcdic, errors (`tests/tcommon.nim`)
@@ -110,17 +143,20 @@ writers validate before emitting.
 - [ ] 3.3 Validate against `Sweep0.sgy` (Rev 0, LE) and `BO_3D-Inglewood_rev21_v7.sgy` (Rev 2.1)
 - [ ] 3.4 Rev 2.1 extensions (from 1.6) needed to fully read the Inglewood file
 
-### Phase 4: SEG-D Rev 2.1 (also reads Rev 2.0)
+### Phase 4: SEG-D Rev 2.0 / 2.1 (2.0 first)
 - [ ] 4.1 Headers (general 1/2/N, scan type / channel set, extended, external, demux trace, trace extensions)
 - [ ] 4.2 Sample formats and the demux reader
 - [ ] 4.3 Writer and round-trip tests with synthetic records
-- [ ] 4.4 Validate against `63.sgd` (Rev 2.0)
+- [ ] 4.4 Validate against `63.sgd` (Rev 2.0): byte-identical read->write round trip
+- [ ] 4.5 Vendor-decoder registry for extended/external headers (with an example decoder in tests)
 
 ### Phase 5: SEG-D Rev 3.0
 - [ ] 5.1 Storage unit label, TOC, general headers 1-3 and optional blocks
 - [ ] 5.2 Trace headers and extensions, trailer, reader
 - [ ] 5.3 Writer and round-trip tests
-- [ ] 5.4 Validate against `00000151_12900_11300.sgd` (Rev 3.0, local only)
+- [ ] 5.4 Validate against `00000151_12900_11300.sgd` (Rev 3.0, local only), then write a
+      1-trace (or few-trace) copy with all headers to `SEG Spec/exampleFiles/` and commit it
+      as a permanent fixture
 
 ### Phase 6: Tooling
 - [ ] 6.1 CLI: `parseSEGD dump|info|convert`
@@ -138,3 +174,4 @@ writers validate before emitting.
 - 2026-11-06: Task 1.3 done: segd_rev3_0_a.md (893 lines, 16 AMBIGUITY items). Phase 1 notes are complete; next is 1.5 (review/index).
 - 2026-11-06: Task 1.5 started: the 3.0 Additional Source Info ID is resolved as 0x20 (via the 3.1 text). Record each later resolution in a `## Resolutions` section at the end of the note concerned.
 - 2026-11-07: The owner added sample files and answered the questions (tape = tape-ready output; never fail silently). The sample headers were inspected and the plan updated: Rev 2.0 SEG-D, Rev 0 LE SEG-Y and the Rev 2.1 SEG-Y note were added. The 65 MB Rev 3.0 sample is git-ignored.
+- 2026-11-07: Owner priorities were recorded: SEG-D 2.0 is the most important; one data model for all revisions; byte-order option on write; extended/user blocks are first-class; tape low priority; 1-trace fixture from the 65 MB file.
