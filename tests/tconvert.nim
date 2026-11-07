@@ -1,14 +1,14 @@
 ## Conversion between revisions and standards (task 8.6).
 
 import std/[assertions, os, math, strutils]
-import parseSEGD/io/diskio
-import parseSEGD/segy/[reader as segyreader, fields]
-import parseSEGD/segd/[reader as segdreader, writer as segdwriter]
-import parseSEGD/convert
-import parseSEGD/model/[traceindex, headerfields]
+import parseSEG/io/diskio
+import parseSEG/segy/[reader as segyreader, fields]
+import parseSEG/segd/[reader as segdreader, writer as segdwriter]
+import parseSEG/convert
+import parseSEG/model/[traceindex, headerfields]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tconvert"
+let tmp = getTempDir() / "parseseg_tconvert"
 createDir(tmp)
 
 proc errorsAndWorse(log: DiagLog): int = log.count(sevError) + log.count(sevFatal)

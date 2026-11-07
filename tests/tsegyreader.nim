@@ -3,12 +3,12 @@
 ## structures and damaged input (task 3.3).
 
 import std/[assertions, os, strutils, sequtils]
-import parseSEGD/common/errors
-import parseSEGD/io/[records, diskio, tapeimage]
-import parseSEGD/segy/[reader, writer]
+import parseSEG/common/errors
+import parseSEG/io/[records, diskio, tapeimage]
+import parseSEG/segy/[reader, writer]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tsegyreader"
+let tmp = getTempDir() / "parseseg_tsegyreader"
 createDir(tmp)
 
 proc readBytes(path: string): seq[byte] =

@@ -2,12 +2,12 @@
 ## equals the reader's decoded value, for every trace of the sample files.
 
 import std/[assertions, os, macros, strutils, math]
-import parseSEGD/segy/[reader as segyreader]
-import parseSEGD/segd/[reader as segdreader]
-import parseSEGD/model/[traceindex, headerfields, edit]
+import parseSEG/segy/[reader as segyreader]
+import parseSEG/segd/[reader as segdreader]
+import parseSEG/model/[traceindex, headerfields, edit]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_theaderfields"
+let tmp = getTempDir() / "parseseg_theaderfields"
 createDir(tmp)
 
 proc same[T](f: SeismicFile, get: proc (name: string, v: var FieldValue): bool, h: T,

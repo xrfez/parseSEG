@@ -6,8 +6,8 @@
 ## nim c -r --path:src tools/make_rev3_fixture.nim
 
 import std/os
-import parseSEGD/io/diskio
-import parseSEGD/segd/[reader, writer]
+import parseSEG/io/diskio
+import parseSEG/segd/[reader, writer]
 
 const
   dir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"

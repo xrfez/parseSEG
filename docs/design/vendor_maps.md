@@ -56,7 +56,7 @@ maps match, the most specific one wins. Ties raise a diagnostic.
 
 ## Runtime behaviour
 - **Search path:** the built-in `vendormaps/` directory in the repo, then the
-  `PARSESEGD_VENDOR_PATH` directories (colon-separated), then paths passed to `loadVendorMaps()`.
+  `PARSESEG_VENDOR_PATH` directories (colon-separated), then paths passed to `loadVendorMaps()`.
 - **Lossless:** raw bytes are always kept. Decoded vendor fields appear beside them as
   `VendorBlock(mapName, name, fields: seq[(name, VendorValue)])`, and writers re-emit the raw bytes.
 - **Never fatal:** a malformed map, an out-of-range field or an unmatched block all become
@@ -67,10 +67,10 @@ maps match, the most specific one wins. Ties raise a diagnostic.
 ## Tooling (CLI subcommands)
 | Command | Purpose |
 |---|---|
-| `parseSEGD vendormap check <map.nif>` | validate syntax, overlaps/gaps, encodings, and target sizes |
-| `parseSEGD vendormap scaffold <data-file> [-o map.nif]` | find every unmapped vendor area in a file and emit a **skeleton map**: targets, sizes, byte ranges that are constant across traces vs varying, and ASCII-looking runs. This is the starting point for integrating a new vendor's layout |
-| `parseSEGD vendormap apply <data-file> [--map m.nif]` | decode and print the vendor fields (NIF output), for checking a map against real data |
-| `parseSEGD vendormap list` | the maps found on the search path and which ones match a given file |
+| `parseSEG vendormap check <map.nif>` | validate syntax, overlaps/gaps, encodings, and target sizes |
+| `parseSEG vendormap scaffold <data-file> [-o map.nif]` | find every unmapped vendor area in a file and emit a **skeleton map**: targets, sizes, byte ranges that are constant across traces vs varying, and ASCII-looking runs. This is the starting point for integrating a new vendor's layout |
+| `parseSEG vendormap apply <data-file> [--map m.nif]` | decode and print the vendor fields (NIF output), for checking a map against real data |
+| `parseSEG vendormap list` | the maps found on the search path and which ones match a given file |
 
 ## Implementation notes
 - NIF I/O uses `nifbuilder`/`nifreader` from the Nim toolchain (`$nim/dist/nimony/src/lib`),

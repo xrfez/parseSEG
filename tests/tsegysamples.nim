@@ -2,9 +2,9 @@
 ## extended textual headers (task 3.2).
 
 import std/[assertions, os, math, strutils]
-import parseSEGD/common/[endians, errors]
-import parseSEGD/segy/[textheader, binheader, traceheader, samples, exttext]
-import parseSEGD/model/tensors
+import parseSEG/common/[endians, errors]
+import parseSEG/segy/[textheader, binheader, traceheader, samples, exttext]
+import parseSEG/model/tensors
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 

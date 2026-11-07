@@ -16,7 +16,7 @@ const
   header = root / "include" / "parseseg.h"
   exampleDir = root / "SEG Spec" / "exampleFiles"
 
-let tmp = getTempDir() / "parsesegd_tcapi"
+let tmp = getTempDir() / "parseseg_tcapi"
 createDir(tmp)
 
 proc run(cmd: string): (string, int) =
@@ -34,7 +34,7 @@ proc buildLib(dir: string, extra = "") =
   mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --app:lib --noMain " &
     "--mm:atomicArc --threads:on -d:useMalloc -d:segCapi " & extra & " --nimcache:" &
     quoteShell(dir / "cache") & " -o:" & quoteShell(dir / "libparseseg.so") & " " &
-    quoteShell(root / "src" / "parseSEGD" / "capi.nim"))
+    quoteShell(root / "src" / "parseSEG" / "capi.nim"))
 
 when defined(linux):
   let libDir = tmp / "release"

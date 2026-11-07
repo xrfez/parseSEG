@@ -2,7 +2,7 @@
 ## and NIF round trips.
 
 import std/[assertions, os, strutils]
-import parseSEGD/common/[errors, diagnostics]
+import parseSEG/common/[errors, diagnostics]
 
 proc sampleLog(): DiagLog =
   result = DiagLog()
@@ -89,7 +89,7 @@ block nif_empty_log:
   doAssert parseDiagnostics(DiagLog().toNif).len == 0
 
 block nif_file_round_trip:
-  let path = getTempDir() / "parsesegd_tdiagnostics.nif"
+  let path = getTempDir() / "parseseg_tdiagnostics.nif"
   sampleLog().writeNif(path)
   doAssert sameEntries(readDiagnostics(path), sampleLog())
   removeFile path

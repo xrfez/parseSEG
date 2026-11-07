@@ -17,7 +17,7 @@ const
   exampleDir = root / "SEG Spec" / "exampleFiles"
   abiTest = root / "tests" / "c" / "abi_test.c"
 
-let tmp = getTempDir() / "parsesegd_ttargets"
+let tmp = getTempDir() / "parseseg_ttargets"
 createDir(tmp)
 let nim = getCurrentCompilerExe().quoteShell
 let cc = findExe("cc")

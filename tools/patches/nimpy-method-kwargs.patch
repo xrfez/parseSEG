@@ -7,7 +7,7 @@ index 4ba6c11..22d2a13 100644
  
    var
 -    argsLen = newLit(numArgs)
-+    argsLen = newLit(numArgs - extraArg) # parseSEGD patch: self is not in argNames
++    argsLen = newLit(numArgs - extraArg) # parseSEG patch: self is not in argNames
      argsLenReq = newLit(numArgsReq - extraArg)
      nameLit = newLit($prc)
  

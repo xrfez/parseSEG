@@ -24,7 +24,7 @@ when defined(linux) or defined(macosx):
   if py.len == 0 or git.len == 0:
     echo "tpython: no python3 or git; Python module test skipped"
   else:
-    let tmp = getTempDir() / "parsesegd_tpython"
+    let tmp = getTempDir() / "parseseg_tpython"
     createDir(tmp)
     if execCmdEx(git & " -C " & quoteShell(nimpyDir) & " apply --reverse --check " &
         quoteShell(patch)).exitCode != 0:
@@ -34,7 +34,7 @@ when defined(linux) or defined(macosx):
     mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --app:lib --mm:atomicArc " &
       "--threads:on -d:useMalloc -d:segPython --nimcache:" & quoteShell(tmp / "cache") &
       " -o:" & quoteShell(modDir / "parseseg.so") & " " &
-      quoteShell(root / "src" / "parseSEGD" / "pyapi.nim"))
+      quoteShell(root / "src" / "parseSEG" / "pyapi.nim"))
     let script = py & " -I " & quoteShell(root / "tests" / "python" / "test_pyapi.py") & " " &
       quoteShell(modDir) & " " & quoteShell(exampleDir) & " " & quoteShell(tmp / "scratch")
     for mode in ["", " nonumpy"]:

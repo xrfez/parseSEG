@@ -1,13 +1,13 @@
 ## Gather detection and multi-component grouping (task 6.2).
 
 import std/[assertions, os, math]
-import parseSEGD/io/diskio
-import parseSEGD/segy/[reader as segyreader, writer as segywriter, fields]
-import parseSEGD/segd/[reader as segdreader, writer as segdwriter]
-import parseSEGD/model/[traceindex, gathers]
+import parseSEG/io/diskio
+import parseSEG/segy/[reader as segyreader, writer as segywriter, fields]
+import parseSEG/segd/[reader as segdreader, writer as segdwriter]
+import parseSEG/model/[traceindex, gathers]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tgathers"
+let tmp = getTempDir() / "parseseg_tgathers"
 createDir(tmp)
 
 proc key(record = NaN, ensemble = NaN, offset = NaN, sx = NaN, rx = NaN,

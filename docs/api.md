@@ -1,12 +1,12 @@
-# parseSEGD public API (task 8.2)
+# parseSEG public API (task 8.2)
 
-`import parseSEGD` gives the stable surface listed here. Everything else is internal or
+`import parseSEG` gives the stable surface listed here. Everything else is internal or
 low-level:
-- `parseSEGD/codecs` holds the byte codecs and the field-layout pragmas;
-- the `parseSEGD/<area>/<module>` paths can still be imported one by one.
+- `parseSEG/codecs` holds the byte codecs and the field-layout pragmas;
+- the `parseSEG/<area>/<module>` paths can still be imported one by one.
 
 C, C++, Python and other hosts use the same model through the C ABI: `include/parseseg.h`,
-the `seg_*` functions, built from `parseSEGD/capi` (see `docs/design/c_abi.md`).
+the `seg_*` functions, built from `parseSEG/capi` (see `docs/design/c_abi.md`).
 
 Conventions that hold throughout:
 - **Reads never raise on file content.** Problems go into a `DiagLog` (`log` /

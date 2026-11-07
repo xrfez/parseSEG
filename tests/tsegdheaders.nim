@@ -1,8 +1,8 @@
 ## SEG-D Rev 1/2 header blocks (task 4.1), checked against 63.sgd.
 
 import std/[assertions, os, strutils]
-import parseSEGD/common/errors
-import parseSEGD/segd/headers
+import parseSEG/common/errors
+import parseSEG/segd/headers
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 

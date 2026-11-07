@@ -5,13 +5,13 @@
 ## `skip_guards`).
 
 import std/[assertions, os, strutils]
-import parseSEGD/io/[records, memsource]
-import parseSEGD/segy/[reader as segyreader]
-import parseSEGD/segd/[reader as segdreader]
-import parseSEGD/model/[traceindex, gathers, prefetch, edit]
+import parseSEG/io/[records, memsource]
+import parseSEG/segy/[reader as segyreader]
+import parseSEG/segd/[reader as segdreader]
+import parseSEG/model/[traceindex, gathers, prefetch, edit]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tphase6review"
+let tmp = getTempDir() / "parseseg_tphase6review"
 createDir(tmp)
 
 proc readBytes(path: string): seq[byte] =

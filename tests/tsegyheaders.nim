@@ -1,8 +1,8 @@
 ## Tests for SEG-Y textual, binary and trace headers (task 3.1).
 
 import std/[assertions, os, strutils]
-import parseSEGD/common/[endians, fieldlayout, diagnostics]
-import parseSEGD/segy/[textheader, binheader, traceheader]
+import parseSEG/common/[endians, fieldlayout, diagnostics]
+import parseSEG/segy/[textheader, binheader, traceheader]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 

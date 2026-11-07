@@ -1,10 +1,10 @@
 ## Vendor maps: loader, validator, matcher, decoding, code decoders (task 4.5).
 
 import std/[assertions, os, math, strutils]
-import parseSEGD/common/[ibmfloat, ebcdic]
-import parseSEGD/segd/[reader as segdreader]
-import parseSEGD/segy/[reader as segyreader]
-import parseSEGD/vendor/apply
+import parseSEG/common/[ibmfloat, ebcdic]
+import parseSEG/segd/[reader as segdreader]
+import parseSEG/segy/[reader as segyreader]
+import parseSEG/vendor/apply
 
 const here = currentSourcePath().parentDir
 const exampleDir = here / ".." / "SEG Spec" / "exampleFiles"
@@ -147,7 +147,7 @@ block malformed_maps_are_diagnostics:
       doAssert false, "accepted: " & bad
     except ValueError as e:
       doAssert why in e.msg, e.msg
-  let dir = getTempDir() / "parsesegd_tvendormaps"
+  let dir = getTempDir() / "parseseg_tvendormaps"
   createDir(dir)
   writeFile(dir / "bad.nif", "(.nif27)\n(vendormap \"a\" (target (kind block)))\n(")
   writeFile(dir / "overlap.nif", """(.nif27)

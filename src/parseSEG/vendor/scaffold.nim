@@ -228,7 +228,7 @@ proc toNif*(s: Scaffold, name = ""): string =
                 elif s.manufacturer >= 0: "manufacturer-" & $s.manufacturer & "-scaffold"
                 else: "segy-scaffold"
   let src = s.source.extractFilename
-  result = "(.nif27)\n; Skeleton vendor map scaffolded by `parseSEGD vendormap scaffold`\n" &
+  result = "(.nif27)\n; Skeleton vendor map scaffolded by `parseSEG vendormap scaffold`\n" &
     "; from " & commentText(src) & ". Each field is a run of bytes that is constant\n" &
     "; over every occurrence (value shown), varies, or looks like text. Rename the\n" &
     "; fields and give them real encodings; see docs/design/vendor_maps.md.\n"

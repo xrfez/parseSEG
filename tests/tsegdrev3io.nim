@@ -1,13 +1,13 @@
 ## SEG-D Rev 3 writer and round trips (tasks 5.3 and 5.4).
 
 import std/[assertions, os, strutils, math]
-import parseSEGD/common/errors
-import parseSEGD/io/[records, diskio, tapeimage]
-import parseSEGD/segd/[reader, writer]
+import parseSEG/common/errors
+import parseSEG/io/[records, diskio, tapeimage]
+import parseSEG/segd/[reader, writer]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const bigFile = exampleDir / "00000151_12900_11300.sgd" # local only, not in git
-let tmp = getTempDir() / "parsesegd_tsegdrev3io"
+let tmp = getTempDir() / "parseseg_tsegdrev3io"
 createDir(tmp)
 
 proc readBytes(path: string): seq[byte] =

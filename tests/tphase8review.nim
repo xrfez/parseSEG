@@ -3,15 +3,15 @@
 ## One block per finding (b<N> = the Nim-side review's numbering).
 
 import std/[assertions, os, math, strutils]
-import parseSEGD/common/endians
-import parseSEGD/io/diskio
-import parseSEGD/segy/[reader as segyreader, fields]
-import parseSEGD/segd/[reader as segdreader, writer as segdwriter]
-import parseSEGD/model/[traceindex, keys, prefetch]
-import parseSEGD/convert
+import parseSEG/common/endians
+import parseSEG/io/diskio
+import parseSEG/segy/[reader as segyreader, fields]
+import parseSEG/segd/[reader as segdreader, writer as segdwriter]
+import parseSEG/model/[traceindex, keys, prefetch]
+import parseSEG/convert
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tphase8review"
+let tmp = getTempDir() / "parseseg_tphase8review"
 createDir(tmp)
 
 proc errorsAndWorse(log: DiagLog): int = log.count(sevError) + log.count(sevFatal)

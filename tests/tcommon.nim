@@ -1,7 +1,7 @@
 ## Tests for the common primitives: endians, bcd, ibmfloat, ebcdic.
 
 import std/assertions
-import parseSEGD/common/[endians, bcd, ibmfloat, ebcdic, errors]
+import parseSEG/common/[endians, bcd, ibmfloat, ebcdic, errors]
 
 block endian_roundtrip:
   var b = newSeq[byte](16)

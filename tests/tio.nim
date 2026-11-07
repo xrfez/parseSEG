@@ -2,10 +2,10 @@
 ## disk files and the byte cursor.
 
 import std/[assertions, os]
-import parseSEGD/common/[errors, diagnostics]
-import parseSEGD/io/[records, diskio, tapeimage, tapedevice]
+import parseSEG/common/[errors, diagnostics]
+import parseSEG/io/[records, diskio, tapeimage, tapedevice]
 
-let tmp = getTempDir() / "parsesegd_tio"
+let tmp = getTempDir() / "parseseg_tio"
 createDir tmp
 
 proc bytes(n: int; seed = 0): seq[byte] =

@@ -1,4 +1,4 @@
-## The `parseSEGD` command line tool (Phase 7) end to end: builds it as
+## The `parseSEG` command line tool (Phase 7) end to end: builds it as
 ## `nim cli` does and runs every command on the sample files, checking the
 ## output, the files written and the exit status (0 ok, 1 errors, 2 usage).
 
@@ -11,13 +11,13 @@ const
   s63 = ex / "63.sgd"
   inova = ex / "inova_rev30_5traces.sgd"
 
-let tmp = getTempDir() / "parsesegd_tcli"
+let tmp = getTempDir() / "parseseg_tcli"
 createDir(tmp)
-let exe = tmp / "parseSEGD"
+let exe = tmp / "parseSEG"
 block build:
   let (o, code) = execCmdEx(getCurrentCompilerExe().quoteShell & " c --hints:off -d:release " &
     "--nimcache:" & quoteShell(tmp / "cache") & " -o:" & quoteShell(exe) & " " &
-    quoteShell(root / "src" / "parseSEGD" / "cli.nim"))
+    quoteShell(root / "src" / "parseSEG" / "cli.nim"))
   doAssert code == 0, o
 
 proc run(args: varargs[string]): (string, int) =
@@ -44,8 +44,8 @@ proc fresh(src: string): string =
 # -------------------------------------------------------- 7.1: inspecting --
 
 block usage_and_version:
-  doAssert "parseSEGD 0.2.0" in ok("version")
-  doAssert "Usage: parseSEGD" in ok("help")
+  doAssert "parseSEG 0.2.0" in ok("version")
+  doAssert "Usage: parseSEG" in ok("help")
   doAssert "unknown command" in fails(2, "frobnicate")
   doAssert "expected info <file>" in fails(2, "info")
   doAssert "no such file" in fails(2, "info", tmp / "missing.sgy")

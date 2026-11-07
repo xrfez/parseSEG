@@ -1,9 +1,9 @@
 ## SEG-D sample codecs (task 4.2).
 
 import std/[assertions, os, math, random]
-import parseSEGD/common/errors
-import parseSEGD/segd/samples
-import parseSEGD/model/tensors
+import parseSEG/common/errors
+import parseSEG/segd/samples
+import parseSEG/model/tensors
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 

@@ -18,7 +18,7 @@ let testDir = getCurrentDir() / "tests"
 for f in walkFiles(testDir / "t*.nim"):
   if f.extractFilename != "tester.nim":
     exec getCurrentCompilerExe().quoteShell & " c -r --hints:off" & mode & " --outdir:" &
-      quoteShell(getTempDir() / ("parsesegd_tests" & mode.replace(" -d:", "_"))) & " " &
+      quoteShell(getTempDir() / ("parseseg_tests" & mode.replace(" -d:", "_"))) & " " &
       quoteShell(f)
 
 echo "All test files completed."

@@ -52,10 +52,10 @@ import ./segy/layout
 import ./io/memsource
 
 const
-  ConverterName = "parseSEGD 0.2.0"
+  ConverterName = "parseSEG 0.2.0"
   StationHeaderName = "PSEGD001"
   stationLayout = """
-<segy-layout name="parseSEGD SEG-D stations">
+<segy-layout name="parseSEG SEG-D stations">
   <extension name="PSEGD001">
     <entry name="sht_line" byte="1" type="ieee64"/>
     <entry name="sht_point" byte="9" type="ieee64"/>

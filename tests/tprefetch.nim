@@ -1,7 +1,7 @@
 ## Read-ahead on a worker thread (task 6.3).
 
 import std/[assertions, os, random]
-import parseSEGD/model/[traceindex, prefetch]
+import parseSEG/model/[traceindex, prefetch]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const files = ["BO_3D-Inglewood_rev21_v7.sgy", "inova_rev30_5traces.sgd", "63.sgd",

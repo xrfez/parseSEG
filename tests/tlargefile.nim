@@ -6,16 +6,16 @@
 ## take 4.3 GB each), and off POSIX systems.
 
 import std/[assertions, os, strutils]
-import parseSEGD/segy/[reader as segyreader]
-import parseSEGD/segd/[reader as segdreader]
-import parseSEGD/model/[traceindex, prefetch, edit]
+import parseSEG/segy/[reader as segyreader]
+import parseSEG/segd/[reader as segdreader]
+import parseSEG/model/[traceindex, prefetch, edit]
 
 const
   FourGiB = 4_294_967_296'i64
   MaxAllocated = 256'i64 shl 20 # more than this means the holes were filled
   exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 
-let tmp = getTempDir() / "parsesegd_tlargefile"
+let tmp = getTempDir() / "parseseg_tlargefile"
 createDir(tmp)
 
 when defined(posix):

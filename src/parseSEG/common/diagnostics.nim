@@ -9,7 +9,7 @@
 ##
 ## ```
 ## (.nif27)
-## (.vendor "parseSEGD")
+## (.vendor "parseSEG")
 ## (diagnostics
 ##  (diag warning badValue "format code 0 is not defined"
 ##   (file "63.sgd")
@@ -172,7 +172,7 @@ template tryRecord*(log: var DiagLog; loc: Location; body: untyped): bool =
 
 # --------------------------------------------------------------------- NIF --
 
-const NifVendor = "parseSEGD"
+const NifVendor = "parseSEG"
 
 proc addInt(b: var Builder; tag: string; value: int64) =
   if value >= 0:

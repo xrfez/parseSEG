@@ -1,13 +1,13 @@
 ## In-place header edits with an undo journal (task 6.6).
 
 import std/[assertions, os, strutils]
-import parseSEGD/io/diskio
-import parseSEGD/segy/[reader as segyreader, writer as segywriter]
-import parseSEGD/segd/[reader as segdreader]
-import parseSEGD/model/[traceindex, edit]
+import parseSEG/io/diskio
+import parseSEG/segy/[reader as segyreader, writer as segywriter]
+import parseSEG/segd/[reader as segdreader]
+import parseSEG/model/[traceindex, edit]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tedit"
+let tmp = getTempDir() / "parseseg_tedit"
 createDir(tmp)
 
 proc readBytes(path: string): seq[byte] =

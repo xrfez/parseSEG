@@ -1,4 +1,4 @@
-# parseSEGD: master plan and checkpoint log
+# parseSEG: master plan and checkpoint log
 
 > **Resuming in a new session? Read this file first, then follow "Resume protocol".**
 
@@ -168,8 +168,8 @@ with synthetic data only. *(Owner: integer-format SEG-D samples would help.)*
 
 ## Architecture (target)
 ```
-src/parseSEGD.nim                # umbrella module, re-exports public API
-src/parseSEGD/
+src/parseSEG.nim                # umbrella module, re-exports public API
+src/parseSEG/
   common/
     endians.nim     # big-endian get/put (u8..u64, i8..i64, 24-bit); ByteOrder + getNum/putNum (BE/LE/pair-swapped)
     fieldlayout.nim # `{.at: specByte.}` pragma -> decodeFields/encodeFields/fieldTable for fixed-layout headers
@@ -299,7 +299,7 @@ Tasks:
       list of trace indices (`openArray[int32]`), not only a range, decoding rows in list order
       straight from the map. Gathers and component groups need this already, and it is the hook
       for sorting (see Future): a sort only produces such a list.
-- [x] 8.3 Export layer (`src/parseSEGD/capi.nim`): exportc procs over the public API, readable
+- [x] 8.3 Export layer (`src/parseSEG/capi.nim`): exportc procs over the public API, readable
       struct names, a documented header (generated, then commented or wrapped), version symbol.
 - [x] 8.4 C test program (and a Python ctypes/numpy smoke test) against the shipped header and
       `.so`; CI builds the `.so`/`.dll`.
@@ -355,18 +355,21 @@ Tasks:
 - Processing itself (filters, FFT, gains, LMO/NMO, stacks) is a separate library consuming this one.
 
 ### Phase 7: Tooling
-- [x] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF log)
-- [x] 7.1b CLI: `parseSEGD vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
+- [x] 7.1 CLI: `parseSEG info|dump|convert|diag` (diag prints the NIF log)
+- [x] 7.1b CLI: `parseSEG vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
       `.nif` map for every unmapped vendor area (e.g. the 9 INOVA blocks 0xB0-0xB8 in the 3.0
       sample, and the 3 Geo Space extended blocks in `63.sgd`)
 - [x] 7.3 NIF header export/import: streamed export (fields + raw, or fields only); import as
       a patch (diff → in-place journaled edits, or rewrite with the original samples). CLI:
-      `parseSEGD headers|edit|export|import`
+      `parseSEG headers|edit|export|import`
 - [x] 7.2 Docs and CI updates
 
 ### Phase 9: Rename the project to parseSEG
-- [ ] 9.1 Rename `parseSEGD` to `parseSEG` everywhere: package, nimble file, `src/parseSEGD*`,
-      imports, docs, tests, tools, the exported C prefix, and the repository (owner action).
+- [x] 9.1 Renamed `parseSEGD` to `parseSEG` everywhere: package (`parseSEG.nimble`, `atlas.lock`),
+      `src/parseSEG.nim` + `src/parseSEG/`, imports, docs, tests, tools, CI, the CLI binary
+      (`bin/parseSEG`) and the vendor-map env var (`PARSESEG_VENDOR_PATH`). The C prefix (`seg_`),
+      `include/parseseg.h`, `libparseseg.*` and the Python module `parseseg` already had the new
+      name. Owner actions left: rename the working directory and the GitHub repository.
 
 ### Phase 10: Survey (positioning) files
 - [ ] 10.1 Obtain and ingest the specs: SEG P1 (P1/90 and P1/11) and SPS (Shell SPS 2.1 and SEG SPS
@@ -651,4 +654,4 @@ Tasks:
   - CLI: `nim cli`.
   - Every build target: `tests/ttargets.nim`.
   - `nim test` takes about 3.5 minutes.
-
+- 2026-11-07: Phase 9 done (task 9.1): project renamed to parseSEG; `nim test` passes. Historical log entries keep the old name. Owner actions: rename the working directory and the GitHub repository (then update the git remote URL). **Next: Phase 10** (needs the P1/SPS specs from the owner).

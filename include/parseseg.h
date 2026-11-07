@@ -1,5 +1,5 @@
 /*
- * parseseg.h: C ABI of parseSEGD, a SEG-Y / SEG-D reader, indexer and
+ * parseseg.h: C ABI of parseSEG, a SEG-Y / SEG-D reader, indexer and
  * in-place header editor. The library is libparseseg.so, parseseg.dll or
  * libparseseg.dylib.
  *
@@ -423,7 +423,7 @@ SegStatus seg_journal_apply(const char *path, const char *journal, SegLog **log)
 /* ---- conversion ------------------------------------------------------ */
 /* Writes a SEG-Y file from a SEG-Y file (another revision, byte order or
    sample format) or from a SEG-D file (any revision; the field mapping is in
-   docs/api.md and src/parseSEGD/convert.nim). Samples are carried exactly
+   docs/api.md and src/parseSEG/convert.nim). Samples are carried exactly
    unless a format that cannot hold them is forced. Everything the target
    has no place for is reported as a diagnostic in the log. */
 
@@ -453,7 +453,7 @@ SegStatus seg_convert(const char *src, const char *dst, const SegConvertOptions 
    0 keeps each record's (8080 becomes 8058 for Rev 2). Samples are copied
    byte for byte unless re-encoded. Dropped and approximated values are
    reported in the log, and records the target cannot represent are skipped
-   with an error (the mapping is in src/parseSEGD/segd/revconvert.nim).
+   with an error (the mapping is in src/parseSEG/segd/revconvert.nim).
    Returns SEG_ERR_FORMAT if the conversion could not complete (an unreadable
    input, an invalid target); `log` as for seg_convert. */
 SegStatus seg_convert_segd(const char *src, const char *dst, int32_t rev_major,

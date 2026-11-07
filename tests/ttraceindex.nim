@@ -2,14 +2,14 @@
 ## reads (task 6.5), on the sample files, tape images and damaged input.
 
 import std/[assertions, os]
-import parseSEGD/common/errors
-import parseSEGD/io/[records, diskio, tapeimage, tapedevice, memsource, pushback]
-import parseSEGD/segy/[reader as segyreader, writer as segywriter]
-import parseSEGD/segd/[reader as segdreader, writer as segdwriter]
-import parseSEGD/model/traceindex
+import parseSEG/common/errors
+import parseSEG/io/[records, diskio, tapeimage, tapedevice, memsource, pushback]
+import parseSEG/segy/[reader as segyreader, writer as segywriter]
+import parseSEG/segd/[reader as segdreader, writer as segdwriter]
+import parseSEG/model/traceindex
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_ttraceindex"
+let tmp = getTempDir() / "parseseg_ttraceindex"
 createDir(tmp)
 
 const

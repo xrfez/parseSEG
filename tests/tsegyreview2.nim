@@ -2,13 +2,13 @@
 ## finding, numbered as in the review).
 
 import std/[assertions, os, strutils]
-import parseSEGD/common/errors
-import parseSEGD/io/diskio
-import parseSEGD/segy/[reader, writer, fields]
+import parseSEG/common/errors
+import parseSEG/io/diskio
+import parseSEG/segy/[reader, writer, fields]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const ingle = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
-let tmp = getTempDir() / "parsesegd_tsegyreview2"
+let tmp = getTempDir() / "parseseg_tsegyreview2"
 createDir(tmp)
 
 proc toBytes(s: string): seq[byte] =

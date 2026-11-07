@@ -543,10 +543,10 @@ proc checkVendorMap*(m: VendorMap): seq[string] =
 
 proc vendorSearchPath*(): seq[string] =
   ## The built-in `vendormaps/` directory of the repository, then the
-  ## directories in `PARSESEGD_VENDOR_PATH` (separated by the platform's path
+  ## directories in `PARSESEG_VENDOR_PATH` (separated by the platform's path
   ## separator).
   result.add currentSourcePath().parentDir.parentDir.parentDir.parentDir / "vendormaps"
-  for d in getEnv("PARSESEGD_VENDOR_PATH").split(PathSep):
+  for d in getEnv("PARSESEG_VENDOR_PATH").split(PathSep):
     if d.len > 0: result.add d
 
 proc addMap*(reg: var VendorRegistry, m: sink VendorMap) =

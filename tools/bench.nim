@@ -7,7 +7,7 @@
 ## not the disk.
 
 import std/[monotimes, times, os, strformat]
-import parseSEGD
+import parseSEG
 
 const
   exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"

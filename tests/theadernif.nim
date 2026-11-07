@@ -4,10 +4,10 @@
 ## would clobber inputs, scaffold escaping and unassigned byte ranges.
 
 import std/[assertions, os, strutils]
-import parseSEGD
+import parseSEG
 
 const ex = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_theadernif"
+let tmp = getTempDir() / "parseseg_theadernif"
 createDir(tmp)
 
 proc fresh(name: string): string =

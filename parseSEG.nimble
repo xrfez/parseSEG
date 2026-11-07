@@ -2,7 +2,7 @@
 
 version       = "0.2.0"
 author        = "Joshua Fenner"
-description   = "Parse SEG formatted files incuding Type Y Revision 1.0 and 2.0 as well as Type D Revision 1.0, 2.1, and 3.0"
+description   = "Read, write, index and edit SEG-Y (Rev 0-2.1) and SEG-D (Rev 2.0-3.0) seismic data on disk and tape"
 license       = "MIT"
 srcDir        = "src"
 

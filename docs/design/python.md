@@ -23,7 +23,7 @@ with parseseg.open("line.sgy") as f:            # keys=True: geometry per trace
 
 `nim pylib` builds `bin/parseseg.so` (`parseseg.pyd` on Windows):
 `nim c --app:lib --mm:atomicArc --threads:on -d:useMalloc -d:release -d:segPython
-src/parseSEGD/pyapi.nim`.
+src/parseSEG/pyapi.nim`.
 
 - No `--noMain`: the module initializes the Nim runtime when Python loads it.
 - The module links no libpython. nimpy looks the CPython API up in the importing process, so
@@ -41,10 +41,10 @@ src/parseSEGD/pyapi.nim`.
 
 ## One source for two boundaries
 
-- `src/parseSEGD/abi/core.nim` holds the shared implementation: handle objects, argument
+- `src/parseSEG/abi/core.nim` holds the shared implementation: handle objects, argument
   checks, the 1 TiB buffer limit and the `malloc` probe, selections, reads, prefetch, edits,
   journals, conversion options and DLPack. Its procs raise.
-- `src/parseSEGD/abi/exporting.nim` defines the one export pragma, `{.segExport.}` /
+- `src/parseSEG/abi/exporting.nim` defines the one export pragma, `{.segExport.}` /
   `{.segExport: "name".}`:
   - with `-d:segCapi` it becomes `exportc: "name", dynlib, cdecl`;
   - with `-d:segPython` it becomes nimpy's `exportpy` (named `name` when given);

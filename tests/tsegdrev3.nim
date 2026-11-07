@@ -1,8 +1,8 @@
 ## SEG-D Rev 3 header blocks and timestamps (task 5.1).
 
 import std/[assertions, os, times, math, strutils]
-import parseSEGD/segd/[headers, rev3, reader]
-import parseSEGD/io/[records, diskio]
+import parseSEG/segd/[headers, rev3, reader]
+import parseSEG/io/[records, diskio]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const bigFile = exampleDir / "00000151_12900_11300.sgd" # local only, not in git

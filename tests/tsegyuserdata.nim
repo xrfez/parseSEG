@@ -1,11 +1,11 @@
 ## SEG-Y User Data (D-9) in extended headers and trailers (task 3.4b).
 
 import std/[assertions, os, strutils]
-import parseSEGD/common/errors
-import parseSEGD/io/[records, diskio, tapeimage]
-import parseSEGD/segy/[reader, writer]
+import parseSEG/common/errors
+import parseSEG/io/[records, diskio, tapeimage]
+import parseSEG/segy/[reader, writer]
 
-let tmp = getTempDir() / "parsesegd_tsegyuserdata"
+let tmp = getTempDir() / "parseseg_tsegyuserdata"
 createDir(tmp)
 
 proc readBytes(path: string): seq[byte] =
@@ -32,7 +32,7 @@ proc nastyBlob(n: int): seq[byte] =
 proc desc(label, format: string): UserDataBlock =
   UserDataBlock(version: "1", dataFormat: format, dataLabel: label,
     description: "test attachment " & label, creationTime: "2026-11-07 12:00:00Z",
-    creator: "parseSEGD tests")
+    creator: "parseSEG tests")
 
 proc makeFile(ext, trailer: ExtendedTextHeader, nExt: int16, nTrailer: int32): SegyData =
   ## A Rev 2.1 file with 3 fixed-length traces of 4 int16 samples.
@@ -82,7 +82,7 @@ block user_data_in_extended_header_with_variable_count:
   for i, (dsc, data) in items:
     let b = x.userData[i]
     doAssert b.dataLabel == dsc.dataLabel and b.dataFormat == dsc.dataFormat
-    doAssert b.blockSize == data.len and b.creator == "parseSEGD tests"
+    doAssert b.blockSize == data.len and b.creator == "parseSEG tests"
     doAssert b.dataVersion == "1" and b.stanza == 1
     doAssert x.userDataBytes(b) == data
     extractUserData(path, b, tmp / "extracted.bin")

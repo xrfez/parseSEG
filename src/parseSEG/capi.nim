@@ -5,7 +5,7 @@
 ## in `docs/design/c_abi.md`. Build with the nimble task `lib`:
 ##
 ##   nim c --app:lib --noMain --mm:atomicArc --threads:on -d:useMalloc -d:release
-##     -d:segCapi --out:libparseseg.so src/parseSEGD/capi.nim
+##     -d:segCapi --out:libparseseg.so src/parseSEG/capi.nim
 ##
 ## Every export catches everything (`except Exception`), so no Nim exception
 ## or Defect unwinds into C; arguments are checked before any call that

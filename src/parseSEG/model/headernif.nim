@@ -143,7 +143,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   var o = NifOut()
   if not open(o.f, tmp, fmWrite): raise newException(IOError, "cannot write " & tmp)
   try:
-    o.put "(.nif27)\n(.vendor \"parseSEGD\")\n(headers\n (standard " &
+    o.put "(.nif27)\n(.vendor \"parseSEG\")\n(headers\n (standard " &
       (if f.kind == skSegy: "segy" else: "segd") & ")\n (traces " & $f.len & ")\n"
     let records = if f.kind == skSegd: f.index.segdRecords.len else: 0
     o.put " (records " & $records & ")"

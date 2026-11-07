@@ -3,12 +3,12 @@
 ## FIXREC structures, damaged input.
 
 import std/[assertions, os, strutils]
-import parseSEGD/common/errors
-import parseSEGD/io/[records, diskio, tapeimage]
-import parseSEGD/segd/[reader, writer]
+import parseSEG/common/errors
+import parseSEG/io/[records, diskio, tapeimage]
+import parseSEG/segd/[reader, writer]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tsegdreader"
+let tmp = getTempDir() / "parseseg_tsegdreader"
 createDir(tmp)
 
 proc readBytes(path: string): seq[byte] =

@@ -3,7 +3,7 @@
 ## (`abi/core.nim`). Build with the nimble task `pylib`:
 ##
 ##   nim c --app:lib --mm:atomicArc --threads:on -d:useMalloc -d:release -d:segPython
-##     --out:parseseg.so src/parseSEGD/pyapi.nim      # parseseg.pyd on Windows
+##     --out:parseseg.so src/parseSEG/pyapi.nim      # parseseg.pyd on Windows
 ##
 ## Python view of the C ABI:
 ##

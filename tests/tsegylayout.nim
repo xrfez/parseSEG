@@ -1,11 +1,11 @@
 ## SEG-Y trace header layouts and named values (task 3.4d).
 
 import std/[assertions, os, math]
-import parseSEGD/io/diskio
-import parseSEGD/segy/[reader, writer, fields]
+import parseSEG/io/diskio
+import parseSEG/segy/[reader, writer, fields]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tsegylayout"
+let tmp = getTempDir() / "parseseg_tsegylayout"
 createDir(tmp)
 
 proc write(d: SegyData, path: string) =

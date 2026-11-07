@@ -3,12 +3,12 @@
 ## the logged losses, and records that cannot be represented.
 
 import std/[assertions, os, strutils, math]
-import parseSEGD/common/diagnostics
-import parseSEGD/io/[records, diskio, tapeimage]
-import parseSEGD/segd/[reader, writer, headers, samples, rev3, revconvert]
+import parseSEG/common/diagnostics
+import parseSEG/io/[records, diskio, tapeimage]
+import parseSEG/segd/[reader, writer, headers, samples, rev3, revconvert]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parsesegd_tsegdrevconvert"
+let tmp = getTempDir() / "parseseg_tsegdrevconvert"
 createDir(tmp)
 
 proc readBytes(path: string): seq[byte] =

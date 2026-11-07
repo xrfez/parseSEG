@@ -1,19 +1,19 @@
-## The `parseSEGD` command line tool (Phase 7), written against the public
-## API (`import parseSEGD`), so it doubles as an end-to-end test of it.
-## Build with `nim cli` (bin/parseSEGD). `parseSEGD help` lists the commands.
+## The `parseSEG` command line tool (Phase 7), written against the public
+## API (`import parseSEG`), so it doubles as an end-to-end test of it.
+## Build with `nim cli` (bin/parseSEG). `parseSEG help` lists the commands.
 ##
 ## Exit status: 0 success; 1 the command ran but reported errors (an error or
 ## fatal diagnostic); 2 a usage error.
 
 import std/[os, strutils, sequtils]
-import ../parseSEGD
+import ../parseSEG
 
 const
   Version = "0.2.0"
   Usage = """
-parseSEGD """ & Version & """ — read, index, edit and convert SEG-Y and SEG-D
+parseSEG """ & Version & """ — read, index, edit and convert SEG-Y and SEG-D
 
-Usage: parseSEGD <command> [options] <arguments>
+Usage: parseSEG <command> [options] <arguments>
 
 Inspecting
   info <file> [--keys]          what the file is: standard, revision, format,
@@ -52,7 +52,7 @@ Vendor maps (NIF plugins for vendor header areas; docs/design/vendor_maps.md)
   vendormap check <map.nif>...  load and validate maps
   vendormap list [<file>] [--map=PATH]
                                 the maps on the search path (vendormaps/,
-                                PARSESEGD_VENDOR_PATH, --map), and which match
+                                PARSESEG_VENDOR_PATH, --map), and which match
   vendormap apply <file> [--map=PATH] [--traces=SEL]
                                 decode the vendor areas, printed as NIF
   vendormap scaffold <file> [-o map.nif] [--map=PATH] [--name=N]
@@ -146,14 +146,14 @@ proc checkInput(path: string) =
     var fh = open(path, fmRead)
     fh.close()
   except IOError:
-    quit("parseSEGD: cannot read " & path & " (" & osErrorMsg(osLastError()) & ")", 1)
+    quit("parseSEG: cannot read " & path & " (" & osErrorMsg(osLastError()) & ")", 1)
 
 proc openFile(path: string, keys = false): SeismicFile =
   checkInput(path)
   result = openSeismic(path, keys = keys)
   if not result.index.detected:
     printLog(result.index.log, sevError)
-    quit("parseSEGD: " & path & " is neither SEG-Y nor SEG-D", 1)
+    quit("parseSEG: " & path & " is neither SEG-Y nor SEG-D", 1)
 
 proc refuseSame(output, input: string) =
   if output == input or (fileExists(output) and fileExists(input) and sameFile(output, input)):
@@ -318,7 +318,7 @@ proc sourceKind(path: string): SeismicKind =
   head.setLen fh.readBuffer(addr head[0], head.len)
   fh.close()
   if not detectKind(head.toOpenArrayByte(0, head.len - 1), result):
-    quit("parseSEGD: " & path & " is neither SEG-Y nor SEG-D", 1)
+    quit("parseSEG: " & path & " is neither SEG-Y nor SEG-D", 1)
 
 proc parseRev(s: string, minParts, maxParts: int, what: string): (uint8, uint8) =
   let parts = s.split('.')
@@ -366,12 +366,12 @@ proc convertCmd(a: Args): int =
   else: usage("--to is segy or segd")
   printLog(log, sevWarning)
   if log.failed:
-    stderr.writeLine "parseSEGD: conversion ", (if log.isFatal: "failed; " & dst &
+    stderr.writeLine "parseSEG: conversion ", (if log.isFatal: "failed; " & dst &
       " was not written" else: "had errors")
     1
   else:
     echo dst, ": written (", log.count(sevInfo), " notes, ", log.count(sevWarning),
-      " warnings; `parseSEGD diag` lists the file's own)"
+      " warnings; `parseSEG diag` lists the file's own)"
     0
 
 # ------------------------------------------------------------------- edit --
@@ -677,17 +677,17 @@ proc run*(args: seq[string]): int =
     of "journal": journal(a)
     of "vendormap": vendormap(a)
     of "version", "--version":
-      echo "parseSEGD ", Version
+      echo "parseSEG ", Version
       0
     of "help", "--help", "-h":
       stdout.write Usage
       0
     else: usage("unknown command '" & cmd & "'")
   except UsageError as e:
-    stderr.writeLine "parseSEGD: ", e.msg, "\n(parseSEGD help lists the commands)"
+    stderr.writeLine "parseSEG: ", e.msg, "\n(parseSEG help lists the commands)"
     2
   except CatchableError as e:
-    stderr.writeLine "parseSEGD: ", e.msg
+    stderr.writeLine "parseSEG: ", e.msg
     1
 
 when isMainModule:

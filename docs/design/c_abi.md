@@ -1,6 +1,6 @@
 # C ABI (task 8.1)
 
-parseSEGD is built to be embedded. Nim programs `import parseSEGD`. Programs in any other
+parseSEG is built to be embedded. Nim programs `import parseSEG`. Programs in any other
 language load `libparseseg.so` / `parseseg.dll` / `libparseseg.dylib` and include
 `include/parseseg.h`. This note fixes the rules of that C boundary. The header carries the
 per-function documentation.
@@ -22,7 +22,7 @@ per-function documentation.
 ## Decisions
 
 1. **Build.** `nim lib` runs `nim c --app:lib --noMain --mm:atomicArc --threads:on`
-   `-d:useMalloc -d:release -d:segCapi src/parseSEGD/capi.nim`.
+   `-d:useMalloc -d:release -d:segCapi src/parseSEG/capi.nim`.
    - `useMalloc` lets any host thread call in with no per-thread setup, and lets ASan and
      valgrind see every allocation.
    - `atomicArc` makes reference counts atomic, so a handle (for example a tensor shared
@@ -34,7 +34,7 @@ per-function documentation.
    is idempotent and thread-safe, and returns `SEG_ABI_VERSION`. No teardown call is needed.
 
 3. **Naming.** Functions use `seg_<object>_<verb>` and types use `Seg<Name>`. The C prefix is
-   `seg`, not `parseSEGD`, so the Phase 9 rename (to parseSEG) does not touch the C API.
+   `seg`, not `parseSEG`, so the Phase 9 rename (to parseSEG) does not touch the C API.
    Constants use `SEG_`.
 
 4. **The header is curated, not generated.** `include/parseseg.h` is hand-written,
@@ -123,7 +123,7 @@ per-function documentation.
     package version string.
 
 13. **One source with the Python module.** The exports are thin wrappers over
-    `src/parseSEGD/abi/core.nim`, marked with `{.segExport: "seg_name".}`, which becomes
+    `src/parseSEG/abi/core.nim`, marked with `{.segExport: "seg_name".}`, which becomes
     `exportc, dynlib, cdecl` under `-d:segCapi`. The Python module wraps the same procs (see
     `python.md`). Put new behavior in the core, then add a wrapper for each target.
 

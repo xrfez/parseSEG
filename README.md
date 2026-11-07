@@ -1,4 +1,4 @@
-# parseSEGD
+# parseSEG
 
 Read, write, index, edit and convert SEG-Y (Rev 0, 1, 2.0, 2.1) and SEG-D (Rev 1, 2.0, 2.1,
 3.0) seismic data, on disk and tape, for viewers and HPC processing. Files of any size are
@@ -7,39 +7,39 @@ stopping a read.
 
 | Use it from | How | Docs |
 |---|---|---|
-| Nim | `import parseSEGD` | `docs/api.md` |
-| The shell | `nim cli`, then `bin/parseSEGD help` | below |
+| Nim | `import parseSEG` | `docs/api.md` |
+| The shell | `nim cli`, then `bin/parseSEG help` | below |
 | C, C++, any FFI | `nim lib` → `libparseseg.so` + `include/parseseg.h` | `docs/design/c_abi.md` |
 | Python | `nim pylib` → `import parseseg` (zero-copy numpy) | `docs/design/python.md` |
 
 ## Command line
 
 ```
-parseSEGD info line.sgy --keys                 # standard, revision, format, traces, gathers
-parseSEGD dump line.sgy --traces=0..9 --fields=trace.sourceX,trace.groupX
-parseSEGD diag shot.sgd --min=warning          # the diagnostics (--nif: as NIF)
-parseSEGD convert shot.sgd shot.sgy --rev=2.1  # SEG-D or SEG-Y to SEG-Y
-parseSEGD convert old.sgd new.sgd --rev=3.0    # SEG-D revisions
-parseSEGD edit line.sgy t5:trace.sourceX=1200 file:binary.jobId=7   # in place, journaled
-parseSEGD headers export line.sgy -o h.nif     # edit h.nif, then:
-parseSEGD headers import line.sgy h.nif -o fixed.sgy               # only changed fields
-parseSEGD journal rollback line.sgy line.sgy.edits.nif
-parseSEGD vendormap scaffold shot.sgd -o vendor.nif                # skeleton vendor map
-parseSEGD vendormap apply shot.sgd --map=vendor.nif
+parseSEG info line.sgy --keys                  # standard, revision, format, traces, gathers
+parseSEG dump line.sgy --traces=0..9 --fields=trace.sourceX,trace.groupX
+parseSEG diag shot.sgd --min=warning           # the diagnostics (--nif: as NIF)
+parseSEG convert shot.sgd shot.sgy --rev=2.1   # SEG-D or SEG-Y to SEG-Y
+parseSEG convert old.sgd new.sgd --rev=3.0     # SEG-D revisions
+parseSEG edit line.sgy t5:trace.sourceX=1200 file:binary.jobId=7    # in place, journaled
+parseSEG headers export line.sgy -o h.nif      # edit h.nif, then:
+parseSEG headers import line.sgy h.nif -o fixed.sgy                # only changed fields
+parseSEG journal rollback line.sgy line.sgy.edits.nif
+parseSEG vendormap scaffold shot.sgd -o vendor.nif                 # skeleton vendor map
+parseSEG vendormap apply shot.sgd --map=vendor.nif
 ```
 
 Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 
 ## Directory Layout
 
-- `src/parseSEGD.nim`: the public API (umbrella module); `src/parseSEGD/`: the library, by
+- `src/parseSEG.nim`: the public API (umbrella module); `src/parseSEG/`: the library, by
   area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `abi`), plus `cli.nim`,
   `capi.nim` (C ABI) and `pyapi.nim` (Python).
 - `include/parseseg.h`: the C header.
 - `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI and build targets
   included).
 - `docs/`: `api.md`, design notes (`design/`), distilled spec notes (`spec/`).
-- `vendormaps/`: built-in vendor maps (NIF), searched with `PARSESEGD_VENDOR_PATH`.
+- `vendormaps/`: built-in vendor maps (NIF), searched with `PARSESEG_VENDOR_PATH`.
 - `tools/`: zig wrappers, the nimpy patch, macOS link stubs, Python oracles for the samples.
 - `bin/`: build outputs.
 - `SEG Spec/`: the standards and sample files.
@@ -47,8 +47,8 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 
 ## Build Tasks
 
-`nim cli` builds the command line tool (`bin/parseSEGD`). Six more build modes of it are
-defined in `config.nims`, also output to `bin/parseSEGD`:
+`nim cli` builds the command line tool (`bin/parseSEG`). Six more build modes of it are
+defined in `config.nims`, also output to `bin/parseSEG`:
 
 | Task | Toolchain | Profile Description | Key Flags |
 |---|---|---|---|
