@@ -18,6 +18,9 @@ export segdheaders, segdsamples, segdrev3, segdreader, segdwriter
 import parseSEGD/vendor/[maps, apply]
 export maps, apply
 
+import parseSEGD/convert
+export convert
+
 import parseSEGD/model/[tensors, keys, traceindex, gathers, prefetch, headerfields, edit]
 export tensors, keys, traceindex, gathers, prefetch, headerfields, edit
 

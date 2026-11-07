@@ -409,6 +409,33 @@ SegStatus seg_editor_close(SegEditor *editor);
 SegStatus seg_journal_rollback(const char *path, const char *journal, SegLog **log);
 SegStatus seg_journal_apply(const char *path, const char *journal, SegLog **log);
 
+/* ---- conversion ------------------------------------------------------ */
+/* Writes a SEG-Y file from a SEG-Y file (another revision, byte order or
+   sample format) or from a SEG-D file (any revision; the field mapping is in
+   docs/api.md and src/parseSEGD/convert.nim). Samples are carried exactly
+   unless a format that cannot hold them is forced. Everything the target
+   has no place for is reported as a diagnostic in the log. */
+
+typedef struct SegConvertOptions {
+    int32_t rev_major, rev_minor; /* SEG-Y revision: 0.0, 1.0, 2.0 or 2.1 (default 2.1) */
+    int32_t byte_order;     /* 0 big-endian (default), 1 little, 2 pair-swapped (Rev 2 only) */
+    int32_t format;         /* SEG-Y format code; 0 = keep (SEG-Y) or pick losslessly (SEG-D) */
+    int32_t text_encoding;  /* SEG-D input: 0 EBCDIC (default), 1 ASCII textual header */
+    int32_t apply_descale;  /* SEG-D input: 1 = write millivolts (MP factor / descale multiplier) */
+    int32_t station_header; /* SEG-D to Rev 2: 1 (default) = line/point in header PSEGD001,
+                               described by a Layout stanza */
+} SegConvertOptions;
+
+/* Fills `out` with the defaults (Rev 2.1, big-endian, lossless, EBCDIC). */
+void seg_convert_options_default(SegConvertOptions *out);
+
+/* Converts `src` to the SEG-Y file `dst`. `options` NULL means the defaults.
+   Returns SEG_ERR_FORMAT if the conversion could not complete (an unreadable
+   input, an invalid target); `log` (may be NULL) receives an owned log of
+   the reader's, writer's and conversion's diagnostics: release it. */
+SegStatus seg_convert(const char *src, const char *dst, const SegConvertOptions *options,
+                      SegLog **log);
+
 /* ---- diagnostics ----------------------------------------------------- */
 
 int64_t   seg_log_count(const SegLog *log);

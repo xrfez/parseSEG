@@ -70,7 +70,18 @@ size-preserving and validated, and each is journaled before it is written.
   `TapeDevice` (Linux `st`, Windows tape, `MemoryTape`).
 
 ## Conversion
-`convertToSegy(...)` and `convertSegyRevision(...)` (task 8.6).
+- `convertFile(src, dst, ConvertOptions(...))` detects the input and writes SEG-Y.
+- `convertSegy(src, sink, opts)` converts SEG-Y to SEG-Y: a new revision (0, 1, 2.0, 2.1),
+  byte order or sample format. It drops what the target cannot hold and reports each kind of
+  loss once.
+- `convertSegdToSegy(src, sink, opts)` converts SEG-D Rev 1/2/3 to SEG-Y, using a documented
+  field mapping (see `convert.nim`):
+  - samples are exact by default, through a lossless format choice;
+  - `applyDescale` writes millivolts instead of recorded values;
+  - Rev 2 targets carry float64 coordinates, offsets and midpoints in Trace Header
+    Extension 1, and line/point in a `PSEGD001` header described by a Layout stanza.
+
+  SEG-D Rev 2 ↔ Rev 3 conversion is not implemented yet (task 8.7).
 
 ## Diagnostics
 `DiagLog` (`len`, `items`, `count(severity)`, `isFatal`, `toNif`, `writeNif`), `Diagnostic`,

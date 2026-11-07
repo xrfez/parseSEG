@@ -34,6 +34,11 @@ static const char *path(const char *base, const char *name) {
 static void test_layout(void) {
     SIZE(SegTraceEntry); SIZE(SegTraceKeys); SIZE(SegTensorView); SIZE(SegValue);
     SIZE(SegGather); SIZE(SegDiagnostic); SIZE(SegChunk); SIZE(DLManagedTensor);
+    SIZE(SegConvertOptions);
+    OFF(SegConvertOptions, rev_major); OFF(SegConvertOptions, rev_minor);
+    OFF(SegConvertOptions, byte_order); OFF(SegConvertOptions, format);
+    OFF(SegConvertOptions, text_encoding); OFF(SegConvertOptions, apply_descale);
+    OFF(SegConvertOptions, station_header);
     CHECK(sizeof(SegTraceEntry) == 24);
     OFF(SegTraceEntry, offset); OFF(SegTraceEntry, header_bytes); OFF(SegTraceEntry, num_samples);
     OFF(SegTraceEntry, record); OFF(SegTraceEntry, channel_set); OFF(SegTraceEntry, scan_type);
@@ -300,6 +305,29 @@ static void test_edits(void) {
     free(orig);
 }
 
+/* ---- conversion ------------------------------------------------------ */
+static void test_convert(void) {
+    SegConvertOptions o;
+    seg_convert_options_default(&o);
+    CHECK(o.rev_major == 2 && o.rev_minor == 1 && o.byte_order == 0 && o.station_header == 1);
+    SegLog *log = NULL;
+    OK(seg_convert(path(dir, "inova_rev30_5traces.sgd"), path(tmp, "inova.sgy"), &o, &log));
+    CHECK(seg_log_count_severity(log, SEG_SEV_ERROR) == 0 && seg_log_count(log) > 0);
+    seg_log_release(log);
+    SegFile *f = NULL;
+    OK(seg_file_open(path(tmp, "inova.sgy"), 0, &f));
+    CHECK(seg_file_kind(f) == SEG_KIND_SEGY && seg_file_trace_count(f) == 5);
+    SegValue v;
+    OK(seg_trace_field(f, 3, "ext1.extGroupX", &v));
+    CHECK(v.kind == SEG_VALUE_FLOAT && v.f == 1826232.375);
+    seg_file_release(f);
+    o.rev_major = 1; o.rev_minor = 0; o.byte_order = 1; /* little-endian needs Rev 2 */
+    CHECK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) == SEG_ERR_FORMAT);
+    o.rev_major = 7;
+    CHECK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) == SEG_ERR_ARGUMENT);
+    OK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "sw.sgy"), NULL, NULL));
+}
+
 /* ---- host threads ---------------------------------------------------- */
 static SegFile *shared_file;
 
@@ -344,6 +372,7 @@ int main(int argc, char **argv) {
     test_reads();
     test_gathers_and_prefetch();
     test_edits();
+    test_convert();
     test_threads();
     if (failures) { fprintf(stderr, "%d failures\n", failures); return 1; }
     printf("abi_test: all checks passed\n");

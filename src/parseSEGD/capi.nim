@@ -14,6 +14,9 @@
 import std/[strutils, locks]
 import ./common/[errors, diagnostics]
 import ./model/[traceindex, keys, gathers, prefetch, headerfields, edit]
+import ./convert
+import ./common/endians
+import ./segy/[textheader, binheader]
 
 const
   SegAbiVersion = 1'i32
@@ -70,6 +73,14 @@ type
     severity, code: int32
     offset, record, channelSet, trace, blockIndex: int64
     file, field, message, codeName: cstring
+
+  SegConvertOptions {.bycopy.} = object
+    revMajor, revMinor: int32
+    byteOrder: int32     # 0 big, 1 little, 2 pair-swapped
+    format: int32        # SEG-Y format code; 0 = keep / lossless
+    textEncoding: int32  # 0 EBCDIC, 1 ASCII
+    applyDescale: int32
+    stationHeader: int32
 
   SegChunk {.bycopy.} = object
     first, count, failed: int64
@@ -794,6 +805,37 @@ proc segLogRelease(l: pointer) {.exportc: "seg_log_release", capi.} =
     if l != nil and logOf(l).owned: GC_unref(logOf(l))
   except Exception: discard
 
+# ------------------------------------------------------------- conversion --
+
+proc segConvertOptionsDefault(o: ptr SegConvertOptions) {.exportc: "seg_convert_options_default",
+    capi.} =
+  if o != nil:
+    let d = ConvertOptions()
+    o[] = SegConvertOptions(revMajor: int32(d.revision.major), revMinor: int32(d.revision.minor),
+      byteOrder: int32(ord(d.byteOrder)), format: int32(d.format),
+      textEncoding: int32(ord(d.textEncoding)), applyDescale: int32(ord(d.applyDescale)),
+      stationHeader: int32(ord(d.stationHeader)))
+
+proc segConvert(src, dst: cstring, opts: ptr SegConvertOptions,
+    outLog: ptr pointer): SegStatus {.exportc: "seg_convert", capi.} =
+  guarded:
+    if src == nil or dst == nil: fail(SEG_ERR_ARGUMENT, "src and dst must not be NULL")
+    elif opts != nil and (opts.revMajor notin 0..2 or opts.revMinor notin 0..1 or
+        opts.byteOrder notin 0..2 or opts.textEncoding notin 0..1 or
+        opts.format notin 0..255):
+      fail(SEG_ERR_ARGUMENT, "SegConvertOptions out of range")
+    else:
+      var o = ConvertOptions()
+      if opts != nil:
+        o = ConvertOptions(revision: SegyRevision(major: uint8(opts.revMajor),
+          minor: uint8(opts.revMinor)), byteOrder: ByteOrder(opts.byteOrder),
+          format: int(opts.format), textEncoding: TextEncoding(opts.textEncoding),
+          applyDescale: opts.applyDescale != 0, stationHeader: opts.stationHeader != 0)
+      let log = convertFile($src, $dst, o)
+      if outLog != nil: outLog[] = keep(LogObj(log: log, owned: true))
+      if log.isFatal: fail(SEG_ERR_FORMAT, log[log.len - 1].msg)
+      else: SEG_OK
+
 # ------------------------------------------------------------ layout check --
 
 proc segSizeof(name: cstring): int64 {.exportc: "seg_sizeof", capi.} =
@@ -807,6 +849,7 @@ proc segSizeof(name: cstring): int64 {.exportc: "seg_sizeof", capi.} =
   of "SegDiagnostic": sizeof(SegDiagnostic)
   of "SegChunk": sizeof(SegChunk)
   of "DLManagedTensor": sizeof(DLManagedTensor)
+  of "SegConvertOptions": sizeof(SegConvertOptions)
   else: -1
 
 proc segOffsetof(name, field: cstring): int64 {.exportc: "seg_offsetof", capi.} =
@@ -872,6 +915,13 @@ proc segOffsetof(name, field: cstring): int64 {.exportc: "seg_offsetof", capi.} 
   of "SegChunk.count": o(SegChunk, count)
   of "SegChunk.failed": o(SegChunk, failed)
   of "SegChunk.samples": o(SegChunk, samples)
+  of "SegConvertOptions.rev_major": o(SegConvertOptions, revMajor)
+  of "SegConvertOptions.rev_minor": o(SegConvertOptions, revMinor)
+  of "SegConvertOptions.byte_order": o(SegConvertOptions, byteOrder)
+  of "SegConvertOptions.format": o(SegConvertOptions, format)
+  of "SegConvertOptions.text_encoding": o(SegConvertOptions, textEncoding)
+  of "SegConvertOptions.apply_descale": o(SegConvertOptions, applyDescale)
+  of "SegConvertOptions.station_header": o(SegConvertOptions, stationHeader)
   of "DLManagedTensor.manager_ctx": o(DLManagedTensor, managerCtx)
   of "DLManagedTensor.deleter": o(DLManagedTensor, deleter)
   else: -1

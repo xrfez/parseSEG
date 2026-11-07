@@ -305,7 +305,7 @@ Tasks:
       `.so`; CI builds the `.so`/`.dll`.
 - [x] 8.5 Geometry for processing: coordinates for SEG-D (Rev 3 position blocks), offsets and
       midpoints from coordinates, and a hook to attach external geometry (filled by Phase 10).
-- [ ] 8.6 Cross-standard and cross-revision conversion as library procs (used by `convert`).
+- [x] 8.6 Cross-standard and cross-revision conversion as library procs (used by `convert`).
       Samples go through Tensors (decode, then encode in the target format). Headers go through
       documented mapping tables: SEG-D → SEG-Y (file number → field record, trace number →
       channel, ns/dt, receiver/source line, point and coordinates where SEG-Y has a field or a
@@ -313,6 +313,10 @@ Tasks:
       these). It is lossy by nature, so every dropped or approximated value is logged as a
       diagnostic, and raw blocks are kept where the target has room (SEG-Y extended text or
       User Data, SEG-D extended headers).
+- [ ] 8.7 (split from 8.6) SEG-D Rev 2 ↔ Rev 3 conversion. Build Rev 3 records (GH#2/GH#3
+      sizes via `computeRev3Sizes`, 96-byte CSDs, Rev 3 THE#1, GH#N → Source Description
+      blocks) and re-encode formats Rev 3 no longer defines. Rev 3 → Rev 2 drops typed blocks,
+      and that is logged.
 - Phase 7's CLI should be written against the 8.2 public API, so it doubles as an end-to-end test.
 - Processing itself (filters, FFT, gains, LMO/NMO, stacks) is a separate library consuming this one.
 
@@ -427,3 +431,11 @@ Tasks:
   - SEG-Y: elevations, and the CDP X/Y as the midpoint, come through the Layout.
   - External geometry hook: `GeometryTable` (`addSource`/`addReceiver` by (line, point, index); index 0 matches any index, an exact index wins), and `applyGeometry(keys | index, table, overwrite)`. Phase 10 fills it from SPS/P1.
   - C ABI: `SegTraceKeys` gains the 4 fields (layout test updated), plus `SegGeometry` (`seg_geometry_new`/`add_source`/`add_receiver`/`release`) and `seg_file_apply_geometry`, which also invalidates the cached gathers.
+- 2026-11-07: Task 8.6 done, except SEG-D Rev 2 ↔ Rev 3, which is split out as **8.7** (it needs whole Rev 3 records built, and both SEG-D revisions already rewrite byte-identically).
+  - `src/parseSEGD/convert.nim`, exported by the umbrella module:
+    - `convertFile` (detects the input; never raises);
+    - `convertSegy`: revision 0/1/2.0/2.1, byte order and format. It drops extended text for Rev 0, and Ext1, proprietary headers and trailers below Rev 2, logging each kind once. Below Rev 2 it skips traces with more than 65535 samples (an error). Going to Rev 2 it adds the byte-order marker and EndText;
+    - `convertSegdToSegy`: the mapping table is in the module doc. Samples go through float64 with a lossless default format (8048 → IBM, 8036 → int24/int32, 8038 → int32, 8080 → float64/float32, else float32), and `applyDescale` (MP factor / DSM) is optional. Channel type and sensor give the trace ID. Coordinates use the finest scalar that fits int32, and Rev 3 times come from the GH#3 time zero.
+  - Rev 2 output also carries float64 coordinates, offset, midpoint, elevations, sample interval and count in Ext1, plus a `PSEGD001` proprietary header with line/point/index/sensor/component/record/channel set/type, described by a `((SEG:Layout))` stanza. `fieldValue(file, trace, "rec_line")` reads it back. Unmappable SEG-D content (extended/external headers, extra general blocks, trailers, 8080 into float32) gets one info note per kind; a value that does not fit a forced format zeroes its trace, with an error.
+  - C ABI: `SegConvertOptions`, `seg_convert_options_default`, `seg_convert` (layout test and abi_test updated).
+  - Tests (`tests/tconvert.nim`): 63.sgd → Rev 2.1 (samples, header and station values) and → Rev 1; INOVA Rev 3 → Rev 2.1 (Ext1 coordinates, scalar -1000, offset, aux trace ID, UTC time); descaling; an 8038 record → format 2 exactly; a forced int8 overflow; Inglewood IBM Rev 2.1 → Rev 1 IEEE (equal samples and headers) and → Rev 0; Sweep0 LE Rev 0 → Rev 2.1 LE → Rev 1 BE; invalid targets and inputs.
