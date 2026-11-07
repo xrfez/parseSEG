@@ -16,8 +16,8 @@ export segdheaders, segdsamples, segdrev3, segdreader, segdwriter
 import parseSEGD/vendor/[maps, apply]
 export maps, apply
 
-import parseSEGD/model/[tensors, keys, traceindex, gathers]
-export tensors, keys, traceindex, gathers
+import parseSEGD/model/[tensors, keys, traceindex, gathers, prefetch]
+export tensors, keys, traceindex, gathers, prefetch
 
 import parseSEGD/io/[records, diskio, memsource, tapeimage, tapedevice]
 export records, diskio, memsource, tapeimage, tapedevice
