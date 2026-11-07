@@ -333,3 +333,29 @@ block r12_refused_bcd_leaves_the_buffer_untouched:
   for i in 0..31: b[i] = 0xAA
   doAssertRaises SegFormatError: g1.encode(b)
   doAssert b[0] == g1.raw[0] and b[1] == g1.raw[1] # raw copied, field not partly written
+
+block fixrec_traces_do_not_cross_blocks:
+  # Owner decision: in FIXREC, a trace that fits in a block starts a new block
+  # rather than crossing a boundary (zero padding in between).
+  var d = makeStream([sd8058, sd8058])
+  let text = align("1", 4) & "SD2.0" & "FIXREC" & alignLeft("B1", 4) & align("1000", 10) &
+    align("163", 10) & "07-NOV-2026" & align("TAPE03", 12) & spaces(6) & spaces(12) &
+    alignLeft("CREW 7", 24) & spaces(14) & align("10", 10)
+  var raw = newSeq[byte](128)
+  for i, c in text: raw[i] = byte(c)
+  d.label = decodeLabel(raw)
+  d.hasLabel = true
+  let traceBytes = 20 + 64 + 52 * 4 # a seismic trace: 292 bytes
+  for path in [tmp / "nocross.tap", tmp / "nocross.sgd"]:
+    if path.endsWith(".tap"): discard d.toTape(path) else: discard d.toDisk(path)
+    let e = if path.endsWith(".tap"): fromTape(path) else: readSegd(path)
+    doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+    doAssert e.records.len == 2
+    sameRecords(d, e)
+    if path.endsWith(".sgd"):
+      for rd in e.records:
+        for t in rd.traces:
+          let startInBlock = t.offset mod 1000
+          doAssert startInBlock + (20 + 32 * int(t.header.traceHeaderExtensions) +
+            4 * t.numSamples) <= 1000, "trace " & $t.index & " crosses a block"
+  doAssert traceBytes < 1000

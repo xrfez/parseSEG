@@ -145,6 +145,20 @@ proc skipFixedPadding(r: var SegdReader) =
     else:
       discard r.input.skipRecordRest()
 
+proc skipTracePadding(r: var SegdReader) =
+  # FIXREC: a block may end with zero padding so that the next trace starts
+  # on a block boundary. A trace header cannot be all zero (scan type 0 is
+  # invalid), so 20 zero bytes where a header should start are padding.
+  if r.hasLabel and r.label.isFixedRecord and r.label.maxBlockSize > 0:
+    var peek: array[SegdTraceHeaderSize, byte]
+    let got = r.input.readAvail(peek)
+    var zero = got == peek.len
+    for i in 0..<got:
+      if peek[i] != 0: zero = false
+    r.input.unread(peek.toOpenArray(0, got - 1))
+    if zero:
+      r.skipFixedPadding()
+
 proc readLabel(r: var SegdReader) =
   var head: array[128, byte]
   let got = r.input.readAvail(head)
@@ -268,6 +282,7 @@ proc findChannelSet*(rec: SegdRecord, h: SegdTraceHeader, st, cs: var int) =
 
 proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
   template rec: untyped = r.record
+  r.skipTracePadding()
   t.index = r.tracesRead
   t.offset = r.input.offset
   var hb: array[SegdTraceHeaderSize, byte]

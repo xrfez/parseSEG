@@ -6,7 +6,10 @@
 ##   record headers are one block, each trace is a block, the general trailer
 ##   is a block. Disk sinks concatenate them.
 ## - FIXREC (a label with `structure = FIXREC` and a block size): the record
-##   is cut into blocks of exactly that size, the last one zero-padded.
+##   is cut into blocks of exactly that size, the last one zero-padded. A trace
+##   that fits in one block never crosses a block boundary (the rest of the
+##   block is zero-padded instead), per Rev 2.0 "block boundaries may not
+##   occur within a trace"; readers skip such padding.
 ##
 ## Header blocks keep the bytes they were read from and re-encode only edited
 ## fields, so a stream read and written back is byte-identical.
@@ -48,6 +51,13 @@ proc problem(w: var SegdWriter, msg: string, field = "", trace = -1) =
   else:
     w.log.report(sevError, dcValidation, msg, loc = loc)
     raiseFormat("refusing to write SEG-D the reader would misread: " & msg)
+
+proc padToBlock(w: var SegdWriter) =
+  # FIXREC: zero-fill the rest of the current block.
+  if w.fixedBlock > 0 and w.pending.len > 0:
+    w.pending.setLen w.fixedBlock
+    w.sink.writeRecord(w.pending)
+    w.pending.setLen 0
 
 proc emit(w: var SegdWriter, data: openArray[byte]) =
   # One logical block: a record of its own (RECORD) or part of fixed blocks.
@@ -177,10 +187,15 @@ proc writeTrace*(w: var SegdWriter, t: SegdTrace) =
   doAssert w.inRecord, "call writeRecordHeaders first"
   w.checkTrace(t)
   var b: seq[byte]
+  # FIXREC (owner decision): a trace does not cross a block boundary when it
+  # fits in one block; the rest of the current block is zero-padded instead.
   b.add t.header.encoded
   if t.hasExt1: b.add t.ext1.encoded
   b.add t.extensions
   b.add t.samples
+  if w.fixedBlock > 0 and w.pending.len > 0 and w.pending.len + b.len > w.fixedBlock and
+      b.len <= w.fixedBlock:
+    w.padToBlock()
   w.emit(b)
   inc w.tracesWritten
 
@@ -201,10 +216,7 @@ proc endRecord*(w: var SegdWriter, trailer: openArray[SegdTrailerBlock] = []) =
     var b: seq[byte]
     for t in blocks: b.add t.encoded
     w.emit(b)
-  if w.fixedBlock > 0 and w.pending.len > 0:
-    w.pending.setLen w.fixedBlock
-    w.sink.writeRecord(w.pending)
-    w.pending.setLen 0
+  w.padToBlock()
   if w.opts.tapeMarkPerRecord:
     w.sink.writeTapeMark()
     w.lastWasMark = true
