@@ -42,9 +42,9 @@ the later documents.
   - only truly unrecoverable conditions (I/O failure, truncated file) end the read early, and
     those are logged as `fatal` too;
   - the whole log is returned with the result (`ReadResult = (data, diagnostics)`) and is
-    serializable. The planned format is **NIF** (Nim Intermediate Format, the S-expression
-    format used by Nimony), with JSON as a second option. *(Owner said "nif or something";
-    confirm NIF before task 2.3.)*
+    serialized as **NIF** (confirmed by the owner: "NIF is the future for Nim"). Use the
+    toolchain's `nifbuilder`/`nifreader` (`$nim/dist/nimony/src/lib`, verified to build on
+    Nim 2.4, no extra dependency). JSON export is optional.
   - Exceptions are used internally only and are converted to diagnostics at the
     record/trace boundary (nim-error-handling "batch boundary" pattern).
   - Writers validate first and refuse to emit spec-invalid output, unless a "lenient"
@@ -69,6 +69,10 @@ the later documents.
   - **vendor-decoder registry**: register decoders at runtime by (manufacturer code, block
     kind), so they plug in without forking;
   - writers re-emit raw blocks unchanged.
+  - **Vendor maps are true plugins:** declarative `.nif` files describe vendor block layouts
+    and are loaded at runtime from a search path, with no recompilation. CLI tooling
+    validates maps, scaffolds a skeleton map from an unknown file, and applies maps. Design:
+    **`docs/design/vendor_maps.md`**. The owner has no vendor maps yet and will add them later.
   - Real data uses these heavily: the 3.0 sample has 9 vendor blocks (0xB0-0xB8) on every trace.
 - **Gather-agnostic.** Never assume shot gathers. Files may hold **receiver gathers** (e.g.
   node data) packed into standard SEG-D/SEG-Y with minimal header changes.
@@ -173,8 +177,9 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       Nim 2.4 with `--noNimblePath` (update `nimble.paths`), and do a smoke test of
       allocating a `Tensor[float32]` and writing into its raw buffer. If it fails, record why
       and pick a fallback (pinned version or our own thin tensor type with the same shape API).
-- [ ] 2.3 Diagnostics: `Diagnostic`/`DiagLog`, the severity and code catalog, NIF + JSON
-      serialization, the exception→diagnostic boundary helper. *(Confirm NIF with the owner.)*
+- [ ] 2.3 Diagnostics: `Diagnostic`/`DiagLog`, the severity and code catalog, **NIF** serialization
+      (+ a NIF reader for round-trip tests), the exception→diagnostic boundary helper. Add
+      `--path:"$nim/dist/nimony/src/lib"` to `config.nims` and `tests/config.nims`.
 - [ ] 2.2 I/O layer: the record source/sink interface (records + tape marks); disk-file,
       tape-image and memory backends; Linux `st` and Windows tape backends (build-gated with
       `when defined(linux/windows)`; test with a mock device and tape images)
@@ -191,7 +196,9 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [ ] 4.2 Sample formats (all 2.x demux codes) into Tensors; multiplexed codes → diagnostic + raw
 - [ ] 4.3 Writer and round-trip tests with synthetic records (disk and tape image)
 - [ ] 4.4 Validate against `63.sgd`: a byte-identical read→write round trip
-- [ ] 4.5 Vendor-decoder registry for extended/external headers and THE #2+ (example decoder in tests)
+- [ ] 4.5 Vendor registry + **NIF vendor-map engine** (`docs/design/vendor_maps.md`): map loader
+      and validator, matcher, compiled field tables, `VendorBlock` values, code-decoder
+      precedence. Test with a hand-written example map against synthetic blocks.
 
 ### Phase 5: SEG-D Rev 3.0
 - [ ] 5.1 Storage unit label, TOC, general headers 1-3 and all optional/typed blocks
@@ -208,11 +215,13 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [ ] 6.4 Benchmarks on the 65 MB sample (decode throughput, index build time)
 
 ### Phase 7: Tooling
-- [ ] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF/JSON log)
+- [ ] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF log)
+- [ ] 7.1b CLI: `parseSEGD vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
+      `.nif` map for every unmapped vendor area (e.g. the 9 INOVA blocks 0xB0-0xB8 in the 3.0
+      sample, and the 3 Geo Space extended blocks in `63.sgd`)
 - [ ] 7.2 Docs and CI updates
 
 ## Open questions for the owner
-- Error log format: is **NIF** (Nim Intermediate Format) what you meant, or is JSON fine? (Needed before task 2.3.)
 - A sample file with **rotational data**, and one with **receiver-gather** SEG-D, would let us verify these paths.
 - Integer-format SEG-D samples (8015/8022/8024/8036/8038/8042/8044/8048).
 
@@ -229,3 +238,4 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - 2026-11-07: Task 1.6 done: segy_rev2_1.md (904 lines). The Inglewood walk tiles exactly. Gotcha: rev 2.0 uses 3507-3510 as one u32, so branch on the revision. The walk scripts are in tools/walks/.
 - 2026-11-07: Tasks 1.5 and 1.6b done. segd_rev2_0.md (858 lines) is word-identical to 2.1 except for 11 listed items. 8015 = one's complement per spec. Samples without THE = (TE-TF)/SI. Real files contain spec-invalid zeros: warn, never reject. **Phase 1 complete.**
 - 2026-11-07: Owner corrections: tape read/write is first-class (Linux and Windows); Tensor (Arraymancer) storage; diagnostics log instead of exceptions (NIF?); gather-agnostic (receiver gathers); multi-component grouping; rotational data is vendor-specific; viewer-ready chunked/prefetch I/O. Phases were reordered: **next is task 2.0 (Arraymancer check)**, then 2.3, then 2.2.
+- 2026-11-07: NIF confirmed for the error log. Vendor maps were designed as declarative NIF plugins (`docs/design/vendor_maps.md`). The toolchain nifbuilder/nifreader were smoke-tested OK on Nim 2.4. **The next session starts at task 2.0.**
