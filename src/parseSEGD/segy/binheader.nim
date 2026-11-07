@@ -168,15 +168,16 @@ func bytesPerSample*(formatCode: int, rev: SegyRevision): int =
   else: 0
 
 proc validate*(h: SegyBinaryHeader, log: var DiagLog, severity = sevWarning,
-    loc = Location()) =
+    loc = Location(), headerOffset: int64 = 3200) =
   ## Reports spec violations in `h` to `log` at `severity`: readers use
   ## warnings, writers use errors. `loc` supplies the file name and record.
-  ## Offsets are absolute file offsets of the fields.
+  ## Offsets are file offsets of the fields, given that the header starts at
+  ## `headerOffset` (3328 when a tape label precedes the file).
   template check(cond: bool, code: DiagCode, specByte: int, fieldName, msg: string) =
     if not cond:
       var l = loc
       l.field = "binary." & fieldName
-      log.report(severity, code, msg, offset = specByte - 1, loc = l)
+      log.report(severity, code, msg, offset = headerOffset + specByte - 3201, loc = l)
   let rev = h.revision
   check rev.major <= 2 and (rev.major == 2 or rev.minor == 0), dcUnsupportedRevision, 3501,
     "segyRevision", "revision " & $rev & " is not defined"

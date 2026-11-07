@@ -117,7 +117,7 @@ proc readFileHeaders(r: var SegyReader) =
     r.log.report(sevInfo, dcByteOrder, "byte order inferred as " & $det.order &
       " (no byte-order marker)", binOffset + (3297 - 3201), r.loc(field = "binary.byteOrderMarker"))
   var l = r.loc()
-  f.binary.validate(r.log, sevWarning, l)
+  f.binary.validate(r.log, sevWarning, l, binOffset)
 
   var fmt: SampleFormat
   if toSampleFormat(int(f.binary.formatCode), fmt):

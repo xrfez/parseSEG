@@ -113,6 +113,11 @@ block tape_label:
   let e = readSegy(disk)
   doAssert e.file.tapeLabel == label and e.traces.len == 1
   doAssert e.file.firstTraceOffset == 128 + 3600
+  var bin = e.file.binary
+  bin.formatCode = 99
+  var log: DiagLog
+  bin.validate(log, headerOffset = 3328)
+  doAssert log.len == 1 and log[0].offset == 3328 + 24
   doAssert e.samples == d.samples
   let tap = tmp / "labelled.tap"
   rewrite(d, openTapeImageSink(tap), initSegyWriteOptions(d.file))
