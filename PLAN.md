@@ -276,6 +276,58 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       `parseSEGD headers|edit|export|import`
 - [ ] 7.2 Docs and CI updates
 
+### Phase 8: Embeddable library (Nim import, C ABI `.so`/`.dll`)
+Goal: the internal model (Tensors, index, keys, gathers, prefetch, edits) is used by a future GUI
+library and a processing library (filters, FFT, gains, geometry QC by linear moveout, brute
+stacks), from Nim directly or through a shared library with a shipped, well-commented C header.
+Tensors stay the internal representation; only the boundary changes.
+Findings of a probe (2026-11-07, `--app:lib --noMain --header`, Nim 2.4):
+- It builds as-is: Nim generates the header with `NimMain` declared, and the library must be
+  initialized by calling it once.
+- Plain objects (only scalars/arrays, e.g. `TraceEntry`) become real C structs with their fields;
+  names are mangled unless the type has `{.exportc: "SegTraceEntry".}`.
+- Objects holding `seq`/`ref`/`string` (`Tensor`, `SeismicFile`, `TraceIndex`) are emitted only as
+  forward declarations; returned by value they cannot even be called from C. They cross as
+  pointers/opaque handles with accessor procs.
+- `Tensor[T]` is a 128-byte struct (shape and strides `array[6, int]`, offset, a `ref` to storage
+  holding `raw_buffer`). The data crosses zero-copy like a numpy array: export a view struct
+  (data pointer, dtype, rank, shape, strides) plus a handle that keeps the tensor alive until
+  released. DLPack (`DLManagedTensor`) is that exact contract and is imported by numpy and PyTorch
+  without copying.
+- The header includes `nimbase.h` from the compiler: ship it, or make the header self-contained.
+Tasks:
+- [ ] 8.1 Research and decide the ABI: naming (`seg_*`), handles versus structs, a DLPack versus
+      our own tensor view, how errors and diagnostics are reported (codes plus a NIF/struct log),
+      ownership and release functions for every allocation, thread-safety rules (prefetch, one
+      editor per file), NimMain/init and teardown, and ORC across the boundary
+      (`--mm:orc`, `-d:useMalloc` when the host frees memory). Write `docs/design/c_abi.md`.
+- [ ] 8.2 Define the stable public Nim API (the umbrella exports too much); keep internals private.
+- [ ] 8.3 Export layer (`src/parseSEGD/capi.nim`): exportc procs over the public API, readable
+      struct names, a documented header (generated, then commented or wrapped), version symbol.
+- [ ] 8.4 C test program (and a Python ctypes/numpy smoke test) against the shipped header and
+      `.so`; CI builds the `.so`/`.dll`.
+- [ ] 8.5 Geometry for processing: coordinates for SEG-D (Rev 3 position blocks), offsets and
+      midpoints from coordinates, and a hook to attach external geometry (filled by Phase 10).
+- Phase 7's CLI should be written against the 8.2 public API, so it doubles as an end-to-end test.
+- Processing itself (filters, FFT, gains, LMO/NMO, stacks) is a separate library consuming this one.
+
+### Phase 9: Rename the project to parseSEG
+- [ ] 9.1 Rename `parseSEGD` to `parseSEG` everywhere: package, nimble file, `src/parseSEGD*`,
+      imports, docs, tests, tools, the exported C prefix, and the repository (owner action).
+
+### Phase 10: Survey (positioning) files
+- [ ] 10.1 Obtain and ingest the specs: SEG P1 (P1/90 and P1/11) and SPS (Shell SPS 2.1 and SEG SPS
+      3.0). *(Owner: please add the PDFs to `SEG Spec/`; none are present yet.)*
+- [ ] 10.2 Readers and writers into a geometry model (source/receiver points, relations/XPS), with
+      diagnostics like the seismic readers.
+- [ ] 10.3 Join survey geometry to traces (the 8.5 hook): fill `TraceKeys` coordinates, offsets
+      and midpoints, especially for SEG-D 2.x, which has no coordinates in its headers.
+
+### Future (noted, not scheduled)
+- Sorting traces by header fields (offset, receiver, CMP, ...) as a *view*: a permutation over the
+  trace index that `readTraces` and prefetch can follow, never rewriting the file. Today
+  `gathers`/`componentGroups` only return trace index lists; nothing is reordered.
+
 ## Open questions for the owner
 - A sample file with **rotational data**, and one with **receiver-gather** SEG-D, would let us verify these paths.
 - Integer-format SEG-D samples (8015/8022/8024/8036/8038/8042/8044/8048).
