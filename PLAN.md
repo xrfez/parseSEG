@@ -355,11 +355,11 @@ Tasks:
 - Processing itself (filters, FFT, gains, LMO/NMO, stacks) is a separate library consuming this one.
 
 ### Phase 7: Tooling
-- [ ] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF log)
-- [ ] 7.1b CLI: `parseSEGD vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
+- [x] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF log)
+- [x] 7.1b CLI: `parseSEGD vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
       `.nif` map for every unmapped vendor area (e.g. the 9 INOVA blocks 0xB0-0xB8 in the 3.0
       sample, and the 3 Geo Space extended blocks in `63.sgd`)
-- [ ] 7.3 NIF header export/import: streamed export (fields + raw, or fields only); import as
+- [x] 7.3 NIF header export/import: streamed export (fields + raw, or fields only); import as
       a patch (diff → in-place journaled edits, or rewrite with the original samples). CLI:
       `parseSEGD headers|edit|export|import`
 - [ ] 7.2 Docs and CI updates
@@ -584,3 +584,30 @@ Tasks:
     - Makefile: LDFLAGS hook, SONAME, a Windows import library, and `libparseseg.a` on Windows too.
     - CI: the no-op `nimpretty --check` is dropped, setup-python is used on Linux (PEP 668), Nim is pinned to 2.4.0, and the Windows build step runs under bash -e. README notes glibc and macOS minimums.
   - Not done (noted): Rev 3 general blocks have no `recordField` names. `__dlpack__` ignores numpy 2's `copy`/`max_version`, which can't be tested with numpy 1.24. The native Windows and macOS CI jobs don't run abi_test. TSan on ubuntu-24.04 may need `vm.mmap_rnd_bits=28`.
+- 2026-11-07: Tasks 7.1, 7.1b and 7.3 done together: one CLI module, so one commit. The CLI is `src/parseSEGD/cli.nim`, built with `nim cli` → `bin/parseSEGD`. The template build modes (nimRelease, zigRelease, ...) now build it; before, they compiled the umbrella library as a program. It uses only the public API (umbrella).
+  - **7.1:**
+    - `info` (`--keys` adds gathers);
+    - `dump` (`--traces` = 5 | 0..9 | 1,4,7; `--fields`; `--all`);
+    - `diag` (`--nif`, `--min`);
+    - `convert`: to SEG-Y, or to SEG-D with `--to=segd`, which is also the default when both names end in .sgd/.segd. Options: `--rev`, `--format`, `--byte-order`, `--text`, `--descale`, `--no-station-header`.
+    - Exit codes: 0 ok, 1 errors in the log, 2 usage.
+    - The CLI has its own small argument parser: `--k=v`, `--k:v`, `--k v`, `-o v`, flags. std/parseopt reads the process's own command line when given an empty list, and doesn't take `-o path`.
+  - **7.3:** `src/parseSEGD/model/headernif.nim` (umbrella).
+    - `exportHeaders(f, path, raw)` streams every named field as NIF through `nifbuilder.open(path)`: file `binary`, record `gh1`/`gh3+`, trace `trace`/`ext1`, plus raw hex per block and per trace header.
+    - `diffHeaders` and `importHeaders(path, nif, outPath, journal, dryRun)` apply a document as a patch: only changed fields, through the journaled editor, in place or into a copy (`outPath`).
+    - Floats are written shortest round-trip, so an unedited export re-imports as 0 changes.
+    - `nifreader.open` calls `quit` on an unreadable file, so the file is opened first.
+    - CLI: `edit <file> <scope>:<block>.<field>=<value>...` (scope t5 | t0..9 | r0 | file; values int, then float, else text, `"..."` forces text); `headers export|import`; `journal apply|rollback`.
+  - **7.1b:** `src/parseSEGD/vendor/scaffold.nim` (umbrella).
+    - `scaffold(path, reg)` finds the vendor areas that no loaded map decodes:
+      - SEG-D extended and external blocks;
+      - Rev 3 user or undefined blocks in the general and trace headers;
+      - Rev 2 trace extensions #2 and later;
+      - SEG-Y unassigned binary and trace bytes when not all zero, and proprietary trace headers.
+    - For each area it compares every occurrence and `toNif` writes a skeleton map that loads: runs of bytes that are constant (value in a comment), vary, or look like text.
+    - Comments go on lines of their own, because a `;` comment runs to the end of the line.
+    - `maps.applies(m, ctx)` is now public.
+    - CLI: `vendormap check|list|apply|scaffold` (with `--map`).
+    - The INOVA sample scaffolds 122 areas, including the 9 trace blocks 0xB0-0xB8. The skeleton checks ok and `apply` decodes them; scaffolding again with it finds nothing unmapped.
+  - Tests: `tests/tcli.nim` builds the CLI and runs every command on the samples, covering outputs, written files, journals, bad input and exit codes.
+

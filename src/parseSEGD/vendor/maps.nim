@@ -725,6 +725,10 @@ proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
         if decodeField(f, b, r.byteOff + i * r.stride, order, v):
           blk.fields.add (f.name & "[" & $i & "]", v)
 
+func applies*(m: VendorMap, ctx: VendorContext): bool =
+  ## True when every clause of the map's `match` holds for `ctx`.
+  specificity(m.match, ctx) >= 0
+
 proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: openArray[byte],
     blk: var VendorBlock, log: var DiagLog, loc = Location()): bool =
   ## Decodes a vendor area: a registered code decoder for (manufacturer,

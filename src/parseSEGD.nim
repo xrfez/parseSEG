@@ -15,14 +15,15 @@ import parseSEGD/segd/[headers as segdheaders, samples as segdsamples, rev3 as s
   reader as segdreader, writer as segdwriter, revconvert as segdrevconvert]
 export segdheaders, segdsamples, segdrev3, segdreader, segdwriter, segdrevconvert
 
-import parseSEGD/vendor/[maps, apply]
-export maps, apply
+import parseSEGD/vendor/[maps, apply, scaffold]
+export maps, apply, scaffold
 
 import parseSEGD/convert
 export convert
 
-import parseSEGD/model/[tensors, keys, traceindex, gathers, prefetch, headerfields, edit]
-export tensors, keys, traceindex, gathers, prefetch, headerfields, edit
+import parseSEGD/model/[tensors, keys, traceindex, gathers, prefetch, headerfields, edit,
+  headernif]
+export tensors, keys, traceindex, gathers, prefetch, headerfields, edit, headernif
 
 import parseSEGD/io/[records, diskio, memsource, tapeimage, tapedevice]
 export records, diskio, memsource, tapeimage, tapedevice

@@ -14,29 +14,34 @@ let zigccExe =
   else:
     "./tools/zigcc"
 
+const cliMain = "src/parseSEGD/cli.nim" ## The `parseSEGD` command line tool (Phase 7).
+
+task cli, "Build the parseSEGD command line tool (bin/parseSEGD; `bin/parseSEGD help`)":
+  selfExec "c -d:release -o:bin/parseSEGD " & cliMain
+
 task nimRelease, "Build native host-optimized binary (aggressive speed, march=native)":
   ## Compiles high-performance binary optimized strictly for the current host CPU.
-  selfExec "c -d:release -d:danger --opt:speed --passC:\"-march=native -mtune=native\" src/parseSEGD.nim"
+  selfExec "c -d:release -d:danger --opt:speed --passC:\"-march=native -mtune=native\" -o:bin/parseSEGD " & cliMain
 
 task nimPortable, "Build portable binary for generic CPUs (stripped, baseline instructions)":
   ## Compiles stripped, portable binary targeting generic CPU baseline compatibility.
-  selfExec "c -d:release --opt:size --passC:\"-mtune=generic\" --passL:\"-s\" src/parseSEGD.nim"
+  selfExec "c -d:release --opt:size --passC:\"-mtune=generic\" --passL:\"-s\" -o:bin/parseSEGD " & cliMain
 
 task nimDebug, "Build debug binary with stack traces and assertions":
   ## Compiles debug binary with full assertions, line tracing, and symbols.
-  selfExec "c --debuginfo:on --assertions:on --lineTrace:on --stackTrace:on src/parseSEGD.nim"
+  selfExec "c --debuginfo:on --assertions:on --lineTrace:on --stackTrace:on -o:bin/parseSEGD " & cliMain
 
 task zigRelease, "Build native host-optimized binary using Zig CC (O3, march=native)":
   ## Compiles native binary using Zig toolchain with -O3 optimization for host CPU.
-  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" -d:release -d:danger --opt:speed --passC:\"-O3 -march=native\" src/parseSEGD.nim"
+  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" -d:release -d:danger --opt:speed --passC:\"-O3 -march=native\" -o:bin/parseSEGD " & cliMain
 
 task zigPortable, "Build portable binary for generic CPUs using Zig CC (stripped, baseline instructions)":
   ## Compiles stripped binary using Zig toolchain targeting generic baseline CPUs and size reduction.
-  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" -d:release --opt:size --passC:\"-Oz\" --passC:\"-mcpu=baseline\" --passL:\"-s\" src/parseSEGD.nim"
+  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" -d:release --opt:size --passC:\"-Oz\" --passC:\"-mcpu=baseline\" --passL:\"-s\" -o:bin/parseSEGD " & cliMain
 
 task zigDebug, "Build debug binary using Zig CC with debug symbols":
   ## Compiles debug binary using Zig toolchain preserving debug symbols.
-  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" --debuginfo:on src/parseSEGD.nim"
+  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" --debuginfo:on -o:bin/parseSEGD " & cliMain
 
 # ------------------------------------------------- library targets (8.9) --
 # Every embeddable artifact: the C ABI (shared and static), the Python module,
