@@ -37,14 +37,17 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 ## Directory Layout
 
 - `src/parseSEG.nim`: the public API (umbrella module); `src/parseSEG/`: the library, by
-  area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `survey`, `abi`), plus `cli.nim`,
-  `capi.nim` (C ABI) and `pyapi.nim` (Python).
-- `include/parseseg.h`: the C header.
+  area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `survey`, `abi`), plus `cli.nim`
+  and `bindings.nim` (the shared library). Every C and Python function is one
+  `{.segApi.}` proc in `abi/api.nim`; the pragma (`abi/segapi.nim`) generates the C
+  exports, the header and the Python module.
+- `include/parseseg.h`, `python/parseseg/__init__.py`: the generated C header and Python
+  (ctypes) module, rewritten by `nim lib` and committed.
 - `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI and build targets
   included).
 - `docs/`: `api.md`, design notes (`design/`), distilled spec notes (`spec/`).
 - `vendormaps/`: built-in vendor maps (NIF), searched with `PARSESEG_VENDOR_PATH`.
-- `tools/`: zig wrappers, the nimpy patch, macOS link stubs, Python oracles for the samples.
+- `tools/`: zig wrappers, macOS link stubs, Python oracles for the samples.
 - `bin/`: build outputs.
 - `SEG Spec/`: the standards and sample files.
 - `.github/workflows/`: GitHub Actions CI pipeline.
@@ -67,13 +70,15 @@ defined in `config.nims`, also output to `bin/parseSEG`:
 
 Every embeddable artifact has a task in `config.nims` (all use `--mm:atomicArc --threads:on
 -d:useMalloc -d:release`; Windows adds `--tlsEmulation:off`). `tests/ttargets.nim` builds them
-all and runs the C ABI test against them.
+all and runs the C ABI test against them. Release builds (these and the CLI builds) get a
+fresh `nimcache/release-<task>` and `--ic:off`; `PARSESEG_IC=1` turns on Nim 2.4's
+experimental incremental compilation for `nim test`, `nimDebug` and `zigDebug`.
 
 | Task | Output | Notes |
 |---|---|---|
 | `nim lib` | `bin/libparseseg.so` / `parseseg.dll` / `libparseseg.dylib` | C ABI for this host; header `include/parseseg.h` (`docs/design/c_abi.md`) |
 | `nim staticlib` | `bin/libparseseg.a` (also on Windows: a MinGW ar archive) | Link with `-lpthread -lm -ldl` (Linux); call `seg_init()` first |
-| `nim pylib` | `bin/parseseg.so` (`.pyd` on Windows) | Python module, `import parseseg` (`docs/design/python.md`); applies `tools/patches/nimpy-method-kwargs.patch` |
+| `nim pylib` | `bin/python/parseseg/` (the generated module + the C ABI library) | Python package, `import parseseg` with `bin/python` on `sys.path` (`docs/design/python.md`) |
 | `nim libLinux` | `bin/linux-x64/`, `bin/linux-arm64/` | zig cross-build (glibc 2.28) |
 | `nim libWindows` | `bin/windows-x64/parseseg.dll` + `parseseg.dll.lib` | zig cross-build (MinGW ABI, UCRT) |
 | `nim libMacos` | `bin/macos-arm64/`, `bin/macos-x64/` `libparseseg.dylib` | zig cross-build; links `tools/macos-stubs` in place of the SDK's Security.framework |

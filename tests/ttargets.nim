@@ -1,7 +1,8 @@
 ## Every build target (task 8.9) runs as the nimble tasks in `config.nims`
 ## build it, so a changed flag or target fails here:
 ## - `nim lib` and `nim staticlib`: `tests/c/abi_test.c` passes against both;
-## - `nim pylib`: the release module imports and works;
+## - `nim pylib`: the release package (generated module + library) imports
+##   and works;
 ## - `nim csources`: the linux-x64 bundle builds with `make` alone, and
 ##   abi_test passes against its static and shared library; every bundle has
 ##   its files;
@@ -78,8 +79,10 @@ int main(int argc, char **argv) {
     (void)argc;
     if (seg_init() != SEG_ABI_VERSION) return 3;
     SegFile *f = NULL;
-    if (seg_file_open(argv[1], 0, &f) != SEG_OK) return 4;
-    printf("traces %lld\n", (long long)seg_file_trace_count(f));
+    if (seg_file_open(argv[1], false, false, &f) != SEG_OK) return 4;
+    int64_t n = -1;
+    if (seg_file_trace_count(f, &n) != SEG_OK) return 5;
+    printf("traces %lld\n", (long long)n);
     seg_file_release(f);
     return 0;
 }
@@ -96,14 +99,14 @@ int main(int argc, char **argv) {
 
   block python_module:
     let py = findExe("python3")
-    if py.len == 0 or findExe("git").len == 0:
-      echo "ttargets: no python3 or git; pylib skipped"
+    if py.len == 0:
+      echo "ttargets: no python3; pylib skipped"
     else:
       task "pylib"
       mustRun(py & " -I -c " & quoteShell("import sys; sys.path.insert(0, sys.argv[1]); " &
         "import parseseg; f = parseseg.open(sys.argv[2]); " &
         "assert f.read(0, 2, dtype='float64').shape() == (2, 2001)") & " " &
-        quoteShell(root / "bin") & " " &
+        quoteShell(root / "bin" / "python") & " " &
         quoteShell(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"))
       echo "ttargets: the release Python module works"
 

@@ -52,6 +52,9 @@ jobs:
           nim libMacos
           nim csources
           cp include/parseseg.h bin/
+          # The builds regenerate the header and the Python module: they must
+          # match what is committed.
+          git diff --exit-code include/parseseg.h python/parseseg/__init__.py
 
       - name: Upload the Linux host build
         uses: actions/upload-artifact@v4
@@ -61,7 +64,7 @@ jobs:
             bin/parseSEG
             bin/libparseseg.so
             bin/libparseseg.a
-            bin/parseseg.so
+            bin/python/
             bin/parseseg.h
 
       - name: Upload the cross builds
@@ -118,7 +121,7 @@ jobs:
       - name: Python module smoke test
         shell: bash
         run: >
-          python -I -c "import sys; sys.path.insert(0, 'bin'); import parseseg;
+          python -I -c "import sys; sys.path.insert(0, 'bin/python'); import parseseg;
           f = parseseg.open('SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy');
           assert f.trace_count() == 200 and f.read(0, 2).shape() == (2, 2001); print('ok')"
 
@@ -136,4 +139,5 @@ jobs:
           path: |
             bin/parseSEG*
             bin/*parseseg*
+            bin/python/
             include/parseseg.h

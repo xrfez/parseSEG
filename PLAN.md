@@ -496,7 +496,7 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
       in this file, ranked. Each finding is marked either:
       - internal: no API change;
       - public API change: needs owner approval, since it breaks callers.
-- [ ] 12.2 Bindings from one declaration (owner, 2026-11-07: do this first, before 12.1).
+- [x] 12.2 Bindings from one declaration (owner, 2026-11-07: do this first, before 12.1).
       Every boundary function is written **once**: an ordinary exported Nim proc in
       `src/parseSEG/abi/api.nim` carrying `{.segApi.}`. The macro (`abi/segapi.nim`) generates
       everything else at compile time.
@@ -923,3 +923,17 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
 - 2026-11-07: Task 6.10 added: read-only header listing per trace/record/file for a viewer's headers tab. Owner rule recorded: viewers never edit files; viewer edits become a NIF patch (`writeHeaderPatch`), applied only by an explicit `importHeaders` (dry run first, preferably to a copy).
 - 2026-11-07: Phase 12 added (owner): idiomatic Nim pass. 12.2 generates the C shims, the nimpy exports and `parseseg.h` from one annotation on the `abi/core.nim` procs (evaluate genny first), replacing the hand-written adapter files (64 C / 71 Python exports) and the hand-written header. Suggested order: 12.2 before 6.8-6.10 and 10.5.
 - 2026-11-07: Owner chose to start Phase 12 with 12.2 (bindings from one `{.segApi.}` proc). Decisions: generated ctypes Python over the one shared library (nimpy dropped), C ABI v2 with a uniform convention, genny evaluated and not used. The design is in the 12.2 entry. Nim 2.4 `--ic:on` is broken in this container (musl `nifler`; a source build still fails), so it is opt-in.
+- 2026-11-07: **12.2 done (bindings from one declaration).**
+  - `src/parseSEG/abi/api.nim` holds every C/Python function once, as an ordinary Nim proc with `{.segApi.}`. `abi/segapi.nim` is the generator:
+    - an untyped pragma passes the signature to a typed macro, which sees resolved types and defaults;
+    - it emits the C export (argument checks, enum checks including struct fields, handle lock unless `concurrent`, exception → status, out-pointers);
+    - it emits the header declaration (doc from `##`) and the Python function;
+    - `static:` blocks let Nim itself render enums, struct layouts and Python default literals;
+    - struct and field docs are read from the declaring source via line info, because `repr` merges a type's doc into its first field.
+  - Generated and committed: `include/parseseg.h` and `python/parseseg/__init__.py`. Hand-written parts are in `abi/gen/`: header prose, the Python runtime, and the Python extras (DLPack capsule, `__array__`, buffer protocol via `PyObject_GetBuffer`).
+  - ABI v2 follows the table in `docs/design/c_abi.md`. New in it: `SEG_ERR_MEMORY`; `SegSampleBuffer`; text into caller buffers (no borrowed strings except log entries); owned logs (`seg_file_diagnostics`); `close` separate from `release`.
+  - Python is now ctypes over the one library. The GIL is released on every call. Calls in flight are counted, so `close()` from another thread never frees under a call. `test_pyapi.py` passes unchanged except the ABI version, with and without numpy (numpy via `PARSESEG_NUMPY_PATH`).
+  - Removed: `capi.nim`, `pyapi.nim`, `abi/core.nim`, `abi/exporting.nim`, `tests/python/smoke.py`, the nimpy requirement and its patch.
+  - Tests: `tcapi` checks the committed generated files against a fresh build, and `abi_test.c` was rewritten for v2 (adds serialized same-handle calls from 4 threads). CI runs `git diff --exit-code` on the generated files after building every target.
+  - Build: entry `src/parseSEG/bindings.nim`; `nim pylib` makes `bin/python/parseseg/`; release tasks use a fresh `nimcache/release-<task>` with `--ic:off`; `PARSESEG_IC=1` gives dev builds `--ic:on`. IC is not usable in this container.
+  - Found while porting: an invalid enum in a C struct argument (`SegSampleBuffer.dtype = 9`) was read as float64. Struct enum fields are now checked.

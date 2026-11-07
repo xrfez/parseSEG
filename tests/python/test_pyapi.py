@@ -1,6 +1,7 @@
-"""The nimpy module `parseseg` end to end (task 8.8).
+"""The Python module `parseseg` end to end (tasks 8.8, 12.2): the generated ctypes
+package over the shared library.
 
-    python3 -I test_pyapi.py <dir holding parseseg.so> <exampleFiles dir> <scratch dir> [nonumpy]
+    python3 -I test_pyapi.py <dir holding the parseseg package> <exampleFiles dir> <scratch dir> [nonumpy]
 
 Standard library only; the numpy checks (zero-copy views, DLPack, read_into a
 numpy array) run when numpy is installed, unless `nonumpy` hides it to test
@@ -52,7 +53,7 @@ def fresh(name):
 
 
 # ------------------------------------------------------------- the module --
-assert parseseg.version() == "0.2.0" and parseseg.abi_version() == 1
+assert parseseg.version() == "0.2.0" and parseseg.abi_version() == 2
 assert "SEG-Y" in parseseg.__doc__
 # Exception classes exist before any error, with their documented bases.
 E = parseseg

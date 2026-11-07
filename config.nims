@@ -16,32 +16,57 @@ let zigccExe =
 
 const cliMain = "src/parseSEG/cli.nim" ## The `parseSEG` command line tool (Phase 7).
 
+# ---------------------------------------------------------- build caches --
+# Release builds never reuse a cache: each gets its own nimcache under
+# nimcache/, wiped first, and incremental compilation off. Development builds
+# (test, nimDebug, zigDebug) use the default cache, and Nim 2.4's incremental
+# compilation when PARSESEG_IC=1 (experimental: it needs working `nifler` and
+# `nifmake` next to the compiler).
+
+proc release(name: string): string =
+  ## Flags for a release build: a fresh nimcache/<name>, IC off.
+  let dir = "nimcache/release-" & name
+  rmDir dir
+  " --ic:off --nimcache:" & dir & " "
+
+proc dev(): string =
+  ## Flags for a development build: IC when PARSESEG_IC=1.
+  if getEnv("PARSESEG_IC") == "1": " --ic:on " else: " "
+
 task cli, "Build the parseSEG command line tool (bin/parseSEG; `bin/parseSEG help`)":
-  selfExec "c -d:release -o:bin/parseSEG " & cliMain
+  selfExec "c -d:release" & release("cli") & "-o:bin/parseSEG " & cliMain
 
 task nimRelease, "Build native host-optimized binary (aggressive speed, march=native)":
   ## Compiles high-performance binary optimized strictly for the current host CPU.
-  selfExec "c -d:release -d:danger --opt:speed --passC:\"-march=native -mtune=native\" -o:bin/parseSEG " & cliMain
+  selfExec "c -d:release -d:danger --opt:speed --passC:\"-march=native -mtune=native\"" &
+    release("nimRelease") & "-o:bin/parseSEG " & cliMain
 
 task nimPortable, "Build portable binary for generic CPUs (stripped, baseline instructions)":
   ## Compiles stripped, portable binary targeting generic CPU baseline compatibility.
-  selfExec "c -d:release --opt:size --passC:\"-mtune=generic\" --passL:\"-s\" -o:bin/parseSEG " & cliMain
+  selfExec "c -d:release --opt:size --passC:\"-mtune=generic\" --passL:\"-s\"" &
+    release("nimPortable") & "-o:bin/parseSEG " & cliMain
 
 task nimDebug, "Build debug binary with stack traces and assertions":
   ## Compiles debug binary with full assertions, line tracing, and symbols.
-  selfExec "c --debuginfo:on --assertions:on --lineTrace:on --stackTrace:on -o:bin/parseSEG " & cliMain
+  selfExec "c --debuginfo:on --assertions:on --lineTrace:on --stackTrace:on" & dev() &
+    "-o:bin/parseSEG " & cliMain
 
 task zigRelease, "Build native host-optimized binary using Zig CC (O3, march=native)":
   ## Compiles native binary using Zig toolchain with -O3 optimization for host CPU.
-  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" -d:release -d:danger --opt:speed --passC:\"-O3 -march=native\" -o:bin/parseSEG " & cliMain
+  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe &
+    "\" -d:release -d:danger --opt:speed --passC:\"-O3 -march=native\"" & release("zigRelease") &
+    "-o:bin/parseSEG " & cliMain
 
 task zigPortable, "Build portable binary for generic CPUs using Zig CC (stripped, baseline instructions)":
   ## Compiles stripped binary using Zig toolchain targeting generic baseline CPUs and size reduction.
-  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" -d:release --opt:size --passC:\"-Oz\" --passC:\"-mcpu=baseline\" --passL:\"-s\" -o:bin/parseSEG " & cliMain
+  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe &
+    "\" -d:release --opt:size --passC:\"-Oz\" --passC:\"-mcpu=baseline\" --passL:\"-s\"" &
+    release("zigPortable") & "-o:bin/parseSEG " & cliMain
 
 task zigDebug, "Build debug binary using Zig CC with debug symbols":
   ## Compiles debug binary using Zig toolchain preserving debug symbols.
-  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe & "\" --debuginfo:on -o:bin/parseSEG " & cliMain
+  selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe &
+    "\" --debuginfo:on" & dev() & "-o:bin/parseSEG " & cliMain
 
 # ------------------------------------------------- library targets (8.9) --
 # Every embeddable artifact: the C ABI (shared and static), the Python module,
@@ -65,7 +90,9 @@ const
     ("macos-x64", "macosx", "amd64", "x86_64-macos.10.15")]
   abiFlags = "--mm:atomicArc --threads:on -d:useMalloc -d:release"
   capiFlags = "--noMain " & abiFlags & " -d:segCapi"
-  capiMain = "src/parseSEG/capi.nim"
+  capiMain = "src/parseSEG/bindings.nim"
+    ## Every export is a {.segApi.} proc in src/parseSEG/abi/api.nim; compiling
+    ## also writes include/parseseg.h and python/parseseg/__init__.py.
 
 func libFile(os: string): string =
   case os
@@ -103,8 +130,7 @@ proc zigFlags(t: Target): string =
     " --os:" & t.os & " --cpu:" & t.cpu & osFlags(t.os) & zigOsFlags(t.os) &
     " --passC:\"-target " & t.zig & "\" --passL:\"-target " & t.zig & "\"" &
     # No debug info: zig emits it by default, with this machine's paths.
-    " --passC:-g0 --passL:-s" &
-    " --nimcache:nimcache/" & t.triple
+    " --passC:-g0 --passL:-s" & release(t.triple)
 
 proc crossLib(t: Target) =
   rmDir "bin/" & t.triple # no stale files (e.g. an old .pdb) in the artifacts
@@ -125,7 +151,7 @@ proc crossLibs(os: string) =
 task lib, "Build the C ABI shared library for this host (bin/libparseseg.so, include/parseseg.h)":
   ## Windows (MinGW): linked statically, so the DLL needs no libgcc/winpthread.
   selfExec "c --app:lib " & capiFlags & osFlags(hostOs) & libLinkFlags(hostOs) &
-    (when defined(windows): " --passL:-static" else: "") &
+    (when defined(windows): " --passL:-static" else: "") & release("lib") &
     " --out:bin/" & libFile(hostOs) & " " & capiMain
 
 task libLinux, "Cross-build the C ABI for linux-x64 and linux-arm64 with zig (bin/<triple>/)":
@@ -139,27 +165,20 @@ task libMacos, "Cross-build the C ABI for macos-arm64 and macos-x64 with zig (bi
 
 task staticlib, "Build the C ABI as a static library for this host (bin/libparseseg.a)":
   ## Link it with -lpthread -lm -ldl (Linux) and call seg_init() first, as with the .so.
-  selfExec "c --app:staticlib " & capiFlags & osFlags(hostOs) & " --out:bin/" &
-    staticFile(hostOs) & " " & capiMain
+  selfExec "c --app:staticlib " & capiFlags & osFlags(hostOs) & release("staticlib") &
+    " --out:bin/" & staticFile(hostOs) & " " & capiMain
 
-const pyModName = when defined(windows): "parseseg.pyd" else: "parseseg.so"
-
-proc patchNimpy() =
-  ## Applies tools/patches/nimpy-method-kwargs.patch to the Atlas checkout
-  ## once (nimpy 0.2.1 miscounts a method's arguments when keywords are
-  ## passed); a no-op when it is already applied. Drop it once upstream is fixed.
-  const patch = "../../tools/patches/nimpy-method-kwargs.patch"
-  if gorgeEx("git -C deps/nimpy apply --reverse --check " & patch).exitCode != 0:
-    exec "git -C deps/nimpy apply " & patch
-
-task pylib, "Build the Python module for this host (bin/parseseg.so, `import parseseg`)":
-  ## No --noMain: Python's import initializes the runtime. nimpy looks the
-  ## CPython API up in the importing process, so no libpython is linked and one
-  ## build serves every Python 3. Windows/MinGW also links statically.
-  patchNimpy()
-  selfExec "c --app:lib " & abiFlags & " -d:segPython" & osFlags(hostOs) &
-    (when defined(windows): " --passL:-static" else: "") &
-    " --out:bin/" & pyModName & " src/parseSEG/pyapi.nim"
+task pylib, "Build the Python package for this host (bin/python/parseseg; `import parseseg`)":
+  ## The package is the generated python/parseseg/__init__.py (ctypes) next to
+  ## the C ABI library: one binary serves C and Python. Put bin/python on
+  ## sys.path, or copy bin/python/parseseg into site-packages.
+  let pkg = "bin/python/parseseg"
+  rmDir pkg
+  mkDir pkg
+  selfExec "c --app:lib " & capiFlags & osFlags(hostOs) & libLinkFlags(hostOs) &
+    (when defined(windows): " --passL:-static" else: "") & release("pylib") &
+    " --out:" & pkg & "/" & libFile(hostOs) & " " & capiMain
+  cpFile "python/parseseg/__init__.py", pkg & "/__init__.py"
 
 func bundleFlags(os: string): tuple[cflags, libs, shared, sharedFlag: string] =
   ## The C flags Nim itself uses for `os`, and how to link a shared library.
@@ -223,7 +242,7 @@ proc csources(t: Target) =
   mkDir dir & "/src"
   mkDir dir & "/include"
   selfExec "c --app:staticlib " & capiFlags & " --os:" & t.os & " --cpu:" & t.cpu &
-    osFlags(t.os) & " --compileOnly --genScript --nimcache:" & dir & "/src " & capiMain
+    osFlags(t.os) & " --ic:off --compileOnly --genScript --nimcache:" & dir & "/src " & capiMain
   cpFile querySetting(libPath) & "/nimbase.h", dir & "/src/nimbase.h"
   cpFile "include/parseseg.h", dir & "/include/parseseg.h"
   for f in listFiles(dir & "/src"):
@@ -250,8 +269,8 @@ task csources, "Generate a C source bundle per target triple (bin/csources/<trip
   for t in targets: csources(t)
 
 task test, "Run test suite":
-  ## Executes unittest suite.
-  selfExec "c -r --hints:off tests/tester.nim"
+  ## Executes unittest suite (PARSESEG_IC=1: incremental compilation).
+  selfExec "c -r --hints:off" & dev() & "tests/tester.nim"
 
 task fmt, "Format codebase via nimpretty":
   ## Formats source and test files in-place.

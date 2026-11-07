@@ -6,7 +6,9 @@ low-level:
 - the `parseSEG/<area>/<module>` paths can still be imported one by one.
 
 C, C++, Python and other hosts use the same model through the C ABI: `include/parseseg.h`,
-the `seg_*` functions, built from `parseSEG/capi` (see `docs/design/c_abi.md`).
+the `seg_*` functions, and the `parseseg` Python package over the same library. Both are
+generated from the `{.segApi.}` procs in `parseSEG/abi/api.nim` (see
+`docs/design/c_abi.md` and `docs/design/python.md`).
 
 Conventions that hold throughout:
 - **Reads never raise on file content.** Problems go into a `DiagLog` (`log` /

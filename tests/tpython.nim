@@ -1,16 +1,16 @@
-## The Python module end to end (task 8.8): builds `parseseg.so` as `nim pylib`
-## does (applying the nimpy patch in `tools/patches`), with runtime checks on,
-## then runs `tests/python/test_pyapi.py` under `python3 -I`, with numpy when
-## it is installed and once more with numpy hidden. Skipped (with a message)
-## without python3 or git.
+## The Python module end to end (tasks 8.8, 12.2): builds the shared library
+## as `nim lib` does, puts it next to the generated `python/parseseg` package
+## in a temporary directory, then runs `tests/python/test_pyapi.py` under
+## `python3 -I`: with numpy when it is installed, and once more with numpy
+## hidden. Set `PARSESEG_NUMPY_PATH` to a directory holding numpy to test the
+## numpy paths without installing it. Skipped (with a message) without
+## python3.
 
 import std/[os, osproc, strutils]
 
 const
   root = currentSourcePath().parentDir.parentDir
   exampleDir = root / "SEG Spec" / "exampleFiles"
-  patch = root / "tools" / "patches" / "nimpy-method-kwargs.patch"
-  nimpyDir = root / "deps" / "nimpy"
 
 proc mustRun(cmd: string) =
   let (o, code) = execCmdEx(cmd)
@@ -20,23 +20,29 @@ proc mustRun(cmd: string) =
 
 when defined(linux) or defined(macosx):
   let py = findExe("python3")
-  let git = findExe("git")
-  if py.len == 0 or git.len == 0:
-    echo "tpython: no python3 or git; Python module test skipped"
+  if py.len == 0:
+    echo "tpython: no python3; Python module test skipped"
   else:
     let tmp = getTempDir() / "parseseg_tpython"
-    createDir(tmp)
-    if execCmdEx(git & " -C " & quoteShell(nimpyDir) & " apply --reverse --check " &
-        quoteShell(patch)).exitCode != 0:
-      mustRun(git & " -C " & quoteShell(nimpyDir) & " apply " & quoteShell(patch))
-    let modDir = tmp / "module"
-    createDir(modDir)
-    mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --app:lib --mm:atomicArc " &
-      "--threads:on -d:useMalloc -d:segPython --nimcache:" & quoteShell(tmp / "cache") &
-      " -o:" & quoteShell(modDir / "parseseg.so") & " " &
-      quoteShell(root / "src" / "parseSEG" / "pyapi.nim"))
-    let script = py & " -I " & quoteShell(root / "tests" / "python" / "test_pyapi.py") & " " &
-      quoteShell(modDir) & " " & quoteShell(exampleDir) & " " & quoteShell(tmp / "scratch")
+    let pkg = tmp / "module" / "parseseg"
+    createDir(pkg)
+    createDir(tmp / "gen" / "include")
+    createDir(tmp / "gen" / "python" / "parseseg")
+    const libName = when defined(macosx): "libparseseg.dylib" else: "libparseseg.so"
+    mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --app:lib --noMain " &
+      "--mm:atomicArc --threads:on -d:useMalloc -d:segCapi --nimcache:" &
+      quoteShell(tmp / "cache") & " -d:segBindingsDir=" & quoteShell(tmp / "gen") & " -o:" &
+      quoteShell(pkg / libName) & " " & quoteShell(root / "src" / "parseSEG" / "bindings.nim"))
+    copyFile(root / "python" / "parseseg" / "__init__.py", pkg / "__init__.py")
+    let numpyPath = getEnv("PARSESEG_NUMPY_PATH")
+    # -I ignores PYTHONPATH, so an extra numpy directory is appended by a stub.
+    let runner = if numpyPath.len == 0: py & " -I "
+                 else: py & " -I -c " & quoteShell("import sys,runpy; sys.path.append(sys.argv[1]); " &
+                   "sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0], run_name='__main__')") &
+                   " " & quoteShell(numpyPath) & " "
+    let script = runner & quoteShell(root / "tests" / "python" / "test_pyapi.py") & " " &
+      quoteShell(tmp / "module") & " " & quoteShell(exampleDir) & " " &
+      quoteShell(tmp / "scratch")
     for mode in ["", " nonumpy"]:
       let (o, code) = execCmdEx(script & mode)
       if code != 0 or "python module: ok" notin o:
