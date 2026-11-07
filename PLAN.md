@@ -127,6 +127,12 @@ writers validate before emitting.
       (text: `seg_y_rev2_1-oct2023.txt` plus `seg-y_rev2-1_clarification_2025-05-01.txt`; skip
       the superseded Rev 2.0 doc). It must cover the byte-order marker (3297-3300), extended
       text count −1, additional trace headers, data trailers, and new formats.
+- [ ] 1.6b **SEG-D Rev 2.0 full note** (blocked until the owner adds the PDF to `SEG Spec/`). Steps:
+      (1) run `tools/extract_specs.sh` (local, no tokens; install `poppler-utils` first if missing);
+      (2) one subagent distills `SEG Spec/text/<2.0 file>.txt` into `docs/spec/segd_rev2_0.md` per
+      CONVENTIONS.md, and **cross-checks it against `segd_rev2_0_delta.md` and the `63.sgd` walk**
+      (the delta note is reconstructed, so where they disagree the 2.0 PDF text wins, unless the
+      real file says otherwise); (3) mark the delta note as superseded.
 - [ ] 1.7 (later) `segd_rev3_1_delta.md`
 - [ ] 1.8 (later) The remaining revisions (SEG-Y 2.0 vs 2.1 differences, SEG-D Rev 1), so all types are specced
 
@@ -175,3 +181,4 @@ writers validate before emitting.
 - 2026-11-06: Task 1.5 started: the 3.0 Additional Source Info ID is resolved as 0x20 (via the 3.1 text). Record each later resolution in a `## Resolutions` section at the end of the note concerned.
 - 2026-11-07: The owner added sample files and answered the questions (tape = tape-ready output; never fail silently). The sample headers were inspected and the plan updated: Rev 2.0 SEG-D, Rev 0 LE SEG-Y and the Rev 2.1 SEG-Y note were added. The 65 MB Rev 3.0 sample is git-ignored.
 - 2026-11-07: Owner priorities were recorded: SEG-D 2.0 is the most important; one data model for all revisions; byte-order option on write; extended/user blocks are first-class; tape low priority; 1-trace fixture from the 65 MB file.
+- 2026-11-07: The owner asked for the SEG-D 2.0 PDF to be extracted, but the PDF is not in the workspace yet. Task 1.6b was added (blocked).
