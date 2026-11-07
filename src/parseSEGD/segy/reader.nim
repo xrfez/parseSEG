@@ -46,6 +46,9 @@ const
   MaxExtendedRecords = 1_000_000
     ## Bound on extended records implied by a Rev 2 first-trace offset (3.2 GB).
   MaxLayoutBytes* = 1 shl 20 ## Larger Layout stanzas are ignored (with a warning).
+  MaxRepeats = 5
+    ## Per-trace diagnostics of one kind logged per file; the rest are counted,
+    ## so a quirk on every trace of a 40 GB file cannot flood the log.
   DefaultMaxRetained* = 256 shl 20
     ## Extended header and trailer bytes kept in memory by default. Beyond it,
     ## stanzas and User Data are only indexed; extract attachments from disk.
@@ -107,6 +110,7 @@ type
     mediumSize: int64    ## File size for disk sources, -1 if unknown.
     done: bool
     headersOnly: bool    ## Skip sample bytes (`SegyTrace.samples` stays empty).
+    fixedMismatches: int ## Fixed-length traces whose own ns/dt disagree (logged up to `MaxRepeats`).
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
   # Storage unit sequence number (digits or blanks) and "SY" in bytes 5-6;
@@ -412,6 +416,13 @@ proc checkEnd(r: var SegyReader) =
   if r.atData:
     r.log.report(sevWarning, dcInconsistent, "data follows the last trace", r.offset, r.loc())
 
+proc summarize(r: var SegyReader) =
+  # Counts the per-trace diagnostics that were not logged.
+  if r.fixedMismatches > MaxRepeats:
+    r.log.report(sevInfo, dcValidation, $(r.fixedMismatches - MaxRepeats) & " more warnings " &
+      "for trace.numSamples (fixed-length mismatch) were not logged", loc = r.loc(
+      field = "trace.numSamples"))
+
 func isExt1Name(b: openArray[byte]): bool =
   # "SEG00001" in ASCII or EBCDIC at bytes 233-240.
   const ascii = "SEG00001"
@@ -461,7 +472,10 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   if f.revision.major >= 1 and f.binary.fixedLengthTraces == 1:
     t.numSamples = int(f.binary.effectiveSamplesPerTrace)
     t.sampleInterval = f.binary.effectiveSampleInterval
-    if f.revision.major < 2 and (traceNs != t.numSamples or traceDt != t.sampleInterval):
+    let mismatch = f.revision.major < 2 and
+      (traceNs != t.numSamples or traceDt != t.sampleInterval)
+    if mismatch: inc r.fixedMismatches
+    if mismatch and r.fixedMismatches <= MaxRepeats:
       r.log.report(sevWarning, dcInconsistent, "fixed-length file, but this trace has " &
         $traceNs & " samples at " & $traceDt & " (binary header: " & $t.numSamples & " at " &
         $t.sampleInterval & ")", t.offset + 114, r.loc(t.index, "trace.numSamples"))
@@ -505,6 +519,7 @@ proc readTrace*(r: var SegyReader, t: var SegyTrace): bool =
   else:
     r.done = true
     if ok: discard r.log.tryRecord(r.loc(), r.checkEnd())
+    r.summarize()
     result = false
 
 func isDone*(r: SegyReader): bool {.inline.} = r.done

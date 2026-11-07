@@ -207,3 +207,29 @@ block disk_source_sees_a_growing_file:
   doAssert src.readRecord(buf) == rkData and buf.len == 3 and buf[0] == byte('b')
   doAssert src.readRecord(buf) == rkEndOfData
   src.close()
+
+block segy_repeated_trace_warnings_are_capped:
+  # A Rev 1 fixed-length file whose 9 trace headers all disagree with the
+  # binary header: 5 warnings and one summary, in both read modes.
+  let d0 = readSegy(exampleDir / "Sweep0.sgy")
+  var d = d0
+  d.file.binary.segyMajor = 1
+  d.file.binary.fixedLengthTraces = 1
+  d.traces.setLen 0
+  for k in 0..<9:
+    var t = d0.traces[0]
+    t.header.numSamples = 7
+    d.traces.add t
+  let path = tmp / "fixed.sgy"
+  let sink = openDiskSink(path)
+  var w = openSegyWriter(sink, d.file, initSegyWriteOptions(d.file, lenient = true))
+  for t in d.traces: w.writeTrace(t)
+  w.close()
+  sink.close()
+  for log in [readSegy(path).diagnostics, readSegyHeaders(path).diagnostics]:
+    var mismatches, summaries = 0
+    for e in log.items:
+      if e.loc.field == "trace.numSamples":
+        if e.severity == sevWarning: inc mismatches
+        elif e.severity == sevInfo: inc summaries
+    doAssert mismatches == 5 and summaries == 1
