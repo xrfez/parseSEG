@@ -107,6 +107,34 @@ the later documents.
   - An optional **prefetch thread** decodes ahead into a bounded queue (the API must not
     block the UI thread), so nothing in the API may assume whole-file loading.
 
+- **Dispatch policy (2026-11-07).** Runtime dispatch (`ref object` + `method`) is used **only**
+  at the I/O backend boundary (disk / tape image / memory / Linux st / Windows tape / user
+  backends), where the backend is chosen at runtime and users may add their own. That costs one
+  indirect call per block or chunk. Everything else (headers, records, trace index, codecs,
+  Tensors) is plain `object` + `proc`/`func`. Hot paths (field and sample decoding on
+  `openArray[byte]`) never touch methods. Base methods declare `raises: [CatchableError]` (see
+  Log, 2.2). An object variant could replace the methods later if the backend set is closed.
+- **Very large files (40 GB+, larger than RAM) are a hard requirement.** Never load a whole file.
+  - Disk random access uses `std/memfiles` (the OS pages on demand), with 64-bit offsets everywhere.
+  - Keep the trace index compact (~24 B/trace: offset i64, size i32, channel set/flags, key
+    geometry kept elsewhere or lazy). 10 M traces ≈ 240 MB.
+  - Tensors hold only the requested range or gather. Writers stream record by record.
+  - Test with a sparse file larger than 4 GB (task 6.7).
+- **In-place header edits on disk** (e.g. updating positions, coordinates or statics, much faster
+  than re-exporting the file):
+  - write through a read-write memmap at offsets from the trace index;
+  - only size-preserving field edits, each encoder validating that the value fits (width, BCD
+    digits, range); anything else is refused with a diagnostic;
+  - every edit is journaled first (offset + original bytes + new bytes) to a NIF journal, so it
+    can be undone;
+  - not available on tape; edits that change sizes need a full rewrite.
+- **Headers-only mode:** read all headers and skip sample bytes (seek on disk, read-and-discard
+  on tape). This is the same walk that builds the trace index.
+- **NIF header export/import:** export all headers as NIF (decoded fields plus raw bytes for
+  lossless output, or fields only), streamed to the file. Import works as a **patch**: compare
+  with the file and apply only the changed fields, either in place (journaled) or by writing a
+  new file that reuses the original sample data.
+
 ## Sample files (`SEG Spec/exampleFiles/`)
 | File | Size | What the headers say | In git? |
 |---|---|---|---|
@@ -217,12 +245,20 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [ ] 6.2 Gather-type detection (shot/receiver/other) and multi-component grouping (`componentGroups`)
 - [ ] 6.3 Prefetch thread with a bounded queue (non-blocking API for a viewer)
 - [ ] 6.4 Benchmarks on the 65 MB sample (decode throughput, index build time)
+- [ ] 6.5 Headers-only API (`readHeaders`): every header, samples skipped, for disk and tape
+- [ ] 6.6 In-place header edits: memmap read-write, field-level encode with validation, NIF
+      undo journal (apply/rollback), refuse size-changing edits; tests on synthetic SEG-Y/SEG-D
+- [ ] 6.7 Large-file test: a sparse synthetic file larger than 4 GB (index build, a range read
+      near the end, an in-place edit near the end) to prove 64-bit offsets work
 
 ### Phase 7: Tooling
 - [ ] 7.1 CLI: `parseSEGD info|dump|convert|diag` (diag prints the NIF log)
 - [ ] 7.1b CLI: `parseSEGD vendormap check|scaffold|apply|list`. `scaffold` emits a skeleton
       `.nif` map for every unmapped vendor area (e.g. the 9 INOVA blocks 0xB0-0xB8 in the 3.0
       sample, and the 3 Geo Space extended blocks in `63.sgd`)
+- [ ] 7.3 NIF header export/import: streamed export (fields + raw, or fields only); import as
+      a patch (diff → in-place journaled edits, or rewrite with the original samples). CLI:
+      `parseSEGD headers|edit|export|import`
 - [ ] 7.2 Docs and CI updates
 
 ## Open questions for the owner
@@ -247,3 +283,4 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - 2026-11-07: Switched dependency management from `nimble setup` to **Atlas** (owner request: agents can read library sources in `deps/`). `nim.cfg` holds the Atlas paths, `atlas.lock` is committed, and `deps/atlas.config` is tracked. Tests pass, and nimsuggest resolves into `deps/`. **Next: task 2.3.**
 - 2026-11-07: Task 2.3 done: `common/diagnostics.nim` (`Severity`, a `DiagCode` catalog with stable NIF spellings, `Location` (incl. `file`, so merged logs from several files stay attributable), `Diagnostic`, `DiagLog`, `toNif`/`writeNif`/`parseDiagnostics`/`readDiagnostics`, and `tryRecord`, a boundary template that maps truncation and I/O to fatal, format violations to error, and anything else to internal). `SegError` now carries `offset`, and `SegTruncatedError`/`raiseTruncated` were added. The nimony lib path is in `config.nims`; import `nifcore` and `stringviews` alongside `nifreader`. Tests: `tests/tdiagnostics.nim`. **Next: task 2.2 (I/O layer).**
 - 2026-11-07: Task 2.2 done: `io/records` (`RecordSource`/`RecordSink` base types with `*Impl` methods; a double tape mark is reported as `rkEndOfData`; `RecordCursor` gives exact-length reads that span blocks, stop at tape marks and track offsets), `io/diskio` (chunked byte stream; tape marks are not stored), `io/tapeimage` (SIMH `.tap`, odd records padded to even unless `padOdd = false` for E11, erase gaps skipped, class bits and trailer mismatches raise), `io/tapedevice` (`TapeDevice` interface, `DeviceSource`/`DeviceSink`, and `MemoryTape` as both the memory backend and the mock drive), `io/tape_linux` (st(4), importc from `<sys/mtio.h>`, compiled against the real header), `io/tape_windows` (Win32 tape API; cross-compiles and links with `zig cc -target x86_64-windows-gnu`, not run on hardware). Neither real-drive backend has been tested on a drive. **Gotcha:** base methods need `raises: [CatchableError]`. Call sites take their exception handling from the base method, so a non-raising base makes callers skip cleanup when an override raises (ASan found the leaks). Tests: `tests/tio.nim`, ASan clean. **Next: task 3.1 (SEG-Y headers).**
+- 2026-11-07: Owner questions answered and decisions recorded: dispatch policy (methods only at the I/O backend boundary), 40 GB+ files, in-place header edits with a NIF undo journal, headers-only mode, NIF header export/import as patches. New tasks 6.5-6.7 and 7.3. **Next: task 3.1 (SEG-Y headers).**
