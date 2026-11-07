@@ -210,6 +210,10 @@ block survey:
   doAssert "relation runs" in ok("info", s63, "--sps", sps)
   discard fails(2, "keys", s63, "--p1=" & sps, "--decimals=9,1")
   discard fails(2, "keys", s63, "--line-map=oops")
+  discard fails(2, "keys", s63, "--sps=" & sps, "--line-map=A=nan")
+  discard fails(2, "survey", sps, "--rev=1.0")        # needs -o
+  discard fails(2, "survey", sps, "--decimals=1,1")   # P1 only
+  discard fails(2, "keys", s63, "--overwrite")        # needs --sps or --p1
 
 block review_outputs_never_clobber_inputs:
   let f = fresh(inglewood)

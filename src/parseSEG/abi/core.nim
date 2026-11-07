@@ -378,9 +378,9 @@ proc loadSps*(go: GeometryObj, path: string): DiagLog =
   let f = readSps(path)
   checkSurveyLog(f.log)
   result = f.log
-  let before = go.s.log.len
   go.s.addSps(f, go.names)
-  for i in before..<go.s.log.len: result.add go.s.log[i]
+  result.add go.s.log
+  go.s.log = DiagLog() # returned, not kept
 
 proc loadP1*(go: GeometryObj, path: string, gridDecimals, depthDecimals: int,
     elevation: bool): DiagLog =
@@ -389,9 +389,9 @@ proc loadP1*(go: GeometryObj, path: string, gridDecimals, depthDecimals: int,
   let f = readP1(path, P1Options(gridDecimals: gridDecimals, depthDecimals: depthDecimals))
   checkSurveyLog(f.log)
   result = f.log
-  let before = go.s.log.len
   go.s.addP1(f, go.names, elevation)
-  for i in before..<go.s.log.len: result.add go.s.log[i]
+  result.add go.s.log
+  go.s.log = DiagLog() # returned, not kept
 
 proc surveyCounts*(go: GeometryObj): (int64, int64, int64) =
   ## Sources, receivers and relation runs held.

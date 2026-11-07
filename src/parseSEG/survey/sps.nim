@@ -91,6 +91,8 @@ type
     relations*: seq[SpsRelation] ## X records.
     comments*: seq[string]       ## C records (cols 2-80).
     others*: seq[string]         ## Blank, `EOF` and unknown lines, kept raw.
+    options*: SpsOptions         ## How the file was read (decimals mode, revision).
+    finalNewline*: bool = true   ## The last line had a terminator.
     order*: seq[SpsEntry]        ## Every record in file order, for writing.
     log*: DiagLog
 
@@ -277,9 +279,17 @@ proc parseHeader(line: string): SpsHeader =
   result.raw = line
 
 func revisionFromH00(data: string): (bool, SpsRevision) =
-  let d = data.toUpperAscii
-  if "2.1" in d: (true, sps21)
-  elif "SPS001" in d or "SPS 1" in d or "SPS1" in d: (true, sps10)
+  ## `SPS001,<date>` (1.0) or `SPS 2.1;` (2.1); blanks are ignored. 1.0 dates
+  ## such as `12.10.90` contain "2.1", so the marker is matched with its
+  ## `SPS` prefix.
+  var d = ""
+  for c in data:
+    if c != ' ': d.add c.toUpperAscii
+  if d.startsWith("SPS001") or d.startsWith("SPS1.") or d.startsWith("SPS1,") or
+      d.startsWith("SPS1;"):
+    (true, sps10)
+  elif d.startsWith("SPS2.1") or d.startsWith("SPSV2.1") or d.startsWith("SPSREV2.1"):
+    (true, sps21)
   else: (false, sps21)
 
 func layoutScore(line: string): int =
@@ -330,12 +340,18 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
         $rev & " from the column layout", loc = Location(file: name))
     s.setPosition(start)
   result.revision = rev
+  result.options = opts
+  result.options.revision = rev
   var x = Ctx(f: result.addr, opts: opts)
   try:
     for r in textRecords(s, result.layout):
       x.rec = r
       let line = r.text
       if r.index == 0: result.crlf = r.crlf
+      result.finalNewline = r.terminated
+      if r.cut:
+        x.problem(sevWarning, dcBadValue, "", "line longer than " & $MaxLineBytes &
+          " bytes; cut into records (is this a text file?)")
       if line.len == 0 or line.isBlank:
         result.order.add SpsEntry(kind: seOther, at: result.others.len)
         result.others.add line
@@ -363,6 +379,33 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
           x.problem(sevInfo, dcBadValue, "", "record longer than 80 columns (" & $line.len & ")")
   except IOError, OSError:
     result.log.report(sevFatal, dcIo, getCurrentExceptionMsg(), loc = Location(file: name))
+
+proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
+  ## Whether `s` holds SPS rather than SEG P1 records, judged from the data
+  ## records of its first `maxRecords` records: SPS point records have a
+  ## record letter (R, S) and grid coordinates in columns 47-65, relations
+  ## (X) channel numbers in 39-48; P1 data records start with a blank and
+  ## have hemisphere letters in columns 35 and 45. Rewinds `s`.
+  let start = s.getPosition
+  var sps, p1 = 0
+  var e, n: float64
+  for r in textRecords(s, openLayout(s)):
+    let t = r.text
+    if t.len > 0:
+      case t[0]
+      of 'R', 'S':
+        if parseFortranFloat(t.col(47, 55), 1, e) and parseFortranFloat(t.col(56, 65), 1, n) and
+            not (e.isNaN or n.isNaN):
+          inc sps
+      of 'X':
+        if t.col(39, 48).strip.len > 0 and t.col(39, 48).strip.allCharsInSet(Digits + {' '}):
+          inc sps
+      of ' ':
+        if t.colChar(35) in {'N', 'S'} and t.colChar(45) in {'E', 'W'}: inc p1
+      else: discard
+    if r.index >= maxRecords: break
+  s.setPosition(start)
+  sps > p1
 
 proc readSps*(path: string, opts = SpsOptions()): SpsFile =
   ## Reads the SPS file at `path` (streamed, never loaded whole). A file
@@ -402,6 +445,7 @@ proc fixed(v: float64, width, decimals: int, field: string): string =
 proc whole(v: float64, width: int, field: string): string =
   if v.isNaN: repeat(' ', width)
   elif v != round(v): raiseFormat(field & ": " & $v & " is not an integer")
+  elif abs(v) >= 1e15: raiseFormat(field & ": value does not fit in " & $width & " columns")
   else: fit(formatInt(int64(v), width), width, field)
 
 proc digit(v: int, field: string): string =
@@ -502,32 +546,35 @@ proc encode*(h: SpsHeader): string =
 proc quietCtx(f: var SpsFile, strict: bool): Ctx =
   Ctx(f: f.addr, opts: SpsOptions(strictImpliedDecimals: strict))
 
-proc pointLine(p: SpsPoint, rev, fileRev: SpsRevision): string =
-  ## The raw text when `p` is unchanged since it was read, else encoded.
-  result = encode(p, rev)
-  if p.raw.len > 0 and rev == fileRev:
+proc pointLine(p: SpsPoint, rev, fileRev: SpsRevision, strict: bool): string =
+  ## The raw text when `p` is unchanged since it was read (its raw text
+  ## parses to the same values), else encoded.
+  if p.raw.len > 0 and rev == fileRev and p.raw[0] in {'R', 'S'}:
     var scratch = SpsFile()
-    if encode(quietCtx(scratch, false).parsePoint(p.raw, rev), rev) == result: result = p.raw
+    if sameValues(quietCtx(scratch, strict).parsePoint(p.raw, rev), p): return p.raw
+  encode(p, rev)
 
-proc relationLine(r: SpsRelation, rev, fileRev: SpsRevision): string =
-  result = encode(r, rev)
-  if r.raw.len > 0 and rev == fileRev:
+proc relationLine(r: SpsRelation, rev, fileRev: SpsRevision, strict: bool): string =
+  if r.raw.len > 0 and rev == fileRev and r.raw[0] == 'X':
     var scratch = SpsFile()
-    if encode(quietCtx(scratch, false).parseRelation(r.raw, rev), rev) == result: result = r.raw
+    if sameValues(quietCtx(scratch, strict).parseRelation(r.raw, rev), r): return r.raw
+  encode(r, rev)
 
 proc headerLine(h: SpsHeader): string =
-  result = encode(h)
-  if h.raw.len > 0 and encode(parseHeader(h.raw)) == result: result = h.raw
+  if h.raw.len > 0 and h.raw[0] == 'H' and sameValues(parseHeader(h.raw), h): h.raw
+  else: encode(h)
 
 proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
   ## Writes `f` to `s`: records in file order (`f.order`), then any records
   ## added to the lists since. Records are validated first: a value that does
   ## not fit its field is an error, and nothing is written unless
   ## `opts.lenient` (then the record is written as read, or skipped if it
-  ## has no raw text). Unchanged records are written byte for byte.
+  ## has no raw text). Unchanged records are written byte for byte. Output is
+  ## always text lines (fixed 80-byte or EBCDIC input comes back as lines).
   let rev = if opts.revision == spsAuto: f.revision else: opts.revision
   let fileRev = f.revision
   let nl = if opts.lineEnding.len > 0: opts.lineEnding elif f.crlf: "\r\n" else: "\n"
+  let strict = f.options.strictImpliedDecimals
   var lines: seq[string]
   var used: array[SpsEntryKind, int]
   proc fail(log: var DiagLog, i: int, msg: string) =
@@ -535,6 +582,16 @@ proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
       loc = Location(file: f.name, record: i))
   proc emit(log: var DiagLog, e: SpsEntry) =
     let i = lines.len
+    let size = case e.kind
+      of seHeader: f.headers.len
+      of sePoint: f.points.len
+      of seRelation: f.relations.len
+      of seComment: f.comments.len
+      of seOther: f.others.len
+    if e.at notin 0..<size:
+      log.fail(i, "order entry " & $e.kind & " " & $e.at & " has no record (" & $size &
+        " left); edit `order` together with the record lists")
+      return
     try:
       case e.kind
       of seHeader:
@@ -545,8 +602,8 @@ proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
           log.report(sevInfo, dcValidation, "H00 set to '" & h.data & "' for revision " & $rev,
             loc = Location(file: f.name, record: i))
         lines.add headerLine(h)
-      of sePoint: lines.add pointLine(f.points[e.at], rev, fileRev)
-      of seRelation: lines.add relationLine(f.relations[e.at], rev, fileRev)
+      of sePoint: lines.add pointLine(f.points[e.at], rev, fileRev, strict)
+      of seRelation: lines.add relationLine(f.relations[e.at], rev, fileRev, strict)
       of seComment:
         let t = "C" & f.comments[e.at]
         lines.add t
@@ -567,9 +624,9 @@ proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
   for i in used[seRelation]..<f.relations.len: result.emit(SpsEntry(kind: seRelation, at: i))
   for i in used[seComment]..<f.comments.len: result.emit(SpsEntry(kind: seComment, at: i))
   if result.count(sevError) == 0:
-    for l in lines:
+    for i, l in lines:
       s.write l
-      s.write nl
+      if i < lines.len - 1 or f.finalNewline: s.write nl
 
 proc writeSps*(f: SpsFile, path: string, opts = SpsWriteOptions()): DiagLog =
   ## Writes `f` to `path` through `<path>.tmp`, renamed on success; on

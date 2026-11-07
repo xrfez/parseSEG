@@ -405,7 +405,7 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
       channel → receiver and source station), then fill `TraceKeys` coordinates, offsets and
       midpoints, especially for SEG-D 2.x, which has no coordinates in its headers. Exposed in
       the public API, C ABI, Python and the CLI (`info --sps`/`--p1`).
-- [ ] 10.4 Review by an agent; fix its findings.
+- [x] 10.4 Review by an agent; fix its findings.
 
 ### Phase 11: SEG-2 (queued after Phase 10)
 - [ ] 11.1 `Seg2File` reader (descriptor blocks, keyword strings, formats 1-5, byte order),
@@ -735,4 +735,28 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
     - Rev 0 trace lengths from tape record lengths;
     - limiting byte-order scoring to bytes 3201-3260 for Rev 0.
 - 2026-11-07: **Phase 10 review** (task 10.4) by an agent: 9 confirmed findings plus suspicions. The fixes follow in the next commit.
+- 2026-11-07: Task 10.4 done: the Phase 10 review's findings are fixed, with regression tests in the "review" blocks of `tests/tsurvey.nim` and `tests/tcli.nim`.
+  - **A non-P1 line inside a P1 file was rewritten as a record at 0N 0E** with a NUL. It is now kept raw.
+  - **A 1.0 H00 date such as `SPS001,12.10.90` was read as Rev 2.1.** The marker is now matched with its `SPS` prefix.
+  - **`std/streams.readLine` lost data:** a NUL at a line start ended the file, and CR-only files lost a character per line. `textRecords` now has its own splitter:
+    - LF, CR LF or a lone CR end a line, and NUL is data;
+    - CR LF detection is exact;
+    - `terminated` tracks the final newline;
+    - lines over 64 KB are cut and reported.
+  - `survey` picked the reader by column 1 of the first line, which failed on EBCDIC/fixed SPS and on P1 headers starting with R/S/X/C. It now uses `looksLikeSps`, which judges by data-record shape.
+  - P1: a header line starting with a digit stopped all decoding. Detection now uses the first record matching any format. Editing `point` was ignored.
+  - Round trips:
+    - P1 headers are no longer padded by default.
+    - The read options (P1 decimals, SPS strict mode) are kept on the file and used by the writers.
+    - A missing final newline is kept.
+    - Unchanged records are found with `sameValues` (NaN = NaN) rather than by re-encoding, so an unchanged record that would not encode (e.g. `H` with no code) is written back as read.
+  - Overflow (1e300, Inf) is an error, where before it was written as a blank.
+  - Stale `order` entries are an error, where before they raised an IndexDefect.
+  - Point indices clamp to int16.
+  - The ABI's geometry log no longer grows across loads.
+  - CLI: `keys` on a file with 0 traces; `--rev` without `-o`, `--decimals` on SPS, and a non-finite `--line-map` are usage errors.
+  - Not done (noted):
+    - Python `load_sps`/`load_p1` hold the GIL while reading.
+    - Join diagnostics name the record's list index, not its line.
+    - A 1.0 file without H00 whose votes tie is read as 2.1.
 

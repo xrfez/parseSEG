@@ -18,7 +18,7 @@ import ../common/ebcdic
 type
   TextLayout* = enum
     ## How the records of a survey file are stored.
-    tlLines = "lines"        ## Newline-terminated (LF or CRLF).
+    tlLines = "lines"        ## Terminated by LF, CR LF or a lone CR.
     tlFixed80 = "fixed80"    ## Fixed 80-byte ASCII records, no terminators.
     tlEbcdic80 = "ebcdic80"  ## Fixed 80-byte EBCDIC records (tape copies).
 
@@ -29,8 +29,14 @@ type
     offset*: int64 ## Byte offset of the record in the stream.
     index*: int    ## 0-based record (line) number.
     crlf*: bool    ## The line ended in CR LF (`tlLines`).
+    terminated*: bool ## A line terminator followed (always true for fixed records).
+    cut*: bool
+      ## The line was longer than `MaxLineBytes` and was cut there; the rest
+      ## follows as the next record. A reader should report it.
 
-const CardWidth* = 80
+const
+  CardWidth* = 80
+  MaxLineBytes* = 65536 ## Longer "lines" are cut (a binary file, or fixed records with a stray LF).
 
 proc detectLayout*(head: openArray[char]): TextLayout =
   ## Guesses the storage from the first bytes of a file: any CR or LF means
@@ -49,25 +55,62 @@ proc detectLayout*(head: openArray[char]): TextLayout =
     result = tlEbcdic80
 
 iterator textRecords*(s: Stream, layout: TextLayout): TextRecord =
-  ## The records of `s`. With `tlLines`, a trailing CR is dropped (CRLF);
-  ## a final line without a terminator is still a record, but an empty one
-  ## at the very end is not.
+  ## The records of `s`. With `tlLines`, a record ends at LF, CR LF or a lone
+  ## CR (the terminator is not part of the text); NUL and other bytes are
+  ## data. A final line without a terminator is still a record (with
+  ## `terminated` false), but an empty one at the very end is not.
   var rec = TextRecord()
   case layout
   of tlLines:
+    var buf = newString(65536)
+    var bufLen, pos = 0
+    var bufStart = int64(s.getPosition) # stream offset of buf[0]
     var line = ""
-    var offset = int64(s.getPosition)
-    while s.readLine(line):
-      let next = int64(s.getPosition)
-      # `readLine` ends a line at LF, CR or CR LF and drops the terminator,
-      # so a CR LF shows as two bytes beyond the text.
-      let hadCr = next - offset - line.len == 2
+    var lineStart = bufStart
+    var pendingCr = false # a CR ended the last chunk; LF may follow
+    template fill(): bool =
+      bufStart += int64(bufLen)
+      bufLen = max(s.readData(buf[0].addr, buf.len), 0)
+      pos = 0
+      bufLen > 0
+    template emit(isCrlf, isTerminated, isCut: bool) =
       rec.text = line
-      rec.crlf = hadCr
-      rec.offset = offset
+      rec.offset = lineStart
+      rec.crlf = isCrlf
+      rec.terminated = isTerminated
+      rec.cut = isCut
       yield rec
       inc rec.index
-      offset = next
+      line.setLen(0)
+    var more = fill()
+    while more:
+      while pos < bufLen:
+        let c = buf[pos]
+        if pendingCr:
+          pendingCr = false
+          if c == '\n':
+            inc pos
+            emit(true, true, false)
+            lineStart = bufStart + int64(pos)
+          else:
+            emit(false, true, false) # a lone CR
+            lineStart = bufStart + int64(pos)
+        elif c == '\n':
+          inc pos
+          emit(false, true, false)
+          lineStart = bufStart + int64(pos)
+        elif c == '\r':
+          inc pos
+          pendingCr = true
+        else:
+          line.add c
+          inc pos
+          if line.len >= MaxLineBytes:
+            emit(false, false, true)
+            lineStart = bufStart + int64(pos)
+      more = fill()
+    if pendingCr: emit(false, true, false)
+    elif line.len > 0: emit(false, false, false)
   of tlFixed80, tlEbcdic80:
     var buf = newString(CardWidth)
     while true:
@@ -78,6 +121,7 @@ iterator textRecords*(s: Stream, layout: TextLayout): TextRecord =
       if layout == tlEbcdic80: text = ebcdicToAscii(text.toOpenArrayByte(0, n - 1))
       rec.text = text
       rec.offset = offset
+      rec.terminated = true
       yield rec
       inc rec.index
 
@@ -159,8 +203,9 @@ func ljust*(s: string, width: int): string =
 func formatFixed*(v: float64, width, decimals: int, implicit = false): string =
   ## `v` as an `Fw.d` field: `decimals` digits after an explicit point, or
   ## with `implicit`, the scaled integer without a point. NaN is blank.
-  ## Returns "" when the value does not fit in `width`.
+  ## Returns "" when the value does not fit in `width` (or is infinite).
   if v.isNaN: return repeat(' ', width)
+  if abs(v) > 1e15: return "" # wider than any card field; also Inf
   let s = if implicit: $int64(round(v * pow(10.0, float64(decimals))))
           else: formatFloat(v, ffDecimal, decimals)
   if s.len > width: "" else: rjust(s, width)
@@ -177,3 +222,14 @@ proc putCol*(line: var string, first: int, text: string) =
   let last = first + text.len - 1
   if line.len < last: line.add repeat(' ', last - line.len)
   for i, c in text: line[first - 1 + i] = c
+
+func sameValues*[T: object](a, b: T): bool =
+  ## Field-by-field equality where NaN equals NaN (a missing value is the
+  ## same missing value). Writers use it to tell an unchanged record, whose
+  ## raw text is written back, from an edited one.
+  result = true
+  for x, y in fields(a, b):
+    when x is SomeFloat:
+      if not (x == y or (x != x and y != y)): return false
+    else:
+      if x != y: return false

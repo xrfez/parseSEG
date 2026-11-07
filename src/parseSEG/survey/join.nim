@@ -78,6 +78,11 @@ proc resolveLine*(n: LineNames, name: string, numeric: float64, line: var float6
       return true
   false
 
+func idx(i: int): int16 {.inline.} =
+  ## A point index as a key part; records hold one digit, but built ones may
+  ## not (out-of-range values clamp).
+  int16(clamp(i, int(low(int16)), int(high(int16))))
+
 proc note(g: var SurveyGeometry, sev: Severity, file, msg: string, record = -1) =
   g.log.report(sev, dcBadValue, msg, loc = Location(file: file, record: record))
 
@@ -102,9 +107,9 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, names = LineNames()) =
       elif p.easting.isNaN or p.northing.isNaN:
         discard # no coordinates: nothing to add
       elif p.kind == 'S':
-        g.table.addSource(l, p.point, int16(p.index), p.easting, p.northing, p.elevation)
+        g.table.addSource(l, p.point, idx(p.index), p.easting, p.northing, p.elevation)
       else:
-        g.table.addReceiver(l, p.point, int16(p.index), p.easting, p.northing, p.elevation)
+        g.table.addReceiver(l, p.point, idx(p.index), p.easting, p.northing, p.elevation)
   for i, r in f.relations:
     var sl, rl: float64
     if g.tape.len > 0 and r.fieldTape != g.tape: discard
@@ -117,8 +122,8 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, names = LineNames()) =
       else:
         let run = RelationRun(fieldTape: r.fieldTape, fromChannel: r.fromChannel,
           toChannel: r.toChannel, step: r.channelIncrement,
-          src: stationKey(sl, r.srcPoint, int16(r.srcIndex)), rcvLine: rl,
-          fromRcv: r.fromReceiver, toRcv: r.toReceiver, rcvIndex: int16(r.rcvIndex))
+          src: stationKey(sl, r.srcPoint, idx(r.srcIndex)), rcvLine: rl,
+          fromRcv: r.fromReceiver, toRcv: r.toReceiver, rcvIndex: idx(r.rcvIndex))
         let runs = g.runs.mgetOrPut(r.fieldRecord, @[])
         for o in runs:
           if run.fromChannel <= o.toChannel and o.fromChannel <= run.toChannel:

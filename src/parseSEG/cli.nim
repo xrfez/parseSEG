@@ -5,7 +5,7 @@
 ## Exit status: 0 success; 1 the command ran but reported errors (an error or
 ## fatal diagnostic); 2 a usage error.
 
-import std/[os, strutils, sequtils, tables, math]
+import std/[os, strutils, sequtils, tables, math, streams]
 import ../parseSEG
 
 const
@@ -212,8 +212,10 @@ proc loadSurvey(a: Args, log: var DiagLog): SurveyGeometry =
     for item in a.get("line-map").split(','):
       let kv = item.split('=')
       if kv.len != 2 or kv[0].strip.len == 0: usage("--line-map needs NAME=N[,NAME=N...]")
-      try: names.names[kv[0].strip] = parseFloat(kv[1].strip)
-      except ValueError: usage("--line-map: '" & kv[1] & "' is not a number")
+      let v = try: parseFloat(kv[1].strip)
+              except ValueError: usage("--line-map: '" & kv[1] & "' is not a number")
+      if v.isNaN or v.classify in {fcInf, fcNegInf}: usage("--line-map: '" & kv[1] & "' is not finite")
+      names.names[kv[0].strip] = v
   result.multiComponent = a.has("multi-component")
   let (grid, depth) = parseDecimals(a)
   for path in a.get("sps").split(','):
@@ -734,7 +736,8 @@ proc keysCmd(a: Args): int =
   var f = openFile(a.pos[0], keys = true)
   defer: f.close()
   let surveyLog = if a.wantsSurvey: joinSurvey(a, f) else: DiagLog()
-  let sel = parseSelection(a.get("traces", "0.." & $(min(f.len, 10) - 1)), f.len)
+  let sel = if f.len == 0 and not a.has("traces"): @[]
+            else: parseSelection(a.get("traces", "0.." & $(min(f.len, 10) - 1)), f.len)
   echo ["trace", "record", "channel", "srcLine", "srcPoint", "srcX", "srcY", "rcvLine",
     "rcvPoint", "rcvX", "rcvY", "offset"].join("\t")
   for i in sel:
@@ -747,14 +750,11 @@ proc keysCmd(a: Args): int =
   if f.index.log.failed or surveyLog.failed: 1 else: 0
 
 proc isSps(path: string): bool =
-  ## SPS data records start with R, S, X or C; P1 data records with a blank.
-  result = false
-  var n = 0
-  for line in lines(path):
-    if line.len > 0 and line[0] in {'R', 'S', 'X', 'C'}: return true
-    if line.len > 0 and line[0] == ' ' and line.strip.len > 0: return false
-    inc n
-    if n > 2000: break
+  ## SPS or SEG P1, from the shape of the data records (`looksLikeSps`).
+  let s = newFileStream(path, fmRead)
+  if s == nil: quit("parseSEG: cannot read " & path, 1)
+  try: looksLikeSps(s)
+  finally: s.close()
 
 proc surveyCmd(a: Args): int =
   a.onlyOptions(["o", "out", "rev", "decimals"])
@@ -763,6 +763,7 @@ proc surveyCmd(a: Args): int =
   checkInput(path)
   let output = a.get("o", a.get("out"))
   if output.len > 0: refuseSame(output, path)
+  elif a.has("rev"): usage("--rev needs -o (the output file)")
   var rev = spsAuto
   case a.get("rev")
   of "": discard
@@ -771,6 +772,7 @@ proc surveyCmd(a: Args): int =
   else: usage("--rev must be 1.0 or 2.1")
   var log: DiagLog
   if isSps(path):
+    if a.has("decimals"): usage("--decimals applies to P1 files only")
     let f = readSps(path)
     log.add f.log
     var kinds: array['A'..'Z', int]
@@ -794,7 +796,7 @@ proc surveyCmd(a: Args): int =
       echo "file ", i, ":      ", lf.format, ", ", lf.header.len, " header records, ",
         lf.records.len, " data records"
     if output.len > 0:
-      log.add writeP1(f, output, P1WriteOptions(decimals: opts))
+      log.add writeP1(f, output)
   echo "diagnostics: ", log.count(sevFatal), " fatal, ", log.count(sevError), " error, ",
     log.count(sevWarning), " warning, ", log.count(sevInfo), " info"
   printLog(log, sevWarning)

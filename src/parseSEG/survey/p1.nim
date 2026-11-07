@@ -63,7 +63,11 @@ type
     name*: string
     layout*: TextLayout
     crlf*: bool
+    finalNewline*: bool = true ## The last line had a terminator.
     files*: seq[PLogicalFile]
+    options*: P1Options
+      ## How the file was read: the implicit decimals, which the writer
+      ## also uses (set them to re-encode with other decimals).
     log*: DiagLog
 
   P1Options* = object
@@ -184,18 +188,19 @@ proc decodeP1(x: Ctx, line: string): P1Record =
   if result.year >= 0: result.year = if result.year < 50: 2000 + result.year else: 1900 + result.year
 
 proc detect(lines: openArray[string]): PFormat =
-  ## The format of a logical file from its first data records.
+  ## The format of a logical file from the first of its data records that
+  ## matches one of P1-P4.
   result = pfUnknown
-  if lines.len > 0:
-    if isP4Data(lines[0]): result = pfP4
-    elif lines.len > 1 and isP2Pair(lines[0], lines[1]): result = pfP2
-    elif isP1Data(lines[0]): result = pfP1
-    elif isP3Data(lines[0]): result = pfP3
+  for i in 0..<lines.len:
+    if isP4Data(lines[i]): return pfP4
+    if i + 1 < lines.len and isP2Pair(lines[i], lines[i + 1]): return pfP2
+    if isP1Data(lines[i]): return pfP1
+    if isP3Data(lines[i]): return pfP3
 
 proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
   ## Reads P1-P4 logical files from `s`. Problems are in `result.log`; the
   ## read stops early only on an I/O failure (fatal).
-  result = P1File(name: name)
+  result = P1File(name: name, options: opts)
   result.layout = if opts.forceLayout: opts.layout else: openLayout(s)
   var x = Ctx(f: result.addr, opts: opts)
   var cur = PLogicalFile()
@@ -218,13 +223,22 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
           if isP1Data(r.text): cur.records.add xr.decodeP1(r.text)
           else:
             xr.problem(sevWarning, dcBadValue, "", "not a P1 data record; kept raw")
-            cur.records.add P1Record(raw: r.text)
-        else: cur.records.add P1Record(raw: r.text)
+            var raw = initP1Record()
+            raw.raw = r.text
+            cur.records.add raw
+        else:
+          var raw = initP1Record()
+          raw.raw = r.text
+          cur.records.add raw
       pending.setLen(0)
   try:
     for r in textRecords(s, result.layout):
       x.rec = r
       if r.index == 0: result.crlf = r.crlf
+      result.finalNewline = r.terminated
+      if r.cut:
+        x.problem(sevWarning, dcBadValue, "", "line longer than " & $MaxLineBytes &
+          " bytes; cut into records (is this a text file?)")
       let line = r.text
       let isH = line.colChar(1) == 'H'
       if isH and (cur.records.len > 0 or pending.len > 0):
@@ -235,7 +249,8 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
         inHeader = true
         cur.header.add line
       elif inHeader and not (isP1Data(line) or isP4Data(line) or
-          (cur.format == pfUnknown and isP3Data(line)) or line.colChar(1) in Digits):
+          (cur.format == pfUnknown and isP3Data(line)) or
+          (line.colChar(1) in Digits and isP2Pair(prev.text, line))):
         cur.header.add line
       else:
         if cur.header.len == 0 and pending.len == 0 and cur.records.len == 0:
@@ -298,9 +313,12 @@ proc encode*(r: P1Record, opts = P1Options()): string =
   result = repeat(' ', 80)
   if r.lineName.len > 16: raiseFormat("P1.lineName: more than 16 characters")
   result.putCol(2, r.lineName)
-  let pt = if r.pointName.len > 0: r.pointName
+  var parsed: float64
+  let nameFits = r.pointName.len > 0 and (r.point.isNaN or
+    (parseFortranFloat(r.pointName, 0, parsed) and parsed == r.point))
+  let pt = if nameFits: r.pointName
            elif r.point.isNaN: ""
-           elif r.point == round(r.point): $int64(r.point)
+           elif r.point == round(r.point) and abs(r.point) < 1e15: $int64(r.point)
            else: $r.point
   result.putCol(18, rjust(fit(if pt.len == 0: " " else: pt, 8, "P1.point"), 8))
   result[25] = r.reshoot
@@ -325,18 +343,17 @@ type
   P1WriteOptions* = object
     lineEnding*: string ## "" keeps the file's (CR LF if it had them, else LF).
     lenient*: bool      ## Write records that fail to encode as read.
-    padHeaders*: bool = true ## Pad header blocks to 20 records (the spec's tape blocking).
-    decimals*: P1Options     ## Implicit decimals used to encode.
+    padHeaders*: bool ## Pad header blocks to 20 records (the spec's tape blocking).
 
-proc recordLine(r: P1Record, format: PFormat, opts: P1WriteOptions): string =
-  ## The raw text when `r` is unchanged since it was read, else encoded.
-  if format != pfP1 and r.raw.len > 0: return r.raw
-  result = encode(r, opts.decimals)
+proc recordLine(r: P1Record, format: PFormat, decimals: P1Options): string =
+  ## The raw text when `r` is unchanged since it was read (or is not a P1
+  ## record), else encoded.
   if r.raw.len > 0:
+    if format != pfP1 or not isP1Data(r.raw): return r.raw
     var scratch = P1File()
-    let x = Ctx(f: scratch.addr, opts: P1Options(gridDecimals: opts.decimals.gridDecimals,
-      depthDecimals: opts.decimals.depthDecimals, angleUnit: r.angleUnit))
-    if isP1Data(r.raw) and encode(x.decodeP1(r.raw), opts.decimals) == result: result = r.raw
+    let x = Ctx(f: scratch.addr, opts: decimals)
+    if sameValues(x.decodeP1(r.raw), r): return r.raw
+  encode(r, decimals)
 
 proc writeP1*(f: P1File, s: Stream, opts = P1WriteOptions()): DiagLog =
   ## Writes every logical file of `f`: header records (padded to blocks of
@@ -355,15 +372,15 @@ proc writeP1*(f: P1File, s: Stream, opts = P1WriteOptions()): DiagLog =
     lines.add header
     for r in lf.records:
       try:
-        lines.add recordLine(r, lf.format, opts)
+        lines.add recordLine(r, lf.format, f.options)
       except SegFormatError as e:
         result.report(if opts.lenient: sevWarning else: sevError, dcValidation, e.msg,
           loc = Location(file: f.name, record: lines.len))
         if r.raw.len > 0: lines.add r.raw
   if result.count(sevError) == 0:
-    for l in lines:
+    for i, l in lines:
       s.write l
-      s.write nl
+      if i < lines.len - 1 or f.finalNewline: s.write nl
 
 proc writeP1*(f: P1File, path: string, opts = P1WriteOptions()): DiagLog =
   ## Writes `f` to `path` through `<path>.tmp`, renamed on success.

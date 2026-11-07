@@ -176,7 +176,8 @@ block p1_roundtrip_and_edit:
   let text = ["H SEG P1 EXAMPLE", p1a, p1b].join("\n") & "\n"
   let f = parseP1(text)
   doAssert p1Text(f, P1WriteOptions(padHeaders: false))[0] == text
-  let padded = p1Text(f)[0].splitLines
+  doAssert p1Text(f)[0] == text, "headers are not padded by default"
+  let padded = p1Text(f, P1WriteOptions(padHeaders: true))[0].splitLines
   doAssert padded.len == 20 + 2 + 1 and padded[20] == p1a, "header padded to a block of 20"
   var g = f
   g.files[0].records[0].easting = 155591
@@ -284,3 +285,93 @@ block join_to_a_real_file:
   doAssert abs(k.offset - hypot(100.0, 400.0)) < 1e-9
   f.close()
   removeDir(dir)
+
+# --------------------------------------------------------- review (10.4) ---
+
+block review_p1_non_p1_lines_stay_raw:
+  let text = ["HAREA", p1a, " BAD RECORD here", p1b].join("\n") & "\n"
+  let f = parseP1(text)
+  doAssert f.files[0].records[1].raw == " BAD RECORD here"
+  doAssert f.files[0].records[1].latitude.isNaN
+  doAssert p1Text(f)[0] == text
+
+block review_sps_h00_date_is_not_rev21:
+  let f = parseSps("H00 SPS format version num.      SPS001,12.10.90;\n")
+  doAssert f.revision == sps10 and f.revisionDeclared
+  doAssert parseSps("H00 SPS format version number   SPS 2.1;").revision == sps21
+  doAssert parseSps("H00 x                           sps2.1").revision == sps21
+
+block review_line_splitter:
+  # NUL is data; CR-only endings; exact CR LF detection; no final newline.
+  let f = parseSps(H00 & "\n\0\n" & rcv1 & "\n")
+  doAssert f.points.len == 1 and f.others == @["\0"]
+  let cr = parseSps([H00, rcv1, rcv2].join("\r"))
+  doAssert cr.points.len == 2 and not cr.crlf and not cr.finalNewline
+  doAssert spsText(cr, SpsWriteOptions(lineEnding: "\r"))[0] == [H00, rcv1, rcv2].join("\r")
+  let mixed = parseSps(H00 & "\r\n" & rcv1 & "\n")
+  doAssert mixed.crlf and mixed.points.len == 1
+  var recs: seq[TextRecord]
+  for r in textRecords(newStringStream("ab\r\ncd\ref"), tlLines): recs.add r
+  doAssert recs.len == 3 and recs[0].text == "ab" and recs[0].crlf and recs[1].text == "cd"
+  doAssert not recs[1].crlf and recs[1].terminated and recs[2].text == "ef"
+  doAssert not recs[2].terminated and recs[2].offset == 7
+  let long = parseSps(repeat('R', MaxLineBytes + 10))
+  doAssert long.log.count(sevWarning) >= 1
+
+block review_detect_sps_or_p1:
+  doAssert looksLikeSps(newStringStream([H00, src1, x1].join("\n")))
+  doAssert not looksLikeSps(newStringStream(["H AREA", "CLIENT: SHELL", p1a].join("\n")))
+  let eb = asciiToEbcdic(H00.alignLeft(80) & src1)
+  var ebs = newString(eb.len)
+  for i, b in eb: ebs[i] = char(b)
+  doAssert looksLikeSps(newStringStream(ebs))
+
+block review_p1_digit_in_header:
+  let f = parseP1(["HAREA", "1979 SURVEY", " NOTE", p1a].join("\n"))
+  doAssert f.files[0].format == pfP1 and f.files[0].header.len == 3
+  doAssert f.files[0].records.len == 1 and f.files[0].records[0].point == 12340
+
+block review_p1_point_edit:
+  var f = parseP1(["H X", p1a].join("\n"))
+  f.files[0].records[0].point = 99999
+  doAssert p1Text(f)[0].splitLines[1].col(18, 25) == "   99999"
+
+block review_round_trips:
+  # Decimals used to read are used to write.
+  let text = ["H X", p1a].join("\n") & "\n"
+  let f = parseP1(text, opts = P1Options(gridDecimals: 2))
+  doAssert f.files[0].records[0].easting == 1555.90
+  doAssert p1Text(f)[0] == text
+  var g = f
+  g.files[0].records[0].easting = 1555.91
+  doAssert p1Text(g)[0].splitLines[1].col(46, 53) == "  155591"
+  # SPS strict mode round-trips.
+  let line = rec('S', [(2, "5646".rjust(10)), (12, "534550".rjust(10)), (24, "1V6"),
+    (47, "2385700".rjust(9)), (56, "30583800".rjust(10))])
+  let st = parseSps(line & "\n", opts = SpsOptions(revision: sps21, strictImpliedDecimals: true))
+  doAssert st.points[0].easting == 238570.0
+  doAssert spsText(st)[0] == line & "\n"
+  # No final newline stays so; an H record without a code is written back.
+  let nofinal = [H00, "H", rcv1].join("\n")
+  doAssert spsText(parseSps(nofinal))[0] == nofinal
+
+block review_overflow_is_an_error:
+  var f = parseSps([H00, rcv1].join("\n") & "\n")
+  f.points[0].staticCorrection = 1e300
+  doAssert writeSps(f, newStringStream()).count(sevError) == 1
+  f.points[0].staticCorrection = NaN
+  f.points[0].easting = Inf
+  doAssert writeSps(f, newStringStream()).count(sevError) == 1
+  var p = parseP1(["H X", p1a].join("\n"))
+  p.files[0].records[0].northing = 1e300
+  doAssert writeP1(p, newStringStream()).count(sevError) == 1
+
+block review_stale_order_and_wide_index:
+  var f = parseSps([H00, rcv1, rcv2].join("\n") & "\n")
+  f.points.setLen(1)
+  doAssert writeSps(f, newStringStream()).count(sevError) == 1
+  var g: SurveyGeometry
+  var built = parseSps([H00, rcv1].join("\n"))
+  built.points[0].index = 100_000
+  g.addSps(built) # clamps instead of a RangeDefect
+  doAssert g.table.receivers.len == 1
