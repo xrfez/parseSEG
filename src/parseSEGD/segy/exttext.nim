@@ -49,6 +49,10 @@ func hasEndText*(h: ExtendedTextHeader): bool {.inline.} =
   ## True when the last record added is `((SEG:EndText))`.
   h.endText
 
+func inBinaryStanza*(h: ExtendedTextHeader): bool {.inline.} =
+  ## True while a binary stanza still expects data in the next record.
+  h.skipUntil > h.data.len
+
 func normalizeStanzaName*(s: string): string =
   ## Upper case with spaces removed: the spec's matching rule.
   for c in s:
@@ -87,6 +91,11 @@ func parseStanzaHeader(b: openArray[byte], pos, limit: int, s: var Stanza): bool
       if n.len > 0 and n.allCharsInSet(Digits) and n.len <= 15:
         s.byteCount = parseInt(n)
     result = true
+
+func startsStanza*(rec: openArray[byte]): bool =
+  ## True when `rec` begins with a well-formed stanza header `((...))`.
+  var s: Stanza
+  openParens(rec, 0) and parseStanzaHeader(rec, 0, rec.len, s)
 
 func lineStarts(h: ExtendedTextHeader, recStart: int): seq[int] =
   # Positions in the record at `recStart` where a stanza header may begin.

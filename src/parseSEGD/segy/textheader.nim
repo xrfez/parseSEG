@@ -48,6 +48,17 @@ func detectTextEncoding*(b: openArray[byte]): TextEncoding =
       if isEbcdicText(c): inc ebcdic
     result = if ascii > ebcdic: teAscii else: teEbcdic
 
+func looksLikeText*(b: openArray[byte]): bool =
+  ## True when at least 90% of `b` is printable text in ASCII or in EBCDIC
+  ## (line ends and tabs included), or when `b` is all blanks or NULs
+  ## (padding). Used to tell text records from binary trace data.
+  var ascii, ebcdic, pad = 0
+  for c in b:
+    if isAsciiText(c) or c == 0x09: inc ascii
+    if isEbcdicText(c) or c == 0x05: inc ebcdic
+    if c in {0x00'u8, 0x20, 0x40}: inc pad
+  result = pad == b.len or 10 * max(ascii, ebcdic) >= 9 * b.len
+
 func decodeText*(b: openArray[byte], encoding: TextEncoding): string =
   ## Decodes text bytes to a Latin-1 string.
   case encoding

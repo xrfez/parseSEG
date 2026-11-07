@@ -20,6 +20,16 @@ func ibmToFloat32*(bits: uint32): float32 =
     let mag = ldexp(float64(frac), cint(4 * expo - 24))
     result = float32(if (bits and 0x8000_0000'u32) != 0: -mag else: mag)
 
+func ibmToFloat64*(bits: uint32): float64 =
+  ## Converts IBM float bits to IEEE double, exactly (every IBM single fits).
+  let frac = bits and 0x00FF_FFFF'u32
+  if frac == 0:
+    result = 0.0
+  else:
+    let expo = int((bits shr 24) and 0x7F) - 64
+    let mag = ldexp(float64(frac), cint(4 * expo - 24))
+    result = if (bits and 0x8000_0000'u32) != 0: -mag else: mag
+
 func float32ToIbm*(x: float32): uint32 =
   ## Converts an IEEE single to IBM float bits with round-to-nearest.
   ## Every finite float32 fits in the IBM range. Infinities clamp to the

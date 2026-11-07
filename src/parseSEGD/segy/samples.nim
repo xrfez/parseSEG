@@ -112,7 +112,10 @@ proc decodeSamples*[T: SampleType](f: SampleFormat, src: openArray[byte],
   forEachOrder(order):
     case f
     of sfIbm32:
-      for i in 0..<n: dst[i] = T(ibmToFloat32(getNum[uint32](src, 4*i, o)))
+      when T is float64:
+        for i in 0..<n: dst[i] = ibmToFloat64(getNum[uint32](src, 4*i, o))
+      else:
+        for i in 0..<n: dst[i] = ibmToFloat32(getNum[uint32](src, 4*i, o))
     of sfInt32:
       for i in 0..<n: dst[i] = T(getNum[int32](src, 4*i, o))
     of sfInt16:

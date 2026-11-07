@@ -31,13 +31,19 @@
 ## - traces end at the declared trace count, at an Ext1 "last trace in file"
 ##   flag, at a trailer record, at a tape mark or at the end of data.
 
-import ../common/[endians, errors, diagnostics]
+import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio]
 import ../model/tensors
 import ./[textheader, binheader, traceheader, samples, exttext]
 export textheader, binheader, traceheader, samples, exttext, diagnostics, endians, tensors
 
-const TapeLabelSize* = 128 ## Bytes in a SEG-Y tape label.
+const
+  TapeLabelSize* = 128 ## Bytes in a SEG-Y tape label.
+  ReadChunk = 4 shl 20
+    ## Large blocks are read in chunks of this size, so a corrupt length in a
+    ## header costs memory only for the bytes actually present.
+  MaxExtendedRecords = 1_000_000
+    ## Bound on extended records implied by a Rev 2 first-trace offset (3.2 GB).
 
 type
   SegyFile* = object
@@ -45,6 +51,9 @@ type
     tapeLabel*: seq[byte]           ## Raw 128-byte label, or empty.
     text*: SegyTextHeader
     binary*: SegyBinaryHeader
+    revision*: SegyRevision
+      ## The revision whose rules were applied (`rulesRevision`); the raw
+      ## bytes are `binary.revision`.
     extended*: ExtendedTextHeader   ## Extended textual header records.
     trailer*: ExtendedTextHeader    ## Rev 2 data trailer records.
     byteOrder*: ByteOrder           ## Byte order of binary fields and samples.
@@ -54,7 +63,8 @@ type
     firstTraceOffset*: int64        ## Medium offset of the first trace.
 
   SegyTrace* = object
-    ## One trace record.
+    ## One trace record. `readTrace` reuses the buffers of the `SegyTrace` it
+    ## is given, so a loop over one variable allocates once.
     header*: SegyTraceHeader
     extraHeaders*: seq[byte]
       ## Raw additional 240-byte headers (Rev 2: Ext1 first, then proprietary),
@@ -70,151 +80,260 @@ type
     file*: SegyFile
     log*: DiagLog
     cursor: RecordCursor
+    pending: seq[byte]   ## Bytes read ahead and pushed back (`unread`).
+    pendingPos: int
     name: string
     tracesRead: int
     lastTraceSeen: bool
+    ext1Warned: bool
     done: bool
-
-func isTraceHeaderTrailer(b: openArray[byte]): bool {.inline.} =
-  (b[0] == 0x28 and b[1] == 0x28) or (b[0] == 0x4D and b[1] == 0x4D)
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
   # Storage unit sequence number (digits or blanks) and "SY" in bytes 5-6;
   # a textual header starts with 'C' instead.
   b[0] in {0x20'u8, 0x30'u8..0x39'u8} and b[4] == 0x53 and b[5] == 0x59
 
+func startsWithC(b: openArray[byte]): bool {.inline.} = b[0] == 0xC3 or b[0] == 0x43
+
 func loc(r: SegyReader, trace = -1, field = ""): Location {.inline.} =
   Location(file: r.name, record: 0, trace: trace, field: field)
 
+# -------------------------------------------------------------- byte input --
+# The cursor plus a push-back buffer: the reader may read a block ahead,
+# decide it is not what it hoped for (a trailer, an extended record), and
+# un-read it. This works on tape, where seeking back is not possible.
+
+func offset(r: SegyReader): int64 {.inline.} =
+  ## Medium offset of the next byte the reader will return.
+  r.cursor.offset - int64(r.pending.len - r.pendingPos)
+
+proc readAvail(r: var SegyReader, dst: var openArray[byte]): int =
+  # Reads up to dst.len bytes; fewer only at a tape mark or end of data.
+  while result < dst.len and r.pendingPos < r.pending.len:
+    dst[result] = r.pending[r.pendingPos]
+    inc result
+    inc r.pendingPos
+  if result < dst.len:
+    result += r.cursor.read(dst.toOpenArray(result, dst.len - 1))
+
+proc unread(r: var SegyReader, data: openArray[byte]) =
+  # Pushes `data` (just read) back in front of the unread bytes.
+  var rest = r.pending[r.pendingPos..^1]
+  r.pending = @data
+  r.pending.add rest
+  r.pendingPos = 0
+
+proc atData(r: var SegyReader): bool =
+  r.pendingPos < r.pending.len or r.cursor.stoppedAt == rkData
+
+proc readInto(r: var SegyReader, buf: var seq[byte], n: int64) =
+  # Reads exactly n bytes into buf (reusing its storage), growing it chunk by
+  # chunk as data arrives. Raises SegTruncatedError if the data ends first.
+  if n < 0 or n > int64(high(int) div 2):
+    raiseFormat("block length " & $n & " is not representable", r.offset)
+  buf.setLen 0
+  var got = 0
+  while got < n:
+    let step = int(min(n - got, ReadChunk))
+    buf.setLen got + step
+    let k = r.readAvail(buf.toOpenArray(got, got + step - 1))
+    got += k
+    if k < step:
+      buf.setLen got
+      raiseTruncated("expected " & $n & " bytes, got " & $got, r.offset)
+
 proc readBlock(r: var SegyReader, n: int): seq[byte] =
-  result = newSeq[byte](n)
-  r.cursor.readExactly(result)
+  r.readInto(result, n)
+
+# ------------------------------------------------------------ file headers --
+
+proc readExtendedHeader(r: var SegyReader, count: int, checkText: bool) =
+  # Reads extended records per `count` (see `needsMore`). With `checkText`
+  # (count -1, or a count implied by the first-trace offset), a record that
+  # is neither text, a stanza start nor binary stanza data ends the header
+  # early: it is pushed back and read as a trace.
+  template f: untyped = r.file
+  var rec = newSeq[byte](TextHeaderSize)
+  while f.extended.needsMore(count):
+    let start = r.offset
+    let got = r.readAvail(rec)
+    if got < TextHeaderSize:
+      raiseTruncated("extended textual record " & $f.extended.recordCount & " has " & $got &
+        " of 3200 bytes", r.offset)
+    if checkText and not f.extended.inBinaryStanza and not startsStanza(rec) and
+        not looksLikeText(rec):
+      r.unread(rec)
+      r.log.report(sevWarning, dcInconsistent, "extended textual header ends after " &
+        $f.extended.recordCount & " records: the record at this offset is not text " &
+        "(missing ((SEG:EndText)) or a wrong count)", start, r.loc(field = "extended"))
+      break
+    f.extended.add rec
 
 proc readFileHeaders(r: var SegyReader) =
-  var f = SegyFile()
-  var head = r.readBlock(TapeLabelSize)
+  # Fills r.file as it goes, so whatever was read survives a later failure.
+  template f: untyped = r.file
+  let head = r.readBlock(TapeLabelSize)
   var textBytes: seq[byte]
   if looksLikeTapeLabel(head):
-    f.tapeLabel = head
     textBytes = r.readBlock(TextHeaderSize)
+    if startsWithC(textBytes):
+      f.tapeLabel = head
+    else:
+      # Not a label after all: the textual header started at byte 0.
+      r.unread(textBytes.toOpenArray(TextHeaderSize - TapeLabelSize, TextHeaderSize - 1))
+      textBytes.setLen TextHeaderSize - TapeLabelSize
+      textBytes = head & textBytes
   else:
     textBytes = head
     textBytes.add r.readBlock(TextHeaderSize - TapeLabelSize)
   let labelLen = f.tapeLabel.len
   f.text = decodeTextHeader(textBytes)
 
-  let binOffset = r.cursor.offset
+  let binOffset = r.offset
   let bin = r.readBlock(BinaryHeaderSize)
   let det = detectByteOrder(bin)
   f.byteOrder = det.order
   f.byteOrderDeclared = det.fromMarker
   f.binary = decodeBinaryHeader(bin, det.order)
-  let rev = f.binary.revision
+  f.revision = f.binary.rulesRevision
+  let rev = f.revision
+  template binLoc(specByte: int, name: string): untyped =
+    (binOffset + (specByte - 3201), r.loc(field = "binary." & name))
   if not det.plausible:
+    let (o, l) = binLoc(3225, "formatCode")
     r.log.report(sevWarning, dcByteOrder, "no byte order gives a defined format code; " &
-      "reading as " & $det.order, binOffset + (3225 - 3201), r.loc(field = "binary.formatCode"))
+      "reading as " & $det.order, o, l)
   elif not det.fromMarker and det.order != boBig:
+    let (o, l) = binLoc(3297, "byteOrderMarker")
     r.log.report(sevInfo, dcByteOrder, "byte order inferred as " & $det.order &
-      " (no byte-order marker)", binOffset + (3297 - 3201), r.loc(field = "binary.byteOrderMarker"))
-  var l = r.loc()
-  f.binary.validate(r.log, sevWarning, l, binOffset)
+      " (no byte-order marker)", o, l)
+  f.binary.validate(r.log, sevWarning, r.loc(), binOffset)
 
   var fmt: SampleFormat
   if toSampleFormat(int(f.binary.formatCode), fmt):
     f.format = fmt
     f.formatKnown = true
     if f.byteOrder == boPairSwapped and sampleSize(fmt) == 3:
+      let (o, l) = binLoc(3225, "formatCode")
       r.log.report(sevError, dcUnsupportedFormat, "3-byte samples cannot be pair-swapped; " &
-        "samples are kept raw", binOffset + (3225 - 3201), r.loc(field = "binary.formatCode"))
+        "samples are kept raw", o, l)
   else:
+    let (o, l) = binLoc(3225, "formatCode")
     r.log.report(sevFatal, dcUnsupportedFormat, "format code " & $f.binary.formatCode &
-      " is undefined, so trace lengths are unknown", binOffset + (3225 - 3201),
-      r.loc(field = "binary.formatCode"))
+      " is undefined, so trace lengths are unknown", o, l)
 
-  # Extended textual header records.
+  # Extended textual header records. Rev 0 has none.
   var count = if rev.major == 0: 0 else: int(f.binary.numExtTextHeaders)
-  if rev.major >= 2 and f.binary.firstTraceOffset != 0:
-    let n = int64(f.binary.firstTraceOffset) - 3600 - labelLen
-    if n >= 0 and n mod TextHeaderSize == 0:
-      let fromOffset = int(n div TextHeaderSize)
-      if count > 0 and count != fromOffset:
-        r.log.report(sevWarning, dcInconsistent, "first trace offset implies " & $fromOffset &
-          " extended records, the count says " & $count & "; using the offset",
-          binOffset + (3521 - 3201), r.loc(field = "binary.firstTraceOffset"))
-      count = fromOffset
+  var fromOffset = false
+  let fto = f.binary.firstTraceOffset
+  if rev.major >= 2 and fto != 0:
+    let base = uint64(3600 + labelLen)
+    let (o, l) = binLoc(3521, "firstTraceOffset")
+    if fto < base or (fto - base) mod TextHeaderSize != 0 or
+        (fto - base) div TextHeaderSize > MaxExtendedRecords:
+      r.log.report(sevWarning, dcBadValue, "first trace offset " & $fto &
+        " is not 3600 + a plausible multiple of 3200; ignored", o, l)
     else:
-      r.log.report(sevWarning, dcBadValue, "first trace offset " &
-        $f.binary.firstTraceOffset & " is not 3600 + a multiple of 3200; ignored",
-        binOffset + (3521 - 3201), r.loc(field = "binary.firstTraceOffset"))
+      let n = int((fto - base) div TextHeaderSize)
+      if count > 0 and count != n:
+        r.log.report(sevWarning, dcInconsistent, "first trace offset implies " & $n &
+          " extended records, the count says " & $count & "; using the offset", o, l)
+      count = n
+      fromOffset = true
   if count < -1: count = 0 # already reported by validate
   f.extended = initExtendedTextHeader(rev1Lines = rev.major < 2)
   f.trailer = initExtendedTextHeader(rev1Lines = rev.major < 2)
-  while f.extended.needsMore(count):
-    f.extended.add r.readBlock(TextHeaderSize)
+  r.readExtendedHeader(count, checkText = count == -1 or fromOffset)
   if rev.major >= 2 and count > 0 and not f.extended.hasEndText:
     r.log.report(sevWarning, dcBadValue, "the last extended textual record is not " &
       "((SEG:EndText)) (required since the Rev 2.1 clarification)",
-      r.cursor.offset - TextHeaderSize, r.loc(field = "extended"))
-  f.firstTraceOffset = r.cursor.offset
-  r.file = f
+      r.offset - TextHeaderSize, r.loc(field = "extended"))
+  f.firstTraceOffset = r.offset
 
 proc openSegy*(src: RecordSource): SegyReader =
   ## Reads the file headers from `src`, positioned at the start of a SEG-Y
   ## file. Check `log.isFatal` for a file whose traces cannot be read.
+  ## Whatever headers were read before a failure are kept in `file`.
   result = SegyReader(cursor: initRecordCursor(src), name: src.name)
   if not result.log.tryRecord(result.loc(), result.readFileHeaders()):
     result.done = true
   if result.log.isFatal: result.done = true
 
-proc readTrailer(r: var SegyReader, first: seq[byte]) =
-  # Reads the data trailer, `first` being its first record when already read.
-  var expected = int(r.file.binary.numTrailerRecords)
-  if first.len > 0:
-    r.file.trailer.add first
-  while (expected < 0 or r.file.trailer.recordCount < expected) and
-      r.cursor.stoppedAt == rkData:
-    r.file.trailer.add r.readBlock(TextHeaderSize)
+# ------------------------------------------------------------------ traces --
+
+proc readTrailer(r: var SegyReader) =
+  # Reads data trailer records: the declared number, or (count -1) all the
+  # remaining text records.
+  let expected = int(r.file.binary.numTrailerRecords)
+  var rec = newSeq[byte](TextHeaderSize)
+  while (expected < 0 or r.file.trailer.recordCount < expected) and r.atData:
+    let got = r.readAvail(rec)
+    if got < TextHeaderSize:
+      raiseTruncated("trailer record " & $r.file.trailer.recordCount & " has " & $got &
+        " of 3200 bytes", r.offset)
+    r.file.trailer.add rec
   if expected > 0 and r.file.trailer.recordCount < expected:
     r.log.report(sevWarning, dcTruncated, "expected " & $expected & " trailer records, found " &
-      $r.file.trailer.recordCount, r.cursor.offset, r.loc(field = "trailer"))
+      $r.file.trailer.recordCount, r.offset, r.loc(field = "trailer"))
+
+proc trailerStartsHere(r: var SegyReader): bool =
+  # Looks ahead one record: a trailer record starts with a stanza header and
+  # is text. Trace data (whatever its first bytes) is pushed back.
+  var rec = newSeq[byte](TextHeaderSize)
+  let got = r.readAvail(rec)
+  result = got == TextHeaderSize and startsStanza(rec) and looksLikeText(rec)
+  r.unread(rec.toOpenArray(0, got - 1))
 
 proc checkEnd(r: var SegyReader) =
   # Called once the traces have ended: checks the declared counts.
   let b = r.file.binary
-  if b.segyMajor >= 2:
+  if r.file.revision.major >= 2:
     if b.numTraces != 0 and uint64(r.tracesRead) < b.numTraces:
       r.log.report(sevWarning, dcInconsistent, "the binary header declares " & $b.numTraces &
-        " traces, the file has " & $r.tracesRead, r.cursor.offset, r.loc(field = "binary.numTraces"))
+        " traces, the file has " & $r.tracesRead, r.offset, r.loc(field = "binary.numTraces"))
     if b.numTrailerRecords > 0 and r.file.trailer.recordCount == 0:
       r.log.report(sevWarning, dcTruncated, "the binary header declares " &
-        $b.numTrailerRecords & " trailer records, the file has none", r.cursor.offset,
+        $b.numTrailerRecords & " trailer records, the file has none", r.offset,
         r.loc(field = "trailer"))
-  if r.cursor.stoppedAt == rkData:
-    r.log.report(sevWarning, dcInconsistent, "data follows the last trace", r.cursor.offset,
-      r.loc())
+  if r.atData:
+    r.log.report(sevWarning, dcInconsistent, "data follows the last trace", r.offset, r.loc())
 
-proc readTraceBody(r: var SegyReader, t: var SegyTrace): bool =
+func isExt1Name(b: openArray[byte]): bool =
+  # "SEG00001" in ASCII or EBCDIC at bytes 233-240.
+  const ascii = "SEG00001"
+  var a, e = true
+  for i, c in ascii:
+    if b[232 + i] != byte(c): a = false
+    if b[232 + i] != latin1ToEbcdic[uint8(c)]: e = false
+  a or e
+
+proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   template f: untyped = r.file
   let order = f.byteOrder
-  let rev = f.binary.revision
-  t = SegyTrace(index: r.tracesRead, offset: r.cursor.offset)
-  let hdr = r.readBlock(TraceHeaderSize)
-  if f.binary.numTrailerRecords != 0 and rev.major >= 2 and isTraceHeaderTrailer(hdr):
-    var rec = hdr
-    rec.add r.readBlock(TextHeaderSize - TraceHeaderSize)
-    r.readTrailer(rec)
-    return false
+  t.index = r.tracesRead
+  t.offset = r.offset
+  var hdr: array[TraceHeaderSize, byte]
+  if r.readAvail(hdr) < TraceHeaderSize:
+    raiseTruncated("trace header ends early", r.offset)
   t.header = decodeTraceHeader(hdr, order)
 
   # Rev 2 additional trace headers; Ext1 comes first.
   var extNs = 0'u32
   var extDt = 0.0
-  if rev.major >= 2 and f.binary.maxAddlTraceHeaders > 0:
-    t.extraHeaders = r.readBlock(TraceHeaderSize)
+  t.extraHeaders.setLen 0
+  if f.revision.major >= 2 and f.binary.maxAddlTraceHeaders > 0:
+    r.readInto(t.extraHeaders, TraceHeaderSize)
+    if not r.ext1Warned and not isExt1Name(t.extraHeaders):
+      r.ext1Warned = true
+      r.log.report(sevWarning, dcBadValue, "the first additional trace header is not named " &
+        "SEG00001; reading it as Trace Header Extension 1 anyway (reported once)",
+        t.offset + TraceHeaderSize + 232, r.loc(t.index, "ext1.headerName"))
     let declared = getNum[uint16](t.extraHeaders, 156, order)
-    let k = if declared != 0: int(declared) else: int(f.binary.maxAddlTraceHeaders)
+    let k = if declared != 0: int64(declared) else: int64(f.binary.maxAddlTraceHeaders)
     if k > 1:
-      t.extraHeaders.add r.readBlock((k - 1) * TraceHeaderSize)
+      var more: seq[byte]
+      r.readInto(more, (k - 1) * TraceHeaderSize)
+      t.extraHeaders.add more
     extNs = getNum[uint32](t.extraHeaders, 136, order)
     extDt = getNum[float64](t.extraHeaders, 144, order)
     if (getNum[uint16](t.extraHeaders, 158, order) and 4) != 0:
@@ -222,35 +341,38 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace): bool =
 
   let traceNs = if extNs != 0: int(extNs) else: int(t.header.numSamples)
   let traceDt = if extDt != 0: extDt else: float64(t.header.sampleInterval)
-  if rev.major >= 1 and f.binary.fixedLengthTraces == 1:
+  if f.revision.major >= 1 and f.binary.fixedLengthTraces == 1:
     t.numSamples = int(f.binary.effectiveSamplesPerTrace)
     t.sampleInterval = f.binary.effectiveSampleInterval
-    if rev.major < 2 and (traceNs != t.numSamples or traceDt != t.sampleInterval):
+    if f.revision.major < 2 and (traceNs != t.numSamples or traceDt != t.sampleInterval):
       r.log.report(sevWarning, dcInconsistent, "fixed-length file, but this trace has " &
         $traceNs & " samples at " & $traceDt & " (binary header: " & $t.numSamples & " at " &
         $t.sampleInterval & ")", t.offset + 114, r.loc(t.index, "trace.numSamples"))
   else:
     t.numSamples = traceNs
     t.sampleInterval = traceDt
-  t.samples = r.readBlock(t.numSamples * sampleSize(f.format))
+  r.readInto(t.samples, int64(t.numSamples) * sampleSize(f.format))
   inc r.tracesRead
-  result = true
 
 proc nextTrace(r: var SegyReader, t: var SegyTrace): bool =
   let b = r.file.binary
-  if r.lastTraceSeen or (b.segyMajor >= 2 and b.numTraces != 0 and
-      uint64(r.tracesRead) >= b.numTraces):
-    if b.numTrailerRecords != 0: r.readTrailer(@[])
+  let rev2 = r.file.revision.major >= 2
+  if r.lastTraceSeen or (rev2 and b.numTraces != 0 and uint64(r.tracesRead) >= b.numTraces):
+    if rev2 and b.numTrailerRecords != 0: r.readTrailer()
     result = false
-  elif r.cursor.stoppedAt != rkData:
+  elif not r.atData:
     result = false # tape mark or end of data
+  elif rev2 and b.numTrailerRecords != 0 and r.trailerStartsHere():
+    r.readTrailer()
+    result = false
   else:
-    result = r.readTraceBody(t)
+    r.readTraceBody(t)
+    result = true
 
 proc readTrace*(r: var SegyReader, t: var SegyTrace): bool =
-  ## Reads the next trace into `t`. Returns false when the traces have ended
-  ## (or the read had to stop; see `log`). After the last trace, any data
-  ## trailer is in `file.trailer`.
+  ## Reads the next trace into `t`, reusing its buffers. Returns false when
+  ## the traces have ended (or the read had to stop; see `log`). After the
+  ## last trace, any data trailer is in `file.trailer`.
   if r.done:
     return false
   var more = false

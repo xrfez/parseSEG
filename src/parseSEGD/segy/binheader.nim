@@ -99,6 +99,22 @@ func `$`*(r: SegyRevision): string = $r.major & "." & $r.minor
 
 func isRev20(h: SegyBinaryHeader): bool {.inline.} = h.segyMajor == 2 and h.segyMinor == 0
 
+func rulesRevision*(h: SegyBinaryHeader): SegyRevision =
+  ## The revision whose rules apply to the file, which may differ from the
+  ## bytes at 3501-3502:
+  ## - `00 01`: Rev 1's u16 0x0100 written little-endian, read as 1.0;
+  ## - `01 02`: Rev 2.1 pair-swapped, read as 2.1;
+  ## - 2.x with x > 1: a later 2.x, read as 2.1;
+  ## - anything else undefined (e.g. blanks in a Rev 0 header): Rev 0 rules,
+  ##   which ignore bytes 3261-3600.
+  let r = h.revision
+  if r.major == 0 and r.minor == 0: SegyRevision(major: 0, minor: 0)
+  elif (r.major == 1 and r.minor == 0) or (r.major == 0 and r.minor == 1):
+    SegyRevision(major: 1, minor: 0)
+  elif r.major == 2 and r.minor == 0: SegyRevision(major: 2, minor: 0)
+  elif r.major == 2 or (r.major == 1 and r.minor == 2): SegyRevision(major: 2, minor: 1)
+  else: SegyRevision(major: 0, minor: 0)
+
 func decodeBinaryHeader*(b: openArray[byte], order: ByteOrder): SegyBinaryHeader =
   ## Decodes a binary header from the first 400 bytes of `b` (file offset
   ## 3200), with numbers in `order`.
@@ -112,15 +128,16 @@ func decodeBinaryHeader*(b: openArray[byte], order: ByteOrder): SegyBinaryHeader
 
 func encode*(h: SegyBinaryHeader, b: var openArray[byte], order: ByteOrder) =
   ## Writes `h` to the first 400 bytes of `b`, with numbers in `order`.
-  ## `maxAddlTraceHeaders` must fit in 16 bits unless the revision is 2.0
-  ## (`validate` reports it).
+  ## Outside Rev 2.0, `maxAddlTraceHeaders` is stored in 16 bits and
+  ## saturates at 65535 (`validate` reports such values; only a lenient
+  ## writer gets this far).
   doAssert b.len >= BinaryHeaderSize, "binary header needs 400 bytes"
   encodeFields(h, b, BinaryHeaderFirstByte, order)
   if h.isRev20:
     putNum(b, 3507 - BinaryHeaderFirstByte, h.maxAddlTraceHeaders, order)
   else:
-    doAssert h.maxAddlTraceHeaders <= high(uint16), "maxAddlTraceHeaders exceeds u16"
-    putNum(b, 3507 - BinaryHeaderFirstByte, uint16(h.maxAddlTraceHeaders), order)
+    let v = uint16(min(h.maxAddlTraceHeaders, uint32(high(uint16))))
+    putNum(b, 3507 - BinaryHeaderFirstByte, v, order)
     putNum(b, 3509 - BinaryHeaderFirstByte, h.surveyType, order)
 
 # ---------------------------------------------------------------------------
@@ -128,7 +145,7 @@ func encode*(h: SegyBinaryHeader, b: var openArray[byte], order: ByteOrder) =
 # it is non-zero.
 
 template override(h: SegyBinaryHeader, ext, std: untyped): untyped =
-  if h.segyMajor >= 2 and ext != 0: typeof(ext)(ext) else: typeof(ext)(std)
+  if h.rulesRevision.major >= 2 and ext != 0: typeof(ext)(ext) else: typeof(ext)(std)
 
 func effectiveSamplesPerTrace*(h: SegyBinaryHeader): uint32 =
   ## Samples per trace of the primary trace set.
@@ -178,9 +195,11 @@ proc validate*(h: SegyBinaryHeader, log: var DiagLog, severity = sevWarning,
       var l = loc
       l.field = "binary." & fieldName
       log.report(severity, code, msg, offset = headerOffset + specByte - 3201, loc = l)
-  let rev = h.revision
-  check rev.major <= 2 and (rev.major == 2 or rev.minor == 0), dcUnsupportedRevision, 3501,
-    "segyRevision", "revision " & $rev & " is not defined"
+  let raw = h.revision
+  let rev = h.rulesRevision
+  let canonical = (raw.major <= 1 and raw.minor == 0) or (raw.major == 2 and raw.minor <= 1)
+  check canonical, dcUnsupportedRevision, 3501, "segyRevision",
+    "revision bytes " & $raw & " are not a defined revision; read with Rev " & $rev & " rules"
   check bytesPerSample(h.formatCode, rev) != 0, dcBadValue, 3225, "formatCode",
     "format code " & $h.formatCode & " is not defined in revision " & $rev
   check h.effectiveSampleInterval != 0, dcBadValue, 3217, "sampleInterval",
@@ -214,7 +233,7 @@ type
 
 func plausibility(h: SegyBinaryHeader): int =
   # Counts header values that look sane; the right byte order scores highest.
-  let rev = h.revision
+  let rev = h.rulesRevision
   if bytesPerSample(h.formatCode, SegyRevision(major: 2, minor: 1)) != 0: inc result, 4
   if bytesPerSample(h.formatCode, rev) != 0: inc result
   if h.samplesPerTrace in 1'u16..32767'u16: inc result
