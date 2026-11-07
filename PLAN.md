@@ -135,7 +135,7 @@ with synthetic data only. *(Owner: integer-format SEG-D samples would help.)*
 7. Dependencies are managed by **Atlas**: sources are in `deps/` (gitignored, so read and debug
    them there), and the paths are in the Atlas section of `nim.cfg` (`--noNimblePath`). On a
    fresh clone, run `atlas rep atlas.lock`. To add a dependency, add it to the nimble file and
-   run `atlas install`, then `atlas pin`.
+   run `atlas install`, then `atlas pin`. `.vscode/settings.json` sets `nim.nimbleAutoSetup: false` so the editor extension does not re-run `nimble setup`.
 
 ## Architecture (target)
 ```

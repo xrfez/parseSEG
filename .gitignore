@@ -5,6 +5,3 @@ nimcache/
 # Atlas: dependency checkouts are reproducible from atlas.lock
 deps/*
 !deps/atlas.config
-nimble.develop
-nimble.paths
-nimbledeps
