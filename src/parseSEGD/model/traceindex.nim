@@ -24,9 +24,9 @@ import ../common/[endians, errors, diagnostics, bcd]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
-import ./tensors
+import ./[tensors, keys]
 
-export memsource, tensors, diagnostics
+export memsource, tensors, diagnostics, keys
 
 type
   SeismicKind* = enum
@@ -69,6 +69,9 @@ type
     segdRecords*: seq[SegdRecord] ## SEG-D record headers and trailers, by record index.
     segdToc*: seq[SegdToc]    ## SEG-D Rev 3 Table of Contents files met.
     log*: DiagLog             ## Diagnostics of the walk.
+    keys*: seq[TraceKeys]
+      ## Per-trace geometry, parallel to `entries`; empty unless the index was
+      ## built with `keys = true` (about 100 bytes per trace).
 
 static: doAssert sizeof(TraceEntry) == 24
 
@@ -143,7 +146,7 @@ func detectKind*(head: openArray[byte], kind: var SeismicKind): bool =
 
 # ------------------------------------------------------------------ walk --
 
-proc indexSegy(src: RecordSource): TraceIndex =
+proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
   var r = openSegy(src, headersOnly = true)
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
   result.codecs.add TraceCodec(kind: skSegy, known: r.file.formatKnown,
@@ -154,6 +157,7 @@ proc indexSegy(src: RecordSource): TraceIndex =
     result.entries.add TraceEntry(offset: t.offset, headerBytes: uint32(hb),
       numSamples: uint32(t.numSamples), channelSet: -1, scanType: -1)
     result.maxSamples = max(result.maxSamples, t.numSamples)
+    if keys: result.keys.add traceKeys(r.file, t)
   result.segy = r.file
   result.log = r.log
 
@@ -162,7 +166,7 @@ proc channelTypeOf(rec: SegdRecord, t: SegdTrace): uint8 =
   elif rec.isRev3: rec.scanTypes[t.scanType].descriptors3[t.channelSet].channelType
   else: rec.scanTypes[t.scanType].descriptors[t.channelSet].channelType
 
-proc indexSegd(src: RecordSource, twosComplement8015: bool): TraceIndex =
+proc indexSegd(src: RecordSource, twosComplement8015, keys: bool): TraceIndex =
   var r = openSegd(src, twosComplement8015, headersOnly = true)
   result = TraceIndex(kind: skSegd, contiguous: not src.hasRecordBoundaries)
   while r.nextRecord():
@@ -175,6 +179,7 @@ proc indexSegd(src: RecordSource, twosComplement8015: bool): TraceIndex =
         numSamples: uint32(t.numSamples), record: ri, channelSet: int16(t.channelSet),
         scanType: int8(t.scanType), channelType: channelTypeOf(r.record, t))
       result.maxSamples = max(result.maxSamples, t.numSamples)
+      if keys: result.keys.add traceKeys(r.record, t)
     result.codecs.add TraceCodec(kind: skSegd, known: r.record.formatKnown,
       segdFormat: r.record.format, twosComplement8015: twosComplement8015)
     result.segdRecords.add r.record
@@ -183,13 +188,15 @@ proc indexSegd(src: RecordSource, twosComplement8015: bool): TraceIndex =
   result.segdToc = r.toc
   result.log = r.log
 
-proc buildIndex*(src: RecordSource, kind: SeismicKind,
-    twosComplement8015 = false): TraceIndex =
+proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = false,
+    keys = false): TraceIndex =
   ## Walks the stream at the current position of `src` with headers only and
-  ## indexes every trace. Problems go to `log`, as with the readers.
+  ## indexes every trace; with `keys`, also collects each trace's geometry
+  ## (for `gathers` and `componentGroups`). Problems go to `log`, as with the
+  ## readers.
   case kind
-  of skSegy: indexSegy(src)
-  of skSegd: indexSegd(src, twosComplement8015)
+  of skSegy: indexSegy(src, keys)
+  of skSegd: indexSegd(src, twosComplement8015, keys)
 
 # ---------------------------------------------------------- range decode --
 
@@ -226,16 +233,16 @@ type
     path*: string
     map: MemFileSource
 
-proc openSeismic*(path: string, twosComplement8015 = false): SeismicFile =
+proc openSeismic*(path: string, twosComplement8015 = false, keys = false): SeismicFile =
   ## Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
-  ## index. Format problems are in `index.log`; an undetectable file gives a
+  ## index (with per-trace geometry when `keys`). Format problems are in `index.log`; an undetectable file gives a
   ## fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
   ## file cannot be opened or mapped.
   result = SeismicFile(path: path, map: openMemFileSource(path))
   let n = int(min(result.map.size, 4096))
   var kind: SeismicKind
   if n > 0 and detectKind(result.map.memory.toOpenArray(0, n - 1), kind):
-    result.index = buildIndex(result.map, kind, twosComplement8015)
+    result.index = buildIndex(result.map, kind, twosComplement8015, keys)
   else:
     result.index.contiguous = true
     result.index.log.report(sevFatal, dcUnsupportedFormat,
