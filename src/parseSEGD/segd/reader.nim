@@ -109,6 +109,7 @@ type
     maxHeaderBytes*: int64      ## See `DefaultMaxHeaderBytes`.
     maxTraceBytes*: int64       ## See `DefaultMaxTraceBytes`.
     noted: Table[string, int] ## Diagnostics per (field, severity), for `note`.
+    headersOnly: bool          ## Skip sample bytes (`SegdTrace.samples` stays empty).
 
 func `$`*(r: SegdRevision): string = $r.major & "." & $r.minor
 
@@ -217,12 +218,18 @@ proc readLabel(r: var SegdReader) =
   else:
     r.input.unread(head.toOpenArray(0, got - 1))
 
-proc openSegd*(src: RecordSource, twosComplement8015 = false): SegdReader =
+proc openSegd*(src: RecordSource, twosComplement8015 = false,
+    headersOnly = false): SegdReader =
   ## Opens a SEG-D stream positioned at its start and reads the storage unit
   ## label if there is one. Call `nextRecord` for each shot record.
+  ##
+  ## With `headersOnly`, `readTrace` skips the sample bytes (seeking on disk,
+  ## reading and discarding on tape): `samples` stays empty, `numSamples` and
+  ## the offsets are set, and a trace cut short still ends the read.
   result = SegdReader(input: initPushbackInput(src), name: src.name,
     byteStream: not src.hasRecordBoundaries, twosComplement8015: twosComplement8015,
-    maxHeaderBytes: DefaultMaxHeaderBytes, maxTraceBytes: DefaultMaxTraceBytes)
+    maxHeaderBytes: DefaultMaxHeaderBytes, maxTraceBytes: DefaultMaxTraceBytes,
+    headersOnly: headersOnly)
   if not result.log.tryRecord(Location(file: src.name, field: "label"), result.readLabel()):
     result.done = true
 
@@ -416,6 +423,13 @@ proc findChannelSet*(rec: SegdRecord, h: SegdTraceHeader, st, cs: var int) =
   else:
     st = -1
 
+proc readSamples(r: var SegdReader, t: var SegdTrace, nbytes: int) =
+  if r.headersOnly:
+    t.samples.setLen 0
+    r.input.skipExactly(nbytes)
+  else:
+    r.input.readInto(t.samples, nbytes)
+
 proc readRev3TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
   # After the demux header: extension blocks (THE#1 required) and samples.
   template rec: untyped = r.record
@@ -453,7 +467,7 @@ proc readRev3TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
   if int64(nbytes) > r.maxTraceBytes:
     raiseUnlocatable(dcBadValue, "trace of " & $t.numSamples & " samples (" & $nbytes &
       " bytes) exceeds maxTraceBytes; the sample count is probably corrupt", t.offset)
-  r.input.readInto(t.samples, nbytes)
+  r.readSamples(t, nbytes)
   inc r.tracesRead
 
 proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
@@ -516,7 +530,7 @@ proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
   if int64(nbytes) > r.maxTraceBytes:
     raiseUnlocatable(dcBadValue, "trace of " & $t.numSamples & " samples (" & $nbytes &
       " bytes) exceeds maxTraceBytes; the sample count is probably corrupt", t.offset)
-  r.input.readInto(t.samples, nbytes)
+  r.readSamples(t, nbytes)
   inc r.tracesRead
 
 proc readRev3Trailer(r: var SegdReader) =
@@ -636,6 +650,7 @@ proc nextRecord*(r: var SegdReader): bool =
     result = false
 
 func isDone*(r: SegdReader): bool {.inline.} = r.done
+func headersOnly*(r: SegdReader): bool {.inline.} = r.headersOnly
 
 proc decodeInto*[T: SegdSampleType](rec: SegdRecord, t: SegdTrace, dst: var Tensor[T], row: int,
     twosComplement8015 = false) =
@@ -643,6 +658,8 @@ proc decodeInto*[T: SegdSampleType](rec: SegdRecord, t: SegdTrace, dst: var Tens
   ## multiply by 2^mpFactor of its channel set for millivolts).
   if not rec.formatKnown:
     raiseFormat("sample format " & $rec.gh1.formatCode & " is not decodable")
+  if t.samples.len < dataBytes(rec.format, t.numSamples):
+    raiseFormat("trace " & $t.index & " holds no samples (read with headersOnly)")
   dst.decodeTrace(row, rec.format, t.samples, min(t.numSamples, dst.shape[1]),
     twosComplement8015)
 
@@ -663,10 +680,14 @@ type
     records*: seq[SegdRecordData]
     diagnostics*: DiagLog
 
-proc readSegd*(src: RecordSource, twosComplement8015 = false): SegdData =
+proc readSegd*(src: RecordSource, twosComplement8015 = false, headersOnly = false): SegdData =
   ## Reads every record of a SEG-D stream into memory. Meant for small files
   ## and tests; large files should be walked record by record.
-  var r = openSegd(src, twosComplement8015)
+  ##
+  ## With `headersOnly`, every header is read and the sample bytes are
+  ## skipped (seeking on disk): each record's `samples` is `[traces, 0]` and
+  ## each trace's `samples` is empty.
+  var r = openSegd(src, twosComplement8015, headersOnly)
   while r.nextRecord():
     var d = SegdRecordData()
     var t: SegdTrace
@@ -675,20 +696,26 @@ proc readSegd*(src: RecordSource, twosComplement8015 = false): SegdData =
       maxNs = max(maxNs, t.numSamples)
       d.traces.add t
     d.record = r.record
-    d.samples = newTraceTensor[float32](d.traces.len, maxNs)
-    for i, tr in d.traces:
-      discard r.log.tryRecord(Location(file: src.name, record: d.record.index, trace: i),
-        d.record.decodeInto(tr, d.samples, i, twosComplement8015))
+    d.samples = newTraceTensor[float32](d.traces.len, if headersOnly: 0 else: maxNs)
+    if not headersOnly:
+      for i, tr in d.traces:
+        discard r.log.tryRecord(Location(file: src.name, record: d.record.index, trace: i),
+          d.record.decodeInto(tr, d.samples, i, twosComplement8015))
     result.records.add d
   result.label = r.label
   result.hasLabel = r.hasLabel
   result.diagnostics = r.log
 
-proc readSegd*(path: string, twosComplement8015 = false): SegdData =
+proc readSegd*(path: string, twosComplement8015 = false, headersOnly = false): SegdData =
   ## Reads a SEG-D disk file into memory; see `readSegd(RecordSource)`.
   var src: RecordSource
   if result.diagnostics.tryRecord(Location(file: path), (src = openDiskSource(path))):
     try:
-      result = readSegd(src, twosComplement8015)
+      result = readSegd(src, twosComplement8015, headersOnly)
     finally:
       src.close()
+
+proc readSegdHeaders*(path: string, twosComplement8015 = false): SegdData =
+  ## Every header of a SEG-D disk file, samples skipped (`readSegd` with
+  ## `headersOnly`).
+  readSegd(path, twosComplement8015, headersOnly = true)

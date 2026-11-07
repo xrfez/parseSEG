@@ -60,6 +60,13 @@ method close*(s: RecordSource) {.base, raises: [CatchableError].} =
   ## Releases the underlying file or device.
   discard
 
+method seekForward*(s: RecordSource; n: int64): int64 {.base, raises: [CatchableError].} =
+  ## Backend hook for byte streams: advances `n` bytes without reading them
+  ## (fewer at the end of the data) and returns how many were passed, or -1
+  ## if the backend cannot seek, so callers read and discard instead. Must
+  ## advance `s.offset`. Record-based media never seek.
+  -1
+
 method writeRecordImpl*(s: RecordSink; data: openArray[byte]) {.base, raises: [CatchableError].} =
   ## Backend hook: writes one record. Must update `s.offset`.
   raiseAssert "writeRecordImpl not implemented for this sink"
@@ -179,6 +186,23 @@ proc readExactly*(c: var RecordCursor; dst: var openArray[byte]) =
   if n < dst.len:
     raiseTruncated("expected " & $dst.len & " bytes, got " & $n & " before " &
       $c.stoppedAt, c.offset)
+
+proc skip*(c: var RecordCursor; n: int64): int64 =
+  ## Passes over up to `n` bytes, stopping early only at a tape mark or end
+  ## of data, and returns how many were passed. Byte streams that can seek
+  ## (disk files, memory maps) skip without reading; other media read and
+  ## discard.
+  result = min(n, int64(c.buf.len - c.pos))
+  if result > 0: c.pos += int(result)
+  if result < n and c.pending == rkData and not c.src.hasRecordBoundaries:
+    let k = c.src.seekForward(n - result)
+    if k >= 0:
+      result += k
+      if result < n: discard c.fill() # let the source report end of data
+  var scratch: array[65536, byte]
+  while result < n and c.fill():
+    let k = c.read(scratch.toOpenArray(0, int(min(n - result, scratch.len)) - 1))
+    result += k
 
 proc readRecordRest*(c: var RecordCursor): seq[byte] =
   ## Returns the unread rest of the current physical record (empty if at a

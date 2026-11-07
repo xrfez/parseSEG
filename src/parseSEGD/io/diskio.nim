@@ -10,6 +10,7 @@ import records
 type
   DiskSource* = ref object of RecordSource
     f: File
+    size: int64
 
   DiskSink* = ref object of RecordSink
     f: File
@@ -19,7 +20,12 @@ proc openDiskSource*(path: string): DiskSource =
   var f: File
   if not open(f, path, fmRead):
     raise newException(IOError, "cannot open for reading: " & path)
-  DiskSource(f: f, name: path)
+  var size = -1'i64 # unknown (a pipe or device): skips read and discard
+  try:
+    size = getFileSize(f)
+  except IOError:
+    discard
+  DiskSource(f: f, name: path, size: size)
 
 method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKind =
   buf.setLen maxLen
@@ -30,6 +36,12 @@ method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKi
   if n > 0: rkData else: rkEndOfData
 
 method hasRecordBoundaries*(s: DiskSource): bool = false
+
+method seekForward*(s: DiskSource; n: int64): int64 =
+  if s.size < 0: return -1
+  result = max(0'i64, min(n, s.size - s.offset))
+  setFilePos(s.f, s.offset + result)
+  s.offset += result
 
 method close*(s: DiskSource) =
   if s.f != nil:

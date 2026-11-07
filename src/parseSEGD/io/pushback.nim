@@ -74,13 +74,18 @@ proc readInto*(p: var PushbackInput, buf: var seq[byte], n: int64) =
       buf.setLen got
       raiseTruncated("expected " & $n & " bytes, got " & $got, p.offset)
 
-proc skip*(p: var PushbackInput, n: int64) =
-  ## Discards `n` bytes (fewer at a tape mark or end of data).
-  var buf: array[65536, byte]
-  var left = n
-  while left > 0:
-    let k = p.readAvail(buf.toOpenArray(0, int(min(left, buf.len)) - 1))
-    if k == 0: left = 0 else: left -= k
+proc skip*(p: var PushbackInput, n: int64): int64 {.discardable.} =
+  ## Discards up to `n` bytes (fewer at a tape mark or end of data) and
+  ## returns how many were passed. Seekable byte streams skip without reading.
+  result = min(n, int64(p.pending.len - p.pendingPos))
+  p.pendingPos += int(result)
+  if result < n: result += p.cursor.skip(n - result)
+
+proc skipExactly*(p: var PushbackInput, n: int64) =
+  ## Discards exactly `n` bytes or raises `SegTruncatedError`.
+  let got = p.skip(n)
+  if got < n:
+    raiseTruncated("expected " & $n & " bytes, got " & $got, p.offset)
 
 proc remainingInRecord*(p: PushbackInput): int =
   ## Bytes left before the end of the current physical record (tape block),

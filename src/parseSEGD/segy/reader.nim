@@ -106,6 +106,7 @@ type
     byteStream: bool     ## The source has no record boundaries (disk): offsets are file offsets.
     mediumSize: int64    ## File size for disk sources, -1 if unknown.
     done: bool
+    headersOnly: bool    ## Skip sample bytes (`SegyTrace.samples` stays empty).
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
   # Storage unit sequence number (digits or blanks) and "SY" in bytes 5-6;
@@ -160,6 +161,15 @@ proc readInto(r: var SegyReader, buf: var seq[byte], n: int64) =
     if k < step:
       buf.setLen got
       raiseTruncated("expected " & $n & " bytes, got " & $got, r.offset)
+
+proc skipExactly(r: var SegyReader, n: int64) =
+  # Passes n bytes without keeping them (seeking where the source can).
+  # Raises SegTruncatedError if the data ends first.
+  var got = min(n, int64(r.pending.len - r.pendingPos))
+  r.pendingPos += int(got)
+  if got < n: got += r.cursor.skip(n - got)
+  if got < n:
+    raiseTruncated("expected " & $n & " bytes, got " & $got, r.offset)
 
 proc readBlock(r: var SegyReader, n: int): seq[byte] =
   r.readInto(result, n)
@@ -331,14 +341,19 @@ func isTrailerAsRead*(f: SegyFile): bool =
   f.binaryAsRead.len == BinaryHeaderSize and f.trailer.data.len == f.trailerAsReadLen and
     (f.trailerAsReadLen == 0 or hash(f.trailer.data) == f.trailerAsRead)
 
-proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained): SegyReader =
+proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
+    headersOnly = false): SegyReader =
   ## Reads the file headers from `src`, positioned at the start of a SEG-Y
   ## file. Check `log.isFatal` for a file whose traces cannot be read.
   ## Whatever headers were read before a failure are kept in `file`.
   ## Extended header and trailer bytes are held in memory up to
   ## `maxRetained` bytes each; beyond that they are only indexed.
+  ##
+  ## With `headersOnly`, `readTrace` skips the sample bytes (seeking on disk,
+  ## reading and discarding on tape): `samples` stays empty, `numSamples` and
+  ## the offsets are set, and a trace cut short still ends the read.
   result = SegyReader(cursor: initRecordCursor(src), name: src.name, maxRetained: maxRetained,
-    byteStream: not src.hasRecordBoundaries, mediumSize: -1)
+    byteStream: not src.hasRecordBoundaries, mediumSize: -1, headersOnly: headersOnly)
   if result.byteStream:
     try:
       result.mediumSize = getFileSize(src.name)
@@ -453,7 +468,12 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   else:
     t.numSamples = traceNs
     t.sampleInterval = traceDt
-  r.readInto(t.samples, int64(t.numSamples) * sampleSize(f.format))
+  let nbytes = int64(t.numSamples) * sampleSize(f.format)
+  if r.headersOnly:
+    t.samples.setLen 0
+    r.skipExactly(nbytes)
+  else:
+    r.readInto(t.samples, nbytes)
   inc r.tracesRead
 
 proc nextTrace(r: var SegyReader, t: var SegyTrace): bool =
@@ -488,6 +508,7 @@ proc readTrace*(r: var SegyReader, t: var SegyTrace): bool =
     result = false
 
 func isDone*(r: SegyReader): bool {.inline.} = r.done
+func headersOnly*(r: SegyReader): bool {.inline.} = r.headersOnly
 func tracesRead*(r: SegyReader): int {.inline.} = r.tracesRead
 
 proc decodeInto*[T: SampleType](file: SegyFile, trace: SegyTrace, t: var Tensor[T],
@@ -496,6 +517,8 @@ proc decodeInto*[T: SampleType](file: SegyFile, trace: SegyTrace, t: var Tensor[
   ## `decodeSamples` (`SegFormatError` for an undecodable format).
   if not file.formatKnown:
     raiseFormat("format code " & $file.binary.formatCode & " is undefined")
+  if trace.samples.len < trace.numSamples * sampleSize(file.format):
+    raiseFormat("trace " & $trace.index & " holds no samples (read with headersOnly)")
   t.decodeTrace(row, file.format, trace.samples, min(trace.numSamples, t.shape[1]),
     file.byteOrder)
 
@@ -512,31 +535,42 @@ type
       ## undecodable ones stay zero (each has a diagnostic).
     diagnostics*: DiagLog
 
-proc readSegy*(src: RecordSource, maxRetained = DefaultMaxRetained): SegyData =
+proc readSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
+    headersOnly = false): SegyData =
   ## Reads every trace of the SEG-Y file at the current position of `src`
   ## into memory. Meant for small files and tests; it holds the file twice
   ## (raw and decoded).
-  var r = openSegy(src, maxRetained)
+  ##
+  ## With `headersOnly`, every header is read and the sample bytes are
+  ## skipped (seeking on disk): `samples` is `[traces, 0]` and each trace's
+  ## `samples` is empty. This is the cheap way to scan a large file's headers.
+  var r = openSegy(src, maxRetained, headersOnly)
   var t: SegyTrace
   var maxNs = 0
   while r.readTrace(t):
     maxNs = max(maxNs, t.numSamples)
     result.traces.add t
-  result.samples = newTraceTensor[float32](result.traces.len, maxNs)
-  for i, tr in result.traces:
-    discard r.log.tryRecord(r.loc(i), r.file.decodeInto(tr, result.samples, i))
+  result.samples = newTraceTensor[float32](result.traces.len, if headersOnly: 0 else: maxNs)
+  if not headersOnly:
+    for i, tr in result.traces:
+      discard r.log.tryRecord(r.loc(i), r.file.decodeInto(tr, result.samples, i))
   result.file = r.file
   result.diagnostics = r.log
 
-proc readSegy*(path: string, maxRetained = DefaultMaxRetained): SegyData =
+proc readSegy*(path: string, maxRetained = DefaultMaxRetained, headersOnly = false): SegyData =
   ## Reads a SEG-Y disk file into memory; see `readSegy(RecordSource)`. A file
   ## that cannot be opened gives a fatal diagnostic.
   var src: RecordSource
   if result.diagnostics.tryRecord(Location(file: path), (src = openDiskSource(path))):
     try:
-      result = readSegy(src, maxRetained)
+      result = readSegy(src, maxRetained, headersOnly)
     finally:
       src.close()
+
+proc readSegyHeaders*(path: string, maxRetained = DefaultMaxRetained): SegyData =
+  ## Every header of a SEG-Y disk file, samples skipped (`readSegy` with
+  ## `headersOnly`).
+  readSegy(path, maxRetained, headersOnly = true)
 
 proc extractUserData*(path: string, b: UserDataBlock, dest: string) =
   ## Copies a User Data attachment from the disk file `path` to the file
