@@ -13,6 +13,9 @@ import parseSEGD/segd/[headers as segdheaders, samples as segdsamples,
   reader as segdreader, writer as segdwriter]
 export segdheaders, segdsamples, segdreader, segdwriter
 
+import parseSEGD/vendor/[maps, apply]
+export maps, apply
+
 import parseSEGD/model/tensors
 export tensors
 
