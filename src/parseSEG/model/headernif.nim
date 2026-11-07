@@ -118,7 +118,7 @@ proc putBlock(o: var NifOut, f: SeismicFile, blk: BlockRef, raw: bool, indent: s
       o.put "\n" & indent & " (f " & n & " " & nifValue(v) & ")"
   if raw:
     o.put "\n" & indent & " (raw \"" &
-      hexOf(f.memory.toOpenArray(int(blk.offset), int(blk.offset) + blk.size - 1)) & "\")"
+      hexOf(f.unsafeMemory.toOpenArray(int(blk.offset), int(blk.offset) + blk.size - 1)) & "\")"
   o.put ")"
 
 proc recordBlocks(f: SeismicFile, record: int): seq[BlockRef] =
@@ -136,7 +136,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   ## block's bytes, and each trace's whole header, as hex. The document is
   ## written to `path.tmp` and renamed when complete. Raises `IOError` if it
   ## cannot be written, or if `path` is the seismic file itself.
-  if f.memory == nil and f.len > 0: raise newException(IOError, "the file is not mapped")
+  if not f.isOpen and f.len > 0: raise newException(IOError, "the file is not mapped")
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(IOError, "the output " & path & " is the seismic file itself")
   let tmp = path & ".tmp"
@@ -167,7 +167,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
           o.putBlock(f, blk, false, "  ")
       if raw:
         let e = f.index.entries[t]
-        o.put "\n  (raw \"" & hexOf(f.memory.toOpenArray(int(e.offset),
+        o.put "\n  (raw \"" & hexOf(f.unsafeMemory.toOpenArray(int(e.offset),
           int(e.offset) + int(e.headerBytes) - 1)) & "\")"
       o.put ")"
     o.put ")\n"

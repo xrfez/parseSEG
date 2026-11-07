@@ -145,7 +145,7 @@ proc flushBatch(ed: var HeaderEditor) =
   # One fsync for every journaled edit of the batch, then the map writes.
   if ed.pending.len == 0: return
   ed.syncJournal()
-  let mem = ed.file.memory
+  let mem = ed.file.unsafeMemory
   for p in ed.pending:
     copyMem(addr mem[p.at], unsafeAddr p.bytes[0], p.bytes.len)
   ed.pending.setLen 0
@@ -474,13 +474,13 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
     l.field = b.name & "." & field
     ed.log.report(sevError, dcValidation, b.name & "." & field & ": " & msg, at, l)
     return false
-  if ed.file.memory == nil: refuse "the file is closed"
+  if not ed.file.isOpen: refuse "the file is closed"
   if not ed.file.index.detected: refuse "the file is neither SEG-Y nor SEG-D"
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
   if field in structural(b.kind):
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
   if ed.batch and ed.overlapsPending(at, size): ed.flushBatch() # decode current bytes
-  let mem = ed.file.memory
+  let mem = ed.file.unsafeMemory
   let a = int(at)
   var h: T
   decodeFields(h, mem.toOpenArray(a, a + size - 1), firstByte, b.order)
@@ -586,7 +586,7 @@ proc setField*(ed: var HeaderEditor, name: string, value: EditValue): bool =
   result = ed.editLocated(b, field, value, loc)
   if result:
     ed.flushBatch() # the index copy is refreshed from the map
-    ed.file.index.segy.binary = decodeBinaryHeader(ed.file.memory.toOpenArray(int(b.offset),
+    ed.file.index.segy.binary = decodeBinaryHeader(ed.file.unsafeMemory.toOpenArray(int(b.offset),
       int(b.offset) + b.size - 1), b.order)
 
 proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
@@ -607,10 +607,10 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     let (a, z) = (int(b.offset), int(b.offset) + b.size - 1)
     if b.kind == hbSegdGh1:
       ed.file.index.segdRecords[record].gh1 =
-        decodeBlock[SegdGeneralHeader1](ed.file.memory.toOpenArray(a, z))
+        decodeBlock[SegdGeneralHeader1](ed.file.unsafeMemory.toOpenArray(a, z))
     else:
       ed.file.index.segdRecords[record].sourceHeaders[b.sourceIndex] =
-        decodeBlock[SegdGeneralHeaderN](ed.file.memory.toOpenArray(a, z))
+        decodeBlock[SegdGeneralHeaderN](ed.file.unsafeMemory.toOpenArray(a, z))
 
 proc setField*(ed: var HeaderEditor, trace: int, name: string,
     value: SomeNumber | string): bool {.inline.} =

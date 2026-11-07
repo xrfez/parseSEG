@@ -112,8 +112,7 @@ block segy_larger_than_4_gib:
       var ed = openEditor(path)
       doAssert ed.setField(YTraces - 1, "trace.sourceX", -77)
       let at = ed.file.index.entries[^1].offset
-      doAssert decodeTraceHeader(ed.file.memory.toOpenArray(int(at),
-        int(at) + TraceHeaderSize - 1), boBig).sourceX == -77
+      doAssert decodeTraceHeader(ed.file.copyBytes(at, TraceHeaderSize), boBig).sourceX == -77
       ed.close()
       doAssert ("(edit " & $(at + 72) & " ") in readFile(journal)
       doAssert readSegyHeaders(path).traces[^1].header.sourceX == -77

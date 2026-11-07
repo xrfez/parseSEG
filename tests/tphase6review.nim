@@ -101,7 +101,7 @@ block a6_closed_maps_fail_cleanly:
   doAssert not compiles(`=copy`(g, f)) # a copy could outlive `close`
   f.close()
   var t = newTraceTensor[float32](1, 10)
-  doAssert f.readTracesInto(0, 0, t) == 0 and f.memory == nil
+  doAssert f.readTracesInto(0, 0, t) == 0 and not f.isOpen
 
 block b1_edits_refused_on_files_that_are_not_seismic:
   writeFile(tmp / "junk.bin", repeat('\xEE', 8000))

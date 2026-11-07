@@ -143,7 +143,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, first = 0, last = -1, chunkTr
   ## worker thread, `chunkTraces` at a time, at most `depth` chunks ahead.
   ## Rows have `cols` samples (default: the range's largest trace). `f` must
   ## stay open, its index unchanged, until `close`.
-  doAssert f.memory != nil or f.len == 0, "the file is closed"
+  doAssert f.isOpen or f.len == 0, "the file is closed"
   doAssert f.index.contiguous, "prefetch needs a plain disk file"
   doAssert chunkTraces > 0 and depth > 0
   let stop = if last < 0: f.len else: last
@@ -158,7 +158,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, first = 0, last = -1, chunkTr
   sh.stop = stop
   sh.chunkTraces = rows
   sh.cols = width
-  sh.mem = f.memory
+  sh.mem = f.unsafeMemory
   sh.size = f.mappedSize
   if f.len > 0:
     sh.entries = cast[ptr UncheckedArray[TraceEntry]](unsafeAddr f.index.entries[0])

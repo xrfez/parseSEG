@@ -24,7 +24,8 @@ export convert
 
 import parseSEG/model/[tensors, keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif]
-export tensors, keys, traceindex, gathers, prefetch, headerfields, edit, headernif
+export traceindex except unsafeMemory
+export tensors, keys, gathers, prefetch, headerfields, edit, headernif
 
 import parseSEG/survey/[textrec, sps, p1, join]
 export textrec, sps, p1, join

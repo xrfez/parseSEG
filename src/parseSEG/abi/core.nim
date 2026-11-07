@@ -266,7 +266,7 @@ proc toDlpack*(to: TensorObj): ptr DLManagedTensor =
 
 proc checkRead*(fo: FileObj) =
   ## Raises `ValueError` unless samples can be read from `fo`'s map.
-  if fo.f.memory == nil and fo.f.len > 0: raiseArg("the file is not mapped")
+  if not fo.f.isOpen and fo.f.len > 0: raiseArg("the file is not mapped")
   if not fo.f.index.contiguous: raiseArg("range reads need a plain disk file")
 
 proc rangeSelection*(fo: FileObj, first, count: int64): seq[int] =

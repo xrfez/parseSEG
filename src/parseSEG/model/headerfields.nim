@@ -235,7 +235,7 @@ proc getByName*[T](h: T, name: string, v: var FieldValue): bool =
 proc readBlockField*(f: SeismicFile, b: BlockRef, field: string, v: var FieldValue,
     err: var string): bool =
   ## Reads `field` of the located block from the mapped bytes.
-  let mem = f.memory
+  let mem = f.unsafeMemory
   if mem == nil:
     err = "the file is closed"
     return false
@@ -304,7 +304,7 @@ proc sampleIntervalUs*(f: SeismicFile, trace: int): float64 =
   ## interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
   ## interval. NaN when unknown (a closed file, an out-of-range trace).
   let ix = f.index
-  if trace < 0 or trace >= ix.len or f.memory == nil: return NaN
+  if trace < 0 or trace >= ix.len or not f.isOpen: return NaN
   let e = ix.entries[trace]
   if ix.kind == skSegy:
     let b = ix.segy.binary

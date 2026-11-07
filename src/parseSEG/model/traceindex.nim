@@ -304,9 +304,29 @@ func len*(f: SeismicFile): int {.inline.} = f.index.entries.len
 func kind*(f: SeismicFile): SeismicKind {.inline.} = f.index.kind
 func log*(f: SeismicFile): lent DiagLog {.inline.} = f.index.log
 
-proc memory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
-  ## The mapped bytes (nil after `close`).
+proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
+  ## **Internal.** The mapped bytes (nil after `close`), for the library's own
+  ## zero-copy decoders and the journaled `HeaderEditor`. Not part of the
+  ## public API, and not exported by the `parseSEG` module: a write through it
+  ## would bypass the editor's validation and undo journal (owner rule: files
+  ## change only on an explicit write). Callers use `copyBytes`, the readers,
+  ## or `traceField`/`fileField` instead.
   if f.map.src != nil: f.map.src.memory else: nil
+
+func isOpen*(f: SeismicFile): bool {.inline.} =
+  ## The file is still mapped (range reads work).
+  f.map.src != nil
+
+proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
+  ## A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
+  ## hex view). Raises `ValueError` if the file is closed or the range lies
+  ## outside it. Changing the copy never changes the file.
+  if f.map.src == nil: raise newException(ValueError, "the file is closed")
+  if offset < 0 or offset + int64(n) > f.map.src.size:
+    raise newException(ValueError, "bytes " & $offset & "+" & $n & " lie outside the file (" &
+      $f.map.src.size & " bytes)")
+  result = newSeq[byte](n)
+  if n > 0: copyMem(addr result[0], addr f.map.src.memory[offset], n)
 
 proc mappedSize*(f: SeismicFile): int64 {.inline.} =
   if f.map.src != nil: f.map.src.size else: 0
@@ -323,7 +343,7 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: i
     log: var DiagLog, T: typedesc): int =
   # Decodes `count` traces: trace `traceAt(k)` into row pointer `rowAt(k)`.
   var failed = 0
-  let mem = f.memory
+  let mem = f.unsafeMemory
   let size = f.mappedSize
   for k in 0..<count:
     let i = traceAt(k)
@@ -339,7 +359,7 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: i
   failed
 
 proc checkReadable(f: SeismicFile, count: int) {.inline.} =
-  doAssert f.memory != nil or count == 0, "the file is closed"
+  doAssert f.isOpen or count == 0, "the file is closed"
   doAssert f.index.contiguous, "range reads need a plain disk file"
 
 proc checkSelection(f: SeismicFile, traces: openArray[int]) =
