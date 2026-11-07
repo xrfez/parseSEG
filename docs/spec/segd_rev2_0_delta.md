@@ -1,5 +1,8 @@
 # SEG-D Rev 2.0: delta on `segd_rev2_1.md`, verified against a real file
 
+> **SUPERSEDED by `segd_rev2_0.md`** (distilled from the real 2.0 PDF; see its §9). This file is
+> kept for its §4 byte-by-byte walk of `63.sgd`, which stays valid.
+
 ## 1. Scope
 - No standalone Rev 2.0 PDF is available. Rev 2.0 is reconstructed as **Rev 2.1 minus the
   changes listed in "Changes introduced in Rev 2.1"** (2.1 text p.5; 3.0 text §2.1, p.10).
@@ -51,7 +54,8 @@ Everything else is identical, including all of the following:
 | 4340 | EOF | exactly the end of the file, with 0 trailer blocks |
 
 Notes from the walk:
-- The GH1 bytes 20-22, 24L and 25 are 0, as the spec requires.
+- The GH1 bytes 20-22 are 0, as the spec requires ("record as zero"). Bytes 24L and 25 are also 0, but the spec only calls them "not used" (X).
+- Spec-invalid values that appear in real data (accept them with a warning): GH3 source set number 0, CSD byte 32 array forming 00, and THE#1 bytes 11-20 filled without the FFFFFF flag.
 - The demux trace header's extended fields (CS bytes 16-17, file bytes 18-20) are filled
   even though the BCD fields are not `FF`. This answers 2.1 open question 7: the
   extended copies may be present and should agree with the BCD fields.

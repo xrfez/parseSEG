@@ -119,7 +119,7 @@ writers validate before emitting.
 - [x] 1.2 `docs/spec/segd_rev2_1.md`: SEG-D Rev 2.1 (text: `seg_d_rev2.1_.txt`)
 - [x] 1.3 `docs/spec/segd_rev3_0_a.md`: SEG-D 3.0 pages 1-86 (structure, label, TOC, data body, header tables 7.x)
 - [x] 1.4 `docs/spec/segd_rev3_0_b.md`: SEG-D 3.0 pages 87-188 (parameters 8.x, trailer, appendices)
-- [ ] 1.5 Review the notes. Verify segd_rev2_1.md and derive the **Rev 2.0 differences**
+- [x] 1.5 Review the notes. Verify segd_rev2_1.md and derive the **Rev 2.0 differences**
       (`docs/spec/segd_rev2_0_delta.md`) by decoding `63.sgd` header by header. Check the
       3.0 header-size formula against the 3.0 sample. Add leap seconds 2015/2017. Resolve AMBIGUITY items (2.1: pages 14-17 and 61 are image-only figures;
       render them with `pdftoppm -f N -l N -r 80 -png` and view only those pages) and write `docs/spec/README.md` (index plus a cross-format summary)
@@ -127,7 +127,7 @@ writers validate before emitting.
       (text: `seg_y_rev2_1-oct2023.txt` plus `seg-y_rev2-1_clarification_2025-05-01.txt`; skip
       the superseded Rev 2.0 doc). It must cover the byte-order marker (3297-3300), extended
       text count −1, additional trace headers, data trailers, and new formats.
-- [ ] 1.6b **SEG-D Rev 2.0 full note**. The PDF was added and its text extracted (pages 13-16 are image-only figures; the block order is confirmed by `63.sgd`). Distiller running. Steps:
+- [x] 1.6b **SEG-D Rev 2.0 full note**. The PDF was added and its text extracted (pages 13-16 are image-only figures; the block order is confirmed by `63.sgd`). Distiller running. Steps:
       (1) run `tools/extract_specs.sh` (local, no tokens; install `poppler-utils` first if missing);
       (2) one subagent distills `SEG Spec/text/<2.0 file>.txt` into `docs/spec/segd_rev2_0.md` per
       CONVENTIONS.md, and **cross-checks it against `segd_rev2_0_delta.md` and the `63.sgd` walk**
@@ -184,3 +184,4 @@ writers validate before emitting.
 - 2026-11-07: The owner asked for the SEG-D 2.0 PDF to be extracted, but the PDF is not in the workspace yet. Task 1.6b was added (blocked).
 - 2026-11-07: The SEG-D Rev 2 PDF (Dec 1996, manufacturer list rev. Jan 2006) was added, extracted and committed. A subagent is writing segd_rev2_0.md.
 - 2026-11-07: Task 1.6 done: segy_rev2_1.md (904 lines, delta on rev1). The Inglewood walk tiles exactly (103 ext. text records incl. a binary PNG stanza, 200 traces). Gotcha: rev 2.0 uses 3507-3510 as one u32, so branch on the revision. The walk scripts are kept in tools/walks/.
+- 2026-11-07: Tasks 1.5 and 1.6b done. segd_rev2_0.md (858 lines) is word-identical to 2.1 except for 11 listed items. 8015 = one's complement per spec. Samples without THE = (TE-TF)/SI (fits 63.sgd). Real files contain spec-invalid zeros: warn, never reject. **Phase 1 complete. Next: task 2.2.**
