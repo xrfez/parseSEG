@@ -12,8 +12,8 @@ import parseSEGD/segy/[textheader, binheader, traceheader, samples, exttext, lay
 export textheader, binheader, traceheader, samples, exttext, layout, reader, writer, fields
 
 import parseSEGD/segd/[headers as segdheaders, samples as segdsamples, rev3 as segdrev3,
-  reader as segdreader, writer as segdwriter]
-export segdheaders, segdsamples, segdrev3, segdreader, segdwriter
+  reader as segdreader, writer as segdwriter, revconvert as segdrevconvert]
+export segdheaders, segdsamples, segdrev3, segdreader, segdwriter, segdrevconvert
 
 import parseSEGD/vendor/[maps, apply]
 export maps, apply

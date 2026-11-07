@@ -87,13 +87,14 @@ attributes made on first access (module `__getattr__`, PEP 562), so
 | `parseseg.open_editor(path, journal="")` → `Editor`: `set_trace/set_record/set_file(…, value)`, `edits()`, `diagnostics()` | `seg_editor_*` |
 | `parseseg.journal_apply(path, journal)`, `journal_rollback` → diagnostics | `seg_journal_*` |
 | `parseseg.convert(src, dst, revision="2.1", byte_order="big", format=0, text_encoding="ebcdic", apply_descale=False, station_header=True)` → diagnostics | `seg_convert` |
+| `parseseg.convert_segd(src, dst, revision="3.0", format=0)` → diagnostics | `seg_convert_segd` |
 | `f.diagnostics()` → list of dicts; `f.log_nif()` → NIF text | `seg_file_log`, `seg_log_*` |
 | `version()`, `abi_version()` | `seg_version`, `seg_abi_version` |
 
 - Handles have `close()` and are context managers. After `close()` any call raises
   `StateError`. A `Prefetch` keeps its file's map open, as in C.
-- `convert`, `journal_apply` and `journal_rollback` return the log. On failure they raise
-  with the log attached as `e.diagnostics`.
+- `convert`, `convert_segd`, `journal_apply` and `journal_rollback` return the log. On
+  failure they raise with the log attached as `e.diagnostics`.
 - A diagnostic dict holds `severity` ("info", "warning", "error", "fatal"), `code`, `message`,
   `offset`, `record`, `channel_set`, `trace`, `block_index`, `file` and `field`.
 - Edit values may be `int`, `float`, `str`, or anything with `__index__` / `__float__` (such

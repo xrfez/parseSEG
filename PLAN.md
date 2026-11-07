@@ -313,7 +313,7 @@ Tasks:
       these). It is lossy by nature, so every dropped or approximated value is logged as a
       diagnostic, and raw blocks are kept where the target has room (SEG-Y extended text or
       User Data, SEG-D extended headers).
-- [ ] 8.7 (split from 8.6) SEG-D Rev 2 ↔ Rev 3 conversion. Build Rev 3 records (GH#2/GH#3
+- [x] 8.7 (split from 8.6) SEG-D Rev 2 ↔ Rev 3 conversion. Build Rev 3 records (GH#2/GH#3
       sizes via `computeRev3Sizes`, 96-byte CSDs, Rev 3 THE#1, GH#N → Source Description
       blocks) and re-encode formats Rev 3 no longer defines. Rev 3 → Rev 2 drops typed blocks,
       and that is logged.
@@ -519,4 +519,39 @@ Tasks:
   - CI (`.github/workflows/ci.yml`, **not run yet**):
     - Linux: nim test with numpy and zig, then ASan/TSan, then every target, uploading host, cross and csources artifacts.
     - Native Windows and macOS: `lib`, `staticlib`, `pylib` and a Python smoke test, with uploads.
+- 2026-11-07: Task 8.7 done: `src/parseSEGD/segd/revconvert.nim` (umbrella: `segdrevconvert`). The mapping tables are in its module doc.
+  - `convertSegdRevision(src, sink, opts, scan)` / `(srcPath, dstPath, opts)` converts Rev 1/2.x → 3.0, Rev 3.x → 2.0/2.1, and within a layout (2.x → 2.y, 3.x → 3.0, format changes). It streams record by record.
+  - **No format is "no longer defined":** every Rev 2 demux format exists in Rev 3 with the same encoding, so samples are copied byte for byte. Only 8080 (Rev 3 only) is re-encoded for Rev 2 (8058 by default), or a format the caller forces; re-encoded traces are compared and inexact ones counted in a warning.
+  - **A header pre-scan** (`scanRecords`, headers only) is needed because a record's headers are written before its traces and trailer are read:
+    - Rev 2 descriptors don't give sample counts exactly. The INOVA data has 0..4000 ms at 1 ms = 4001 samples, while (end − start)/interval = 4000. Rev 3 needs one count per set, and the scan takes it from the traces.
+    - Rev 3 → Rev 2 needs the unwrapped trailer's block count in GH#2.
+    - The file API always scans. The stream API (tape) falls back to the descriptors and notes it.
+  - Rev 2 → 3:
+    - GH#N becomes a Source Description (Vibrator 0x15 when the vibrator fields are set, else Other 0x1F).
+    - GH#3 time zero comes from GH#1 (whole seconds).
+    - The 96-byte CSD is filled from the 32-byte one: µs times, DSM = 2^MP, channel type n → n·0x10.
+    - THE#1 carries the receiver fields and sample count.
+    - The Rev 2 trailer travels in a user trailer group (0xA0 "SEG-D REV2 TRLR"), which unwraps losslessly on the way back.
+    - Rev 2 extensions after #1 are dropped (they have no type byte).
+  - Rev 3 → 2:
+    - Source Descriptions become GH#N. Other general blocks are dropped, listed once by type, and GH#3 is dropped.
+    - Blocks after THE#1 (INOVA's vendor 0xB0-0xB8 included) are kept as raw Rev 2 extensions, up to 14.
+    - MP = log2(DSM), times are in 2 ms units, filters in BCD.
+    - Unrepresentable records are skipped with an error: more than 9999 channels per set, a negative start time, an interval that is not BSI/2^k, more than 99 skew blocks, more than 65535 extended or external blocks.
+  - Writer: `setRev3Trailer` (for a Rev 3 trailer known only after its traces).
+  - **Fixed on the way:** `rev3.recordLengthUs` read GH#1's BCD record length as units of 0.5 × 1.024 s (5× too long); both revisions use RR.R × 1.024 s (regression test included).
+  - C ABI: `seg_convert_segd(src, dst, rev_major, rev_minor, format, log)` (additive, so the ABI version stays 1). Python: `parseseg.convert_segd(src, dst, revision="3.0", format=0)`.
+  - Tests:
+    - `tests/tsegdrevconvert.nim`:
+      - 63.sgd → 3.0 → 2.0, field by field;
+      - 2.0 → 2.1 differs from the original in exactly one byte;
+      - INOVA → 2.1 → 3.0 keeps samples and vendor blocks;
+      - every Rev 2 format → 3.0 → 2.1, with GH#1, GH#N, CSDs, THE#1 and trailers byte-identical except THE counts;
+      - tape with a label and no scan;
+      - 8080 → 8058 (exact and inexact);
+      - a forced 8038;
+      - skipped records;
+      - invalid requests.
+    - The C test and the Python test cover the new export.
+  - Gap noticed (not fixed): `recordField` has no names for GH#2 (`gh2.*`) in either revision, nor for Rev 3 general blocks.
 

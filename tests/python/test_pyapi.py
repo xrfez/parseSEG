@@ -314,6 +314,24 @@ assert err.diagnostics and err.diagnostics[-1]["severity"] == "fatal"
 err = raises(parseseg.Error, parseseg.convert, INGLEWOOD, INGLEWOOD)
 assert err.diagnostics
 
+# SEG-D revisions (task 8.7).
+r3 = os.path.join(scratch, "63_r3.sgd")
+log = parseseg.convert_segd(S63, r3)          # default 3.0
+assert all(x["severity"] == "info" for x in log) and log
+with parseseg.open(r3) as d3, parseseg.open(S63) as d2:
+    assert open(r3, "rb").read()[42] == 3        # GH#2 byte 11: revision major
+    assert d3.record_field(0, "gh1.formatCode") == 8058
+    assert d3.read(0, 1).tobytes() == d2.read(0, 1).tobytes()
+log = parseseg.convert_segd(r3, os.path.join(scratch, "63_r21.sgd"), revision="2.1")
+assert open(os.path.join(scratch, "63_r21.sgd"), "rb").read()[42:44] == bytes([2, 1])
+with parseseg.open(os.path.join(scratch, "63_r21.sgd")) as d21:
+    assert d21.trace_count() == 1
+err = raises(parseseg.FormatError, parseseg.convert_segd, S63, dst, revision="1.0")
+assert err.diagnostics[-1]["severity"] == "fatal"
+raises(parseseg.FormatError, parseseg.convert_segd, S63, dst, revision="2.1", format=8080)
+raises(parseseg.ArgumentError, parseseg.convert_segd, S63, dst, revision="3")
+raises(parseseg.ArgumentError, parseseg.convert_segd, S63, dst, format=-1)
+
 # ---------------------------------------------------------- object hygiene --
 # Objects made directly from their classes are empty, not crashes.
 raises(parseseg.StateError, parseseg.SeismicFile().trace_count)

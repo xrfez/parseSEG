@@ -21,11 +21,12 @@
 import ../common/[errors, diagnostics]
 import ../model/[traceindex, keys, gathers, prefetch, headerfields, edit]
 import ../convert
+import ../segd/[revconvert, reader as segdreader]
 import ../common/endians
 import ../segy/[textheader, binheader]
 
 export errors, diagnostics, traceindex, keys, gathers, prefetch, headerfields, edit, convert,
-  endians, textheader, binheader
+  endians, textheader, binheader, revconvert, segdreader
 
 const
   AbiVersion* = 1'i32 ## `SEG_ABI_VERSION`; bump on any incompatible C change.
@@ -508,3 +509,12 @@ proc convertOptions*(revMajor, revMinor, byteOrder, format, textEncoding: int64,
 proc checkConvert*(log: DiagLog) =
   ## Raises `SegFormatError` for a fatal conversion log.
   if log.isFatal: raiseFormat(log[log.len - 1].msg)
+
+proc segdConvertOptions*(revMajor, revMinor, format: int64): SegdConvertOptions =
+  ## Checked SEG-D target options; raises `ValueError` for out-of-range codes
+  ## (the conversion itself refuses revisions and formats it cannot write).
+  if revMajor notin 0..255 or revMinor notin 0..255 or format notin 0..9999:
+    raiseArg("SEG-D target revision or format out of range")
+  SegdConvertOptions(revision: SegdRevision(major: uint8(revMajor), minor: uint8(revMinor)),
+    format: int(format))
+

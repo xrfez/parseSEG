@@ -176,6 +176,7 @@ proc moduleGetattr(name: string): PPyObject {.segExport: "__getattr__".} =
 proc moduleDir(): seq[string] {.segExport: "__dir__".} =
   ## `dir(parseseg)`, including the on-demand exception classes.
   result = @["SeismicFile", "Samples", "Prefetch", "Editor", "Geometry", "open", "convert",
+    "convert_segd",
     "open_editor", "journal_apply", "journal_rollback", "version", "abi_version",
     "__doc__", "__name__"]
   for k in PyErrKind: result.add $k
@@ -804,6 +805,24 @@ proc convertPy(src, dst: string, revision: string = "2.1", byte_order: string = 
       ord(parseEnum[TextEncoding](text_encoding)), apply_descale, station_header)
     withoutGil:
       log = convertFile(src, dst, o)
+  if r == nil: return nil
+  decRef r
+  withLog(log, checkConvert(log))
+
+proc convertSegdPy(src, dst: string, revision: string = "3.0", format: int = 0): PPyObject {.
+    segExport: "convert_segd".} =
+  ## Converts the SEG-D file `src` to the SEG-D file `dst` in revision "2.0",
+  ## "2.1" or "3.0" (Rev 1/2 to 3.0, Rev 3 to 2.x, or within a layout).
+  ## `format` is a SEG-D format code (0: keep; 8080 becomes 8058 for Rev 2).
+  ## Returns the diagnostics (dropped and approximated values, skipped
+  ## records); a failure raises with them attached.
+  var log: DiagLog
+  let r = pyDo:
+    let parts = revision.split('.')
+    if parts.len != 2: raise newException(ValueError, "revision must look like '3.0'")
+    let o = segdConvertOptions(parseInt(parts[0]), parseInt(parts[1]), format)
+    withoutGil:
+      log = convertSegdRevision(src, dst, o)
   if r == nil: return nil
   decRef r
   withLog(log, checkConvert(log))

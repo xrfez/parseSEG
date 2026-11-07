@@ -626,6 +626,17 @@ proc segConvert(src, dst: cstring, opts: ptr SegConvertOptions,
       checkConvert(log)
       SEG_OK
 
+proc segConvertSegd(src, dst: cstring, revMajor, revMinor, format: int32,
+    outLog: ptr pointer): SegStatus {.segExport: "seg_convert_segd".} =
+  guarded:
+    if outLog != nil: outLog[] = nil
+    if src == nil or dst == nil: fail(SEG_ERR_ARGUMENT, "src and dst must not be NULL")
+    else:
+      let log = convertSegdRevision($src, $dst, segdConvertOptions(revMajor, revMinor, format))
+      if outLog != nil: outLog[] = keep(LogObj(log: log, owned: true))
+      checkConvert(log)
+      SEG_OK
+
 # ------------------------------------------------------------ layout check --
 
 proc segSizeof(name: cstring): int64 {.segExport: "seg_sizeof".} =

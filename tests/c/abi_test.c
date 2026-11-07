@@ -329,6 +329,25 @@ static void test_convert(void) {
     o.rev_major = 7;
     CHECK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) == SEG_ERR_ARGUMENT);
     OK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "sw.sgy"), NULL, NULL));
+    /* SEG-D revisions (task 8.7). */
+    SegLog *slog = NULL;
+    OK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "63_r3.sgd"), 3, 0, 0, &slog));
+    CHECK(slog != NULL && seg_log_count(slog) > 0 && seg_log_count_severity(slog, 3) == 0);
+    seg_log_release(slog);
+    OK(seg_file_open(path(tmp, "63_r3.sgd"), 0, &f));
+    CHECK(seg_file_kind(f) == 2 && seg_file_trace_count(f) == 1);
+    OK(seg_record_field(f, 0, "gh1.formatCode", &v));
+    CHECK(v.kind == SEG_VALUE_INT && v.i == 8058);
+    seg_file_release(f);
+    OK(seg_convert_segd(path(tmp, "63_r3.sgd"), path(tmp, "63_r2.sgd"), 2, 1, 0, NULL));
+    CHECK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "x.sgd"), 1, 0, 0, &slog) ==
+          SEG_ERR_FORMAT && slog != NULL && seg_log_count_severity(slog, 3) == 1);
+    seg_log_release(slog);
+    CHECK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "x.sgd"), 2, 1, 8080, NULL) ==
+          SEG_ERR_FORMAT);
+    CHECK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "x.sgd"), 3, 0, -1, NULL) ==
+          SEG_ERR_ARGUMENT);
+    CHECK(seg_convert_segd(NULL, path(tmp, "x.sgd"), 3, 0, 0, NULL) == SEG_ERR_ARGUMENT);
 }
 
 /* ---- review regressions (Phase 8) ----------------------------------- */

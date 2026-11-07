@@ -323,6 +323,14 @@ proc writeTrace*(w: var SegdWriter, t: SegdTrace) =
   w.bytesInRecord += b.len
   inc w.tracesWritten
 
+proc setRev3Trailer*(w: var SegdWriter, trailerBytes: seq[byte]) =
+  ## Rev 3: replaces the general trailer of the record in progress, for a
+  ## trailer known only after its traces. GH#2 and GH#3 were written with the
+  ## record headers, so it must have the size they announce (`endRecord`
+  ## checks).
+  doAssert w.inRecord and w.record.isRev3, "setRev3Trailer needs a Rev 3 record in progress"
+  w.record.trailerBytes = trailerBytes
+
 proc endRev2Record(w: var SegdWriter, trailer: openArray[SegdTrailerBlock]) =
   if w.tracesWritten != w.record.traceCount:
     w.problem("the channel set descriptors announce " & $w.record.traceCount & " traces, " &
