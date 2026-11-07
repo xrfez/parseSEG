@@ -26,18 +26,17 @@ block format_codes:
 block every_format_round_trips_in_every_order:
   let values = [0.0, 1.0, -1.0, 100.0, -128.0, 127.0, 42.0]
   for f in definedSampleFormats:
-    if f != sfFixedGain:
-      for order in ByteOrder:
-        if not (order == boPairSwapped and sampleSize(f) == 3):
-          var vals: seq[float64]
-          for v in values:
-            if f in {sfUInt8, sfUInt16, sfUInt24, sfUInt32, sfUInt64}: vals.add abs(v)
-            else: vals.add v
-          var buf = newSeq[byte](vals.len * sampleSize(f))
-          encodeSamples(f, vals, buf, order)
-          var back = newSeq[float64](vals.len)
-          decodeSamples(f, buf, back, order)
-          doAssert back == vals, $f & " " & $order
+    for order in ByteOrder:
+      if not (order == boPairSwapped and sampleSize(f) == 3):
+        var vals: seq[float64]
+        for v in values:
+          if f in {sfUInt8, sfUInt16, sfUInt24, sfUInt32, sfUInt64}: vals.add abs(v)
+          else: vals.add v
+        var buf = newSeq[byte](vals.len * sampleSize(f))
+        encodeSamples(f, vals, buf, order)
+        var back = newSeq[float64](vals.len)
+        decodeSamples(f, buf, back, order)
+        doAssert back == vals, $f & " " & $order
 
 block known_encodings:
   var b = newSeq[byte](8)
@@ -54,6 +53,12 @@ block known_encodings:
   var one = [0'f32]
   decodeSamples(sfFixedGain, fixed, one)
   doAssert one[0] == -100'f32
+  # Encoding picks the largest gain: -100 = -25600 * 2^-8; 0.5 = 16384 * 2^-15.
+  encodeSamples(sfFixedGain, [-100.0, 0.5], b)
+  doAssert b[0..7] == @[0'u8, 8, 0x9C, 0x00, 0, 15, 0x40, 0x00]
+  var two = [0.0, 0.0]
+  decodeSamples(sfFixedGain, b, two)
+  doAssert two == [-100.0, 0.5]
 
 block encode_refuses_bad_values:
   var b = newSeq[byte](8)
@@ -61,7 +66,8 @@ block encode_refuses_bad_values:
   doAssertRaises SegFormatError: encodeSamples(sfInt8, [NaN], b)
   doAssertRaises SegFormatError: encodeSamples(sfUInt16, [-1.0], b)
   doAssertRaises SegFormatError: encodeSamples(sfInt24, [9_000_000.0], b)
-  doAssertRaises SegFormatError: encodeSamples(sfFixedGain, [1.0], b)
+  doAssertRaises SegFormatError: encodeSamples(sfFixedGain, [40000.0], b)
+  doAssertRaises SegFormatError: encodeSamples(sfFixedGain, [NaN], b)
   doAssertRaises SegFormatError: encodeSamples(sfInt24, [1.0], b, boPairSwapped)
   var one = [0'f32]
   doAssertRaises SegTruncatedError: decodeSamples(sfFloat32, [1'u8, 2], one)

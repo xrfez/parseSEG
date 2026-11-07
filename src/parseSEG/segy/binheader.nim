@@ -97,23 +97,42 @@ func `<=`*(a, b: SegyRevision): bool {.inline.} = not (b < a)
 
 func `$`*(r: SegyRevision): string = $r.major & "." & $r.minor
 
-func isRev20(h: SegyBinaryHeader): bool {.inline.} = h.segyMajor == 2 and h.segyMinor == 0
+func claimedRevision(h: SegyBinaryHeader): SegyRevision =
+  ## The revision the bytes at 3501-3502 name, with byte-order slips fixed.
+  let r = h.revision
+  if r.major == 0 and r.minor == 0: SegyRevision(major: 0, minor: 0)
+  elif (r.major == 1 and r.minor == 0) or (r.major == 0 and r.minor == 1):
+    SegyRevision(major: 1, minor: 0)
+  elif (r.major == 2 and r.minor == 0) or (r.major == 0 and r.minor == 2):
+    SegyRevision(major: 2, minor: 0)
+  elif r.major == 2 or (r.major == 1 and r.minor == 2): SegyRevision(major: 2, minor: 1)
+  else: SegyRevision(major: 0, minor: 0)
+
+func revisionPlausible(h: SegyBinaryHeader, rev: SegyRevision): bool =
+  ## Whether the Rev 1/2 fields agree with a claimed revision `rev`. In Rev 0
+  ## bytes 3261-3600 are unassigned, so vendor data there may look like a
+  ## revision; the fixed-length flag, the extended count and (Rev 2) the
+  ## byte-order marker must then make sense too (`segy_rev0.md` §9.2).
+  if rev.major == 0: true
+  elif h.fixedLengthTraces notin 0..1 or h.numExtTextHeaders < -1: false
+  elif rev.major >= 2: h.byteOrderMarker in [ByteOrderMarker, 0'u32]
+  else: true
 
 func rulesRevision*(h: SegyBinaryHeader): SegyRevision =
   ## The revision whose rules apply to the file, which may differ from the
   ## bytes at 3501-3502:
   ## - `00 01`: Rev 1's u16 0x0100 written little-endian, read as 1.0;
-  ## - `01 02`: Rev 2.1 pair-swapped, read as 2.1;
+  ## - `00 02` / `01 02`: Rev 2.0 / 2.1 written as a swapped u16;
   ## - 2.x with x > 1: a later 2.x, read as 2.1;
+  ## - a claimed Rev 1/2 whose fixed-length flag, extended count or Rev 2
+  ##   byte-order marker make no sense: vendor data in a Rev 0 header;
   ## - anything else undefined (e.g. blanks in a Rev 0 header): Rev 0 rules,
   ##   which ignore bytes 3261-3600.
-  let r = h.revision
-  if r.major == 0 and r.minor == 0: SegyRevision(major: 0, minor: 0)
-  elif (r.major == 1 and r.minor == 0) or (r.major == 0 and r.minor == 1):
-    SegyRevision(major: 1, minor: 0)
-  elif r.major == 2 and r.minor == 0: SegyRevision(major: 2, minor: 0)
-  elif r.major == 2 or (r.major == 1 and r.minor == 2): SegyRevision(major: 2, minor: 1)
-  else: SegyRevision(major: 0, minor: 0)
+  let c = h.claimedRevision
+  if h.revisionPlausible(c): c else: SegyRevision(major: 0, minor: 0)
+
+func isRev20(h: SegyBinaryHeader): bool {.inline.} =
+  h.rulesRevision == SegyRevision(major: 2, minor: 0)
 
 func decodeBinaryHeader*(b: openArray[byte], order: ByteOrder): SegyBinaryHeader =
   ## Decodes a binary header from the first 400 bytes of `b` (file offset
@@ -200,6 +219,9 @@ proc validate*(h: SegyBinaryHeader, log: var DiagLog, severity = sevWarning,
   let canonical = (raw.major <= 1 and raw.minor == 0) or (raw.major == 2 and raw.minor <= 1)
   check canonical, dcUnsupportedRevision, 3501, "segyRevision",
     "revision bytes " & $raw & " are not a defined revision; read with Rev " & $rev & " rules"
+  check not canonical or h.claimedRevision == rev, dcUnsupportedRevision, 3501,
+    "segyRevision", "revision bytes say " & $raw & ", but the fixed-length flag, extended " &
+    "count or byte-order marker do not fit; taken as vendor data in a Rev 0 header"
   check bytesPerSample(h.formatCode, rev) != 0, dcBadValue, 3225, "formatCode",
     "format code " & $h.formatCode & " is not defined in revision " & $rev
   check h.effectiveSampleInterval != 0, dcBadValue, 3217, "sampleInterval",

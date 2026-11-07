@@ -96,7 +96,7 @@ func checkTarget(opts: ConvertOptions, err: var string): bool =
     return false
   if opts.format != 0:
     var f: SampleFormat
-    if not toSampleFormat(opts.format, f) or f == sfFixedGain:
+    if not toSampleFormat(opts.format, f):
       err = "target format " & $opts.format & " is not a writable SEG-Y format"
       return false
     if f.isRev2Format and r.major < 2:
@@ -188,11 +188,6 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
   let rev = opts.revision
   var outFmt = f.format
   if opts.format != 0: discard toSampleFormat(opts.format, outFmt)
-  if outFmt == sfFixedGain:
-    result.add r.log
-    result.report(sevFatal, dcUnsupportedFormat, "format 4 (fixed gain) cannot be written; " &
-      "choose a target format", loc = loc)
-    return
   if outFmt.isRev2Format and rev.major < 2:
     result.add r.log
     result.report(sevFatal, dcUnsupportedFormat, "the input format " & $ord(outFmt) &
@@ -207,6 +202,15 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
   f.binary.segyMinor = rev.minor
   f.revision = rev
   f.binary.formatCode = int16(ord(outFmt))
+  if rev == SegyRevision(major: 2, minor: 0):
+    if f.binary.surveyType != 0:
+      result.note(seen, 20, "Rev 2.0 has no survey type (bytes 3509-3510 belong to the " &
+        "additional trace header count): survey type " & $f.binary.surveyType & " dropped", loc)
+      f.binary.surveyType = 0
+    for s in f.extended.stanzas:
+      if s.company.toUpperAscii == "SEG" and s.name.toLowerAscii.startsWith("layout"):
+        result.note(seen, 21, "the ((SEG:Layout)) stanza is defined from Rev 2.1; a Rev 2.0 " &
+          "reader ignores it (it is kept as text)", loc)
   if rev.major == 0 and f.extended.recordCount > 0:
     result.note(seen, 0, "Rev 0 has no extended textual headers: " & $f.extended.recordCount &
       " records dropped", loc)

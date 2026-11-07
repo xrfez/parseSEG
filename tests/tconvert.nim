@@ -138,7 +138,7 @@ block invalid_targets_and_inputs:
   let sw = exampleDir / "Sweep0.sgy"
   for o in [ConvertOptions(revision: SegyRevision(major: 1), byteOrder: boLittle),
       ConvertOptions(revision: SegyRevision(major: 1), format: 6), # float64 needs Rev 2
-      ConvertOptions(format: 4), ConvertOptions(format: 13),
+      ConvertOptions(format: 13),
       ConvertOptions(revision: SegyRevision(major: 3))]:
     doAssert convertFile(sw, tmp / "bad.sgy", o).isFatal
   doAssert convertFile(tmp / "missing", tmp / "x.sgy").isFatal

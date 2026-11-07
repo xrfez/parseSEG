@@ -6,6 +6,7 @@ import std/[assertions, os, strutils, sequtils]
 import parseSEG/common/errors
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segy/[reader, writer]
+import parseSEG/convert
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 let tmp = getTempDir() / "parseseg_tsegyreader"
@@ -430,3 +431,29 @@ block ext1_byte_order_conversion:
     for k in 0..<3: doAssert e.traces[k].ext1 == prev.traces[k].ext1
     prev = e
   doAssert readBytes(tmp / "ext1_big.sgy") == readBytes(path)
+
+block rev0_zero_sample_count_task_3_5:
+  # Sweep0.sgy is Rev 0, little-endian, one trace of 12001 samples. Rev 0
+  # writers sometimes left trace bytes 115-116 at 0: the binary count is used.
+  var s = readFile(exampleDir / "Sweep0.sgy")
+  s[3600 + 114] = '\0'
+  s[3600 + 115] = '\0'
+  writeFile(tmp / "sweep_ns0.sgy", s)
+  let d = readSegy(tmp / "sweep_ns0.sgy")
+  doAssert d.traces.len == 1 and d.traces[0].numSamples == 12001
+  var warned = false
+  for x in d.diagnostics:
+    if x.loc.field == "trace.numSamples" and "binary header" in x.msg: warned = true
+  doAssert warned
+  let orig = readSegy(exampleDir / "Sweep0.sgy")
+  doAssert d.traces[0].samples == orig.traces[0].samples
+
+block rev20_files_task_3_5:
+  # 2.1 -> 2.0: Rev 2.0 does not require ((SEG:EndText)), and reads back as 2.0.
+  let src = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  let log = convertFile(src, tmp / "ingle20.sgy",
+    ConvertOptions(revision: SegyRevision(major: 2, minor: 0)))
+  doAssert not log.isFatal and log.count(sevError) == 0, $log
+  let d = readSegy(tmp / "ingle20.sgy", headersOnly = true)
+  doAssert d.file.revision == SegyRevision(major: 2, minor: 0)
+  for x in d.diagnostics: doAssert "EndText" notin x.msg

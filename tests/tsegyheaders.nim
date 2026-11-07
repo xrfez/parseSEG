@@ -185,10 +185,18 @@ block effective_values_respect_revision:
 
 block binary_validation:
   var h = SegyBinaryHeader(segyMajor: 1, formatCode: 7, sampleInterval: 0,
-    samplesPerTrace: 100, fixedLengthTraces: 3)
+    samplesPerTrace: 100, extSamplesPerTrace: 0, numExtTextHeaders: -5)
   var log: DiagLog
   h.validate(log, sevError, Location(file: "x.sgy"))
-  doAssert log.len == 3
+  # An extended count below -1 makes "Rev 1" in 3501-3502 vendor data: Rev 0
+  # rules, so the Rev 1 fields are not checked (segy_rev0.md §9.2).
+  doAssert h.rulesRevision == SegyRevision(major: 0)
+  doAssert log.len == 3 and log[0].code == dcUnsupportedRevision and log[0].offset == 3500
+  log = DiagLog()
+  h.numExtTextHeaders = 0
+  h.fixedLengthTraces = 1
+  h.validate(log, sevError, Location(file: "x.sgy"))
+  doAssert log.len == 2
   doAssert log[0].code == dcBadValue and log[0].offset == 3224
   doAssert log[0].loc.field == "binary.formatCode" and log[0].loc.file == "x.sgy"
   doAssert log[0].severity == sevError
@@ -199,6 +207,21 @@ block binary_validation:
   doAssert log2.len == 1 and log2[0].loc.field == "binary.maxAddlTraceHeaders"
   doAssert bytesPerSample(7, SegyRevision(major: 2, minor: 1)) == 3
   doAssert bytesPerSample(7, SegyRevision(major: 1)) == 0
+
+block revision_bytes_task_3_5:
+  # 2.0 written as a swapped u16 (00 02) is Rev 2.0, like 01 02 for 2.1.
+  var h = SegyBinaryHeader(segyMajor: 0, segyMinor: 2, byteOrderMarker: ByteOrderMarker)
+  doAssert h.rulesRevision == SegyRevision(major: 2, minor: 0)
+  # A 2.x claim without the byte-order marker (vendor bytes) is Rev 0.
+  h = SegyBinaryHeader(segyMajor: 2, segyMinor: 1, byteOrderMarker: 0x55AA55AA'u32)
+  doAssert h.rulesRevision == SegyRevision(major: 0)
+  h.byteOrderMarker = 0 # not written by some 2.x writers
+  doAssert h.rulesRevision == SegyRevision(major: 2, minor: 1)
+  # 2.0's u32 at 3507-3510 also for 00 02.
+  var b = newSeq[byte](400)
+  SegyBinaryHeader(segyMajor: 0, segyMinor: 2, byteOrderMarker: ByteOrderMarker,
+    maxAddlTraceHeaders: 70000, formatCode: 5).encode(b, boBig)
+  doAssert decodeBinaryHeader(b, boBig).maxAddlTraceHeaders == 70000
 
 block scalars:
   doAssert applyScalar(1234, -100) == 12.34

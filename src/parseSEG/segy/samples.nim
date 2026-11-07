@@ -19,7 +19,7 @@ type
     sfIbm32 = 1      ## IBM hexadecimal float, 4 bytes.
     sfInt32 = 2      ## Two's complement, 4 bytes.
     sfInt16 = 3      ## Two's complement, 2 bytes.
-    sfFixedGain = 4  ## Fixed point with gain (obsolete), 4 bytes; read-only.
+    sfFixedGain = 4  ## Fixed point with gain (obsolete, Rev 0-1), 4 bytes.
     sfFloat32 = 5    ## IEEE single, 4 bytes.
     sfFloat64 = 6    ## IEEE double, 8 bytes (Rev 2).
     sfInt24 = 7      ## Two's complement, 3 bytes (Rev 2).
@@ -159,12 +159,26 @@ proc toInt[I: SomeInteger](x: float64, i: int): I {.inline.} =
   else:
     I(r)
 
+proc fixedGainWord(x: float64, i: int): uint32 =
+  ## Format 4: the largest gain G (0-255) whose mantissa round(x * 2^G)
+  ## still fits an i16, so value = mantissa * 2^-G keeps the most precision.
+  ## |x| above 32767 does not fit any G.
+  if x != x or abs(x) > 32767.5:
+    raiseFormat("sample " & $i & " = " & $x & " does not fit format 4 (|value| <= 32767)")
+  var g = 0
+  if x != 0:
+    g = clamp(int(floor(log2(32767.0 / abs(x)))), 0, 255)
+    while g > 0 and abs(round(x * pow(2.0, float64(g)))) > 32767: dec g
+    while g < 255 and abs(round(x * pow(2.0, float64(g + 1)))) <= 32767: inc g
+  let m = clamp(round(x * pow(2.0, float64(g))), -32768.0, 32767.0)
+  (uint32(g) shl 16) or uint32(cast[uint16](int16(m)))
+
 proc encodeSamples*[T: SampleType](f: SampleFormat, src: openArray[T],
     dst: var openArray[byte], order = boBig) =
   ## Encodes `src` as format `f` into the start of `dst`. Integer formats
   ## round to nearest. Raises `SegFormatError` for a value that does not fit
-  ## (including NaN in an integer format), for format 4 (read-only) and for a
-  ## 3-byte format in pair-swapped order.
+  ## (including NaN in an integer format or format 4) and for a 3-byte format
+  ## in pair-swapped order. Format 4 picks the largest gain per sample.
   checkOrder(f, order)
   let n = src.len
   doAssert dst.len >= n * sampleSize(f), "destination too short"
@@ -177,7 +191,7 @@ proc encodeSamples*[T: SampleType](f: SampleFormat, src: openArray[T],
     of sfInt16:
       for i in 0..<n: putNum(dst, 2*i, toInt[int16](float64(src[i]), i), o)
     of sfFixedGain:
-      raiseFormat("sample format 4 (fixed point with gain) is obsolete and read-only")
+      for i in 0..<n: putNum(dst, 4*i, fixedGainWord(float64(src[i]), i), o)
     of sfFloat32:
       for i in 0..<n: putNum(dst, 4*i, float32(src[i]), o)
     of sfFloat64:

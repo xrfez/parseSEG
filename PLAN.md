@@ -247,7 +247,7 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
   - [x] 3.4d Layout XML (`((SEG:Layout:text/xml))`, D-8): parse into a field map; accessors
         (inline, crossline, CDP/source/receiver coordinates, ...) use it when present
 
-- [ ] 3.5 Older and in-between revisions from the 1.8 gap analyses: SEG-Y Rev 0 (1975) and Rev 2.0
+- [x] 3.5 Older and in-between revisions from the 1.8 gap analyses: SEG-Y Rev 0 (1975) and Rev 2.0
       files read (and write) correctly; tests with synthetic files
 
 ### Phase 4: SEG-D Rev 2.0 / 2.1 (2.0 first)
@@ -722,4 +722,17 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
   - A 90xx code in a record that says 3.0 is decoded with a warning (also in Rev 2). Writers refuse it unless lenient.
   - `convertSegdRevision` targets 3.1. Before 3.1, 90xx maps to 80xx (and 8080 to 8058 for 2.x). An explicit format must exist in the target. The INOVA file converts 3.0 → 3.1/9058 → 3.0 byte-exactly.
   - `crsFormat(crsText)` tells P1/11 CRS text from SEG stanzas. A P1/11 parser is not written (noted).
+- 2026-11-07: Task 3.5 done: SEG-Y Rev 0 and 2.0, from the gap analyses.
+  - Revision bytes `00 02` (2.0 as a swapped u16) are Rev 2.0, including the u32 at 3507-3510.
+  - A claimed Rev 1/2 whose fixed-length flag is not 0/1, whose extended count is below -1, or (Rev 2) whose byte-order marker is neither the marker nor 0 is taken as vendor data in a Rev 0 header. That is a warning, and the file is read with Rev 0 rules.
+  - `((SEG:EndText))` is required (reader warning, writer problem) only from 2.1.
+  - Converting to 2.0 notes a dropped survey type and a Layout stanza 2.0 does not define.
+  - Rev 0 traces whose bytes 115-116 are 0 take the binary header's sample count, with a warning.
+  - Format 4 (fixed point with gain) can be encoded: the largest gain that fits, value = mantissa × 2^-G. Conversions may target it.
+  - Not done (noted):
+    - parsing the 2.0 `Trace Header Mapping` stanza;
+    - a reader option for the format 4 gain sign (the raw bytes are kept);
+    - Rev 0 trace lengths from tape record lengths;
+    - limiting byte-order scoring to bytes 3201-3260 for Rev 0.
+- 2026-11-07: **Phase 10 review** (task 10.4) by an agent: 9 confirmed findings plus suspicions. The fixes follow in the next commit.
 

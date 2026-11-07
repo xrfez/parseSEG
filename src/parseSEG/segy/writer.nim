@@ -136,8 +136,8 @@ proc checkFile(w: var SegyWriter) =
   elif count == -1 and not f.extended.hasEndText:
     w.problem("a variable extended record count (-1) needs a final ((SEG:EndText)) record",
       "extended", asRead = countAsRead)
-  elif rev.major >= 2 and count > 0 and not f.extended.hasEndText:
-    w.problem("Rev 2 extended textual headers must end with ((SEG:EndText))", "extended",
+  elif SegyRevision(major: 2, minor: 1) <= rev and count > 0 and not f.extended.hasEndText:
+    w.problem("Rev 2.1 extended textual headers must end with ((SEG:EndText))", "extended",
       asRead = countAsRead)
   if count != 0:
     for s in f.extended.stanzas:

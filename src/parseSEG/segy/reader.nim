@@ -111,6 +111,7 @@ type
     done: bool
     headersOnly: bool    ## Skip sample bytes (`SegyTrace.samples` stays empty).
     fixedMismatches: int ## Fixed-length traces whose own ns/dt disagree (logged up to `MaxRepeats`).
+    zeroSampleTraces: int ## Rev 0 traces sized from the binary header (logged up to `MaxRepeats`).
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
   # Storage unit sequence number (digits or blanks) and "SY" in bytes 5-6;
@@ -308,7 +309,7 @@ proc readFileHeaders(r: var SegyReader) =
         extStart + st.headerStart, r.loc(field = "extended.layout"))
   f.extendedAsRead = hash(f.extended.data)
   f.extendedAsReadLen = f.extended.data.len
-  if rev.major >= 2 and count > 0 and not f.extended.hasEndText:
+  if SegyRevision(major: 2, minor: 1) <= rev and count > 0 and not f.extended.hasEndText:
     r.log.report(sevWarning, dcBadValue, "the last extended textual record is not " &
       "((SEG:EndText)) (required since the Rev 2.1 clarification)",
       r.offset - TextHeaderSize, r.loc(field = "extended"))
@@ -423,6 +424,10 @@ proc summarize(r: var SegyReader) =
     r.log.report(sevInfo, dcValidation, $(r.fixedMismatches - MaxRepeats) & " more warnings " &
       "for trace.numSamples (fixed-length mismatch) were not logged", loc = r.loc(
       field = "trace.numSamples"))
+  if r.zeroSampleTraces > MaxRepeats:
+    r.log.report(sevInfo, dcValidation, $(r.zeroSampleTraces - MaxRepeats) & " more traces " &
+      "with 0 samples were sized from the binary header (not logged)", loc = r.loc(
+      field = "trace.numSamples"))
 
 func isExt1Name(b: openArray[byte]): bool =
   # "SEG00001" in ASCII or EBCDIC at bytes 233-240.
@@ -480,6 +485,15 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
       r.log.report(sevWarning, dcInconsistent, "fixed-length file, but this trace has " &
         $traceNs & " samples at " & $traceDt & " (binary header: " & $t.numSamples & " at " &
         $t.sampleInterval & ")", t.offset + 114, r.loc(t.index, "trace.numSamples"))
+  elif f.revision.major == 0 and traceNs == 0 and f.binary.effectiveSamplesPerTrace != 0:
+    # Rev 0 sized traces by tape block, and some writers left bytes 115-116
+    # at 0 (segy_rev0.md §9.2): use the binary header's count.
+    t.numSamples = int(f.binary.effectiveSamplesPerTrace)
+    t.sampleInterval = if traceDt != 0: traceDt else: f.binary.effectiveSampleInterval
+    inc r.zeroSampleTraces
+    if r.zeroSampleTraces <= MaxRepeats:
+      r.log.report(sevWarning, dcInconsistent, "the trace header gives 0 samples; using the " &
+        "binary header's " & $t.numSamples, t.offset + 114, r.loc(t.index, "trace.numSamples"))
   else:
     t.numSamples = traceNs
     t.sampleInterval = traceDt
