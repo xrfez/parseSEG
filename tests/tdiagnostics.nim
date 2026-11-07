@@ -9,7 +9,7 @@ proc sampleLog(): DiagLog =
   result.report(sevInfo, dcVendorBlock, "block 0xB0 kept raw",
     offset = 1024, loc = Location(record: 0, trace: 5, blockIndex: 2))
   result.report(sevWarning, dcBadValue, "format code 0 is not defined",
-    offset = 4340, loc = Location(record: 0, field: "GH1.formatCode"))
+    offset = 4340, loc = Location(file: "a dir/63.sgd", record: 0, field: "GH1.formatCode"))
   result.report(sevError, dcUnsupportedFormat,
     "tricky \"quotes\" (parens) [brackets] #hash 'tick' back\\slash\nnewline\ttab ünïcode",
     loc = Location(channelSet: 1, trace: 0))
@@ -33,12 +33,14 @@ block defaults_mean_unknown:
   doAssert d.offset == -1
   doAssert d.loc.record == -1 and d.loc.trace == -1 and d.loc.channelSet == -1
   doAssert $d == "info io: x"
+  doAssert $Diagnostic(code: dcIo, loc: Location(file: "f.sgy"), msg: "x") == "info io [f.sgy]: x"
 
 block string_form:
   doAssert $sampleLog()[0] ==
     "info vendorBlock @1024 [record 0, trace 5, block 2]: block 0xB0 kept raw"
   doAssert $sampleLog()[1] ==
-    "warning badValue @4340 [record 0, field GH1.formatCode]: format code 0 is not defined"
+    "warning badValue @4340 [a dir/63.sgd, record 0, field GH1.formatCode]: " &
+    "format code 0 is not defined"
 
 block boundary_maps_exceptions:
   var log = DiagLog()
@@ -78,6 +80,7 @@ block nif_round_trip:
   doAssert nif.startsWith("(.nif27)")
   doAssert "(diag warning badValue \"format code 0 is not defined\"" in nif
   doAssert "(field \"GH1.formatCode\")" in nif
+  doAssert "(file \"a dir/63.sgd\")" in nif
   let back = parseDiagnostics(nif)
   doAssert sameEntries(log, back)
   doAssert back.count(sevFatal) == 1

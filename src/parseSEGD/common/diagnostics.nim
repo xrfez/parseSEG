@@ -12,13 +12,14 @@
 ## (.vendor "parseSEGD")
 ## (diagnostics
 ##  (diag warning badValue "format code 0 is not defined"
+##   (file "63.sgd")
 ##   (offset 4340)
 ##   (record 0)
 ##   (field "GH1.formatCode")))
 ## ```
 ##
 ## Each entry is severity, code, message, then the optional children
-## (`offset`, `record`, `channelSet`, `trace`, `blockIndex`, `field`), which are
+## (`file`, `offset`, `record`, `channelSet`, `trace`, `blockIndex`, `field`), which are
 ## omitted when unknown.
 
 import std/strutils
@@ -52,7 +53,9 @@ type
     dcValidation = "validation"     ## A writer found spec-invalid content.
 
   Location* = object
-    ## Where in the logical structure a problem sits. -1 / "" mean "not applicable".
+    ## Where a problem sits: which file, and where in its logical structure.
+    ## -1 / "" mean "not applicable" or "unknown".
+    file*: string          ## Path or name of the file, tape device or stream being read/written.
     record*: int = -1      ## Record (SEG-D shot record, or SEG-Y file) index.
     channelSet*: int = -1  ## SEG-D channel set index within the scan type.
     trace*: int = -1       ## Trace index within the record.
@@ -74,7 +77,7 @@ type
 
 func `$`*(loc: Location): string =
   ## Human-readable location such as `record 0, trace 3, field GH1.format`.
-  result = ""
+  result = loc.file
   template part(name: string; value: int) =
     if value >= 0:
       if result.len > 0: result.add ", "
@@ -175,6 +178,9 @@ proc addNif(b: var Builder; log: DiagLog) =
         b.addIdent $d.severity
         b.addIdent $d.code
         b.addStrLit d.msg
+        if d.loc.file.len > 0:
+          b.withTree "file":
+            b.addStrLit d.loc.file
         b.addInt "offset", d.offset
         b.addInt "record", d.loc.record
         b.addInt "channelSet", d.loc.channelSet
@@ -227,9 +233,10 @@ proc parseDiag(r: var Reader; t: var ExpandedToken): Diagnostic =
       result.msg = r.decodeStr(t)
     of ParLe:
       let tag = r.decodeStr(t)
-      if tag == "field":
+      if tag == "field" or tag == "file":
         r.expect(t, StrLit, "string")
-        result.loc.field = r.decodeStr(t)
+        if tag == "field": result.loc.field = r.decodeStr(t)
+        else: result.loc.file = r.decodeStr(t)
       else:
         r.expect(t, IntLit, "integer")
         let v = decodeInt(t)
