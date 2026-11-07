@@ -2,6 +2,9 @@ bin/
 htmldocs/
 nimcache/
 /SEG Spec/exampleFiles/00000151_12900_11300.sgd
+# Atlas: dependency checkouts are reproducible from atlas.lock
+deps/*
+!deps/atlas.config
 nimble.develop
 nimble.paths
 nimbledeps

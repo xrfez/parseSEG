@@ -45,7 +45,3 @@ task fmt, "Format codebase via nimpretty":
 task docs, "Generate HTML documentation":
   ## Emits HTML documentation into htmldocs directory.
   selfExec "doc --project --outdir:htmldocs src/parseSEGD.nim"
-# begin Nimble config (version 2)
-when withDir(thisDir(), system.fileExists("nimble.paths")):
-  include "nimble.paths"
-# end Nimble config

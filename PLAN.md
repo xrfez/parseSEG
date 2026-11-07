@@ -132,6 +132,10 @@ with synthetic data only. *(Owner: integer-format SEG-D samples would help.)*
    The Python oracles in `tools/walks/` decode the sample files independently. Compare the
    Nim output against them.
 6. Work branch: `seg-library`.
+7. Dependencies are managed by **Atlas**: sources are in `deps/` (gitignored, so read and debug
+   them there), and the paths are in the Atlas section of `nim.cfg` (`--noNimblePath`). On a
+   fresh clone, run `atlas rep atlas.lock`. To add a dependency, add it to the nimble file and
+   run `atlas install`, then `atlas pin`.
 
 ## Architecture (target)
 ```
@@ -239,4 +243,5 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - 2026-11-07: Tasks 1.5 and 1.6b done. segd_rev2_0.md (858 lines) is word-identical to 2.1 except for 11 listed items. 8015 = one's complement per spec. Samples without THE = (TE-TF)/SI. Real files contain spec-invalid zeros: warn, never reject. **Phase 1 complete.**
 - 2026-11-07: Owner corrections: tape read/write is first-class (Linux and Windows); Tensor (Arraymancer) storage; diagnostics log instead of exceptions (NIF?); gather-agnostic (receiver gathers); multi-component grouping; rotational data is vendor-specific; viewer-ready chunked/prefetch I/O. Phases were reordered: **next is task 2.0 (Arraymancer check)**, then 2.3, then 2.2.
 - 2026-11-07: NIF confirmed for the error log. Vendor maps were designed as declarative NIF plugins (`docs/design/vendor_maps.md`). The toolchain nifbuilder/nifreader were smoke-tested OK on Nim 2.4. **The next session starts at task 2.0.**
-- 2026-11-07: Task 2.0 done. Arraymancer 0.7.33 builds and runs on Nim 2.4 (debug and `-d:danger`) under `--noNimblePath`. `import arraymancer/tensor` needs only `nimblas` at compile time, and no system BLAS is linked or installed (BLAS loads only if matmul is called). Writing raw buffers via `unsafe_raw_offset` works (`tests/ttensor.nim`). `nimble setup` generates `nimble.paths` (machine-specific, now gitignored and untracked) and `config.nims` includes it; tests pick it up through the root config. A fresh clone needs `nimble install -d && nimble setup`. **Next: task 2.3.**
+- 2026-11-07: Task 2.0 done. Arraymancer 0.7.33 builds and runs on Nim 2.4 (debug and `-d:danger`) under `--noNimblePath`. `import arraymancer/tensor` needs only `nimblas` at compile time, and no system BLAS is linked or installed (BLAS loads only if matmul is called). Writing raw buffers via `unsafe_raw_offset` works (`tests/ttensor.nim`). `nimble setup` generates `nimble.paths` (machine-specific, now gitignored and untracked) and `config.nims` includes it; tests pick it up through the root config. **Next: task 2.3.**
+- 2026-11-07: Switched dependency management from `nimble setup` to **Atlas** (owner request: agents can read library sources in `deps/`). `nim.cfg` holds the Atlas paths, `atlas.lock` is committed, and `deps/atlas.config` is tracked. Tests pass, and nimsuggest resolves into `deps/`. **Next: task 2.3.**
