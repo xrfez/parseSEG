@@ -265,3 +265,27 @@ block rev3_user_blocks_by_type:
     let at = findBlock(t.extensions, 0xB0)
     doAssert tb[0].get("first").intVal == int64(beU32(t.extensions, at))
   doAssert l.len == 0
+
+block rev3_position_and_trailer_offered:
+  let d = readSegd(exampleDir / "inova_rev30_5traces.sgd")
+  var rec = d.records[0].record
+  var r: VendorRegistry
+  r.addMap loadVendorMap("""(.nif27)
+(vendormap "pos" (match (format segd) (manufacturer 50))
+  (target (kind block) (type 0x50) (where generalHeader) (name position96)
+    (field x (at 33) (enc f64)) (field t3 (at 96) (enc u8)))
+  (target (kind trailer) (type 1) (name edits) (field head (at 1) (len 5) (enc ascii))))""")
+  # Give the record a trace-edit trailer.
+  var desc = SegdTrailerDescription(trailerBlockType: 1, asciiOrBinary: 2, blockSize: 1,
+    blockType: 0x70)
+  rec.trailerBytes = @(desc.encoded)
+  var data = newSeq[byte](32)
+  for i, c in "V 1.0": data[i] = byte(c)
+  rec.trailerBytes.add data
+  var l: DiagLog
+  let bs = r.decodeVendorAreas(rec, l, "fixture")
+  doAssert l.len == 0
+  var names: seq[string]
+  for b in bs: names.add b.name
+  doAssert names == @["position96", "edits"], $names
+  doAssert bs[0].get("t3").intVal == 0x52 and bs[1].get("head").text == "V 1.0"

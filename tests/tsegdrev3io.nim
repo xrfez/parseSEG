@@ -1,6 +1,6 @@
 ## SEG-D Rev 3 writer and round trips (tasks 5.3 and 5.4).
 
-import std/[assertions, os, strutils]
+import std/[assertions, os, strutils, math]
 import parseSEGD/common/errors
 import parseSEGD/io/[records, diskio, tapeimage]
 import parseSEGD/segd/[reader, writer]
@@ -258,3 +258,94 @@ block committed_rev3_fixture:
     for i in 0..<fx.len:
       if byte(big[i]) != fx[i]: diff.add i
     doAssert diff == @[76, 77, 78, 79, 84, 85, 86, 87, 853, 854]
+
+# --------------------------------------------- Phase 5 review regressions --
+
+block r1_fixrec_gaps_below_a_header:
+  # Every gap size 1..19 before a trace: block sizes around 320 bytes.
+  for bs in 280'i64 .. 360:
+    var d = stream([sd8058])
+    d.hasLabel = true
+    d.label = label("FIXREC", bs)
+    for (path, tape) in [(tmp / "gap.sgd", false), (tmp / "gap.tap", true)]:
+      if tape: discard d.toTape(path) else: discard d.toDisk(path)
+      let e = if tape: fromTape(path) else: readSegd(path)
+      doAssert e.diagnostics.len == 0, "block " & $bs & ": " & $e.diagnostics[0]
+      same(d, e)
+
+block r2_huge_trailer_sizes_are_not_a_defect:
+  var b = readBytes(exampleDir / "inova_rev30_5traces.sgd")
+  for i in 44..47: b[i] = 0xFF            # GH#2 bytes 13-16: trailer count unknown
+  for i in 72..79: b[i] = 0xFF            # GH#3 recordSize
+  for i in 80..86: b[i] = 0; b[87] = 1    # GH#3 dataSize = 1
+  let f = open(tmp / "hugegt.sgd", fmWrite)
+  discard f.writeBytes(b, 0, b.len)
+  f.close()
+  let e = readSegd(tmp / "hugegt.sgd")
+  doAssert e.diagnostics.isFatal and e.records[0].traces.len == 5
+
+block r3_extended_channel_set_numbers:
+  var d = stream([sd8058])
+  d.records[0].record.scanTypes[0].descriptors3[1].channelSetNumber = 200
+  for k in 0..2:
+    d.records[0].traces[k].header.channelSetNumber = BcdAllF
+    d.records[0].traces[k].header.extChannelSetNumber = 200
+  doAssert d.toDisk(tmp / "cs200.sgd").len == 0
+  let e = readSegd(tmp / "cs200.sgd")
+  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+  doAssert e.records[0].traces[0].channelSet == 1
+
+block r4_unknown_trailer_count_multi_record:
+  var d = stream([sd8058, sd8058])
+  d.records[0].record.gh2r3.generalTrailerBlocks = 0xFFFF_FFFF'u32
+  d.records[0].record.gh3.recordSize = 0
+  d.records[1].record.gh1.externalHeaderBlocks = 70 # GH#1 byte 32 = 0x70
+  d.records[1].record.external = newSeq[byte](70 * 32)
+  computeRev3Sizes(d.records[1].record, d.records[1].traces)
+  doAssert d.toDisk(tmp / "gt70.sgd").len == 0
+  let e = readSegd(tmp / "gt70.sgd")
+  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+  doAssert e.records.len == 2 and e.records[0].record.trailerBytes.len == 64
+  # A trailer readers cannot walk is refused when nothing else sizes it.
+  var g = stream([sd8058])
+  g.records[0].record.gh2r3.generalTrailerBlocks = 0xFFFF_FFFF'u32
+  g.records[0].record.gh3.recordSize = 0
+  g.records[0].record.trailerBytes = blk(0x20, "not a description block")
+  doAssertRaises SegFormatError: discard g.toDisk(tmp / "gtbad.sgd")
+
+block r5_large_areas_are_skipped_and_huge_traces_stop:
+  let d = stream([sd8058])
+  discard d.toDisk(tmp / "areas.sgd")
+  var src: RecordSource = openDiskSource(tmp / "areas.sgd")
+  var r = openSegd(src)
+  r.maxHeaderBytes = 40 # the 64-byte external header and trailer are skipped
+  doAssert r.nextRecord()
+  var t: SegdTrace
+  var n = 0
+  while r.readTrace(t): inc n
+  src.close()
+  doAssert n == 4 and r.record.incomplete and r.record.external.len == 0
+  doAssert not r.log.hasErrors
+  var e = SegdData(records: @[SegdRecordData(record: r.record, traces: d.records[0].traces)])
+  doAssertRaises SegFormatError: discard e.toDisk(tmp / "incomplete.sgd")
+  src = openDiskSource(tmp / "areas.sgd")
+  var r2 = openSegd(src)
+  r2.maxTraceBytes = 100 # 40 samples x 4 bytes = 160
+  doAssert r2.nextRecord()
+  doAssert not r2.readTrace(t) and r2.log.isFatal
+  src.close()
+
+block r6_rev31_warns:
+  var d = stream([sd8058])
+  d.records[0].record.gh2r3.revisionMinor = 1
+  discard d.toDisk(tmp / "rev31.sgd")
+  let e = readSegd(tmp / "rev31.sgd")
+  doAssert e.records[0].traces.len == 4
+  doAssert e.diagnostics.len == 1 and e.diagnostics[0].code == dcUnsupportedRevision
+
+block r7_minor_time_fields_checked:
+  var g1 = SegdGeneralHeader1(year: 26, julianDay: 999, hour: 1)
+  doAssert generalHeaderUtc(g1).isNaN
+  g1.julianDay = 1
+  g1.hour = 24
+  doAssert generalHeaderUtc(g1).isNaN

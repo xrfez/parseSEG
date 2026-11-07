@@ -458,7 +458,8 @@ func gpsMinusUtc*(ts: int64): int =
 func generalHeaderUtc*(g1: SegdGeneralHeader1, century = 2000): float64 =
   ## UTC POSIX seconds of GH#1's BCD date and time (1-second resolution;
   ## two-digit year in `century`). NaN when a field is not valid BCD.
-  if g1.year < 0 or g1.julianDay < 1 or g1.hour < 0 or g1.minute < 0 or g1.second < 0:
+  if g1.year notin 0..99 or g1.julianDay notin 1..366 or g1.hour notin 0..23 or
+      g1.minute notin 0..59 or g1.second notin 0..60:
     return NaN
   let jan1 = daysFromCivil(century + g1.year, 1, 1) * 86400
   float64(jan1 + int64(g1.julianDay - 1) * 86400 + int64(g1.hour) * 3600 +

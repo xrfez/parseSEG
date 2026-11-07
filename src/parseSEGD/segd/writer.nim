@@ -20,7 +20,7 @@
 ## `SegFormatError` unless `lenient`; then it is logged as a warning.
 
 import std/math
-import ../common/[errors, diagnostics]
+import ../common/[errors, diagnostics, endians]
 import ../io/records
 import ./[headers, samples, reader]
 
@@ -101,6 +101,19 @@ proc rev3HeaderBytes*(rec: SegdRecord): int64 =
   for s in rec.scanTypes: n += 96 * int64(s.descriptors3.len) + int64(s.skew.len)
   n
 
+func trailerGroupsWalk(b: openArray[byte]): bool =
+  # True when `b` is exactly a sequence of (description block, data) groups
+  # that a reader can walk.
+  var i = 0
+  result = true
+  while i < b.len and result:
+    if i + 32 > b.len or b[i + 31] != BtTrailerDescription or b[i + 1] notin {1'u8, 2} or
+        b[i + 2] != 0 or b[i + 3] != 0:
+      result = false
+    else:
+      i += 32 + 32 * int(beU32(b, i + 4))
+  result = result and i == b.len
+
 proc checkRev3Record(w: var SegdWriter, rec: SegdRecord) =
   let g1 = rec.gh1
   let g2 = rec.gh2r3
@@ -138,6 +151,14 @@ proc checkRev3Record(w: var SegdWriter, rec: SegdRecord) =
       "blocks take " & $rev3HeaderBytes(rec) & " bytes", "gh3.headerSize")
   if rec.trailerBytes.len mod 32 != 0:
     w.problem("the general trailer is not whole 32-byte blocks", "trailer")
+  if g2.generalTrailerBlocks == 0xFFFF_FFFF'u32 and rec.gh3.recordSize == 0 and
+      not trailerGroupsWalk(rec.trailerBytes):
+    w.problem("with the trailer block count unknown (FFFFFFFF) and no GH#3 record size, " &
+      "readers find the trailer by its description blocks, but this trailer is not a " &
+      "sequence of description-block groups", "gh2.generalTrailerBlocks")
+  if rec.incomplete:
+    raiseFormat("the record was read with parts too large to hold in memory; it cannot " &
+      "be rewritten (raise maxHeaderBytes)")
   if g2.generalTrailerBlocks != 0xFFFF_FFFF'u32 and
       int64(g2.generalTrailerBlocks) * 32 != rec.trailerBytes.len:
     w.problem("General Header #2 announces " & $g2.generalTrailerBlocks & " trailer blocks, " &
@@ -292,8 +313,11 @@ proc writeTrace*(w: var SegdWriter, t: SegdTrace) =
     if w.record.isRev3: b.add t.ext1r3.encoded else: b.add t.ext1.encoded
   b.add t.extensions
   b.add t.samples
-  if w.fixedBlock > 0 and w.pending.len > 0 and w.pending.len + b.len > w.fixedBlock and
-      b.len <= w.fixedBlock:
+  # A trace header never starts in a block's last 19 bytes, so readers can
+  # tell padding from a header.
+  if w.fixedBlock > 0 and w.pending.len > 0 and
+      ((w.pending.len + b.len > w.fixedBlock and b.len <= w.fixedBlock) or
+       w.fixedBlock - w.pending.len < SegdTraceHeaderSize):
     w.padToBlock()
   w.emit(b)
   w.bytesInRecord += b.len
@@ -318,11 +342,11 @@ proc endRev3Record(w: var SegdWriter) =
     w.problem("the channel set descriptors announce " & $w.record.traceCount & " traces, " &
       $w.tracesWritten & " were written", "csd.channelsInSet")
   let g3 = w.record.gh3
-  if g3.dataSize != 0 and int64(g3.dataSize) != w.bytesInRecord:
+  if g3.dataSize != 0 and g3.dataSize != uint64(w.bytesInRecord):
     w.problem("General Header #3 data size is " & $g3.dataSize & ", " & $w.bytesInRecord &
       " bytes of headers and traces were written", "gh3.dataSize")
   let total = w.bytesInRecord + w.record.trailerBytes.len
-  if g3.recordSize != 0 and int64(g3.recordSize) != total:
+  if g3.recordSize != 0 and g3.recordSize != uint64(total):
     w.problem("General Header #3 record size is " & $g3.recordSize & ", the record has " &
       $total & " bytes", "gh3.recordSize")
   if w.record.trailerBytes.len > 0:

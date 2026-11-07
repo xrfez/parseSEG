@@ -31,6 +31,21 @@ proc decodeArea(reg: VendorRegistry, ctx: VendorContext, kind: VendorTargetKind,
           bytes.toOpenArray(i * blockSize, (i + 1) * blockSize - 1), b, log, loc):
         result.add b
 
+proc decodeTypedBlocks(reg: VendorRegistry, ctx: VendorContext, area: openArray[byte],
+    where: string, log: var DiagLog, loc: Location, result: var seq[VendorBlock]) =
+  # Rev 3 typed blocks by type byte. A Position block (0x50 0x51 0x52) is
+  # offered as its 96 bytes, under type 0x50.
+  var i = 0
+  while i + 32 <= area.len:
+    let t = area[i + 31]
+    let span = if t == BtPosition1 and i + 96 <= area.len and area[i + 63] == BtPosition2 and
+                  area[i + 95] == BtPosition3: 96 else: 32
+    var b: VendorBlock
+    if reg.decode(ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(t), where: where,
+        extIndex: -1), area.toOpenArray(i, i + span - 1), b, log, loc):
+      result.add b
+    i += span
+
 proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
     file = ""): seq[VendorBlock] =
   ## Decodes a SEG-D record's extended and external headers (whole area and
@@ -39,14 +54,20 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
   let ctx = segdContext(rec)
   let loc = Location(file: file, record: rec.index)
   if rec.isRev3:
-    # Rev 3: general header blocks by type byte (`block`, where generalHeader);
-    # Position blocks span 3 blocks, so each block is offered with what follows.
-    for (i, t) in blocks(rec.generalBlocks):
+    # Rev 3: general header blocks by type byte (`block`, where generalHeader).
+    decodeTypedBlocks(reg, ctx, rec.generalBlocks, "generalHeader", log, loc, result)
+    # The trailer: each description block's data, by trailer block type.
+    var i = 0
+    let tb = rec.trailerBytes
+    while i + 32 <= tb.len and tb[i + 31] == BtTrailerDescription:
+      let n = 32 * int(beU32(tb, i + 4))
+      if i + 32 + n > tb.len: break
       var b: VendorBlock
-      if reg.decode(ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(t),
-          where: "generalHeader", extIndex: -1), rec.generalBlocks.toOpenArray(i, i + 31), b,
-          log, loc):
+      if reg.decode(ctx, VendorArea(kind: vtTrailer, blockIndex: -1, blockType: int(tb[i]),
+          where: blockText(tb.toOpenArray(i, i + 31), 9, 24), extIndex: -1),
+          tb.toOpenArray(i + 32, i + 31 + n), b, log, loc):
         result.add b
+      i += 32 + n
   decodeArea(reg, ctx, vtExtendedHeader, rec.extended, 32, log, loc, result)
   decodeArea(reg, ctx, vtExternalHeader, rec.external, 32, log, loc, result)
   for i, g in rec.sourceHeaders:
@@ -67,11 +88,7 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
   let loc = Location(file: file, record: rec.index, trace: t.index)
   if rec.isRev3:
     # Rev 3: typed blocks by type byte (`block`, where traceHeader).
-    for (i, bt) in blocks(t.extensions):
-      var b: VendorBlock
-      if reg.decode(ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(bt),
-          where: "traceHeader", extIndex: -1), t.extensions.toOpenArray(i, i + 31), b, log, loc):
-        result.add b
+    decodeTypedBlocks(reg, ctx, t.extensions, "traceHeader", log, loc, result)
     return
   for i in 0 ..< t.extensions.len div 32:
     var b: VendorBlock

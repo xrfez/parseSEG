@@ -359,3 +359,20 @@ block fixrec_traces_do_not_cross_blocks:
           doAssert startInBlock + (20 + 32 * int(t.header.traceHeaderExtensions) +
             4 * t.numSamples) <= 1000, "trace " & $t.index & " crosses a block"
   doAssert traceBytes < 1000
+
+block rev2_fixrec_every_gap_size:
+  # Phase 5 review: gaps of 1..19 bytes before a trace (block sizes 290..380).
+  for bs in 290'i64 .. 380:
+    var d = makeStream([sd8058])
+    let text = align("1", 4) & "SD2.0" & "FIXREC" & alignLeft("B1", 4) & align($bs, 10) &
+      align("163", 10) & "07-NOV-2026" & align("T", 12) & spaces(6) & spaces(12) &
+      alignLeft("C", 24) & spaces(14) & align("1", 10)
+    var raw = newSeq[byte](128)
+    for i, c in text: raw[i] = byte(c)
+    d.label = decodeLabel(raw)
+    d.hasLabel = true
+    for (path, tape) in [(tmp / "gap2.sgd", false), (tmp / "gap2.tap", true)]:
+      if tape: discard d.toTape(path) else: discard d.toDisk(path)
+      let e = if tape: fromTape(path) else: readSegd(path)
+      doAssert e.diagnostics.len == 0, "block " & $bs & ": " & $e.diagnostics[0]
+      sameRecords(d, e)

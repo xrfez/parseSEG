@@ -82,6 +82,11 @@ proc skip*(p: var PushbackInput, n: int64) =
     let k = p.readAvail(buf.toOpenArray(0, int(min(left, buf.len)) - 1))
     if k == 0: left = 0 else: left -= k
 
+proc remainingInRecord*(p: PushbackInput): int =
+  ## Bytes left before the end of the current physical record (tape block),
+  ## pushed-back bytes included.
+  p.pending.len - p.pendingPos + p.cursor.remainingInRecord
+
 proc skipRecordRest*(p: var PushbackInput): int =
   ## Discards the rest of the current physical record (tape block); returns
   ## the bytes skipped. Pushed-back bytes are dropped first.

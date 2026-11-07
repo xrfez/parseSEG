@@ -33,6 +33,12 @@ export headers, samples, rev3, diagnostics, tensors
 
 const
   MaxCount = 65535 ## Bound for counts that size header areas.
+  DefaultMaxHeaderBytes* = 256 shl 20
+    ## Extended/external headers, trailers and TOC files larger than this are
+    ## skipped (not held in memory; the record is marked `incomplete`).
+  DefaultMaxTraceBytes* = 2'i64 shl 30
+    ## A trace larger than this stops the read (a corrupt sample count would
+    ## otherwise pull the rest of a huge stream into memory).
   MaxDescriptors = 65535 ## Bound for scan types × channel sets in one record.
   MaxRepeats = 5 ## Diagnostics logged per (field, severity); the rest are counted.
 
@@ -68,6 +74,7 @@ type
     format*: SegdSampleFormat  ## Valid when `formatKnown`.
     formatKnown*: bool
     traceCount*: int           ## Traces announced by the channel set descriptors.
+    incomplete*: bool          ## A header area or the trailer was too large to hold and was skipped.
 
   SegdTrace* = object
     ## One trace. `readTrace` reuses the buffers of the trace it is given.
@@ -99,6 +106,8 @@ type
     done: bool
     csdWarned: bool
     toc*: seq[SegdToc]          ## Rev 3 Table of Contents files met in the stream.
+    maxHeaderBytes*: int64      ## See `DefaultMaxHeaderBytes`.
+    maxTraceBytes*: int64       ## See `DefaultMaxTraceBytes`.
     noted: Table[string, int] ## Diagnostics per (field, severity), for `note`.
 
 func `$`*(r: SegdRevision): string = $r.major & "." & $r.minor
@@ -137,6 +146,23 @@ proc readBlock[T](r: var SegdReader): T =
 proc readBytes(r: var SegdReader, n: int64): seq[byte] =
   r.input.readInto(result, n)
 
+proc readArea(r: var SegdReader, n: int64, field: string): seq[byte] =
+  # A header area or trailer: held when it fits `maxHeaderBytes`, else
+  # skipped (it still must be present) and the record marked incomplete.
+  if n <= r.maxHeaderBytes:
+    result = r.readBytes(n)
+  else:
+    let at = r.input.offset
+    var left = n
+    var buf: array[65536, byte]
+    while left > 0:
+      let k = r.input.readAvail(buf.toOpenArray(0, int(min(left, buf.len)) - 1))
+      if k == 0: raiseTruncated(field & ": expected " & $n & " bytes", r.input.offset)
+      left -= k
+    r.record.incomplete = true
+    r.note(sevInfo, dcValidation, field & ": " & $n & " bytes exceed the in-memory limit; " &
+      "skipped (the record cannot be rewritten from memory)", at, r.loc(field = field))
+
 proc reportBcd[T](r: var SegdReader, h: T, blockName: string, offset: int64) =
   for f in h.invalidBcdFields:
     r.note(sevWarning, dcBadBcd, blockName & "." & f & " holds a non-decimal digit",
@@ -155,17 +181,25 @@ proc skipFixedPadding(r: var SegdReader) =
 
 proc skipTracePadding(r: var SegdReader) =
   # FIXREC: a block may end with zero padding so that the next trace starts
-  # on a block boundary. A trace header cannot be all zero (scan type 0 is
-  # invalid), so 20 zero bytes where a header should start are padding.
+  # on a block boundary. Writers never start a trace header in a block's last
+  # 19 bytes, and a header cannot begin with 20 zero bytes (scan type 0 is
+  # invalid): so zeros up to the block end, or 20 zeros, are padding. The
+  # peek never looks past the block boundary.
   if r.hasLabel and r.label.isFixedRecord and r.label.maxBlockSize > 0:
-    var peek: array[SegdTraceHeaderSize, byte]
-    let got = r.input.readAvail(peek)
-    var zero = got == peek.len
-    for i in 0..<got:
-      if peek[i] != 0: zero = false
-    r.input.unread(peek.toOpenArray(0, got - 1))
-    if zero:
-      r.skipFixedPadding()
+    let gap = if r.byteStream:
+                int((r.label.maxBlockSize - r.input.offset mod r.label.maxBlockSize) mod
+                  r.label.maxBlockSize)
+              else: r.input.remainingInRecord
+    if gap > 0:
+      var peek: array[SegdTraceHeaderSize, byte]
+      let n = min(gap, peek.len)
+      let got = r.input.readAvail(peek.toOpenArray(0, n - 1))
+      var zero = got == n
+      for i in 0..<got:
+        if peek[i] != 0: zero = false
+      r.input.unread(peek.toOpenArray(0, got - 1))
+      if zero:
+        r.skipFixedPadding()
 
 proc readLabel(r: var SegdReader) =
   var head: array[128, byte]
@@ -187,7 +221,8 @@ proc openSegd*(src: RecordSource, twosComplement8015 = false): SegdReader =
   ## Opens a SEG-D stream positioned at its start and reads the storage unit
   ## label if there is one. Call `nextRecord` for each shot record.
   result = SegdReader(input: initPushbackInput(src), name: src.name,
-    byteStream: not src.hasRecordBoundaries, twosComplement8015: twosComplement8015)
+    byteStream: not src.hasRecordBoundaries, twosComplement8015: twosComplement8015,
+    maxHeaderBytes: DefaultMaxHeaderBytes, maxTraceBytes: DefaultMaxTraceBytes)
   if not result.log.tryRecord(Location(file: src.name, field: "label"), result.readLabel()):
     result.done = true
 
@@ -209,7 +244,7 @@ proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
   if rec.gh2r3.blockType != BtGeneralHeader2:
     r.note(sevWarning, dcBadValue, "General Header #2 block type is " & $rec.gh2r3.blockType &
       ", not 2", gh2Offset + 31, r.loc(field = "gh2.blockType"))
-  if rec.revision.major > 3 or rec.revision.minor > 1:
+  if rec.revision.major > 3 or rec.revision.minor > 0:
     r.note(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision & " read as Rev 3.0",
       gh2Offset + 10, r.loc(field = "gh2.revision"))
   let nGh = generalHeaderCount(rec.gh1, rec.gh2r3)
@@ -263,8 +298,8 @@ proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
       s.descriptors3.add c
     s.skew = r.readBytes(32 * nSK)
     rec.scanTypes.add s
-  rec.extended = r.readBytes(32 * int64(nEC))
-  rec.external = r.readBytes(32 * int64(nEX))
+  rec.extended = r.readArea(32 * int64(nEC), "extended")
+  rec.external = r.readArea(32 * int64(nEX), "external")
   # From the blocks read, not medium offsets (tape images interleave markers).
   var computed = 3 * 32 + int64(rec.generalBlocks.len) + int64(rec.extended.len) +
     int64(rec.external.len)
@@ -371,13 +406,13 @@ proc findChannelSet*(rec: SegdRecord, h: SegdTraceHeader, st, cs: var int) =
   st = h.scanTypeNumber - 1
   cs = -1
   if st >= 0 and st < rec.scanTypes.len:
-    let want = h.channelSetNumber
+    let want = channelSetNumber(h) # BCD byte 4, or bytes 16-17 when it is FF
     if rec.isRev3:
       for i, c in rec.scanTypes[st].descriptors3:
         if int(c.channelSetNumber) == want and cs < 0: cs = i
     else:
       for i, c in rec.scanTypes[st].descriptors:
-        if c.channelSetNumber == want and cs < 0: cs = i
+        if channelSetNumber(c) == want and cs < 0: cs = i
   else:
     st = -1
 
@@ -414,7 +449,11 @@ proc readRev3TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
   if rec.format == sd8015 and t.numSamples mod 4 != 0:
     r.note(sevWarning, dcBadValue, "format 8015 needs a multiple of 4 samples, the " &
       "trace has " & $t.numSamples, t.offset, r.loc(t.index, t.channelSet, "trace.numSamples"))
-  r.input.readInto(t.samples, dataBytes(rec.format, t.numSamples))
+  let nbytes = dataBytes(rec.format, t.numSamples)
+  if int64(nbytes) > r.maxTraceBytes:
+    raiseUnlocatable(dcBadValue, "trace of " & $t.numSamples & " samples (" & $nbytes &
+      " bytes) exceeds maxTraceBytes; the sample count is probably corrupt", t.offset)
+  r.input.readInto(t.samples, nbytes)
   inc r.tracesRead
 
 proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
@@ -473,7 +512,11 @@ proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
   if rec.format == sd8015 and t.numSamples mod 4 != 0:
     r.note(sevWarning, dcBadValue, "format 8015 needs a multiple of 4 samples, the " &
       "trace has " & $t.numSamples, t.offset, r.loc(t.index, t.channelSet, "trace.numSamples"))
-  r.input.readInto(t.samples, dataBytes(rec.format, t.numSamples))
+  let nbytes = dataBytes(rec.format, t.numSamples)
+  if int64(nbytes) > r.maxTraceBytes:
+    raiseUnlocatable(dcBadValue, "trace of " & $t.numSamples & " samples (" & $nbytes &
+      " bytes) exceeds maxTraceBytes; the sample count is probably corrupt", t.offset)
+  r.input.readInto(t.samples, nbytes)
   inc r.tracesRead
 
 proc readRev3Trailer(r: var SegdReader) =
@@ -485,20 +528,25 @@ proc readRev3Trailer(r: var SegdReader) =
   if n == 0: return
   r.alignToBlock()
   if n != 0xFFFF_FFFF'u32:
-    rec.trailerBytes = r.readBytes(32 * int64(n))
+    rec.trailerBytes = r.readArea(32 * int64(n), "trailer")
   elif rec.gh3.recordSize > rec.gh3.dataSize and rec.gh3.dataSize > 0:
-    rec.trailerBytes = r.readBytes(int64(rec.gh3.recordSize - rec.gh3.dataSize))
+    let diff = rec.gh3.recordSize - rec.gh3.dataSize
+    if diff > uint64(high(int64) div 2):
+      raiseUnlocatable(dcBadValue, "General Header #3 sizes give a trailer of " & $diff &
+        " bytes; the record end cannot be located", r.input.offset)
+    rec.trailerBytes = r.readArea(int64(diff), "trailer")
   else:
     var desc: array[SegdBlockSize, byte]
     var going = true
     while going:
       let got = r.input.readAvail(desc)
-      if got == SegdBlockSize and desc[31] == BtTrailerDescription:
+      # A description block: type 0x70, binary/ASCII flag 1 or 2, bytes 3-4
+      # zero (so a following record's GH#1 with EX = 70 is not taken).
+      if got == SegdBlockSize and desc[31] == BtTrailerDescription and desc[1] in {1'u8, 2} and
+          desc[2] == 0 and desc[3] == 0:
         rec.trailerBytes.add desc
         let d = decodeRev3[SegdTrailerDescription](desc)
-        var data: seq[byte]
-        r.input.readInto(data, 32 * int64(d.blockSize))
-        rec.trailerBytes.add data
+        rec.trailerBytes.add r.readArea(32 * int64(d.blockSize), "trailer")
       else:
         r.input.unread(desc.toOpenArray(0, got - 1))
         going = false
@@ -564,10 +612,13 @@ proc nextRecord*(r: var SegdReader): bool =
       if n < 0 or n > 10_000_000:
         raiseUnlocatable(dcBadValue, "the Table of Contents entry count is unreadable", r.input.offset)
       var entries: seq[byte]
-      r.input.readInto(entries, int64(n) * TocEntrySize)
+      if int64(n) * TocEntrySize > r.maxHeaderBytes:
+        discard r.readArea(int64(n) * TocEntrySize, "toc") # skipped; header kept
+      else:
+        r.input.readInto(entries, int64(n) * TocEntrySize)
       head.add entries
       r.toc.add decodeToc(head)
-      if r.byteStream: discard else: discard r.input.skipRecordRest()
+      if r.byteStream: r.skipFixedPadding() else: discard r.input.skipRecordRest()
     if not ok:
       r.stop()
       return false

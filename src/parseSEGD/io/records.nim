@@ -154,6 +154,10 @@ proc offset*(c: RecordCursor): int64 =
   ## images).
   if c.pos < c.buf.len: c.src.dataOffset + c.pos else: c.src.offset
 
+proc remainingInRecord*(c: RecordCursor): int {.inline.} =
+  ## Unread bytes left in the current physical record (0 at a record start).
+  max(0, c.buf.len - c.pos)
+
 proc atRecordStart*(c: RecordCursor): bool {.inline.} =
   ## True if the next byte starts a physical record.
   c.pos == 0 or c.pos >= c.buf.len
