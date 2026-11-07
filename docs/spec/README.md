@@ -8,7 +8,7 @@ the verification sections (facts checked against real files) override everything
 | Note | Standard | Status |
 |---|---|---|
 | `segy_rev1.md` | SEG-Y Rev 1.0 (also covers Rev 0) | verified on `Sweep0.sgy` (Rev 0, LE) |
-| `segy_rev2_1.md` | SEG-Y Rev 2.1, delta on Rev 1 | task 1.6, verified on the Inglewood sample |
+| `segy_rev2_1.md` | SEG-Y Rev 2.1, delta on Rev 1 | verified: the Inglewood walk tiles all 1,982,000 bytes |
 | `segd_rev2_1.md` | SEG-D Rev 2.1 | layout verified via 2.0 sample |
 | `segd_rev2_0_delta.md` | SEG-D Rev 2.0, delta on 2.1 | **verified byte-for-byte on `63.sgd`** |
 | `segd_rev3_0_a.md` | SEG-D 3.0: structure, label, TOC, layouts, sample formats, 3.0-vs-2.1 changes | sizes verified |

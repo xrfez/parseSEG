@@ -123,7 +123,7 @@ writers validate before emitting.
       (`docs/spec/segd_rev2_0_delta.md`) by decoding `63.sgd` header by header. Check the
       3.0 header-size formula against the 3.0 sample. Add leap seconds 2015/2017. Resolve AMBIGUITY items (2.1: pages 14-17 and 61 are image-only figures;
       render them with `pdftoppm -f N -l N -r 80 -png` and view only those pages) and write `docs/spec/README.md` (index plus a cross-format summary)
-- [ ] 1.6 `docs/spec/segy_rev2_1.md` (subagent): SEG-Y Rev 2.1 as a **delta on segy_rev1.md**
+- [x] 1.6 `docs/spec/segy_rev2_1.md` (subagent): SEG-Y Rev 2.1 as a **delta on segy_rev1.md**
       (text: `seg_y_rev2_1-oct2023.txt` plus `seg-y_rev2-1_clarification_2025-05-01.txt`; skip
       the superseded Rev 2.0 doc). It must cover the byte-order marker (3297-3300), extended
       text count −1, additional trace headers, data trailers, and new formats.
@@ -183,3 +183,4 @@ writers validate before emitting.
 - 2026-11-07: Owner priorities were recorded: SEG-D 2.0 is the most important; one data model for all revisions; byte-order option on write; extended/user blocks are first-class; tape low priority; 1-trace fixture from the 65 MB file.
 - 2026-11-07: The owner asked for the SEG-D 2.0 PDF to be extracted, but the PDF is not in the workspace yet. Task 1.6b was added (blocked).
 - 2026-11-07: The SEG-D Rev 2 PDF (Dec 1996, manufacturer list rev. Jan 2006) was added, extracted and committed. A subagent is writing segd_rev2_0.md.
+- 2026-11-07: Task 1.6 done: segy_rev2_1.md (904 lines, delta on rev1). The Inglewood walk tiles exactly (103 ext. text records incl. a binary PNG stanza, 200 traces). Gotcha: rev 2.0 uses 3507-3510 as one u32, so branch on the revision. The walk scripts are kept in tools/walks/.
