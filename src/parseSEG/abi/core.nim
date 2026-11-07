@@ -24,9 +24,11 @@ import ../convert
 import ../segd/[revconvert, reader as segdreader]
 import ../common/endians
 import ../segy/[textheader, binheader]
+import ../survey/[sps, p1, join]
+import std/[tables, math]
 
 export errors, diagnostics, traceindex, keys, gathers, prefetch, headerfields, edit, convert,
-  endians, textheader, binheader, revconvert, segdreader
+  endians, textheader, binheader, revconvert, segdreader, join
 
 const
   AbiVersion* = 1'i32 ## `SEG_ABI_VERSION`; bump on any incompatible C change.
@@ -82,7 +84,8 @@ type
     log*: LogObj
 
   GeometryObj* = ref object
-    g*: GeometryTable
+    s*: SurveyGeometry ## Station coordinates and SPS relations.
+    names*: LineNames  ## How text line names become numbers.
 
   # DLPack v0.8 (dlpack.h), unversioned `DLManagedTensor`.
   DLDevice* {.bycopy.} = object
@@ -351,15 +354,54 @@ proc checkIndex(index: int32): int16 =
   int16(index)
 
 proc addSource*(go: GeometryObj, line, point: float64, index: int32, x, y, z: float64) =
-  go.g.addSource(line, point, checkIndex(index), x, y, z)
+  go.s.table.addSource(line, point, checkIndex(index), x, y, z)
 
 proc addReceiver*(go: GeometryObj, line, point: float64, index: int32, x, y, z: float64) =
-  go.g.addReceiver(line, point, checkIndex(index), x, y, z)
+  go.s.table.addReceiver(line, point, checkIndex(index), x, y, z)
+
+proc mapLine*(go: GeometryObj, name: string, line: float64) =
+  ## Maps a text line name (SPS 1.0, P1) to a line number, for later loads.
+  if name.len == 0: raiseArg("empty line name")
+  if line.isNaN: raiseArg("line number is NaN")
+  go.names.names[name] = line
+
+proc setSurveyOptions*(go: GeometryObj, trailingDigits, multiComponent: bool) =
+  go.names.trailingDigits = trailingDigits
+  go.s.multiComponent = multiComponent
+
+proc checkSurveyLog(log: DiagLog) =
+  if log.isFatal: raise newException(IOError, log[log.len - 1].msg)
+
+proc loadSps*(go: GeometryObj, path: string): DiagLog =
+  ## Adds an SPS file's stations and relations; returns the reader's and the
+  ## join's diagnostics. Raises `IOError` when the file cannot be read.
+  let f = readSps(path)
+  checkSurveyLog(f.log)
+  result = f.log
+  let before = go.s.log.len
+  go.s.addSps(f, go.names)
+  for i in before..<go.s.log.len: result.add go.s.log[i]
+
+proc loadP1*(go: GeometryObj, path: string, gridDecimals, depthDecimals: int,
+    elevation: bool): DiagLog =
+  ## Adds a P1 file's shotpoints as sources; see `loadSps`.
+  if gridDecimals notin 0..8 or depthDecimals notin 0..8: raiseArg("decimals must be 0-8")
+  let f = readP1(path, P1Options(gridDecimals: gridDecimals, depthDecimals: depthDecimals))
+  checkSurveyLog(f.log)
+  result = f.log
+  let before = go.s.log.len
+  go.s.addP1(f, go.names, elevation)
+  for i in before..<go.s.log.len: result.add go.s.log[i]
+
+proc surveyCounts*(go: GeometryObj): (int64, int64, int64) =
+  ## Sources, receivers and relation runs held.
+  (int64(go.s.table.sources.len), int64(go.s.table.receivers.len), int64(go.s.relationCount))
 
 proc applyGeometry*(fo: FileObj, go: GeometryObj, overwrite: bool, how: string): int64 =
-  ## Fills the keys from `go`; returns the traces updated.
+  ## Fills the keys from `go` (stations from relations, then coordinates);
+  ## returns the traces updated.
   fo.requireKeys(how)
-  result = int64(fo.f.index.applyGeometry(go.g, overwrite))
+  result = int64(fo.f.index.applySurvey(go.s, overwrite))
   fo.gathersDone = false # sources and receivers may now be told apart
 
 # --------------------------------------------------------------- prefetch --

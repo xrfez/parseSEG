@@ -5,7 +5,7 @@
 ## Exit status: 0 success; 1 the command ran but reported errors (an error or
 ## fatal diagnostic); 2 a usage error.
 
-import std/[os, strutils, sequtils]
+import std/[os, strutils, sequtils, tables, math]
 import ../parseSEG
 
 const
@@ -16,7 +16,7 @@ parseSEG """ & Version & """ — read, index, edit and convert SEG-Y and SEG-D
 Usage: parseSEG <command> [options] <arguments>
 
 Inspecting
-  info <file> [--keys]          what the file is: standard, revision, format,
+  info <file> [--keys] [SURVEY] what the file is: standard, revision, format,
                                 records, traces, samples, gathers, diagnostics
   dump <file> [--traces=SEL] [--fields=a,b,...] [--all]
                                 trace headers as a table (SEL: 5 | 0..9 | 1,4,7);
@@ -25,6 +25,24 @@ Inspecting
                                 every field of every block
   diag <file> [--nif] [--min=info|warning|error|fatal]
                                 the diagnostics of indexing the file
+  keys <file> [--traces=SEL] [SURVEY]
+                                per-trace geometry: record, channel, source
+                                and receiver stations and coordinates, offset
+
+Survey files (SPS 1.0/2.1, SEG P1 1983; docs/spec/sps.md, p1_p2_p3.md)
+  SURVEY options join survey geometry to the traces (info, keys):
+    --sps=F[,F...]              SPS R/S/X files: stations, and X relations
+                                (field record + channel -> stations)
+    --p1=F[,F...]               SEG P1 shotpoints (sources)
+    --decimals=G,D              P1 implicit decimals: grid, depth/elevation
+    --elevation                 P1 columns 62-66 are elevation (else depth)
+    --line-map=NAME=N[,...]     text line names -> line numbers
+    --trailing-digits           unmapped names use their trailing digits
+    --multi-component           SPS channel increment k: k components/station
+    --overwrite                 replace stations and coordinates already known
+  survey <file> [-o out] [--rev=1.0|2.1] [--decimals=G,D]
+                                summary and diagnostics of an SPS or P1 file;
+                                with -o, write it back (SPS: in revision --rev)
 
 Converting
   convert <src> <dst> [--to=segy|segd] [--rev=R] [--format=N]
@@ -72,10 +90,13 @@ type Args = object
   opts: seq[(string, string)]
 
 const ValueOptions = ["o", "out", "journal", "traces", "fields", "rev", "format", "to",
-  "byte-order", "text", "min", "map", "name"]
+  "byte-order", "text", "min", "map", "name", "sps", "p1", "decimals", "line-map"]
 
 const Flags = ["force", "keys", "all", "nif", "descale", "no-station-header", "fields-only", "dry-run",
-  "help", "h"]
+  "help", "h", "elevation", "trailing-digits", "multi-component", "overwrite"]
+
+const SurveyOptions = ["sps", "p1", "decimals", "line-map", "elevation", "trailing-digits",
+  "multi-component", "overwrite"]
 
 proc parseArgs(args: seq[string]): Args =
   ## `--key=value`, `--key:value` or `--key value` (and `-o value`) for value
@@ -169,11 +190,60 @@ func formatName(f: SampleFormat): string =
     of sfFloat64: "IEEE float64"
     else: ($f)[2..^1].toLowerAscii) & ")"
 
+proc parseDecimals(a: Args): (int, int) =
+  result = (0, 0)
+  if a.has("decimals"):
+    let parts = a.get("decimals").split(',')
+    if parts.len != 2: usage("--decimals needs G,D (e.g. 1,1)")
+    result = (parseIntOpt(parts[0], "decimals"), parseIntOpt(parts[1], "decimals"))
+    if result[0] notin 0..8 or result[1] notin 0..8: usage("--decimals must be 0-8")
+
+proc wantsSurvey(a: Args): bool =
+  ## Whether survey files are to be joined; their options need one.
+  result = a.has("sps") or a.has("p1")
+  if not result:
+    for o in SurveyOptions:
+      if a.has(o): usage("--" & o & " needs --sps or --p1")
+
+proc loadSurvey(a: Args, log: var DiagLog): SurveyGeometry =
+  ## The survey geometry named by the SURVEY options.
+  var names = LineNames(trailingDigits: a.has("trailing-digits"))
+  if a.has("line-map"):
+    for item in a.get("line-map").split(','):
+      let kv = item.split('=')
+      if kv.len != 2 or kv[0].strip.len == 0: usage("--line-map needs NAME=N[,NAME=N...]")
+      try: names.names[kv[0].strip] = parseFloat(kv[1].strip)
+      except ValueError: usage("--line-map: '" & kv[1] & "' is not a number")
+  result.multiComponent = a.has("multi-component")
+  let (grid, depth) = parseDecimals(a)
+  for path in a.get("sps").split(','):
+    if path.len > 0:
+      checkInput(path)
+      let f = readSps(path)
+      log.add f.log
+      result.addSps(f, names)
+  for path in a.get("p1").split(','):
+    if path.len > 0:
+      checkInput(path)
+      let f = readP1(path, P1Options(gridDecimals: grid, depthDecimals: depth))
+      log.add f.log
+      result.addP1(f, names, a.has("elevation"))
+  log.add result.log
+
+proc joinSurvey(a: Args, f: var SeismicFile): DiagLog =
+  ## Joins the SURVEY options' geometry to `f` (opened with keys) and prints
+  ## what was joined.
+  let g = loadSurvey(a, result)
+  let n = f.index.applySurvey(g, a.has("overwrite"))
+  echo "survey:      ", g.table.sources.len, " sources, ", g.table.receivers.len,
+    " receivers, ", g.relationCount, " relation runs; ", n, " traces updated"
+
 proc info(a: Args): int =
-  a.onlyOptions(["keys"])
+  a.onlyOptions(@["keys"] & @SurveyOptions)
   a.needArgs(1, "info <file>")
-  var f = openFile(a.pos[0], keys = a.has("keys"))
+  var f = openFile(a.pos[0], keys = a.has("keys") or a.wantsSurvey)
   defer: f.close()
+  let surveyLog = if a.wantsSurvey: joinSurvey(a, f) else: DiagLog()
   let ix = f.index
   echo "file:        ", a.pos[0], " (", getFileSize(a.pos[0]), " bytes)"
   if f.kind == skSegy:
@@ -213,7 +283,11 @@ proc info(a: Args): int =
   echo "diagnostics: ", ix.log.count(sevFatal), " fatal, ", ix.log.count(sevError), " error, ",
     ix.log.count(sevWarning), " warning, ", ix.log.count(sevInfo), " info"
   printLog(ix.log, sevError)
-  if ix.log.failed: 1 else: 0
+  printLog(surveyLog, sevWarning)
+  if ix.log.failed or surveyLog.failed: 1 else: 0
+
+proc keysCmd(a: Args): int
+proc surveyCmd(a: Args): int
 
 # ------------------------------------------------------------------- dump --
 
@@ -649,6 +723,83 @@ proc vendormap(a: Args): int =
     result = if log.failed: 1 else: 0
   else: usage("expected vendormap check|list|apply|scaffold")
 
+# ------------------------------------------------------------ keys, survey --
+
+proc fmtNum(v: float64): string =
+  if v.isNaN: "-" elif v == round(v) and abs(v) < 1e15: $int64(v) else: formatFloat(v, ffDecimal, 2)
+
+proc keysCmd(a: Args): int =
+  a.onlyOptions(@["traces"] & @SurveyOptions)
+  a.needArgs(1, "keys <file>")
+  var f = openFile(a.pos[0], keys = true)
+  defer: f.close()
+  let surveyLog = if a.wantsSurvey: joinSurvey(a, f) else: DiagLog()
+  let sel = parseSelection(a.get("traces", "0.." & $(min(f.len, 10) - 1)), f.len)
+  echo ["trace", "record", "channel", "srcLine", "srcPoint", "srcX", "srcY", "rcvLine",
+    "rcvPoint", "rcvX", "rcvY", "offset"].join("\t")
+  for i in sel:
+    let k = f.index.keys[i]
+    echo [$i, fmtNum(k.record), fmtNum(k.channel), fmtNum(k.srcLine), fmtNum(k.srcPoint),
+      fmtNum(k.srcX), fmtNum(k.srcY), fmtNum(k.rcvLine), fmtNum(k.rcvPoint), fmtNum(k.rcvX),
+      fmtNum(k.rcvY), fmtNum(k.offset)].join("\t")
+  printLog(f.index.log, sevError)
+  printLog(surveyLog, sevWarning)
+  if f.index.log.failed or surveyLog.failed: 1 else: 0
+
+proc isSps(path: string): bool =
+  ## SPS data records start with R, S, X or C; P1 data records with a blank.
+  result = false
+  var n = 0
+  for line in lines(path):
+    if line.len > 0 and line[0] in {'R', 'S', 'X', 'C'}: return true
+    if line.len > 0 and line[0] == ' ' and line.strip.len > 0: return false
+    inc n
+    if n > 2000: break
+
+proc surveyCmd(a: Args): int =
+  a.onlyOptions(["o", "out", "rev", "decimals"])
+  a.needArgs(1, "survey <file>")
+  let path = a.pos[0]
+  checkInput(path)
+  let output = a.get("o", a.get("out"))
+  if output.len > 0: refuseSame(output, path)
+  var rev = spsAuto
+  case a.get("rev")
+  of "": discard
+  of "1.0", "1": rev = sps10
+  of "2.1": rev = sps21
+  else: usage("--rev must be 1.0 or 2.1")
+  var log: DiagLog
+  if isSps(path):
+    let f = readSps(path)
+    log.add f.log
+    var kinds: array['A'..'Z', int]
+    for p in f.points: inc kinds[p.kind]
+    echo "file:        ", path
+    echo "standard:    SPS ", f.revision, (if f.revisionDeclared: " (H00)" else: " (from the columns)"),
+      ", ", f.layout, (if f.crlf: ", CR LF" else: "")
+    echo "records:     ", f.headers.len, " H, ", kinds['S'], " S, ", kinds['R'], " R, ",
+      f.relations.len, " X, ", f.comments.len, " C"
+    if output.len > 0:
+      log.add writeSps(f, output, SpsWriteOptions(revision: rev))
+  else:
+    if a.has("rev"): usage("--rev applies to SPS files only")
+    let (grid, depth) = parseDecimals(a)
+    let opts = P1Options(gridDecimals: grid, depthDecimals: depth)
+    let f = readP1(path, opts)
+    log.add f.log
+    echo "file:        ", path
+    echo "standard:    SEG positional exchange (1983), ", f.layout
+    for i, lf in f.files:
+      echo "file ", i, ":      ", lf.format, ", ", lf.header.len, " header records, ",
+        lf.records.len, " data records"
+    if output.len > 0:
+      log.add writeP1(f, output, P1WriteOptions(decimals: opts))
+  echo "diagnostics: ", log.count(sevFatal), " fatal, ", log.count(sevError), " error, ",
+    log.count(sevWarning), " warning, ", log.count(sevInfo), " info"
+  printLog(log, sevWarning)
+  if log.failed: 1 else: 0
+
 # ------------------------------------------------------------------- main --
 
 proc run*(args: seq[string]): int =
@@ -671,6 +822,8 @@ proc run*(args: seq[string]): int =
     of "info": info(a)
     of "dump": dump(a)
     of "diag": diag(a)
+    of "keys": keysCmd(a)
+    of "survey": surveyCmd(a)
     of "convert": convertCmd(a)
     of "edit": edit(a)
     of "headers": headers(a)

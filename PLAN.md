@@ -396,11 +396,11 @@ Tasks:
 Text formats, so no sample files are needed (owner, 2026-11-07; real samples will follow later).
 - [x] 10.1 Specs ingested: SPS 1993 + Rev 2.1 and SEG P1/P2/P3 (1983) extracted and distilled
       (task 1.9). P1/90, P1/11 and SPS 3.0 are not available; add them if the owner finds them.
-- [ ] 10.2 Readers and writers into a survey model (`src/parseSEG/survey/`): SPS S/R/X + H
+- [x] 10.2 Readers and writers into a survey model (`src/parseSEG/survey/`): SPS S/R/X + H
       records (both revisions, revision detected from the content), P1 (and P2/P3 records
       kept as typed or raw records), with diagnostics like the seismic readers; column-exact
       writers that round-trip; synthetic tests built from the spec examples.
-- [ ] 10.3 Join survey geometry to traces (the 8.5 hook): build a `GeometryTable` from SPS/P1;
+- [x] 10.3 Join survey geometry to traces (the 8.5 hook): build a `GeometryTable` from SPS/P1;
       apply SPS X (relation) records to traces that lack receiver stations (field record +
       channel → receiver and source station), then fill `TraceKeys` coordinates, offsets and
       midpoints, especially for SEG-D 2.x, which has no coordinates in its headers. Exposed in
@@ -698,4 +698,22 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
     - SEG-Y 2.0 differs from 2.1 only in bytes 3507-3510. Our reader treats revision bytes `00 02` as Rev 0.
     - The SEG-D Rev 0 text mis-cites itself as 1975; it is c. 1980.
     - The 1983 positional document defines P1-P4, where P3 is land survey observations and P4 is Transit Doppler. Only P1 carries joinable positions.
+- 2026-11-07: Tasks 10.2 and 10.3 done: survey files, in `src/parseSEG/survey/` (umbrella).
+  - `textrec`: card-image records from LF/CRLF lines, fixed 80-byte ASCII, or EBCDIC, streamed. FORTRAN `Iw`/`Fw.d` fields (implicit decimals unless a `.` is written).
+  - `sps`: `readSps`/`writeSps` for Rev 1.0 and 2.1 (H/R/S/X/C).
+    - The revision comes from H00, else a column-layout vote.
+    - Every record keeps its raw text, so unchanged records are written back byte for byte (CR LF kept). Edited records are re-encoded.
+    - 1.0 ↔ 2.1 conversion is lossless where values fit. A value that doesn't fit is an error and nothing is written, unless `lenient`.
+    - Decisions (sps.md §11): F10.2 without a `.` is an integer, with `strictImpliedDecimals` as an option; 1.0 names stay text plus a numeric value when they are numbers.
+  - `p1`: `readP1`/`writeP1` for 1983 P1 (decoded: DMS or grads, hemispheres, implicit-decimal grid and depth, 2-digit years pivoted at 50). P2-P4 are detected and kept raw. Header blocks are padded to 20 on write.
+  - `join`: `SurveyGeometry` with `addSps`/`addP1`, `relation(record, channel)` and `applySurvey(keys or index)`.
+    - X records are kept as runs and receivers are interpolated, ascending or descending. `multiComponent` makes an increment k mean k components per station. An optional `tape` filter selects X records; overlapping runs get a warning.
+    - Text line names go through `LineNames` (a map, then optional trailing digits).
+    - P1 reshoot codes become point indices (blank 0, A 2, B 3, ...).
+  - `TraceKeys.channel` (SEG-Y bytes 13-16, SEG-D trace number) carries the join.
+  - Station keys are rounded to 1/100, and a trace without a point index also matches index 1.
+  - C: `seg_geometry_load_sps|load_p1|map_line|set_options|counts`. `seg_file_apply_geometry` applies relations too.
+  - Python: `Geometry.load_sps|load_p1|map_line|set_options|counts`.
+  - CLI: `survey <file> [-o] [--rev]`, `keys <file> [--traces]`, and SURVEY options on `info`/`keys` (`--sps`, `--p1`, `--decimals`, `--elevation`, `--line-map`, `--trailing-digits`, `--multi-component`, `--overwrite`).
+  - Tests: `tests/tsurvey.nim` (records rebuilt at exact columns from the spec examples), plus survey blocks in abi_test, test_pyapi and tcli.
 

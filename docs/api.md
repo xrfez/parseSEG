@@ -53,6 +53,26 @@ unknown; `traces`; `sources`; `receivers`), derived from the geometry, never ass
 `classify(index, range)`. `componentGroups(index, range)` returns a `ComponentGroup`
 (station, traces, components) per station and source; see `isMultiComponent`.
 
+## Survey files and external geometry (Phase 10)
+SPS (Rev 1.0, 2.1) and SEG P1 (1983) give the coordinates that SEG-D 2.x headers lack, and SPS
+X records name the stations each channel was recorded from. Spec notes: `docs/spec/sps.md`,
+`docs/spec/p1_p2_p3.md`.
+
+| Proc | What |
+|---|---|
+| `readSps(path or stream, SpsOptions)`, `parseSps(text)` → `SpsFile` | H, R/S (`points`), X (`relations`) and C records; revision from H00 or the columns. Every record keeps its raw text. |
+| `writeSps(f, path or stream, SpsWriteOptions(revision, lineEnding, lenient))`, `spsText(f)` | Column-exact; unchanged records byte for byte; 1.0 ↔ 2.1. A value that does not fit is an error and nothing is written (unless `lenient`). |
+| `readP1(path or stream, P1Options(gridDecimals, depthDecimals, angleUnit))`, `parseP1` → `P1File` | Logical files (`files`), each with its header text and records; P1 decoded, P2-P4 kept raw. |
+| `writeP1(f, path or stream, P1WriteOptions)`, `p1Text(f)` | Header blocks padded to 20 records; unchanged records byte for byte. |
+| `SurveyGeometry`: `addSps(g, sps, LineNames)`, `addP1(g, p1, LineNames, elevation)`, `relation(g, record, channel, rel)` | Station coordinates (`table`) and relation runs. `LineNames` maps text line names (`names`, `trailingDigits`). `multiComponent`, `tape` refine X records. |
+| `applySurvey(keys or index, g, overwrite = false)` | Stations from relations (on `TraceKeys.record` and `.channel`), then coordinates, offset, midpoint. |
+| `GeometryTable`, `addSource`/`addReceiver`, `applyGeometry` | The coordinate table alone (a host's database). Keys are rounded to 1/100; a trace without a point index also matches index 1. |
+
+C: `seg_geometry_load_sps`, `seg_geometry_load_p1`, `seg_geometry_map_line`,
+`seg_geometry_set_options`, `seg_geometry_counts`, then `seg_file_apply_geometry`. Python:
+`Geometry.load_sps`, `load_p1`, `map_line`, `set_options`, `counts`, then
+`SeismicFile.apply_geometry`.
+
 ## In-place edits
 `openEditor(path, journal)` and `setField(trace, "trace.<f>", v)` / `setField("binary.<f>", v)`
 / `setRecordField(record, "gh1.<f>", v)`, then `close`. Field names are as above. Edits are

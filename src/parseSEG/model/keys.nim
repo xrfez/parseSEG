@@ -219,21 +219,32 @@ func hash*(k: StationKey): Hash =
 func `==`*(a, b: StationKey): bool =
   a.line == b.line and a.point == b.point and a.index == b.index
 
+func stationKey*(line, point: float64, index: int16): StationKey =
+  ## The table key of a station. Line and point are rounded to 1/100, the
+  ## resolution of survey files (SPS F10.2), so values decoded from binary
+  ## fractions (SEG-D) match the same station.
+  StationKey(line: round(line * 100) / 100, point: round(point * 100) / 100, index: index)
+
 proc addSource*(g: var GeometryTable, line, point: float64, index: int16, x, y: float64,
     z = NaN) =
   ## Adds or replaces a source station; `index` 0 matches any point index.
-  g.sources[StationKey(line: line, point: point, index: index)] = Coordinates(x: x, y: y, z: z)
+  g.sources[stationKey(line, point, index)] = Coordinates(x: x, y: y, z: z)
 
 proc addReceiver*(g: var GeometryTable, line, point: float64, index: int16, x, y: float64,
     z = NaN) =
   ## Adds or replaces a receiver station; `index` 0 matches any point index.
-  g.receivers[StationKey(line: line, point: point, index: index)] = Coordinates(x: x, y: y, z: z)
+  g.receivers[stationKey(line, point, index)] = Coordinates(x: x, y: y, z: z)
 
 proc lookup(t: Table[StationKey, Coordinates], line, point: float64, index: int16,
     c: var Coordinates): bool =
+  ## Tries the exact station, then an entry for any index (0). A trace with
+  ## no index (0) also matches index 1: survey files number the original
+  ## position 1 and never write 0.
   if line.isNaN or point.isNaN: return false
-  for key in [StationKey(line: line, point: point, index: index),
-      StationKey(line: line, point: point, index: 0)]:
+  let keys = [stationKey(line, point, index), stationKey(line, point, 0),
+    stationKey(line, point, 1)]
+  for i in 0 .. (if index == 0: 2 else: 1):
+    let key = keys[i]
     if key in t:
       c = t[key]
       return true

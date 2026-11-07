@@ -358,7 +358,34 @@ SegStatus seg_geometry_add_receiver(SegGeometry *geometry, double line, double p
                                     int32_t index, double x, double y, double z);
 void seg_geometry_release(SegGeometry *geometry);
 
-/* Fills each trace's unknown source and receiver coordinates (all of them
+/* Survey files (docs/spec/sps.md, docs/spec/p1_p2_p3.md). Each load adds to
+   the geometry and returns SEG_OK unless the file cannot be read
+   (SEG_ERR_IO); per-record problems are in `*log` (may be NULL; release it
+   with seg_log_release).
+   - SPS (Rev 1.0 or 2.1, detected): R and S records become receiver and
+     source stations (x, y = easting, northing in the file's grid units,
+     z = surface elevation); X records map (field record, channel) to the
+     stations, so traces without station numbers in their headers (SEG-D
+     2.x) get them, matched on SegTraceKeys.record and .channel.
+   - SEG P1 (1983): shotpoints become sources; the reshoot code is the point
+     index (blank = any, A = 2, B = 3, ...). Grid and depth/elevation fields
+     have `grid_decimals` / `depth_decimals` implicit decimals (0-8, from the
+     file's header); columns 62-66 are z only when `elevation` is nonzero.
+   Line names that are not numbers are skipped unless mapped first with
+   seg_geometry_map_line, or SEG_SURVEY_TRAILING_DIGITS is set. */
+#define SEG_SURVEY_TRAILING_DIGITS 1u /* line "CLT4960" -> 4960 when unmapped */
+#define SEG_SURVEY_MULTI_COMPONENT 2u /* SPS channel increment k > 1: k components per station */
+SegStatus seg_geometry_load_sps(SegGeometry *geometry, const char *path, SegLog **log);
+SegStatus seg_geometry_load_p1(SegGeometry *geometry, const char *path, int32_t grid_decimals,
+                               int32_t depth_decimals, int32_t elevation, SegLog **log);
+SegStatus seg_geometry_map_line(SegGeometry *geometry, const char *name, double line);
+SegStatus seg_geometry_set_options(SegGeometry *geometry, uint32_t flags);
+/* Sources, receivers and SPS relation runs held (each pointer may be NULL). */
+SegStatus seg_geometry_counts(const SegGeometry *geometry, int64_t *sources,
+                              int64_t *receivers, int64_t *relations);
+
+/* Fills each trace's source and receiver stations from SPS relations, then
+   its unknown source and receiver coordinates (all of them
    if `overwrite`), then its offset and midpoint, and refreshes the gathers.
    `updated` (may be NULL) receives the number of traces changed. */
 SegStatus seg_file_apply_geometry(SegFile *file, const SegGeometry *geometry,

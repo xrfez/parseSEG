@@ -221,6 +221,34 @@ static void test_gathers_and_prefetch(void) {
     CHECK(updated == 1);
     OK(seg_file_trace_keys(f, 0, &k));
     CHECK(k.offset == 500 && k.cmp_y == 2200 && k.rcv_z == 7 && isnan(k.src_z));
+    CHECK(k.record == 63 && k.channel == 1);
+    seg_geometry_release(geo);
+
+    /* Survey files: an SPS relation (record 63, channel 1) names the stations. */
+    const char *sps_text =
+        "H00 SPS format version number   SPS 2.1;\n"
+        "R     10.00    101.00  1G1                     500100.0 6000000.0  12.5 18213250\n"
+        "S     20.00    205.00  1V6                     500000.0 6000400.0  10.0 19001150\n"
+        "XT1          6311     20.00    205.001    1    11     10.00    101.00    101.001\n";
+    FILE *fh = fopen(path(tmp, "t.sps"), "w");
+    fputs(sps_text, fh);
+    fclose(fh);
+    OK(seg_geometry_new(&geo));
+    SegLog *slog = NULL;
+    OK(seg_geometry_load_sps(geo, path(tmp, "t.sps"), &slog));
+    CHECK(slog != NULL && seg_log_count(slog) == 0);
+    seg_log_release(slog);
+    int64_t ns = -1, nr = -1, nx = -1;
+    OK(seg_geometry_counts(geo, &ns, &nr, &nx));
+    CHECK(ns == 1 && nr == 1 && nx == 1);
+    CHECK(seg_geometry_load_sps(geo, path(tmp, "missing.sps"), NULL) == SEG_ERR_IO);
+    CHECK(seg_geometry_set_options(geo, 4) == SEG_ERR_ARGUMENT);
+    OK(seg_geometry_map_line(geo, "LINE A", 7));
+    OK(seg_file_apply_geometry(f, geo, 1, &updated));
+    CHECK(updated == 1);
+    OK(seg_file_trace_keys(f, 0, &k));
+    CHECK(k.src_point == 205 && k.rcv_point == 101 && k.rcv_x == 500100 && k.offset > 412.3 &&
+          k.offset < 412.4);
     seg_geometry_release(geo);
     seg_file_release(f);
 

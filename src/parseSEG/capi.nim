@@ -403,6 +403,53 @@ proc segGeometryAddReceiver(g: pointer, line, point: float64, index: int32,
       handle[GeometryObj](g).addReceiver(line, point, index, x, y, z)
       SEG_OK
 
+proc surveyCall(g: pointer, path: cstring, outLog: ptr pointer,
+    load: proc (go: GeometryObj, path: string): DiagLog): SegStatus =
+  guarded:
+    if outLog != nil: outLog[] = nil
+    if g == nil or path == nil: fail(SEG_ERR_ARGUMENT, "geometry and path must not be NULL")
+    else:
+      let log = load(handle[GeometryObj](g), $path)
+      if outLog != nil: outLog[] = keep(LogObj(log: log, owned: true))
+      SEG_OK
+
+proc segGeometryLoadSps(g: pointer, path: cstring, outLog: ptr pointer): SegStatus {.
+    segExport: "seg_geometry_load_sps".} =
+  surveyCall(g, path, outLog, proc (go: GeometryObj, p: string): DiagLog = go.loadSps(p))
+
+proc segGeometryLoadP1(g: pointer, path: cstring, gridDecimals, depthDecimals,
+    elevation: int32, outLog: ptr pointer): SegStatus {.segExport: "seg_geometry_load_p1".} =
+  surveyCall(g, path, outLog, proc (go: GeometryObj, p: string): DiagLog =
+    go.loadP1(p, int(gridDecimals), int(depthDecimals), elevation != 0))
+
+proc segGeometryMapLine(g: pointer, name: cstring, line: float64): SegStatus {.
+    segExport: "seg_geometry_map_line".} =
+  guarded:
+    if g == nil or name == nil: fail(SEG_ERR_ARGUMENT, "NULL argument")
+    else:
+      handle[GeometryObj](g).mapLine($name, line)
+      SEG_OK
+
+proc segGeometrySetOptions(g: pointer, flags: uint32): SegStatus {.
+    segExport: "seg_geometry_set_options".} =
+  guarded:
+    if g == nil: fail(SEG_ERR_ARGUMENT, "NULL geometry")
+    elif (flags and not 3'u32) != 0: fail(SEG_ERR_ARGUMENT, "unknown flags")
+    else:
+      handle[GeometryObj](g).setSurveyOptions((flags and 1) != 0, (flags and 2) != 0)
+      SEG_OK
+
+proc segGeometryCounts(g: pointer, sources, receivers, relations: ptr int64): SegStatus {.
+    segExport: "seg_geometry_counts".} =
+  guarded:
+    if g == nil: fail(SEG_ERR_ARGUMENT, "NULL geometry")
+    else:
+      let (s, r, x) = handle[GeometryObj](g).surveyCounts
+      if sources != nil: sources[] = s
+      if receivers != nil: receivers[] = r
+      if relations != nil: relations[] = x
+      SEG_OK
+
 proc segGeometryRelease(g: pointer) {.segExport: "seg_geometry_release".} =
   try:
     if g != nil: GC_unref(handle[GeometryObj](g))

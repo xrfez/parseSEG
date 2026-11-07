@@ -1,4 +1,5 @@
-## parseSEG: read and write SEG-Y and SEG-D seismic data on disk and tape.
+## parseSEG: read and write SEG-Y and SEG-D seismic data on disk and tape,
+## and the SPS and SEG P1 survey files that give it geometry.
 ##
 ## This umbrella module re-exports the stable public API; `docs/api.md`
 ## lists it. The low-level byte codecs (BCD, IBM float, EBCDIC, the field
@@ -24,6 +25,9 @@ export convert
 import parseSEG/model/[tensors, keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif]
 export tensors, keys, traceindex, gathers, prefetch, headerfields, edit, headernif
+
+import parseSEG/survey/[textrec, sps, p1, join]
+export textrec, sps, p1, join
 
 import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
 export records, diskio, memsource, tapeimage, tapedevice

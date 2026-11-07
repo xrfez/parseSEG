@@ -29,7 +29,7 @@
 when not defined(segPython):
   {.error: "build the Python module with -d:segPython (see `nim pylib`)".}
 
-import std/[dynlib, strutils]
+import std/[dynlib, strutils, tables]
 import nimpy/[py_lib, py_types, py_utils, raw_buffers]
 import ./abi/core except SeismicFile, Prefetcher
 import ./abi/exporting
@@ -391,6 +391,36 @@ proc addReceiver(self: Geometry, line, point: float64, index: int, x, y: float64
     if index < int(low(int32)) or index > int(high(int32)):
       raise newException(ValueError, "point index out of range")
     self.geometryOf.addReceiver(line, point, int32(index), x, y, z)
+
+proc loadSps(self: Geometry, path: string): PPyObject {.segExport: "load_sps".} =
+  ## Adds an SPS file (Rev 1.0 or 2.1): R/S stations and X relations.
+  ## Returns the diagnostics; an unreadable file raises IOError.
+  pyGuard: self.geometryOf.loadSps(path).toPy
+
+proc loadP1(self: Geometry, path: string, grid_decimals: int = 0, depth_decimals: int = 0,
+    elevation: bool = false): PPyObject {.segExport: "load_p1".} =
+  ## Adds a SEG P1 (1983) file's shotpoints as sources. The decimals are
+  ## the implicit decimals of the grid and depth/elevation fields (from the
+  ## file's header); with `elevation`, columns 62-66 are z.
+  pyGuard: self.geometryOf.loadP1(path, grid_decimals, depth_decimals, elevation).toPy
+
+proc mapLine(self: Geometry, name: string, line: float64): PPyObject {.
+    segExport: "map_line".} =
+  ## Maps a text line name (SPS 1.0, P1) to a line number for later loads.
+  pyDo: self.geometryOf.mapLine(name, line)
+
+proc setOptions(self: Geometry, trailing_digits: bool = false,
+    multi_component: bool = false): PPyObject {.segExport: "set_options".} =
+  ## `trailing_digits`: unmapped line names use their trailing digits.
+  ## `multi_component`: an SPS channel increment k > 1 means k components
+  ## per station. Applies to later loads and joins.
+  pyDo: self.geometryOf.setSurveyOptions(trailing_digits, multi_component)
+
+proc counts(self: Geometry): PPyObject {.segExport.} =
+  ## The sources, receivers and SPS relation runs held, as a dict.
+  pyGuard:
+    let (s, r, x) = self.geometryOf.surveyCounts
+    {"sources": s, "receivers": r, "relations": x}.toTable
 
 # ----------------------------------------------------------- SeismicFile --
 

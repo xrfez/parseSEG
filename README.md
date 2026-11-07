@@ -1,7 +1,8 @@
 # parseSEG
 
 Read, write, index, edit and convert SEG-Y (Rev 0, 1, 2.0, 2.1) and SEG-D (Rev 1, 2.0, 2.1,
-3.0) seismic data, on disk and tape, for viewers and HPC processing. Files of any size are
+3.0) seismic data, on disk and tape, for viewers and HPC processing, and the SPS and SEG P1
+survey files that give traces their geometry. Files of any size are
 memory-mapped and indexed, never loaded whole. Problems are reported as diagnostics instead of
 stopping a read.
 
@@ -26,6 +27,9 @@ parseSEG headers import line.sgy h.nif -o fixed.sgy                # only change
 parseSEG journal rollback line.sgy line.sgy.edits.nif
 parseSEG vendormap scaffold shot.sgd -o vendor.nif                 # skeleton vendor map
 parseSEG vendormap apply shot.sgd --map=vendor.nif
+parseSEG survey line.s01                       # an SPS or SEG P1 file: summary, diagnostics
+parseSEG survey line.s01 -o line10.s01 --rev=1.0                   # SPS revisions
+parseSEG keys shot.sgd --sps=line.r01,line.s01,line.x01            # geometry joined to traces
 ```
 
 Exit status: 0 success, 1 the command reported errors, 2 a usage error.
@@ -33,7 +37,7 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 ## Directory Layout
 
 - `src/parseSEG.nim`: the public API (umbrella module); `src/parseSEG/`: the library, by
-  area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `abi`), plus `cli.nim`,
+  area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `survey`, `abi`), plus `cli.nim`,
   `capi.nim` (C ABI) and `pyapi.nim` (Python).
 - `include/parseseg.h`: the C header.
 - `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI and build targets

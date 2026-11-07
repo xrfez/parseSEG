@@ -186,6 +186,31 @@ block vendormaps:
 
 # ------------------------------------------- Phase 7 review regressions --
 
+block survey:
+  let sps = tmp / "t.sps"
+  writeFile(sps, [
+    "H00 SPS format version number   SPS 2.1;",
+    "R     10.00    101.00  1G1                     500100.0 6000000.0  12.5 18213250",
+    "S     20.00    205.00  1V6                     500000.0 6000400.0  10.0 19001150",
+    "XT1          6311     20.00    205.001    1    11     10.00    101.00    101.001",
+  ].join("\r\n") & "\r\n")
+  let s = ok("survey", sps)
+  doAssert "SPS 2.1 (H00)" in s and "CR LF" in s and "1 H, 1 S, 1 R, 1 X, 0 C" in s
+  discard ok("survey", sps, "-o", tmp / "t10.sps", "--rev=1.0")
+  doAssert "SPS 1.0 (H00)" in ok("survey", tmp / "t10.sps")
+  discard ok("survey", tmp / "t10.sps", "-o", tmp / "t21.sps", "--rev=2.1")
+  doAssert readFile(tmp / "t21.sps") == readFile(sps), "1.0 -> 2.1 restores the file"
+  discard fails(2, "survey", sps, "-o", sps)
+  discard fails(2, "survey", sps, "--rev=3")
+  let k0 = ok("keys", s63, "--sps=" & sps)
+  doAssert "1 relation runs; 0 traces updated" in k0, "the headers' stations are kept"
+  let k = ok("keys", s63, "--sps=" & sps, "--overwrite")
+  doAssert "1 traces updated" in k and "\t63\t1\t20\t205\t500000\t6000400\t10\t101\t500100" in k
+  doAssert "412.31" in k
+  doAssert "relation runs" in ok("info", s63, "--sps", sps)
+  discard fails(2, "keys", s63, "--p1=" & sps, "--decimals=9,1")
+  discard fails(2, "keys", s63, "--line-map=oops")
+
 block review_outputs_never_clobber_inputs:
   let f = fresh(inglewood)
   doAssert "is the input file" in fails(2, "headers", "export", f, "-o", f)

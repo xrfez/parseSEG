@@ -261,6 +261,27 @@ with parseseg.open(S63) as d:
     assert k2["src_x"] == 1100.5 and math.isnan(k2["src_z"]) and abs(k2["offset"] - 100) < 1e-9
     raises(TypeError, d.apply_geometry, "not a geometry")
 
+# Survey files: an SPS relation (record 63, channel 1) names the stations.
+sps_path = os.path.join(scratch, "t.sps")
+with open(sps_path, "w") as fh:
+    fh.write("\n".join([
+    'H00 SPS format version number   SPS 2.1;',
+    'R     10.00    101.00  1G1                     500100.0 6000000.0  12.5 18213250',
+    'S     20.00    205.00  1V6                     500000.0 6000400.0  10.0 19001150',
+    'XT1          6311     20.00    205.001    1    11     10.00    101.00    101.001',
+    ]) + "\n")
+with parseseg.open(S63) as d:
+    assert d.trace_keys(0)["channel"] == 1
+    g = parseseg.Geometry()
+    assert g.load_sps(sps_path) == []
+    assert g.counts() == {"sources": 1, "receivers": 1, "relations": 1}
+    raises(parseseg.IOError, g.load_sps, sps_path + ".missing")
+    g.map_line("LINE A", 7)
+    g.set_options(trailing_digits=True)
+    assert d.apply_geometry(g, True) == 1
+    k = d.trace_keys(0)
+    assert (k["src_point"], k["rcv_point"], k["rcv_x"]) == (205, 101, 500100)
+
 # ---------------------------------------------------------------- editing --
 path = fresh(INGLEWOOD)
 original = open(path, "rb").read()
