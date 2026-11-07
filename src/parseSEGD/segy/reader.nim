@@ -31,6 +31,7 @@
 ## - traces end at the declared trace count, at an Ext1 "last trace in file"
 ##   flag, at a trailer record, at a tape mark or at the end of data.
 
+import std/hashes
 import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio]
 import ../model/tensors
@@ -61,6 +62,9 @@ type
     format*: SampleFormat           ## Valid when `formatKnown`.
     formatKnown*: bool
     firstTraceOffset*: int64        ## Medium offset of the first trace.
+    binaryAsRead: seq[byte]         ## Raw binary header as read; empty for new files.
+    extendedAsRead: Hash            ## Hash of the extended records as read.
+    extendedAsReadLen: int          ## -1 for new files.
 
   SegyTrace* = object
     ## One trace record. `readTrace` reuses the buffers of the `SegyTrace` it
@@ -191,6 +195,7 @@ proc readFileHeaders(r: var SegyReader) =
 
   let binOffset = r.offset
   let bin = r.readBlock(BinaryHeaderSize)
+  f.binaryAsRead = bin
   let det = detectByteOrder(bin)
   f.byteOrder = det.order
   f.byteOrderDeclared = det.fromMarker
@@ -244,11 +249,33 @@ proc readFileHeaders(r: var SegyReader) =
   f.extended = initExtendedTextHeader(rev1Lines = rev.major < 2)
   f.trailer = initExtendedTextHeader(rev1Lines = rev.major < 2)
   r.readExtendedHeader(count, checkText = count == -1 or fromOffset)
+  f.extendedAsRead = hash(f.extended.data)
+  f.extendedAsReadLen = f.extended.data.len
   if rev.major >= 2 and count > 0 and not f.extended.hasEndText:
     r.log.report(sevWarning, dcBadValue, "the last extended textual record is not " &
       "((SEG:EndText)) (required since the Rev 2.1 clarification)",
       r.offset - TextHeaderSize, r.loc(field = "extended"))
   f.firstTraceOffset = r.offset
+
+func isBinaryAsRead*(f: SegyFile): bool =
+  ## True when the binary header, encoded in `byteOrder`, is byte-identical
+  ## to the one read from the file (false for files built in memory).
+  if f.binaryAsRead.len != BinaryHeaderSize:
+    result = false
+  else:
+    var b = newSeq[byte](BinaryHeaderSize)
+    f.binary.encode(b, f.byteOrder)
+    result = b == f.binaryAsRead
+
+func binaryAsRead*(f: SegyFile): lent seq[byte] {.inline.} =
+  ## The raw binary header bytes as read (in `byteOrder`); empty for files
+  ## built in memory.
+  f.binaryAsRead
+
+func isExtendedAsRead*(f: SegyFile): bool =
+  ## True when the extended textual records are unchanged since the read.
+  f.binaryAsRead.len == BinaryHeaderSize and f.extended.data.len == f.extendedAsReadLen and
+    hash(f.extended.data) == f.extendedAsRead
 
 proc openSegy*(src: RecordSource): SegyReader =
   ## Reads the file headers from `src`, positioned at the start of a SEG-Y

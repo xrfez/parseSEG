@@ -78,7 +78,7 @@ block byte_order_conversion:
     doAssert e.samples == d.samples
     # And back again, byte for byte.
     let back = tmp / ("back_" & name)
-    e.copyTo(back, SegyWriteOptions(byteOrder: d.file.byteOrder))
+    e.copyTo(back, SegyWriteOptions(byteOrder: d.file.byteOrder, lenient: true))
     doAssert readBytes(back) == readBytes(exampleDir / name)
 
 block tape_image_round_trip:
@@ -321,3 +321,64 @@ block review_ibm_into_float64_keeps_range:
   var one = [0.0]
   decodeSamples(sfIbm32, [0x7F'u8, 0xFF, 0xFF, 0xFF], one)
   doAssert one[0] > 7e75
+
+# ------------------------------------------------- write-as-read (3.4a) --
+
+proc writeLog(d: SegyData, path: string, opts: SegyWriteOptions): DiagLog =
+  let sink = openDiskSink(path)
+  var w = openSegyWriter(sink, d.file, opts)
+  for t in d.traces: w.writeTrace(t)
+  w.close()
+  sink.close()
+  result = w.log
+
+block as_read_little_endian_rev0_is_written_back:
+  let d = readSegy(exampleDir / "Sweep0.sgy")
+  let log = writeLog(d, tmp / "asread_sweep.sgy", initSegyWriteOptions(d.file))
+  doAssert log.len == 1 and log[0].severity == sevWarning
+  doAssert log[0].loc.field == "binary.byteOrderMarker"
+  doAssert readBytes(tmp / "asread_sweep.sgy") == readBytes(exampleDir / "Sweep0.sgy")
+  # The same header built in memory is new content: little-endian Rev 0 is refused.
+  let fresh = SegyFile(text: d.file.text, binary: d.file.binary, byteOrder: boLittle,
+    format: d.file.format, formatKnown: true, extended: initExtendedTextHeader(),
+    trailer: initExtendedTextHeader())
+  doAssertRaises SegFormatError:
+    discard openSegyWriter(openDiskSink(tmp / "fresh_le.sgy"), fresh,
+      SegyWriteOptions(byteOrder: boLittle))
+  # Converting a clean big-endian file to little-endian Rev 1 is refused too.
+  var e = readSegy(exampleDir / "Sweep0.sgy")
+  e.copyTo(tmp / "sweep_be.sgy", SegyWriteOptions(byteOrder: boBig))
+  let be = readSegy(tmp / "sweep_be.sgy")
+  doAssert be.file.byteOrder == boBig
+  doAssertRaises SegFormatError:
+    be.copyTo(tmp / "sweep_back_le.sgy", SegyWriteOptions(byteOrder: boLittle))
+
+block as_read_invalid_values_are_judged_per_field:
+  # Sweep0 (LE) with a zero sample interval: read with a warning ...
+  let path = patched("Sweep0.sgy", [(3216, @[0'u8, 0])])
+  var d = readSegy(path)
+  doAssert d.file.binary.sampleInterval == 0
+  # ... written back with warnings only, also after an unrelated edit ...
+  d.file.binary.jobId = 42
+  let log = writeLog(d, tmp / "dt0.sgy", initSegyWriteOptions(d.file))
+  doAssert log.count(sevError) == 0
+  var sawDt = false
+  for e in log:
+    if e.loc.field == "binary.sampleInterval": sawDt = true
+  doAssert sawDt
+  # ... but zeroing the interval of a clean file is a new problem.
+  var g = readSegy(exampleDir / ingle)
+  g.file.binary.sampleInterval = 0
+  g.file.binary.extSampleInterval = 0
+  doAssertRaises SegFormatError: g.copyTo(tmp / "dt0_new.sgy", initSegyWriteOptions(g.file))
+  let lenientLog = writeLog(g, tmp / "dt0_lenient.sgy", initSegyWriteOptions(g.file, true))
+  doAssert lenientLog.count(sevError) == 0 and lenientLog.count(sevWarning) > 0
+
+block as_read_missing_endtext_is_written_back:
+  var blank = newSeq[byte](15)
+  for i in 0..<blank.len: blank[i] = 0x20
+  let path = patched(ingle, [(330000, blank)])
+  let d = readSegy(path)
+  doAssert not d.file.extended.hasEndText
+  discard writeLog(d, tmp / "noendtext.sgy", initSegyWriteOptions(d.file))
+  doAssert readBytes(tmp / "noendtext.sgy") == readBytes(path)
