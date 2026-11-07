@@ -197,10 +197,13 @@ block huge_declared_attachment_is_bounded:
   s2.setLen s.len
   writeFile(path, s2)
   let e = readSegy(path, maxRetained = 8 * 1024)
-  doAssert e.traces.len == 3
-  doAssert e.file.trailer.userData.len == 1
-  doAssert e.file.trailer.userData[0].blockSize == 5_000_000_000
-  doAssert not e.diagnostics.isFatal # the trailer simply ends inside the block
+  doAssert e.traces.len == 3 and not e.diagnostics.isFatal
+  # On disk the declared size is checked against the file: not indexed, warned.
+  doAssert e.file.trailer.userData.len == 0
+  var warned = false
+  for x in e.diagnostics:
+    if x.severity == sevWarning and "beyond the end of the file" in x.msg: warned = true
+  doAssert warned
 
 block tape_image_round_trip:
   var tr = initExtendedTextHeader()

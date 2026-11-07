@@ -61,6 +61,9 @@ type
     mediumOffset*: int64
       ## File offset of the first data byte when the records were read from a
       ## byte stream (disk); -1 otherwise.
+    available*: int64
+      ## Data bytes actually inside the records (less than `blockSize` when
+      ## the block overruns the header or trailer; set by `finish`).
 
   ExtTextIssue* = object
     ## Something malformed found while walking the records.
@@ -84,12 +87,20 @@ type
     udLimit: int           ## End of the chain's stanza when BYTES was declared.
     carry: seq[byte]       ## Start of a description block split across records.
     carryStart: int
+    streamLimit: int       ## Stream offset where the medium ends (high(int) if unknown).
 
 func initExtendedTextHeader*(rev1Lines = false, maxRetained = high(int)): ExtendedTextHeader =
   ## An empty extended header. `rev1Lines` enables the Rev 0/1 rule that a
   ## stanza may start on any line inside a record. Record bytes are kept while
   ## their total stays within `maxRetained`.
-  ExtendedTextHeader(rev1Lines: rev1Lines, maxRetained: maxRetained, udLimit: high(int))
+  ExtendedTextHeader(rev1Lines: rev1Lines, maxRetained: maxRetained, udLimit: high(int),
+    streamLimit: high(int))
+
+func `streamLimit=`*(h: var ExtendedTextHeader, limit: int64) =
+  ## Declares where the medium ends, counted from the first record (a disk
+  ## file's size minus the header's offset). Binary lengths reaching beyond it
+  ## are reported as corrupt instead of swallowing the rest of the file.
+  h.streamLimit = int(min(limit, int64(high(int))))
 
 func recordCount*(h: ExtendedTextHeader): int {.inline.} = h.records
 
@@ -104,9 +115,9 @@ func hasEndText*(h: ExtendedTextHeader): bool {.inline.} =
 func streamLen(h: ExtendedTextHeader): int {.inline.} = h.records * TextHeaderSize
 
 func inBinaryStanza*(h: ExtendedTextHeader): bool {.inline.} =
-  ## True while binary data (a binary stanza or a User Data block, or a
-  ## description block split across records) continues into the next record.
-  h.skipUntil > h.streamLen or h.carry.len > 0
+  ## True while binary data (a binary stanza or a User Data block) continues
+  ## into the next record.
+  h.skipUntil > h.streamLen
 
 func normalizeStanzaName*(s: string): string =
   ## Upper case with spaces removed: the spec's matching rule.
@@ -176,10 +187,12 @@ func find(b: openArray[byte], s: string, start: int): int =
     inc i
 
 func continuesUserData*(h: ExtendedTextHeader, rec: openArray[byte]): bool =
-  ## True when `rec` would continue an open User Data chain (it starts with a
-  ## description block).
+  ## True when `rec` would continue an open User Data chain: it starts with a
+  ## description block, or it is text completing one split across records.
   if not h.udActive:
     result = false
+  elif h.carry.len > 0:
+    result = looksLikeText(rec)
   else:
     let i = skipBlanks(rec, 0)
     result = i < rec.len and matchesAt(rec, i, DescOpen)
@@ -194,8 +207,7 @@ func startsStanzaRecord*(rec: openArray[byte]): bool =
     result = false
   elif s.isUserData:
     let i = skipBlanks(rec, s.dataStart)
-    result = i < rec.len and matchesAt(rec, i, DescOpen) and
-      find(rec, "<blocksize>", i) > 0
+    result = i < rec.len and matchesAt(rec, i, DescOpen)
   else:
     result = s.isBinary or looksLikeText(rec)
 
@@ -278,6 +290,13 @@ proc walkChain(h: var ExtendedTextHeader, rec: openArray[byte], s0, p: int,
     h.endChain(base + q)
     return e
   if recOffset >= 0: b.mediumOffset = recOffset + int64(b.dataStart - s0)
+  if b.blockSize > int64(h.streamLimit - b.dataStart):
+    h.issues.add ExtTextIssue(pos: base + q, msg: "User Data block '" & b.dataLabel &
+      "' declares " & $b.blockSize & " bytes, beyond the end of the file; the rest of " &
+      "the stanza is not indexed")
+    h.endChain(base + q)
+    return e
+  b.available = b.blockSize # until `finish` finds otherwise
   h.skipUntil = b.dataStart + int(b.blockSize)
   h.stanzas[^1].dataEnd = h.skipUntil
   h.userData.add b
@@ -334,8 +353,14 @@ proc add*(h: var ExtendedTextHeader, rec: openArray[byte], recOffset: int64 = -1
           h.udActive = true
           h.udLimit = if s.isBinary: s.dataStart + s.byteCount else: high(int)
         elif s.isBinary:
-          s.dataEnd = s.dataStart + s.byteCount
-          h.skipUntil = s.dataEnd
+          if s.byteCount > h.streamLimit - s.dataStart:
+            h.issues.add ExtTextIssue(pos: s.headerStart, msg: "stanza " & s.key & " declares " &
+              $s.byteCount & " bytes, beyond the end of the file; treated as text")
+            s.byteCount = -1
+            s.dataEnd = e
+          else:
+            s.dataEnd = s.dataStart + s.byteCount
+            h.skipUntil = s.dataEnd
         else:
           s.dataEnd = e
         h.stanzas.add s
@@ -345,6 +370,39 @@ proc add*(h: var ExtendedTextHeader, rec: openArray[byte], recOffset: int64 = -1
     if not h.stanzas[^1].isBinary and not h.stanzas[^1].isUserData and
         h.stanzas[^1].headerStart < s0:
       h.stanzas[^1].dataEnd = e
+
+proc finish*(h: var ExtendedTextHeader) =
+  ## Call after the last record: sets each User Data block's `available`
+  ## bytes and reports blocks and binary stanzas that overrun the records, and
+  ## a description block left unterminated.
+  let total = h.streamLen
+  # A last record that is an EndText swallowed by a too-long block ends the
+  # data there.
+  var endTextAt = total
+  let last = total - TextHeaderSize
+  if h.records > 0 and h.data.len >= total and not h.endText:
+    var st: Stanza
+    if openParens(h.data, last) and
+        parseStanzaHeader(h.data.toOpenArray(last, total - 1), 0, st) and st.isEndText:
+      endTextAt = last
+  for b in h.userData.mitems:
+    if b.dataStart <= endTextAt and b.dataStart + int(b.blockSize) > endTextAt and
+        endTextAt < total:
+      h.issues.add ExtTextIssue(pos: b.descStart, msg: "User Data block '" & b.dataLabel &
+        "' declares " & $b.blockSize & " bytes and runs into the final ((SEG:EndText)) " &
+        "record; its size is probably wrong")
+    b.available = max(0'i64, min(b.blockSize, int64(endTextAt - b.dataStart)))
+    if b.available < b.blockSize and endTextAt == total:
+      h.issues.add ExtTextIssue(pos: b.descStart, msg: "User Data block '" & b.dataLabel &
+        "' declares " & $b.blockSize & " bytes, only " & $b.available &
+        " are inside the records")
+  for s in h.stanzas:
+    if s.isBinary and s.dataEnd > total:
+      h.issues.add ExtTextIssue(pos: s.headerStart, msg: "stanza " & s.key & " declares " &
+        $s.byteCount & " bytes, only " & $(total - s.dataStart) & " are inside the records")
+  if h.carry.len > 0:
+    h.issues.add ExtTextIssue(pos: h.carryStart,
+      msg: "User Data: unterminated description block at the end of the records")
 
 func needsMore*(h: ExtendedTextHeader, count: int): bool =
   ## Whether more records belong to a header whose declared count is `count`
@@ -377,11 +435,15 @@ func find*(h: ExtendedTextHeader, key: string): int =
 
 func isRetained*(h: ExtendedTextHeader, b: UserDataBlock): bool =
   ## True when the attachment's bytes are all in `data`.
-  b.dataStart + int(b.blockSize) <= h.data.len
+  b.dataStart + int(b.blockSize) <= h.data.len and b.dataStart + int(b.blockSize) <= h.streamLen
 
 func userDataBytes*(h: ExtendedTextHeader, b: UserDataBlock): seq[byte] =
-  ## The attachment's bytes from memory. Raises `ValueError` if they were
-  ## not retained (use `reader.extractUserData` on the file instead).
+  ## The attachment's bytes from memory. Raises `ValueError` if the block
+  ## overruns the records (see `finish`) or was not retained (use
+  ## `reader.extractUserData` on the file instead).
+  if b.dataStart + int(b.blockSize) > h.streamLen or b.available < b.blockSize:
+    raise newException(ValueError, "User Data block '" & b.dataLabel & "' declares " &
+      $b.blockSize & " bytes but overruns the records")
   if not h.isRetained(b):
     raise newException(ValueError, "User Data block '" & b.dataLabel &
       "' is not held in memory; extract it from the file")

@@ -203,9 +203,30 @@ proc addEntry(r: var TraceLayout, n: XmlNode, ext: string) =
   let inz = n.attr("if-non-zero").strip.toLowerAscii in ["1", "true", "yes"]
   r.entries.add LayoutEntry(name: name, extension: ext, byte: pos, kind: kind, ifNonZero: inz)
 
+proc checkCharRefs(xml: string) =
+  # The XML parser raises a defect on out-of-range numeric character
+  # references (`&#99999999999;`); reject them first.
+  var i = xml.find("&#")
+  while i >= 0:
+    var j = i + 2
+    let hex = j < xml.len and xml[j] in {'x', 'X'}
+    if hex: inc j
+    var v = 0'i64
+    var digits = 0
+    while j < xml.len and digits <= 8 and
+        (xml[j] in Digits or (hex and xml[j] in HexDigits)):
+      v = v * (if hex: 16 else: 10) + int64(if xml[j] in Digits: ord(xml[j]) - ord('0')
+        else: ord(toLowerAscii(xml[j])) - ord('a') + 10)
+      inc digits
+      inc j
+    if digits == 0 or digits > 8 or v > 0x10FFFF or j >= xml.len or xml[j] != ';':
+      raise newException(ValueError, "Layout XML: invalid character reference at offset " & $i)
+    i = xml.find("&#", j)
+
 proc parseLayout*(xml: string): TraceLayout =
   ## Parses a D-8 layout document. Raises `ValueError` for malformed XML or
   ## entries (bad byte, unknown type, an entry that does not fit its header).
+  checkCharRefs(xml)
   var root: XmlNode
   try:
     root = parseXml(xml.strip)
@@ -223,7 +244,7 @@ proc parseLayout*(xml: string): TraceLayout =
       of "desc": result.desc = n.innerText.strip
       of "entry": result.addEntry(n, "")
       of "extension":
-        let ext = n.attr("name").strip
+        let ext = n.attr("name").strip.toUpperAscii
         for m in n:
           if m.kind == xnElement and m.tag == "entry": result.addEntry(m, ext)
       else: discard

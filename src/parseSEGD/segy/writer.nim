@@ -36,7 +36,9 @@ type
     rev: SegyRevision
     order: ByteOrder
     lenient: bool
-    wasRead: bool  ## The file came from the reader (not built in memory).
+    wasRead: bool        ## The file came from the reader (not built in memory).
+    cur: seq[byte]       ## The binary header as it will be written, in the file's byte order.
+    lastFlagged: bool    ## A trace flagged "last in file" was written.
     log*: DiagLog
     tracesWritten: int
 
@@ -54,11 +56,28 @@ proc problem(w: var SegyWriter, msg: string, field = "", trace = -1, asRead = fa
     w.log.report(sevError, dcValidation, msg, loc = loc)
     raiseFormat("refusing to write spec-invalid SEG-Y: " & msg)
 
-func fieldSize(field: string): int =
-  # Width of a binary header field named "binary.<name>" by `validate`.
-  result = 2
-  for spec in binaryHeaderFields:
-    if "binary." & spec.name == field: result = spec.size
+func unchanged(w: SegyWriter, ranges: openArray[(int, int)]): bool =
+  # True when every (spec byte, size) range of the binary header is as read.
+  result = w.wasRead
+  for (specByte, size) in ranges:
+    let rel = specByte - 3201
+    if result and w.cur[rel ..< rel + size] != w.file.binaryAsRead[rel ..< rel + size]:
+      result = false
+
+const RevisionBytes = (3501, 2)
+
+func dependencies(field: string): seq[(int, int)] =
+  # The binary header bytes a `validate` finding depends on: its own field,
+  # the revision (every rule is revision-specific) and, for values with a
+  # Rev 2 extended counterpart, that field too.
+  result = @[RevisionBytes]
+  case field
+  of "binary.sampleInterval": result.add [(3217, 2), (3273, 8)]
+  of "binary.samplesPerTrace": result.add [(3221, 2), (3269, 4)]
+  else:
+    for spec in binaryHeaderFields:
+      if "binary." & spec.name == field: result.add (spec.specByte, spec.size)
+    if field == "binary.maxAddlTraceHeaders": result.add (3507, 4)
 
 proc checkFile(w: var SegyWriter) =
   let f = w.file
@@ -66,21 +85,15 @@ proc checkFile(w: var SegyWriter) =
   let rev = w.rev
   let loc = Location(file: w.sink.name)
   let extAsRead = f.isExtendedAsRead
-  # Readable but spec-invalid values: a warning when the field's bytes are
-  # unchanged from the read, else an error.
+  # Readable but spec-invalid values: a warning when every byte the finding
+  # depends on is as read, else an error.
   let headerOffset = int64(3200 + f.tapeLabel.len)
   var found: DiagLog
   b.validate(found, sevError, loc, headerOffset)
-  var cur = newSeq[byte](BinaryHeaderSize)
-  b.encode(cur, f.byteOrder)
   var newProblems = 0
   for d in found:
     var e = d
-    let rel = int(d.offset - headerOffset)
-    let size = fieldSize(d.loc.field)
-    let unchanged = w.wasRead and rel >= 0 and rel + size <= BinaryHeaderSize and
-      cur[rel ..< rel + size] == f.binaryAsRead[rel ..< rel + size]
-    if w.lenient or unchanged:
+    if w.lenient or w.unchanged(dependencies(d.loc.field)):
       e.severity = sevWarning
     else:
       inc newProblems
@@ -88,13 +101,15 @@ proc checkFile(w: var SegyWriter) =
   if newProblems > 0:
     raiseFormat("refusing to write spec-invalid SEG-Y (" & $newProblems &
       " new or edited header values; see the writer log or set lenient)")
-  # Unreadable output.
+  # Output a reader would misdecode, unless it is exactly what was read
+  # (identical bytes read back identically).
   if not f.extended.isComplete or not f.trailer.isComplete:
     raiseFormat("the extended header or trailer was only indexed, not held in memory " &
       "(retention limit); read the file with a larger maxRetained to rewrite it")
-  if not f.formatKnown:
-    w.problem("format code " & $b.formatCode & " is undefined, so traces cannot be written",
-      "binary.formatCode")
+  var fmt: SampleFormat
+  if not f.formatKnown or not toSampleFormat(int(b.formatCode), fmt) or fmt != f.format:
+    w.problem("the binary header format code " & $b.formatCode & " does not match the " &
+      "file's sample format (set both `binary.formatCode` and `format`)", "binary.formatCode")
   if not (b.segyMajor == 2 and b.segyMinor == 0) and b.maxAddlTraceHeaders > high(uint16):
     w.problem("additional trace header count " & $b.maxAddlTraceHeaders &
       " does not fit in 16 bits", "binary.maxAddlTraceHeaders")
@@ -104,41 +119,51 @@ proc checkFile(w: var SegyWriter) =
         "binary.byteOrderMarker")
     elif w.order == boLittle:
       w.problem("little-endian output is not valid before Rev 2; readers must infer the " &
-        "byte order", "binary.byteOrderMarker", asRead = w.wasRead and f.byteOrder == boLittle)
+        "byte order", "binary.byteOrderMarker",
+        asRead = f.byteOrder == boLittle and w.unchanged([RevisionBytes]))
   let n = f.extended.recordCount
   let count = if rev.major == 0: 0 else: int(b.numExtTextHeaders)
+  let countAsRead = extAsRead and w.unchanged([RevisionBytes, (3505, 2), (3521, 8)])
   if rev.major == 0 and n > 0:
     w.problem("Rev 0 files have no extended textual headers, but " & $n & " are present",
       "extended")
   elif count > 0 and count != n:
     w.problem("the binary header declares " & $count & " extended records, " & $n &
-      " are present", "binary.numExtTextHeaders")
+      " are present", "binary.numExtTextHeaders", asRead = countAsRead)
   elif count == 0 and n > 0:
     w.problem("the binary header declares no extended records, " & $n & " are present",
-      "binary.numExtTextHeaders")
+      "binary.numExtTextHeaders", asRead = countAsRead)
   elif count == -1 and not f.extended.hasEndText:
     w.problem("a variable extended record count (-1) needs a final ((SEG:EndText)) record",
-      "extended", asRead = extAsRead)
+      "extended", asRead = countAsRead)
   elif rev.major >= 2 and count > 0 and not f.extended.hasEndText:
     w.problem("Rev 2 extended textual headers must end with ((SEG:EndText))", "extended",
-      asRead = extAsRead)
+      asRead = countAsRead)
+  if count != 0:
+    for s in f.extended.stanzas:
+      if s.isEndText and s.headerStart div 3200 < n - 1:
+        w.problem("((SEG:EndText)) must be the last extended record, but record " &
+          $(s.headerStart div 3200) & " of " & $n & " is one", "extended", asRead = countAsRead)
   if rev.major >= 2 and b.firstTraceOffset != 0 and
       b.firstTraceOffset != uint64(3600 + f.tapeLabel.len + n * 3200):
     w.problem("the first trace offset " & $b.firstTraceOffset & " does not match the " &
-      $n & " extended records", "binary.firstTraceOffset")
+      $n & " extended records", "binary.firstTraceOffset", asRead = countAsRead)
   let t = f.trailer.recordCount
+  let trailerAsRead = f.isTrailerAsRead and w.unchanged([RevisionBytes, (3529, 4)])
   if rev.major < 2 and t > 0:
     w.problem("data trailers need Rev 2", "trailer")
   elif rev.major >= 2 and b.numTrailerRecords >= 0 and int(b.numTrailerRecords) != t:
     w.problem("the binary header declares " & $b.numTrailerRecords & " trailer records, " &
-      $t & " are present", "binary.numTrailerRecords")
+      $t & " are present", "binary.numTrailerRecords", asRead = trailerAsRead)
 
 proc openSegyWriter*(sink: RecordSink, file: SegyFile, opts: SegyWriteOptions): SegyWriter =
   ## Validates `file` and writes its tape label, textual, binary and extended
   ## textual headers. Raises `SegFormatError` if validation fails and
   ## `opts.lenient` is false; I/O errors propagate.
   result = SegyWriter(sink: sink, file: file, order: opts.byteOrder, lenient: opts.lenient,
-    rev: file.binary.rulesRevision, wasRead: file.binaryAsRead.len == BinaryHeaderSize)
+    rev: file.binary.rulesRevision, wasRead: file.binaryAsRead.len == BinaryHeaderSize,
+    cur: newSeq[byte](BinaryHeaderSize))
+  file.binary.encode(result.cur, file.byteOrder)
   result.checkFile()
   if file.tapeLabel.len > 0:
     doAssert file.tapeLabel.len == TapeLabelSize, "a tape label is 128 bytes"
@@ -217,6 +242,10 @@ proc writeTrace*(w: var SegyWriter, t: SegyTrace) =
   ## trace is inconsistent with the file headers (unless lenient) or cannot be
   ## expressed in the output byte order.
   w.checkTrace(t)
+  if w.lastFlagged:
+    w.problem("a trace follows one flagged last in file (Ext1 bytes 159-160); readers " &
+      "stop at the flag", "ext1.lastTraceFlag", t.index)
+  if t.hasExt1 and (t.ext1.lastTraceFlag and LastInFile) != 0: w.lastFlagged = true
   var rec = newSeq[byte](TraceHeaderSize * (if t.hasExt1: 2 else: 1))
   t.header.encode(rec, w.order)
   if t.hasExt1:
@@ -237,7 +266,7 @@ proc close*(w: var SegyWriter, endOfData = true) =
   let declared = w.file.binary.numTraces
   if w.rev.major >= 2 and declared != 0 and declared != uint64(w.tracesWritten):
     w.problem("the binary header declares " & $declared & " traces, " & $w.tracesWritten &
-      " were written", "binary.numTraces")
+      " were written", "binary.numTraces", asRead = w.unchanged([RevisionBytes, (3513, 8)]))
   for i in countup(0, w.file.trailer.data.len - 1, 3200):
     w.sink.writeRecord(w.file.trailer.data.toOpenArray(i, i + 3199))
   w.sink.writeTapeMark(if endOfData: 2 else: 1)

@@ -6,7 +6,7 @@
 ## (`coor4` by `co_scal`, `elev4` by `ed_scal`, `time2` by `tm_scal`,
 ## `spnum4` by `sp_scal`). `geometry` collects the common values of a trace.
 
-import std/math
+import std/[math, strutils]
 import ../common/[endians, ibmfloat]
 import ./[traceheader, layout, reader]
 
@@ -56,13 +56,14 @@ func raw(v: TraceView, t: SegyTrace, e: LayoutEntry, value: var float64): bool =
   result = true
   if e.extension == "" or e.extension == "SEG00000":
     value = read(v.std)
-  elif e.extension == "SEG00001":
+  elif cmpIgnoreCase(e.extension, "SEG00001") == 0:
     if v.hasExt1: value = read(v.ext1) else: result = false
   else:
     result = false
     var i = 0
     while i + TraceHeaderSize <= t.proprietary.len and not result:
-      if headerBlockName(t.proprietary.toOpenArray(i, i + TraceHeaderSize - 1)) == e.extension:
+      if cmpIgnoreCase(headerBlockName(t.proprietary.toOpenArray(i, i + TraceHeaderSize - 1)),
+          e.extension) == 0:
         value = read(t.proprietary.toOpenArray(i, i + TraceHeaderSize - 1))
         result = true
       i += TraceHeaderSize
@@ -83,7 +84,10 @@ func evaluate(lay: TraceLayout, v: TraceView, t: SegyTrace, name: string,
         else: ""
       if scalarName.len > 0 and depth == 0:
         var s: float64
-        if evaluate(lay, v, t, scalarName, s, depth + 1):
+        # A scalar typed wider than int2 by a Layout stanza may not fit;
+        # an unusable one is ignored rather than wrapped.
+        if evaluate(lay, v, t, scalarName, s, depth + 1) and s == trunc(s) and
+            s >= -32768.0 and s <= 32767.0:
           x = applyScalar(x, int16(s))
       value = x
       result = true

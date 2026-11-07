@@ -31,7 +31,7 @@
 ## - traces end at the declared trace count, at an Ext1 "last trace in file"
 ##   flag, at a trailer record, at a tape mark or at the end of data.
 
-import std/hashes
+import std/[hashes, os]
 import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio]
 import ../model/tensors
@@ -45,6 +45,7 @@ const
     ## header costs memory only for the bytes actually present.
   MaxExtendedRecords = 1_000_000
     ## Bound on extended records implied by a Rev 2 first-trace offset (3.2 GB).
+  MaxLayoutBytes* = 1 shl 20 ## Larger Layout stanzas are ignored (with a warning).
   DefaultMaxRetained* = 256 shl 20
     ## Extended header and trailer bytes kept in memory by default. Beyond it,
     ## stanzas and User Data are only indexed; extract attachments from disk.
@@ -72,6 +73,8 @@ type
     binaryAsRead: seq[byte]         ## Raw binary header as read; empty for new files.
     extendedAsRead: Hash            ## Hash of the extended records as read.
     extendedAsReadLen: int          ## -1 for new files.
+    trailerAsRead: Hash             ## Hash of the trailer records as read.
+    trailerAsReadLen: int
 
   SegyTrace* = object
     ## One trace record. `readTrace` reuses the buffers of the `SegyTrace` it
@@ -101,6 +104,7 @@ type
     ext1Warned: bool
     maxRetained: int
     byteStream: bool     ## The source has no record boundaries (disk): offsets are file offsets.
+    mediumSize: int64    ## File size for disk sources, -1 if unknown.
     done: bool
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
@@ -270,15 +274,20 @@ proc readFileHeaders(r: var SegyReader) =
   f.extended = initExtendedTextHeader(rev1Lines = rev.major < 2, maxRetained = r.maxRetained)
   f.trailer = initExtendedTextHeader(rev1Lines = rev.major < 2, maxRetained = r.maxRetained)
   let extStart = r.offset
+  if r.mediumSize >= 0: f.extended.streamLimit = r.mediumSize - extStart
   try:
     r.readExtendedHeader(count, checkText = count == -1 or fromOffset)
   finally:
+    f.extended.finish()
     r.reportIssues(f.extended, extStart, "extended")
   f.layout = standardLayout(rev)
   let li = f.extended.find("SEG:Layout")
   if li >= 0:
     let st = f.extended.stanzas[li]
     try:
+      if st.dataEnd - st.dataStart > MaxLayoutBytes:
+        raise newException(ValueError, "Layout stanza of " & $(st.dataEnd - st.dataStart) &
+          " bytes exceeds " & $MaxLayoutBytes)
       f.layout = merge(f.layout, parseLayout(f.extended.stanzaText(st)))
     except ValueError as e:
       r.log.report(sevWarning, dcBadValue, e.msg & "; using the standard layout",
@@ -316,6 +325,12 @@ func isExtendedAsRead*(f: SegyFile): bool =
   f.binaryAsRead.len == BinaryHeaderSize and f.extended.data.len == f.extendedAsReadLen and
     hash(f.extended.data) == f.extendedAsRead
 
+func isTrailerAsRead*(f: SegyFile): bool =
+  ## True when the trailer records are unchanged since the read (an empty
+  ## trailer counts as unchanged for a file that was read).
+  f.binaryAsRead.len == BinaryHeaderSize and f.trailer.data.len == f.trailerAsReadLen and
+    (f.trailerAsReadLen == 0 or hash(f.trailer.data) == f.trailerAsRead)
+
 proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained): SegyReader =
   ## Reads the file headers from `src`, positioned at the start of a SEG-Y
   ## file. Check `log.isFatal` for a file whose traces cannot be read.
@@ -323,7 +338,12 @@ proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained): SegyReader 
   ## Extended header and trailer bytes are held in memory up to
   ## `maxRetained` bytes each; beyond that they are only indexed.
   result = SegyReader(cursor: initRecordCursor(src), name: src.name, maxRetained: maxRetained,
-    byteStream: not src.hasRecordBoundaries)
+    byteStream: not src.hasRecordBoundaries, mediumSize: -1)
+  if result.byteStream:
+    try:
+      result.mediumSize = getFileSize(src.name)
+    except CatchableError:
+      discard # not a plain file (e.g. a pipe): no size limit
   if not result.log.tryRecord(result.loc(), result.readFileHeaders()):
     result.done = true
   if result.log.isFatal: result.done = true
@@ -335,6 +355,8 @@ proc readTrailer(r: var SegyReader) =
   # remaining records.
   let expected = int(r.file.binary.numTrailerRecords)
   let start = r.offset
+  if r.mediumSize >= 0 and r.file.trailer.recordCount == 0:
+    r.file.trailer.streamLimit = r.mediumSize - start
   var rec = newSeq[byte](TextHeaderSize)
   try:
     while (expected < 0 or r.file.trailer.recordCount < expected) and r.atData:
@@ -345,6 +367,9 @@ proc readTrailer(r: var SegyReader) =
           " of 3200 bytes", r.offset)
       r.file.trailer.add(rec, if r.byteStream: at else: -1)
   finally:
+    r.file.trailer.finish()
+    r.file.trailerAsRead = hash(r.file.trailer.data)
+    r.file.trailerAsReadLen = r.file.trailer.data.len
     r.reportIssues(r.file.trailer, start, "trailer")
   if expected > 0 and r.file.trailer.recordCount < expected:
     r.log.report(sevWarning, dcTruncated, "expected " & $expected & " trailer records, found " &
@@ -521,6 +546,9 @@ proc extractUserData*(path: string, b: UserDataBlock, dest: string) =
   if b.mediumOffset < 0:
     raise newException(ValueError, "User Data block '" & b.dataLabel &
       "' has no file offset (it was not read from a disk file)")
+  if b.available < b.blockSize:
+    raise newException(ValueError, "User Data block '" & b.dataLabel & "' declares " &
+      $b.blockSize & " bytes, but only " & $b.available & " are inside the records")
   var src, dst: File
   if not open(src, path, fmRead):
     raise newException(IOError, "cannot open for reading: " & path)
