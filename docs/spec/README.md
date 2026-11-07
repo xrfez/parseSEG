@@ -15,6 +15,13 @@ the verification sections (facts checked against real files) override everything
 | `segd_rev3_0_a.md` | SEG-D 3.0: structure, label, TOC, layouts, sample formats, 3.0-vs-2.1 changes | sizes verified |
 | `segd_rev3_0_b.md` | SEG-D 3.0: field semantics, code tables, appendices | partly verified |
 | `segd_rev3_0_verified.md` | SEG-D 3.0 facts from the real 65 MB sample | ground truth |
+| `segd_rev3_1_delta.md` | SEG-D 3.1, delta on 3.0 (little-endian 90xx formats, P1/11 CRS text), with a gap analysis | from the text; no 3.1 sample |
+| `segy_rev2_0_delta.md` | SEG-Y 2.0 vs 2.1 (bytes 3507-3510; stanzas), with a gap analysis | from the text |
+| `segy_rev0.md` | SEG-Y Rev 0 (1975), delta on Rev 1, with a gap analysis | from the 1975 text; `Sweep0.sgy` is a Rev 0 file |
+| `segd_rev0.md` | the original SEG-D (Rev 0, c. 1980): full layout incl. multiplexed scans, delta on 2.0, gap analysis | from the text |
+| `seg2.md` | SEG-2 (1990), PC seismic/radar files | from the text; figures missing, see AMBIGUITY items |
+| `sps.md` | SPS survey files, Rev 1.0 (1993) and 2.1 (2006) | columns checked by field adjacency in the examples |
+| `p1_p2_p3.md` | SEG P1/P2/P3/P4 (1983) positional exchange formats | P1 examples rebuilt to 80 columns |
 
 ## Cross-format summary
 | | SEG-Y | SEG-D 2.x | SEG-D 3.x |
