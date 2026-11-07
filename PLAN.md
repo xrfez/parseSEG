@@ -489,6 +489,33 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
 - [ ] 11.2 Writer, conversion to and from SEG-Y / SEG-D, C ABI and Python, CLI.
 - [ ] 11.3 Validate against a Geospace SEG-2 sample *(owner: please provide one)*.
 
+### Phase 12: Idiomatic Nim pass (owner, 2026-11-07)
+Go through the project and make it read like idiomatic Nim, guided by the nim-* skills
+(style guide, API design, code organization, error handling, doc comments).
+- [ ] 12.1 Audit by an agent, module by module, against those skills. Output: a findings list
+      in this file, ranked. Each finding is marked either:
+      - internal: no API change;
+      - public API change: needs owner approval, since it breaks callers.
+- [ ] 12.2 Bindings from one declaration. Today each boundary function is written three times:
+      the `abi/core.nim` proc, a hand-written adapter in `capi.nim` / `pyapi.nim` (each already
+      tagged `{.segExport.}`), and a hand-written `include/parseseg.h`. Replace this with one
+      annotation on the core proc (e.g. `{.segApi.}`) whose macro generates:
+      - the C shim: handles as `pointer`, `cstring`/out-parameter conversion, `SegStatus` and
+        last-error mapping, `except Exception` guard;
+      - the nimpy export: `PPyObject` conversion, the Python exception mapping;
+      - `include/parseseg.h`, written at build time, with a test that fails if the
+        committed header differs (no drift).
+
+      Evaluate `genny` (treeform) first; adopt it only if it handles handles, tensor views
+      and the nimpy path, else write the macro. Hand-written adapters stay only where a
+      function really is shaped differently per language (tensor views / DLPack, prefetch,
+      iterators). The C ABI must stay byte-compatible (`abi_test.c` and `test_pyapi.py`
+      unchanged and passing).
+
+      Do this **before** 6.8-6.10 and 10.5 if possible, so new APIs get bindings for free.
+- [ ] 12.3 Apply the approved 12.1 findings, one module per commit, tests green after each.
+- [ ] 12.4 Review by an agent; fix its findings.
+
 ### Future (noted, not scheduled)
 - Sorting traces by header fields (offset, receiver, CMP, ...), decided 2026-11-07: a sort
   returns a **permutation** (a trace index list, 4 B/trace) over the index and never moves data.
@@ -853,3 +880,4 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
 - 2026-11-07: 4.7 decided by the agent as a default (the owner had no preference): demultiplex into a temporary demux file on open, original never touched; rationale and costs in the 4.7 entry. Revisit if a real multiplexed file shows a problem. Also confirmed for the owner: `readTraces` decodes into a new tensor (a copy), so processing never touches the mapped file.
 - 2026-11-07: Closed the raw-memory hole (owner rule: files change only on an explicit write). `SeismicFile.memory` is now `unsafeMemory`, internal and not exported by `parseSEG` (`export traceindex except unsafeMemory`); a write through it on a `writable` map would have bypassed the `HeaderEditor` journal. Public replacements: `isOpen` and `copyBytes(offset, n)` (a bounds-checked copy). `tumbrella` checks that the pointer is not reachable. C ABI and Python never exposed it. `nim test` passes; lib/pylib/cli build.
 - 2026-11-07: Task 6.10 added: read-only header listing per trace/record/file for a viewer's headers tab. Owner rule recorded: viewers never edit files; viewer edits become a NIF patch (`writeHeaderPatch`), applied only by an explicit `importHeaders` (dry run first, preferably to a copy).
+- 2026-11-07: Phase 12 added (owner): idiomatic Nim pass. 12.2 generates the C shims, the nimpy exports and `parseseg.h` from one annotation on the `abi/core.nim` procs (evaluate genny first), replacing the hand-written adapter files (64 C / 71 Python exports) and the hand-written header. Suggested order: 12.2 before 6.8-6.10 and 10.5.
