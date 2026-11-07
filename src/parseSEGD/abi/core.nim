@@ -107,8 +107,14 @@ proc raiseState(msg: string) {.noinline, noreturn.} =
 proc raiseArg(msg: string) {.noinline, noreturn.} =
   raise newException(ValueError, msg)
 
-proc cMalloc(size: csize_t): pointer {.importc: "malloc", header: "<stdlib.h>".}
-proc cFree(p: pointer) {.importc: "free", header: "<stdlib.h>".}
+proc cMalloc(size: csize_t): pointer {.importc: "malloc", header: "<stdlib.h>", cdecl, gcsafe,
+    raises: [].}
+proc cFree(p: pointer) {.importc: "free", header: "<stdlib.h>", cdecl.}
+
+var mallocProbe {.volatile.}: proc (size: csize_t): pointer {.cdecl, gcsafe, raises: [].} =
+  cMalloc
+  # Called through a volatile pointer: clang may otherwise drop an unused
+  # malloc/free pair and assume the allocation succeeded.
 
 proc canAllocate*(bytes: int64): bool =
   ## Nim's allocator terminates the process when the system refuses memory
@@ -116,7 +122,7 @@ proc canAllocate*(bytes: int64): bool =
   ## large buffer is first probed with malloc/free. The system may still run
   ## out later; this catches requests it refuses outright.
   if bytes < 64 shl 20: return true
-  let p = cMalloc(csize_t(bytes))
+  let p = mallocProbe(csize_t(bytes))
   result = p != nil
   if result: cFree(p)
 

@@ -331,7 +331,7 @@ Tasks:
     `__dlpack__`, since the tensors stay internal.
   - Test it with a pytest-free `python3 -I` script in `nim test`, mirroring
     `tests/python/smoke.py`, and with numpy whenever it is available.
-- [ ] 8.9 **Ongoing:** build tasks for every target, kept current whenever a target or flag
+- [x] 8.9 **Ongoing:** build tasks for every target, kept current whenever a target or flag
       changes. Tasks in `config.nims`:
   - `lib` (the C ABI for the host OS);
   - `libLinux` / `libWindows` / `libMacos` (cross-builds through the existing zig tasks,
@@ -506,4 +506,17 @@ Tasks:
   - Samples reach numpy zero-copy: `Samples.__dlpack__`/`__dlpack_device__` (a PyCapsule over the DLPack struct shared with C), `__array__`, `.numpy()`. `read_into`/`read_traces_into` decode into a caller's writable 2-D array (buffer protocol; strided rows allowed). Reads, open, convert, journals and `Prefetch.next` release the GIL, and a read holds a counted file reference so a concurrent `close()` cannot unmap it.
   - **nimpy bug** (unfixed upstream): a method's keyword arguments index past its argument-name list (`argsLen` counts `self`), so `f.read(0, 1, dtype="float64")` raised SystemError (and would read out of bounds under danger). `tools/patches/nimpy-method-kwargs.patch` (one line) is applied idempotently to `deps/nimpy` by `nim pylib` and `tests/tpython.nim`. Delete it when upstream fixes it.
   - Tests: `tests/tpython.nim` builds the module (checks on) and runs `tests/python/test_pyapi.py` with numpy and with numpy hidden; valgrind on the whole script reports no errors.
+- 2026-11-07: Task 8.9 done (and ongoing: keep `config.nims`, `tests/ttargets.nim` and CI current when a target or flag changes).
+  - `config.nims`: one target table (linux-x64/arm64 at glibc 2.28, windows-x64, macos-arm64/x64) and shared flags (`abiFlags`; `--tlsEmulation:off` on Windows, because emulated thread-locals break on host threads). Tasks: `lib`, `staticlib`, `pylib`, `libLinux`, `libWindows` (DLL plus import library), `libMacos`, `csources` (one bundle per triple: generated C, `nimbase.h`, header, a per-target Makefile and CMakeLists.txt with Nim's own C flags, README).
+  - Cross-building found two bugs:
+    - **`canAllocate` was optimized away by clang** (an unused malloc/free pair may be elided and assumed to succeed), so under zig cc, and natively on macOS, an over-large request killed the host. The probe now calls malloc through a volatile function pointer. The zig-built library now passes abi_test, including the RLIMIT_AS child.
+    - On Windows, capi's `NimMain` import clashed with Nim's dllexport definition. It now uses a matching `codegenDecl`.
+  - macOS without an SDK: Nim's `std/sysrand` (through Arraymancer → `std/random`) links `-framework Security`. `tools/macos-stubs/Security.framework/Security.tbd` (only `SecRandomCopyBytes`) satisfies the linker, and the dylib loads the real framework (install name `@rpath/libparseseg.dylib`). Built and checked here (exports, load commands), but **not run on a Mac**; the CI macOS job builds natively.
+  - `tests/ttargets.nim` runs the tasks themselves:
+    - abi_test passes against `lib`, `staticlib`, both libraries the linux-x64 bundle builds with `make` alone, and the zig linux-x64 build;
+    - the release `pylib` imports and reads;
+    - every cross build exports exactly the header's 58 functions (llvm-nm/llvm-objdump).
+  - CI (`.github/workflows/ci.yml`, **not run yet**):
+    - Linux: nim test with numpy and zig, then ASan/TSan, then every target, uploading host, cross and csources artifacts.
+    - Native Windows and macOS: `lib`, `staticlib`, `pylib` and a Python smoke test, with uploads.
 

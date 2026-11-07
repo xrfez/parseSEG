@@ -25,6 +25,22 @@ Six optimized build modes are defined in `config.nims` and output to `./bin/`:
 | `nim zigPortable` | Zig CC | Generic Portable Size | `-d:release --opt:size -Oz -mcpu=baseline -s` |
 | `nim zigDebug` | Zig CC | Full Debug & Diagnostics | `--debuginfo:on` |
 
+## Library Targets (C ABI, Python, C sources)
+
+Every embeddable artifact has a task in `config.nims` (all use `--mm:atomicArc --threads:on
+-d:useMalloc -d:release`; Windows adds `--tlsEmulation:off`). `tests/ttargets.nim` builds them
+all and runs the C ABI test against them.
+
+| Task | Output | Notes |
+|---|---|---|
+| `nim lib` | `bin/libparseseg.so` / `parseseg.dll` / `libparseseg.dylib` | C ABI for this host; header `include/parseseg.h` (`docs/design/c_abi.md`) |
+| `nim staticlib` | `bin/libparseseg.a` (`parseseg.lib` on Windows) | Link with `-lpthread -lm -ldl` (Linux); call `seg_init()` first |
+| `nim pylib` | `bin/parseseg.so` (`.pyd` on Windows) | Python module, `import parseseg` (`docs/design/python.md`); applies `tools/patches/nimpy-method-kwargs.patch` |
+| `nim libLinux` | `bin/linux-x64/`, `bin/linux-arm64/` | zig cross-build (glibc 2.28) |
+| `nim libWindows` | `bin/windows-x64/parseseg.dll` + `parseseg.dll.lib` | zig cross-build (MinGW ABI, UCRT) |
+| `nim libMacos` | `bin/macos-arm64/`, `bin/macos-x64/` `libparseseg.dylib` | zig cross-build; links `tools/macos-stubs` in place of the SDK's Security.framework |
+| `nim csources` | `bin/csources/<triple>/` | Generated C + `nimbase.h` + header + Makefile + CMakeLists.txt, one bundle per triple (the C is target-specific); builds with GCC or Clang alone |
+
 ## Development Commands
 
 - Run test suite: `nim test`

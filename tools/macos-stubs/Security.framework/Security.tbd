@@ -1,0 +1,11 @@
+--- !tapi-tbd
+# Link-time stub for cross-building to macOS without an SDK (`nim libMacos`):
+# Nim's std/sysrand links -framework Security for SecRandomCopyBytes, the only
+# symbol it uses. At run time the real framework at install-name is loaded.
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos ]
+install-name:    '/System/Library/Frameworks/Security.framework/Versions/A/Security'
+exports:
+  - targets:     [ x86_64-macos, arm64-macos ]
+    symbols:     [ _SecRandomCopyBytes ]
+...

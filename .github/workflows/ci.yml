@@ -2,12 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, seg-library ]
   pull_request:
     branches: [ main, master ]
 
 jobs:
-  build-and-test:
+  # Tests, sanitizers and every target buildable from Linux: the host C ABI
+  # (shared and static), the Python module, the zig cross-builds and the C
+  # source bundles (task 8.9; tests/ttargets.nim builds them all).
+  linux:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -18,26 +21,106 @@ jobs:
         with:
           nim-version: 'stable'
 
+      - name: Set up Zig (cross builds)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Install numpy (Python module tests)
+        run: python3 -m pip install numpy
+
       - name: Verify code formatting
-        run: |
-          nimpretty --check src/*.nim
+        run: nimpretty --check src/*.nim
 
       - name: Fetch dependencies (Atlas)
-        run: |
-          atlas rep atlas.lock
+        run: atlas rep atlas.lock
 
-      - name: Run test suite (includes the C ABI test, tests/tcapi.nim)
-        run: |
-          nim test
+      - name: Run test suite (C ABI, Python module and build targets included)
+        run: nim test
 
-      - name: Build the C ABI shared library
+      - name: C ABI under ASan and TSan
+        run: nim c -r --hints:off -d:capiSanitize tests/tcapi.nim
+
+      - name: Build every target
         run: |
           nim lib
+          nim staticlib
+          nim pylib
+          nim libLinux
+          nim libWindows
+          nim libMacos
+          nim csources
+          cp include/parseseg.h bin/
 
-      - name: Upload the library and header
+      - name: Upload the Linux host build
         uses: actions/upload-artifact@v4
         with:
-          name: libparseseg-linux-x64
+          name: parseseg-linux-x64-host
           path: |
             bin/libparseseg.so
+            bin/libparseseg.a
+            bin/parseseg.so
+            bin/parseseg.h
+
+      - name: Upload the cross builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: parseseg-cross
+          path: |
+            bin/linux-x64/
+            bin/linux-arm64/
+            bin/windows-x64/
+            bin/macos-arm64/
+            bin/macos-x64/
+
+      - name: Upload the C source bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: parseseg-csources
+          path: bin/csources/
+
+  # Native builds on the other hosts: the C ABI and the Python module built by
+  # their own toolchains (the macOS cross build links a Security stub instead).
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: 'stable'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch dependencies (Atlas)
+        run: atlas rep atlas.lock
+
+      - name: Build the C ABI and the Python module
+        run: |
+          nim lib
+          nim staticlib
+          nim pylib
+
+      - name: Python module smoke test
+        shell: bash
+        run: >
+          python -I -c "import sys; sys.path.insert(0, 'bin'); import parseseg;
+          f = parseseg.open('SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy');
+          assert f.trace_count() == 200 and f.read(0, 2).shape() == (2, 2001); print('ok')"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: parseseg-${{ matrix.os }}
+          path: |
+            bin/*parseseg*
             include/parseseg.h

@@ -90,7 +90,9 @@ proc setLastError(msg: string) =
   if n > 0: copyMem(addr lastErrorBuf[0], unsafeAddr msg[0], n)
   lastErrorBuf[n] = '\0'
 
-proc NimMain() {.importc, cdecl.}
+proc NimMain() {.importc, cdecl, codegenDecl: "N_LIB_EXPORT N_CDECL($1, $2)$3".}
+  # Declared as Nim defines it (exported): Windows refuses a redeclaration
+  # that adds dllexport.
 
 # ---------------------------------------------------------------- helpers --
 
