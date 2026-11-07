@@ -22,7 +22,7 @@ per-function documentation.
 ## Decisions
 
 1. **Build.** `nim lib` runs `nim c --app:lib --noMain --mm:atomicArc --threads:on`
-   `-d:useMalloc -d:release src/parseSEGD/capi.nim`.
+   `-d:useMalloc -d:release -d:segCapi src/parseSEGD/capi.nim`.
    - `useMalloc` lets any host thread call in with no per-thread setup, and lets ASan and
      valgrind see every allocation.
    - `atomicArc` makes reference counts atomic, so a handle (for example a tensor shared
@@ -121,6 +121,11 @@ per-function documentation.
 12. **Versioning.** `SEG_ABI_VERSION` (an integer in the header) and `seg_abi_version()` must
     match. Bump the ABI version on any incompatible change. `seg_version()` returns the
     package version string.
+
+13. **One source with the Python module.** The exports are thin wrappers over
+    `src/parseSEGD/abi/core.nim`, marked with `{.segExport: "seg_name".}`, which becomes
+    `exportc, dynlib, cdecl` under `-d:segCapi`. The Python module wraps the same procs (see
+    `python.md`). Put new behavior in the core, then add a wrapper for each target.
 
 ## Out of scope for now
 

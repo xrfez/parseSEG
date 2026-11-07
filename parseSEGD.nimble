@@ -11,3 +11,4 @@ srcDir        = "src"
 
 requires "nim >= 2.4.0"
 requires "arraymancer >= 0.7.33"
+requires "nimpy >= 0.2.0"

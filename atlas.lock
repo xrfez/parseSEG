@@ -6,6 +6,12 @@
       "commit": "873ac940bd5df50e1f7d587a91eeb7cf4ebf4a7e",
       "version": ""
     },
+    "nimpy": {
+      "dir": "$deps/nimpy",
+      "url": "https://github.com/yglukhov/nimpy",
+      "commit": "114e1b9c4f1e73d6d3999ba4df7194e7547c1be1",
+      "version": ""
+    },
     "nimblas": {
       "dir": "$deps/nimblas",
       "url": "https://github.com/andreaferretti/nimblas",
@@ -70,6 +76,7 @@
     "--path:\"deps/nimcl\"",
     "--path:\"deps/nimcuda/src\"",
     "--path:\"deps/nimlapack\"",
+    "--path:\"deps/nimpy\"",
     "--path:\"deps/opencl/src\"",
     "--path:\"deps/stb_image\"",
     "--path:\"deps/untar/src\"",
@@ -82,7 +89,7 @@
     "content": [
       "# Package",
       "",
-      "version       = \"0.1.0\"",
+      "version       = \"0.2.0\"",
       "author        = \"Joshua Fenner\"",
       "description   = \"Parse SEG formatted files incuding Type Y Revision 1.0 and 2.0 as well as Type D Revision 1.0, 2.1, and 3.0\"",
       "license       = \"MIT\"",
@@ -93,6 +100,7 @@
       "",
       "requires \"nim >= 2.4.0\"",
       "requires \"arraymancer >= 0.7.33\"",
+      "requires \"nimpy >= 0.2.0\"",
       ""
     ]
   },

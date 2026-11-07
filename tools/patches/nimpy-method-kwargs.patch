@@ -1,0 +1,13 @@
+diff --git i/nimpy.nim w/nimpy.nim
+index 4ba6c11..22d2a13 100644
+--- i/nimpy.nim
++++ w/nimpy.nim
+@@ -604,7 +604,7 @@ proc makeCallNimProcWithPythonArgs(prc, formalParams, argsTuple, kwargsDict: Nim
+     inc numArgs
+ 
+   var
+-    argsLen = newLit(numArgs)
++    argsLen = newLit(numArgs - extraArg) # parseSEGD patch: self is not in argNames
+     argsLenReq = newLit(numArgsReq - extraArg)
+     nameLit = newLit($prc)
+ 

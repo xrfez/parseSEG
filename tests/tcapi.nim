@@ -32,7 +32,7 @@ proc mustRun(cmd: string) =
 proc buildLib(dir: string, extra = "") =
   createDir(dir)
   mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --app:lib --noMain " &
-    "--mm:atomicArc --threads:on -d:useMalloc " & extra & " --nimcache:" &
+    "--mm:atomicArc --threads:on -d:useMalloc -d:segCapi " & extra & " --nimcache:" &
     quoteShell(dir / "cache") & " -o:" & quoteShell(dir / "libparseseg.so") & " " &
     quoteShell(root / "src" / "parseSEGD" / "capi.nim"))
 

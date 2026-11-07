@@ -317,7 +317,7 @@ Tasks:
       sizes via `computeRev3Sizes`, 96-byte CSDs, Rev 3 THE#1, GH#N → Source Description
       blocks) and re-encode formats Rev 3 no longer defines. Rev 3 → Rev 2 drops typed blocks,
       and that is logged.
-- [ ] 8.8 Python bindings with **nimpy** (owner request, 2026-11-07): a native extension module
+- [x] 8.8 Python bindings with **nimpy** (owner request, 2026-11-07): a native extension module
       (`parseseg.so` / `parseseg.pyd`, `import parseseg`), with nimpy added through Atlas.
   - One custom export pragma (e.g. `{.segExport.}`) marks every boundary proc. A define chooses
     what it expands to: `-d:segCapi` gives `exportc, dynlib, cdecl` (the `.so`/`.dll`/`.dylib`
@@ -500,3 +500,10 @@ Tasks:
   - **8.8 plan:** replace `capi` with a define-switched pragma (`-d:segCapi` → exportc/dynlib/cdecl, `-d:segPython` → nimpy `exportpy`). Keep the shared implementation procs and thin per-target wrappers. Add nimpy with `atlas use nimpy` (or add it to the nimble file, then `atlas install` and `atlas pin`). numpy is not installed here (no pip), so test with `python3 -I` and skip the numpy checks.
   - **8.9 plan:** `staticlib` and `csources` were verified by hand (`--app:staticlib`; `--compileOnly --genScript` plus `nimbase.h`, built with gcc alone). There is no `make` in this container, so test a Makefile only through CI, or with a shell fallback.
   - **Test probes:** put them in `tests/probe_*.nim` (ignored by the runner) and delete them. Reviews put scratch files under `/tmp/claude-1000/`.
+- 2026-11-07: Task 8.8 done: the Python module `parseseg` (nimpy 0.2.1 via Atlas). Design note: `docs/design/python.md`.
+  - **One source:** `src/parseSEGD/abi/core.nim` holds the shared boundary implementation (handles, checks, limits, reads, prefetch, edits, journals, conversion options, DLPack); its procs raise. `abi/exporting.nim` defines `{.segExport.}` / `{.segExport: "name".}`: `-d:segCapi` → `exportc, dynlib, cdecl`; `-d:segPython` → `exportpy`; neither → nothing. `capi.nim` was rewritten as thin C wrappers (same symbols, statuses and messages; abi_test, the symbol check and the ctypes smoke pass unchanged, and so do ASan/TSan) and now needs `-d:segCapi` (added to `nim lib` and tcapi).
+  - **Python** (`src/parseSEGD/pyapi.nim`, `nim pylib` → `bin/parseseg.so`): objects `SeismicFile`, `Samples`, `Prefetch`, `Editor`, `Geometry` with `close()`/`with`; real exception classes (`parseseg.Error` > `ArgumentError`/`FormatError` (ValueError), `IOError` (OSError), `StateError`/`InternalError` (RuntimeError), `RefusedError`), made on first access through module `__getattr__`. The wrappers return raw `PPyObject` and set the exception themselves, because nimpy's own mapping makes a new uncatchable class per raise. `convert`/journal calls attach `e.diagnostics`.
+  - Samples reach numpy zero-copy: `Samples.__dlpack__`/`__dlpack_device__` (a PyCapsule over the DLPack struct shared with C), `__array__`, `.numpy()`. `read_into`/`read_traces_into` decode into a caller's writable 2-D array (buffer protocol; strided rows allowed). Reads, open, convert, journals and `Prefetch.next` release the GIL, and a read holds a counted file reference so a concurrent `close()` cannot unmap it.
+  - **nimpy bug** (unfixed upstream): a method's keyword arguments index past its argument-name list (`argsLen` counts `self`), so `f.read(0, 1, dtype="float64")` raised SystemError (and would read out of bounds under danger). `tools/patches/nimpy-method-kwargs.patch` (one line) is applied idempotently to `deps/nimpy` by `nim pylib` and `tests/tpython.nim`. Delete it when upstream fixes it.
+  - Tests: `tests/tpython.nim` builds the module (checks on) and runs `tests/python/test_pyapi.py` with numpy and with numpy hidden; valgrind on the whole script reports no errors.
+

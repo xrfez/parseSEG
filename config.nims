@@ -45,8 +45,27 @@ const libName =
 task lib, "Build the C ABI shared library (bin/libparseseg.so, see include/parseseg.h)":
   ## atomicArc: handles may be released from any host thread; useMalloc: host
   ## threads need no allocator setup.
-  selfExec "c --app:lib --noMain --mm:atomicArc --threads:on -d:useMalloc -d:release " &
+  selfExec "c --app:lib --noMain --mm:atomicArc --threads:on -d:useMalloc -d:release -d:segCapi " &
     "--out:bin/" & libName & " src/parseSEGD/capi.nim"
+
+const pyModName = when defined(windows): "parseseg.pyd" else: "parseseg.so"
+
+proc patchNimpy() =
+  ## Applies tools/patches/nimpy-method-kwargs.patch to the Atlas checkout
+  ## once (nimpy 0.2.1 miscounts a method's arguments when keywords are
+  ## passed); a no-op when it is already applied. Drop it once upstream is fixed.
+  const patch = "../../tools/patches/nimpy-method-kwargs.patch"
+  if gorgeEx("git -C deps/nimpy apply --reverse --check " & patch).exitCode != 0:
+    exec "git -C deps/nimpy apply " & patch
+
+task pylib, "Build the Python module (bin/parseseg.so, `import parseseg`; needs no libpython)":
+  ## nimpy loads the CPython API from the importing process, so one build
+  ## serves every Python 3 version. atomicArc/useMalloc as for `lib`: objects
+  ## may be freed on any Python thread. Windows/MinGW needs tlsEmulation off.
+  patchNimpy()
+  selfExec "c --app:lib --mm:atomicArc --threads:on -d:useMalloc -d:release -d:segPython " &
+    (when defined(windows): "--tlsEmulation:off --passL:-static " else: "") &
+    "--out:bin/" & pyModName & " src/parseSEGD/pyapi.nim"
 
 task test, "Run test suite":
   ## Executes unittest suite.
