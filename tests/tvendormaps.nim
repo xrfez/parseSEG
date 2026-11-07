@@ -243,3 +243,25 @@ block review_revision_minor_ten:
   doAssert not r.decode(c, area(vtExternalHeader), [1'u8], blk, l)
   c.revision = VendorRevision(major: 2, minor: 10)
   doAssert r.decode(c, area(vtExternalHeader), [1'u8], blk, l)
+
+block rev3_user_blocks_by_type:
+  # INOVA (manufacturer 50) user blocks 0xB0-0xB8 on every trace of the Rev 3
+  # fixture, handed over by block type.
+  let d = readSegd(exampleDir / "inova_rev30_5traces.sgd")
+  let rec = d.records[0].record
+  var r: VendorRegistry
+  r.addMap loadVendorMap("""(.nif27)
+(vendormap "inova-b0" (match (format segd) (rev 3.0 3.1) (manufacturer 50))
+  (target (kind block) (type 0xB0) (where traceHeader) (name inovaB0)
+    (field first (at 1) (enc u32)) (field kind (at 32) (enc u8)))
+  (target (kind block) (type 0x16) (where generalHeader) (name explosive)
+    (field depth (at 15) (enc u16) (unit "cm"))))""")
+  var l: DiagLog
+  let gh = r.decodeVendorAreas(rec, l, "fixture")
+  doAssert gh.len == 1 and gh[0].name == "explosive" and "depth" in gh[0]
+  for t in d.records[0].traces:
+    let tb = r.decodeVendorAreas(rec, t, l, "fixture")
+    doAssert tb.len == 1 and tb[0].get("kind").intVal == 0xB0
+    let at = findBlock(t.extensions, 0xB0)
+    doAssert tb[0].get("first").intVal == int64(beU32(t.extensions, at))
+  doAssert l.len == 0

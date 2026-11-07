@@ -222,3 +222,39 @@ block real_rev3_file_rewrites_byte_identically:
     doAssert d.toDisk(tmp / "big.sgd").len == 0
     doAssert readBytes(tmp / "big.sgd") == readBytes(bigFile)
     removeFile(tmp / "big.sgd")
+
+block committed_rev3_fixture:
+  # 5 traces of the real INOVA Rev 3.0 record, all headers as recorded
+  # (tools/make_rev3_fixture.nim): always available, unlike the 65 MB file.
+  let fixture = exampleDir / "inova_rev30_5traces.sgd"
+  let d = readSegd(fixture)
+  doAssert d.diagnostics.len == 0, $d.diagnostics[0]
+  let rd = d.records[0]
+  let r = rd.record
+  doAssert r.isRev3 and r.gh1.manufacturerCode == 50 and r.gh1.fileNumber == 151
+  doAssert r.gh3.timeZero == 1474994765504000 and r.gh3.headerSize == 4544
+  doAssert r.gh3.dataSize == 86744 and r.gh3.recordSize == 86744
+  doAssert r.generalBlocks.len == 14 * 32 and r.external.len == 113 * 32
+  doAssert blockText(r.generalBlocks.toOpenArray(32, 63)) == "West Virginia"
+  doAssert rd.traces.len == 5
+  var order: seq[int]
+  for t in rd.traces: order.add t.channelSet
+  doAssert order == @[0, 2, 1, 3, 3] # physical order as recorded: CS1, CS3, CS2, CS4, CS4
+  doAssert rd.traces[3].offset == 53864 and rd.traces[3].ext1r3.receiverLine == 100.0
+  doAssert rd.samples[3, 0] == 9.369352937937947e-07'f32
+  for t in rd.traces:
+    var user = 0
+    for (i, bt) in blocks(t.extensions):
+      if isUserBlock(bt): inc user
+    doAssert user == 9 # INOVA blocks 0xB0-0xB8
+  doAssert d.toDisk(tmp / "fixture.sgd").len == 0
+  doAssert readBytes(tmp / "fixture.sgd") == readBytes(fixture)
+  if fileExists(bigFile):
+    # The fixture is the big file's first 86744 bytes but for the GH#3 sizes
+    # and CS4's trace count.
+    let big = readFile(bigFile)
+    let fx = readBytes(fixture)
+    var diff: seq[int]
+    for i in 0..<fx.len:
+      if byte(big[i]) != fx[i]: diff.add i
+    doAssert diff == @[76, 77, 78, 79, 84, 85, 86, 87, 853, 854]

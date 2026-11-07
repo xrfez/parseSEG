@@ -38,6 +38,15 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
   ## and general trailer blocks, wherever a map or decoder applies.
   let ctx = segdContext(rec)
   let loc = Location(file: file, record: rec.index)
+  if rec.isRev3:
+    # Rev 3: general header blocks by type byte (`block`, where generalHeader);
+    # Position blocks span 3 blocks, so each block is offered with what follows.
+    for (i, t) in blocks(rec.generalBlocks):
+      var b: VendorBlock
+      if reg.decode(ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(t),
+          where: "generalHeader", extIndex: -1), rec.generalBlocks.toOpenArray(i, i + 31), b,
+          log, loc):
+        result.add b
   decodeArea(reg, ctx, vtExtendedHeader, rec.extended, 32, log, loc, result)
   decodeArea(reg, ctx, vtExternalHeader, rec.external, 32, log, loc, result)
   for i, g in rec.sourceHeaders:
@@ -51,10 +60,19 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
 
 proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
     log: var DiagLog, file = ""): seq[VendorBlock] =
-  ## Decodes a SEG-D trace's header extensions #2 and later (`traceExt`,
-  ## `(extension k)`).
+  ## Decodes a SEG-D trace's header extensions #2 and later: Rev 1/2 by
+  ## position (`traceExt`, `(extension k)`), Rev 3 by block type (`block`,
+  ## `(type 0xB0) (where traceHeader)`).
   let ctx = segdContext(rec)
   let loc = Location(file: file, record: rec.index, trace: t.index)
+  if rec.isRev3:
+    # Rev 3: typed blocks by type byte (`block`, where traceHeader).
+    for (i, bt) in blocks(t.extensions):
+      var b: VendorBlock
+      if reg.decode(ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(bt),
+          where: "traceHeader", extIndex: -1), t.extensions.toOpenArray(i, i + 31), b, log, loc):
+        result.add b
+    return
   for i in 0 ..< t.extensions.len div 32:
     var b: VendorBlock
     if reg.decode(ctx, VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1,
