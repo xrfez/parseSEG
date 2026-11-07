@@ -234,12 +234,14 @@ type
     path*: string
     map: MemFileSource
 
-proc openSeismic*(path: string, twosComplement8015 = false, keys = false): SeismicFile =
+proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
+    writable = false): SeismicFile =
   ## Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
   ## index (with per-trace geometry when `keys`). Format problems are in `index.log`; an undetectable file gives a
   ## fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
-  ## file cannot be opened or mapped.
-  result = SeismicFile(path: path, map: openMemFileSource(path))
+  ## file cannot be opened or mapped. `writable` maps it read-write, for
+  ## in-place header edits (`model/edit`).
+  result = SeismicFile(path: path, map: openMemFileSource(path, writable))
   let n = int(min(result.map.size, 4096))
   var kind: SeismicKind
   if n > 0 and detectKind(result.map.memory.toOpenArray(0, n - 1), kind):
@@ -265,6 +267,10 @@ proc memory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
 
 proc mappedSize*(f: SeismicFile): int64 {.inline.} =
   if f.map != nil: f.map.size else: 0
+
+proc flush*(f: SeismicFile) =
+  ## Writes modified pages of a writable map back to the file.
+  if f.map != nil: f.map.flush()
 
 proc rowPtr[T](t: Tensor[T], row: int): ptr UncheckedArray[T] {.inline.} =
   let base = cast[ptr UncheckedArray[T]](t.unsafe_raw_offset())
