@@ -218,7 +218,11 @@ proc segFileSampleInterval(f: pointer, i: int64): float64 {.
 
 proc segFileLog(f: pointer): pointer {.segExport: "seg_file_log".} =
   try:
-    if f == nil: nil else: cast[pointer](fileOf(f).fileLog) # borrowed: the file holds it
+    if f == nil: return nil
+    # Bound to a local first: under ARC, a cast of a call's `ref` result skips
+    # its destructor and leaks the reference.
+    let l = fileOf(f).fileLog
+    cast[pointer](l) # borrowed: the file holds it
   except Exception: nil
 
 # ---------------------------------------------------------- header fields --
@@ -525,7 +529,9 @@ proc segEditorEdits(e: pointer): int64 {.segExport: "seg_editor_edits", raises: 
 
 proc segEditorLog(e: pointer): pointer {.segExport: "seg_editor_log".} =
   try:
-    if e == nil: nil else: cast[pointer](handle[EditorObj](e).editorLog)
+    if e == nil: return nil
+    let l = handle[EditorObj](e).editorLog # a local: see seg_file_log
+    cast[pointer](l)
   except Exception: nil
 
 proc segEditorClose(e: pointer): SegStatus {.segExport: "seg_editor_close".} =
