@@ -11,9 +11,13 @@ tape**, designed to back a future high-performance viewer and HPC processing. Pr
 4. SEG-Y Rev 2.1
 
 **Long-term goal: spec out and support every revision of both standards** (SEG-Y 0/1/2.0/2.1,
-SEG-D 1/2.0/2.1/3.0/3.1). Standalone spec PDFs exist for SEG-Y 1.0/2.0/2.1 and SEG-D
-**2.0**/2.1/3.0/3.1. SEG-D Rev 1 and SEG-Y Rev 0 are known only from the history sections of
-the later documents.
+SEG-D 0/1/2.0/2.1/3.0/3.1), plus **SEG-2** and the survey (positioning) formats.
+Standalone spec PDFs exist for SEG-Y **0** (1975)/1.0/2.0/2.1, SEG-D **0** (the original
+standard)/**2.0**/2.1/3.0/3.1, SEG-2 (1990), SPS (1993 original and Rev 2.1) and SEG P1/P2/P3
+(1983); all added by the owner on 2026-11-07 except where earlier. SEG-D Rev 1 is known only
+from the history sections of the later documents.
+- **SEG-2** (owner, 2026-11-07): seen internally on Geospace systems; PC-oriented, usually
+  little-endian, keyword strings in the headers.
 
 ## Owner decisions (2026-11-07, revised)
 - **One data model, many revisions.** The revision is always identified from the headers
@@ -203,8 +207,13 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [x] 1.5 Review and verification against the real files (`segd_rev3_0_verified.md`, README index)
 - [x] 1.6 `segy_rev2_1.md` (delta on rev 1, verified on Inglewood)
 - [x] 1.6b `segd_rev2_0.md` from the standalone 2.0 PDF (word-diffed against 2.1, checked against `63.sgd`)
-- [ ] 1.7 (later) `segd_rev3_1_delta.md` (also check 3.1 for new sensor types, e.g. rotational)
-- [ ] 1.8 (later) The remaining revisions: SEG-Y 2.0 vs 2.1 differences, SEG-D Rev 1 (from history sections)
+- [ ] 1.7 `segd_rev3_1_delta.md` (also check 3.1 for new sensor types, e.g. rotational)
+- [ ] 1.8 The remaining revisions: `segy_rev2_0_delta.md` (SEG-Y 2.0 vs 2.1), `segy_rev0.md` and
+      `segd_rev0.md` from the original 1975 standards (owner PDFs, 2026-11-07), each with a gap
+      analysis against the current readers. SEG-D Rev 1 stays known only from history sections.
+- [ ] 1.9 `seg2.md` (SEG-2, 1990), `sps.md` (SPS 1993 + Rev 2.1), `p1_p2_p3.md` (SEG 1983
+      positional exchange formats). New PDFs extracted to `SEG Spec/text/` (`SEG-Y Rev 0` had no
+      extension; renamed to `SEG-Y Rev 0.pdf`).
 
 ### Phase 2: Core infrastructure
 - [x] 2.1 endians, bcd, ibmfloat, ebcdic, errors (`tests/tcommon.nim`)
@@ -238,6 +247,9 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
   - [x] 3.4d Layout XML (`((SEG:Layout:text/xml))`, D-8): parse into a field map; accessors
         (inline, crossline, CDP/source/receiver coordinates, ...) use it when present
 
+- [ ] 3.5 Older and in-between revisions from the 1.8 gap analyses: SEG-Y Rev 0 (1975) and Rev 2.0
+      files read (and write) correctly; tests with synthetic files
+
 ### Phase 4: SEG-D Rev 2.0 / 2.1 (2.0 first)
 - [x] 4.1 Headers (GH1/GH2/GH#N, CSD, skew, extended, external, demux trace header, THE)
 - [x] 4.2 Sample formats (all 2.x demux codes) into Tensors; multiplexed codes → diagnostic + raw
@@ -247,6 +259,9 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       and validator, matcher, compiled field tables, `VendorBlock` values, code-decoder
       precedence. Test with a hand-written example map against synthetic blocks.
 
+- [ ] 4.6 SEG-D Rev 0 (the original standard) from the 1.8 gap analysis: revision detection
+      without a GH#2 revision, Rev 0 header fields and sample formats; synthetic tests
+
 ### Phase 5: SEG-D Rev 3.0
 - [x] 5.1 Storage unit label, TOC, general headers 1-3 and all optional/typed blocks
 - [x] 5.2 Trace headers and typed extensions (incl. Orientation 0x60), trailer, reader
@@ -254,6 +269,8 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [x] 5.3 Writer and round-trip tests
 - [x] 5.4 Validate against `00000151_12900_11300.sgd` (local only), then write a few-trace copy
       with all headers to `SEG Spec/exampleFiles/` and commit it as a permanent fixture
+
+- [ ] 5.5 SEG-D Rev 3.1 from the 1.7 delta: revision handling and any new or changed blocks
 
 ### Phase 6: Data model for viewers and HPC
 - [x] 6.1 Trace index (header-only walk) and range reads into Tensor slices, memfiles backend
@@ -372,12 +389,25 @@ Tasks:
       name. Owner actions left: rename the working directory and the GitHub repository.
 
 ### Phase 10: Survey (positioning) files
-- [ ] 10.1 Obtain and ingest the specs: SEG P1 (P1/90 and P1/11) and SPS (Shell SPS 2.1 and SEG SPS
-      3.0). *(Owner: please add the PDFs to `SEG Spec/`; none are present yet.)*
-- [ ] 10.2 Readers and writers into a geometry model (source/receiver points, relations/XPS), with
-      diagnostics like the seismic readers.
-- [ ] 10.3 Join survey geometry to traces (the 8.5 hook): fill `TraceKeys` coordinates, offsets
-      and midpoints, especially for SEG-D 2.x, which has no coordinates in its headers.
+Text formats, so no sample files are needed (owner, 2026-11-07; real samples will follow later).
+- [ ] 10.1 Specs ingested: SPS 1993 + Rev 2.1 and SEG P1/P2/P3 (1983) extracted and distilled
+      (task 1.9). P1/90, P1/11 and SPS 3.0 are not available; add them if the owner finds them.
+- [ ] 10.2 Readers and writers into a survey model (`src/parseSEG/survey/`): SPS S/R/X + H
+      records (both revisions, revision detected from the content), P1 (and P2/P3 records
+      kept as typed or raw records), with diagnostics like the seismic readers; column-exact
+      writers that round-trip; synthetic tests built from the spec examples.
+- [ ] 10.3 Join survey geometry to traces (the 8.5 hook): build a `GeometryTable` from SPS/P1;
+      apply SPS X (relation) records to traces that lack receiver stations (field record +
+      channel → receiver and source station), then fill `TraceKeys` coordinates, offsets and
+      midpoints, especially for SEG-D 2.x, which has no coordinates in its headers. Exposed in
+      the public API, C ABI, Python and the CLI (`info --sps`/`--p1`).
+- [ ] 10.4 Review by an agent; fix its findings.
+
+### Phase 11: SEG-2 (queued after Phase 10)
+- [ ] 11.1 `Seg2File` reader (descriptor blocks, keyword strings, formats 1-5, byte order),
+      trace index and keys, `openSeismic` detection.
+- [ ] 11.2 Writer, conversion to and from SEG-Y / SEG-D, C ABI and Python, CLI.
+- [ ] 11.3 Validate against a Geospace SEG-2 sample *(owner: please provide one)*.
 
 ### Future (noted, not scheduled)
 - Sorting traces by header fields (offset, receiver, CMP, ...), decided 2026-11-07: a sort
@@ -392,6 +422,8 @@ Tasks:
 ## Open questions for the owner
 - A sample file with **rotational data**, and one with **receiver-gather** SEG-D, would let us verify these paths.
 - Integer-format SEG-D samples (8015/8022/8024/8036/8038/8042/8044/8048).
+- Real SPS / P1 files (Phase 10 is tested with synthetic files built from the spec examples) and a
+  Geospace SEG-2 file (Phase 11).
 
 ## Log
 - 2026-11-06: Phase 0 done. The spec text is extracted and committed. Branch `seg-library` created.
