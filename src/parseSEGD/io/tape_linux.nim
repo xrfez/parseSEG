@@ -60,7 +60,8 @@ proc op(t: LinuxTape; code: cshort; count: int; what: string) =
 proc rawStatus(t: LinuxTape): MtGet =
   if ioctl(t.fd, MTIOCGET, addr result) < 0: t.fail("MTIOCGET")
 
-method status*(t: LinuxTape): TapeStatus =
+proc linuxStatus(t: LinuxTape): TapeStatus =
+  # Statically bound, so `readBlock` does not go through method dispatch.
   let g = t.rawStatus()
   let s = int(g.mt_gstat)
   TapeStatus(fileNumber: int(g.mt_fileno), blockNumber: int(g.mt_blkno),
@@ -68,19 +69,21 @@ method status*(t: LinuxTape): TapeStatus =
     atEndOfData: (s and GmtEod) != 0, atEndOfMedium: (s and GmtEot) != 0,
     writeProtected: (s and GmtWrProt) != 0, online: (s and GmtOnline) != 0)
 
+method status*(t: LinuxTape): TapeStatus = t.linuxStatus()
+
 method readBlock*(t: LinuxTape; buf: var openArray[byte]): int =
   let n = posix.read(t.fd, if buf.len > 0: addr buf[0] else: nil, buf.len)
   if n > 0:
     result = n
   elif n == 0:
     # 0 bytes is a tape mark, unless the drive reports blank tape.
-    result = if t.status.atEndOfData: -1 else: 0
+    result = if t.linuxStatus.atEndOfData: -1 else: 0
   else:
     let err = errno
     if err == ENOMEM:
       raise newException(IOError, t.name & ": block exceeds the " & $buf.len &
         "-byte read buffer")
-    if (err == EIO or err == ENOSPC) and (let s = t.status; s.atEndOfData or s.atEndOfMedium):
+    if (err == EIO or err == ENOSPC) and (let s = t.linuxStatus; s.atEndOfData or s.atEndOfMedium):
       result = -1
     else:
       t.fail("read")

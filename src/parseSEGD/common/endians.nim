@@ -1,6 +1,7 @@
 ## Big-endian integer and IEEE float access on byte buffers.
 ##
-## All SEG formats are big-endian. Positions are 0-based byte offsets into the
+## The SEG specs are big-endian; `getNum`/`putNum` also handle the little-endian
+## and pair-swapped orders seen in SEG-Y files. Positions are 0-based byte offsets into the
 ## buffer. Out-of-range access is an index defect: callers check record
 ## sizes before decoding a block.
 
@@ -74,3 +75,61 @@ func putBeF32*(b: var openArray[byte], pos: int, v: float32) {.inline.} =
 
 func putBeF64*(b: var openArray[byte], pos: int, v: float64) {.inline.} =
   putBeU64(b, pos, cast[uint64](v))
+
+# ---------------------------------------------------------------------------
+# Byte-order-aware access (SEG-Y files may be little-endian or pair-swapped).
+
+type
+  ByteOrder* = enum
+    ## Byte order of multi-byte binary fields. SEG-Y Rev 2 declares it with the
+    ## marker 0x01020304 at binary header bytes 3297-3300.
+    boBig = "big"                 ## Spec order: most significant byte first.
+    boLittle = "little"           ## Every field's bytes reversed.
+    boPairSwapped = "pairSwapped" ## Bytes swapped within each 16-bit pair.
+
+func swapBytes*(x: uint16): uint16 {.inline.} = (x shl 8) or (x shr 8)
+
+func swapBytes*(x: uint32): uint32 {.inline.} =
+  (x shl 24) or ((x and 0xFF00'u32) shl 8) or ((x shr 8) and 0xFF00'u32) or (x shr 24)
+
+func swapBytes*(x: uint64): uint64 {.inline.} =
+  (uint64(swapBytes(uint32(x and 0xFFFF_FFFF'u64))) shl 32) or uint64(swapBytes(uint32(x shr 32)))
+
+func swapPairs[T: uint32 | uint64](x: T): T {.inline.} =
+  const lowBytes = when T is uint32: 0x00FF_00FF'u32 else: 0x00FF_00FF_00FF_00FF'u64
+  ((x and lowBytes) shl 8) or ((x shr 8) and lowBytes)
+
+func reorder[T: uint16 | uint32 | uint64](x: T, order: ByteOrder): T {.inline.} =
+  ## Converts between big-endian and `order`. The mapping is its own inverse.
+  case order
+  of boBig: x
+  of boLittle: swapBytes(x)
+  of boPairSwapped:
+    when T is uint16: swapBytes(x) else: swapPairs(x)
+
+func getNum*[T: SomeNumber](b: openArray[byte], pos: int, order: ByteOrder): T {.inline.} =
+  ## Reads a 1, 2, 4 or 8 byte number stored in `order` at byte offset `pos`.
+  ## Single bytes are never reordered.
+  when sizeof(T) == 1:
+    cast[T](b[pos])
+  elif sizeof(T) == 2:
+    cast[T](reorder(beU16(b, pos), order))
+  elif sizeof(T) == 4:
+    cast[T](reorder(beU32(b, pos), order))
+  elif sizeof(T) == 8:
+    cast[T](reorder(beU64(b, pos), order))
+  else:
+    {.error: "getNum supports 1, 2, 4 and 8 byte numbers".}
+
+func putNum*[T: SomeNumber](b: var openArray[byte], pos: int, v: T, order: ByteOrder) {.inline.} =
+  ## Writes `v` in `order` at byte offset `pos`. Single bytes are never reordered.
+  when sizeof(T) == 1:
+    b[pos] = cast[uint8](v)
+  elif sizeof(T) == 2:
+    putBeU16(b, pos, reorder(cast[uint16](v), order))
+  elif sizeof(T) == 4:
+    putBeU32(b, pos, reorder(cast[uint32](v), order))
+  elif sizeof(T) == 8:
+    putBeU64(b, pos, reorder(cast[uint64](v), order))
+  else:
+    {.error: "putNum supports 1, 2, 4 and 8 byte numbers".}
