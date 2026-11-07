@@ -45,6 +45,9 @@ const
     ## header costs memory only for the bytes actually present.
   MaxExtendedRecords = 1_000_000
     ## Bound on extended records implied by a Rev 2 first-trace offset (3.2 GB).
+  DefaultMaxRetained* = 256 shl 20
+    ## Extended header and trailer bytes kept in memory by default. Beyond it,
+    ## stanzas and User Data are only indexed; extract attachments from disk.
 
 type
   SegyFile* = object
@@ -90,6 +93,8 @@ type
     tracesRead: int
     lastTraceSeen: bool
     ext1Warned: bool
+    maxRetained: int
+    byteStream: bool     ## The source has no record boundaries (disk): offsets are file offsets.
     done: bool
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
@@ -165,13 +170,23 @@ proc readExtendedHeader(r: var SegyReader, count: int, checkText: bool) =
       raiseTruncated("extended textual record " & $f.extended.recordCount & " has " & $got &
         " of 3200 bytes", r.offset)
     if checkText and not f.extended.inBinaryStanza and not startsStanza(rec) and
-        not looksLikeText(rec):
+        not f.extended.continuesUserData(rec) and not looksLikeText(rec):
       r.unread(rec)
       r.log.report(sevWarning, dcInconsistent, "extended textual header ends after " &
         $f.extended.recordCount & " records: the record at this offset is not text " &
         "(missing ((SEG:EndText)) or a wrong count)", start, r.loc(field = "extended"))
       break
-    f.extended.add rec
+    f.extended.add(rec, if r.byteStream: start else: -1)
+
+proc reportIssues(r: var SegyReader, h: ExtendedTextHeader, start: int64, field: string) =
+  # Walker issues become warnings. Stream offsets map to file offsets on disk.
+  for i in h.issues:
+    r.log.report(sevWarning, dcBadValue, i.msg, if r.byteStream: start + i.pos else: -1,
+      r.loc(field = field))
+  if not h.isComplete:
+    r.log.report(sevInfo, dcValidation, field & ": " & $h.recordCount & " records exceed the " &
+      "retention limit; stanzas and User Data are indexed but not held in memory",
+      start, r.loc(field = field))
 
 proc readFileHeaders(r: var SegyReader) =
   # Fills r.file as it goes, so whatever was read survives a later failure.
@@ -246,9 +261,13 @@ proc readFileHeaders(r: var SegyReader) =
       count = n
       fromOffset = true
   if count < -1: count = 0 # already reported by validate
-  f.extended = initExtendedTextHeader(rev1Lines = rev.major < 2)
-  f.trailer = initExtendedTextHeader(rev1Lines = rev.major < 2)
-  r.readExtendedHeader(count, checkText = count == -1 or fromOffset)
+  f.extended = initExtendedTextHeader(rev1Lines = rev.major < 2, maxRetained = r.maxRetained)
+  f.trailer = initExtendedTextHeader(rev1Lines = rev.major < 2, maxRetained = r.maxRetained)
+  let extStart = r.offset
+  try:
+    r.readExtendedHeader(count, checkText = count == -1 or fromOffset)
+  finally:
+    r.reportIssues(f.extended, extStart, "extended")
   f.extendedAsRead = hash(f.extended.data)
   f.extendedAsReadLen = f.extended.data.len
   if rev.major >= 2 and count > 0 and not f.extended.hasEndText:
@@ -277,11 +296,14 @@ func isExtendedAsRead*(f: SegyFile): bool =
   f.binaryAsRead.len == BinaryHeaderSize and f.extended.data.len == f.extendedAsReadLen and
     hash(f.extended.data) == f.extendedAsRead
 
-proc openSegy*(src: RecordSource): SegyReader =
+proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained): SegyReader =
   ## Reads the file headers from `src`, positioned at the start of a SEG-Y
   ## file. Check `log.isFatal` for a file whose traces cannot be read.
   ## Whatever headers were read before a failure are kept in `file`.
-  result = SegyReader(cursor: initRecordCursor(src), name: src.name)
+  ## Extended header and trailer bytes are held in memory up to
+  ## `maxRetained` bytes each; beyond that they are only indexed.
+  result = SegyReader(cursor: initRecordCursor(src), name: src.name, maxRetained: maxRetained,
+    byteStream: not src.hasRecordBoundaries)
   if not result.log.tryRecord(result.loc(), result.readFileHeaders()):
     result.done = true
   if result.log.isFatal: result.done = true
@@ -290,15 +312,20 @@ proc openSegy*(src: RecordSource): SegyReader =
 
 proc readTrailer(r: var SegyReader) =
   # Reads data trailer records: the declared number, or (count -1) all the
-  # remaining text records.
+  # remaining records.
   let expected = int(r.file.binary.numTrailerRecords)
+  let start = r.offset
   var rec = newSeq[byte](TextHeaderSize)
-  while (expected < 0 or r.file.trailer.recordCount < expected) and r.atData:
-    let got = r.readAvail(rec)
-    if got < TextHeaderSize:
-      raiseTruncated("trailer record " & $r.file.trailer.recordCount & " has " & $got &
-        " of 3200 bytes", r.offset)
-    r.file.trailer.add rec
+  try:
+    while (expected < 0 or r.file.trailer.recordCount < expected) and r.atData:
+      let at = r.offset
+      let got = r.readAvail(rec)
+      if got < TextHeaderSize:
+        raiseTruncated("trailer record " & $r.file.trailer.recordCount & " has " & $got &
+          " of 3200 bytes", r.offset)
+      r.file.trailer.add(rec, if r.byteStream: at else: -1)
+  finally:
+    r.reportIssues(r.file.trailer, start, "trailer")
   if expected > 0 and r.file.trailer.recordCount < expected:
     r.log.report(sevWarning, dcTruncated, "expected " & $expected & " trailer records, found " &
       $r.file.trailer.recordCount, r.offset, r.loc(field = "trailer"))
@@ -308,7 +335,7 @@ proc trailerStartsHere(r: var SegyReader): bool =
   # is text. Trace data (whatever its first bytes) is pushed back.
   var rec = newSeq[byte](TextHeaderSize)
   let got = r.readAvail(rec)
-  result = got == TextHeaderSize and startsStanza(rec) and looksLikeText(rec)
+  result = got == TextHeaderSize and startsStanzaRecord(rec)
   r.unread(rec.toOpenArray(0, got - 1))
 
 proc checkEnd(r: var SegyReader) =
@@ -437,11 +464,11 @@ type
       ## undecodable ones stay zero (each has a diagnostic).
     diagnostics*: DiagLog
 
-proc readSegy*(src: RecordSource): SegyData =
+proc readSegy*(src: RecordSource, maxRetained = DefaultMaxRetained): SegyData =
   ## Reads every trace of the SEG-Y file at the current position of `src`
   ## into memory. Meant for small files and tests; it holds the file twice
   ## (raw and decoded).
-  var r = openSegy(src)
+  var r = openSegy(src, maxRetained)
   var t: SegyTrace
   var maxNs = 0
   while r.readTrace(t):
@@ -453,12 +480,43 @@ proc readSegy*(src: RecordSource): SegyData =
   result.file = r.file
   result.diagnostics = r.log
 
-proc readSegy*(path: string): SegyData =
+proc readSegy*(path: string, maxRetained = DefaultMaxRetained): SegyData =
   ## Reads a SEG-Y disk file into memory; see `readSegy(RecordSource)`. A file
   ## that cannot be opened gives a fatal diagnostic.
   var src: RecordSource
   if result.diagnostics.tryRecord(Location(file: path), (src = openDiskSource(path))):
     try:
-      result = readSegy(src)
+      result = readSegy(src, maxRetained)
     finally:
       src.close()
+
+proc extractUserData*(path: string, b: UserDataBlock, dest: string) =
+  ## Copies a User Data attachment from the disk file `path` to the file
+  ## `dest`, in 4 MB chunks, without holding it in memory. Raises
+  ## `ValueError` if the attachment's file offset is unknown (it was read
+  ## from tape), `IOError` on I/O failure or a short file.
+  if b.mediumOffset < 0:
+    raise newException(ValueError, "User Data block '" & b.dataLabel &
+      "' has no file offset (it was not read from a disk file)")
+  var src, dst: File
+  if not open(src, path, fmRead):
+    raise newException(IOError, "cannot open for reading: " & path)
+  try:
+    if not open(dst, dest, fmWrite):
+      raise newException(IOError, "cannot open for writing: " & dest)
+    try:
+      src.setFilePos(b.mediumOffset)
+      var buf = newSeq[byte](ReadChunk)
+      var left = b.blockSize
+      while left > 0:
+        let n = int(min(left, ReadChunk))
+        if src.readBuffer(addr buf[0], n) != n:
+          raise newException(IOError, path & ": file ends inside User Data block '" &
+            b.dataLabel & "'")
+        if dst.writeBuffer(addr buf[0], n) != n:
+          raise newException(IOError, "write failed: " & dest)
+        left -= n
+    finally:
+      dst.close()
+  finally:
+    src.close()

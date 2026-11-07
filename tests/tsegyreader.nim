@@ -172,7 +172,7 @@ proc rev2File(numTraces: uint64, trailerRecords: int32, lastFlag: bool): SegyDat
   f.extended.addText("ACME", "Notes", "hello")
   f.extended.addEndText()
   f.trailer = initExtendedTextHeader()
-  f.trailer.addText("SEG", "UserData", "trailer text")
+  f.trailer.addText("ACME", "TrailerNotes", "trailer text")
   result.file = f
   for k in 0..<3:
     var t = SegyTrace(index: k, numSamples: 5 + k)

@@ -89,6 +89,9 @@ proc checkFile(w: var SegyWriter) =
     raiseFormat("refusing to write spec-invalid SEG-Y (" & $newProblems &
       " new or edited header values; see the writer log or set lenient)")
   # Unreadable output.
+  if not f.extended.isComplete or not f.trailer.isComplete:
+    raiseFormat("the extended header or trailer was only indexed, not held in memory " &
+      "(retention limit); read the file with a larger maxRetained to rewrite it")
   if not f.formatKnown:
     w.problem("format code " & $b.formatCode & " is undefined, so traces cannot be written",
       "binary.formatCode")
