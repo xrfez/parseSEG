@@ -171,8 +171,10 @@ proc encodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T
     let bits = if f == sd8042: 5 else: 13
     for i in 0..<n:
       let x = float64(src[i])
-      let (e, mag) = expFraction(x, 16.0, 3, bits, i)
+      var (e, mag) = expFraction(x, 16.0, 3, bits, i)
       let s = if x < 0 and mag != 0: 1'u32 else: 0'u32
+      # All ones (negative full scale) is an invalid code: clamp one step in.
+      if s == 1 and e == 3 and mag == (1'u32 shl bits) - 1: dec mag
       if f == sd8042: dst[i] = byte((s shl 7) or (uint32(e) shl 5) or mag)
       else: putBeU16(dst, 2 * i, uint16((s shl 15) or (uint32(e) shl 13) or mag))
   of sd8048:
@@ -185,8 +187,11 @@ proc encodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T
         var frac = (w and 0xFF_FFFF'u32) + 1
         var expo = (w shr 24) and 0x7F
         if frac == 0x100_0000'u32:
-          frac = 0x10_0000'u32
-          expo = min(expo + 1, 0x7F)
+          if expo == 0x7F:
+            frac = 0xFF_FFFE'u32 # already the largest exponent: clamp at full scale
+          else:
+            frac = 0x10_0000'u32
+            inc expo
         w = (w and 0x8000_0000'u32) or (expo shl 24) or frac
       putBeU32(dst, 4 * i, w and not 1'u32)
   of sd8036:

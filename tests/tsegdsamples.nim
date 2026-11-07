@@ -98,3 +98,16 @@ block sample_63_into_tensor:
   var back = newSeq[byte](4000)
   t.encodeTrace(0, sd8058, back, 1000)
   doAssert back == raw[340 .. ^1]
+
+block review_clamps:
+  var b = newSeq[byte](8)
+  encodeSegdSamples(sd8048, [1e300, 7.2370051e75], b)
+  var v = newSeq[float64](2)
+  decodeSegdSamples(sd8048, b, v)
+  doAssert v[0] > 7.2e75 and v[1] > 7.2e75 # full scale, not 1/16 of it
+  encodeSegdSamples(sd8042, [-1e9], b)
+  doAssert b[0] != 0xFF # the all-ones code is invalid
+  encodeSegdSamples(sd8044, [-1e9], b)
+  doAssert not (b[0] == 0xFF and b[1] == 0xFF)
+  decodeSegdSamples(sd8044, b, v.toOpenArray(0, 0))
+  doAssert v[0] < -4000.0

@@ -12,7 +12,7 @@ export maps
 func segdContext*(rec: SegdRecord): VendorContext =
   ## Matching facts of a SEG-D record: revision, manufacturer code and serial.
   VendorContext(format: "segd",
-    revision: float64(rec.revision.major) + float64(rec.revision.minor) / 10.0,
+    revision: VendorRevision(major: int(rec.revision.major), minor: int(rec.revision.minor)),
     manufacturer: rec.gh1.manufacturerCode, serial: rec.gh1.manufacturerSerial,
     byteOrder: boBig)
 
@@ -64,7 +64,7 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
 func segyContext*(f: SegyFile): VendorContext =
   ## Matching facts of a SEG-Y file: revision, textual header, byte order.
   VendorContext(format: "segy",
-    revision: float64(f.revision.major) + float64(f.revision.minor) / 10.0,
+    revision: VendorRevision(major: int(f.revision.major), minor: int(f.revision.minor)),
     manufacturer: -1, serial: -1, text: f.text.text, byteOrder: f.byteOrder)
 
 proc decodeVendorAreas*(reg: VendorRegistry, f: SegyFile, log: var DiagLog): seq[VendorBlock] =

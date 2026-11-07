@@ -10,7 +10,7 @@
 ## and `BcdInvalid` (-2) for a non-decimal nibble.
 
 import std/[math, strutils]
-import ../common/[endians, fieldlayout]
+import ../common/[endians, fieldlayout, errors]
 export fieldlayout
 
 const
@@ -275,6 +275,34 @@ func decodeLabel*(b: openArray[byte]): SegdStorageUnitLabel =
   result.recordingEntityName = text(b, 81, 104)
   result.userDefined = text(b, 105, 118)
   result.maxShotsPerFieldRecord = text(b, 119, 128)
+
+proc encoded*(l: SegdStorageUnitLabel): array[128, byte] =
+  ## The label's bytes: `raw` when the fields are unchanged since
+  ## `decodeLabel`, else rebuilt from the fields (numbers right-justified, text
+  ## left-justified, blanks elsewhere). Raises `SegFormatError` for a field
+  ## that does not fit.
+  var asRead = decodeLabel(l.raw)
+  asRead.raw = l.raw
+  if asRead == l:
+    return l.raw
+  for i in 0..127: result[i] = byte(' ')
+  proc put(r: var array[128, byte], first, last: int, s: string, right: bool, name: string) =
+    let width = last - first + 1
+    if s.len > width: raiseFormat("label " & name & " '" & s & "' exceeds " & $width & " characters")
+    let t = if right: align(s, width) else: alignLeft(s, width)
+    for i, c in t: r[first - 1 + i] = byte(c)
+  result.put(1, 4, l.storageUnitSeqNum, true, "storageUnitSeqNum")
+  result.put(5, 9, l.revision, false, "revision")
+  result.put(10, 15, l.structure, false, "structure")
+  result.put(16, 19, l.bindingEdition, false, "bindingEdition")
+  result.put(20, 29, $l.maxBlockSize, true, "maxBlockSize")
+  result.put(30, 39, l.producerOrgCode, true, "producerOrgCode")
+  result.put(40, 50, l.creationDate, false, "creationDate")
+  result.put(51, 62, l.serialNumber, true, "serialNumber")
+  result.put(69, 80, l.externalLabelName, true, "externalLabelName")
+  result.put(81, 104, l.recordingEntityName, false, "recordingEntityName")
+  result.put(105, 118, l.userDefined, false, "userDefined")
+  result.put(119, 128, l.maxShotsPerFieldRecord, true, "maxShotsPerFieldRecord")
 
 func isFixedRecord*(l: SegdStorageUnitLabel): bool {.inline.} =
   ## Device structure C: every shot padded to `maxBlockSize`.

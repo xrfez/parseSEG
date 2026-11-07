@@ -251,3 +251,85 @@ block damaged_input:
   writeBytes(tmp / "mux.sgd", mux)
   let m = readSegd(tmp / "mux.sgd")
   doAssert m.diagnostics.isFatal and "multiplexed" in m.diagnostics[m.diagnostics.len - 1].msg
+
+# ------------------------------------------- Phase 4 review regressions --
+# Numbered as in the review.
+
+block r3_corrupt_counts_are_bounded:
+  var b = readBytes(exampleDir / "63.sgd")
+  b[27] = 0x99 # 99 scan types
+  b[28] = 0xFF # channel sets in GH#2 ...
+  b[35] = 0xFF; b[36] = 0xFF # ... = 65535
+  writeBytes(tmp / "manycsd.sgd", b)
+  let d = readSegd(tmp / "manycsd.sgd")
+  doAssert d.diagnostics.isFatal and d.records.len == 0
+  doAssert d.diagnostics.len <= 3
+
+block r3_repeated_diagnostics_are_summarized:
+  var d = makeStream([sd8058])
+  # Every seismic trace disagrees with its descriptor's extension count.
+  d.records[0].record.scanTypes[0].descriptors[1].traceHeaderExtensions = 3
+  d.records[0].record.scanTypes[0].descriptors[1].channelCount = 40
+  for k in 5..<42:
+    var t = d.records[0].traces[4]
+    t.index = k
+    d.records[0].traces.add t
+  discard d.toDisk(tmp / "noisy.sgd", SegdWriteOptions(lenient: true))
+  let e = readSegd(tmp / "noisy.sgd")
+  doAssert e.records[0].traces.len == 42
+  var mismatch, summary = 0
+  for x in e.diagnostics:
+    if x.loc.field == "trace.traceHeaderExtensions" and x.severity == sevWarning: inc mismatch
+    if "more warning diagnostics" in x.msg: inc summary
+  doAssert mismatch == 5 and summary == 1
+
+block r4_r5_labels_from_fields_and_fixrec_bounds:
+  var d = makeStream([sd8058])
+  d.hasLabel = true
+  d.label = SegdStorageUnitLabel(storageUnitSeqNum: "1", revision: "SD2.0", structure: "RECORD",
+    bindingEdition: "B1", producerOrgCode: "163", creationDate: "07-NOV-2026",
+    serialNumber: "T1", recordingEntityName: "CREW")
+  discard d.toDisk(tmp / "fieldlabel.sgd")
+  let e = readSegd(tmp / "fieldlabel.sgd")
+  doAssert e.hasLabel and e.label.recordingEntityName == "CREW" and e.records.len == 1
+  # Edited to FIXREC: the label written says FIXREC too.
+  var f = e
+  f.label.structure = "FIXREC"
+  f.label.maxBlockSize = 1024
+  discard f.toDisk(tmp / "fieldfixrec.sgd")
+  let g = readSegd(tmp / "fieldfixrec.sgd")
+  doAssert g.label.isFixedRecord and g.records.len == 1 and g.diagnostics.len == 0
+  doAssert readBytes(tmp / "fieldfixrec.sgd").len mod 1024 == 0
+  for bad in [100'i64, 9_999_999_999]:
+    var h = f
+    h.label.maxBlockSize = bad
+    doAssertRaises SegFormatError: discard h.toDisk(tmp / "badblock.sgd")
+  var n = f
+  n.label.revision = "XX2.0"
+  doAssertRaises SegFormatError: discard n.toDisk(tmp / "badrev.sgd")
+
+block r6_r11_writer_recomputes_from_headers:
+  var d = makeStream([sd8058])
+  d.records[0].record.scanTypes[0].descriptors[1].channelCount = 4 # 5 traces written, 6 announced
+  doAssertRaises SegFormatError: discard d.toDisk(tmp / "count.sgd")
+  var e = makeStream([sd8058])
+  e.records[0].record.gh2.revisionMajor = 3
+  doAssertRaises SegFormatError: discard e.toDisk(tmp / "rev3w.sgd")
+  var f = makeStream([sd8058])
+  for i, c in "SD2.0": f.records[0].record.gh1.generalConstants[i] = byte(c) # bytes 5-9
+  doAssertRaises SegFormatError: discard f.toDisk(tmp / "lookslabel.sgd")
+
+block r9_negative_sample_count_is_fatal:
+  var d = makeStream([sd8058])
+  d.records[0].record.scanTypes[0].descriptors[0].startTime = 100 # after endTime 52
+  discard d.toDisk(tmp / "negns.sgd", SegdWriteOptions(lenient: true))
+  let e = readSegd(tmp / "negns.sgd")
+  doAssert e.diagnostics.isFatal and e.records[0].traces.len == 0
+
+block r12_refused_bcd_leaves_the_buffer_untouched:
+  var g1 = decodeBlock[SegdGeneralHeader1](readBytes(exampleDir / "63.sgd")[0..31])
+  g1.fileNumber = 12345
+  var b: array[32, byte]
+  for i in 0..31: b[i] = 0xAA
+  doAssertRaises SegFormatError: g1.encode(b)
+  doAssert b[0] == g1.raw[0] and b[1] == g1.raw[1] # raw copied, field not partly written

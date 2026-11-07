@@ -24,14 +24,17 @@
 ## their bytes, so a read/write round trip is byte-identical. SEG-D Rev 3 is
 ## a separate layout (task 5).
 
-import std/math
+import std/[math, tables, strutils]
 import ../common/[endians, errors, diagnostics]
 import ../io/[records, diskio, pushback]
 import ../model/tensors
 import ./[headers, samples]
 export headers, samples, diagnostics, tensors
 
-const MaxCount = 65535 ## Bound for counts that size header areas.
+const
+  MaxCount = 65535 ## Bound for counts that size header areas.
+  MaxDescriptors = 65535 ## Bound for scan types × channel sets in one record.
+  MaxRepeats = 5 ## Diagnostics logged per (field, severity); the rest are counted.
 
 type
   SegdRevision* = object
@@ -88,8 +91,31 @@ type
     inRecord: bool
     done: bool
     csdWarned: bool
+    noted: Table[string, int] ## Diagnostics per (field, severity), for `note`.
 
 func `$`*(r: SegdRevision): string = $r.major & "." & $r.minor
+
+proc note(r: var SegdReader, severity: Severity, code: DiagCode, msg: string,
+    offset: int64 = -1, loc = Location()) =
+  # Logs a diagnostic, but only the first `MaxRepeats` per field and
+  # severity: a systematic quirk repeated on every trace of a 40 GB file must
+  # not grow the log without bound. `stop` reports how many were left out.
+  let key = $severity & " " & loc.field
+  let n = r.noted.getOrDefault(key) + 1
+  r.noted[key] = n
+  if n <= MaxRepeats:
+    r.log.report(severity, code, msg, offset, loc)
+
+proc stop(r: var SegdReader) =
+  # Ends the stream and summarizes the diagnostics `note` left out.
+  if not r.done:
+    r.done = true
+    for key, n in r.noted:
+      if n > MaxRepeats:
+        let field = key.split(' ', 1)[1]
+        r.log.report(sevInfo, dcValidation, $(n - MaxRepeats) & " more " & key.split(' ')[0] &
+          " diagnostics for " & field & " were not logged", loc = Location(file: r.name,
+          field: field))
 
 func loc(r: SegdReader, trace = -1, channelSet = -1, field = ""): Location {.inline.} =
   Location(file: r.name, record: r.records - 1, trace: trace, channelSet: channelSet,
@@ -105,7 +131,7 @@ proc readBytes(r: var SegdReader, n: int64): seq[byte] =
 
 proc reportBcd[T](r: var SegdReader, h: T, blockName: string, offset: int64) =
   for f in h.invalidBcdFields:
-    r.log.report(sevWarning, dcBadBcd, blockName & "." & f & " holds a non-decimal digit",
+    r.note(sevWarning, dcBadBcd, blockName & "." & f & " holds a non-decimal digit",
       offset, r.loc(field = blockName & "." & f))
 
 # ------------------------------------------------------------------ label --
@@ -126,7 +152,7 @@ proc readLabel(r: var SegdReader) =
     r.label = decodeLabel(head)
     r.hasLabel = true
     if r.label.isFixedRecord and r.label.maxBlockSize <= 0:
-      r.log.report(sevWarning, dcTapeLayout, "FIXREC label without a block size; " &
+      r.note(sevWarning, dcTapeLayout, "FIXREC label without a block size; " &
         "records are read unpadded", 19, Location(file: r.name, field: "label.maxBlockSize"))
     if not r.byteStream:
       discard r.input.skipRecordRest() # the label is its own tape block
@@ -157,22 +183,22 @@ proc readRecordHeaders(r: var SegdReader) =
     rec.gh2 = r.readBlock[:SegdGeneralHeader2]()
     rec.revision = SegdRevision(major: rec.gh2.revisionMajor, minor: rec.gh2.revisionMinor)
     if rec.gh2.blockNumber != 2:
-      r.log.report(sevWarning, dcBadValue, "General Header #2 block number is " &
+      r.note(sevWarning, dcBadValue, "General Header #2 block number is " &
         $rec.gh2.blockNumber & ", not 2", o + 18, r.loc(field = "gh2.blockNumber"))
     if rec.revision.major >= 3:
       raiseUnlocatable(dcUnsupportedRevision, "SEG-D Rev " & $rec.revision &
         " records use the Rev 3 layout, which this reader does not handle yet", o + 10)
     if rec.revision.major > 2 or (rec.revision.major == 2 and rec.revision.minor > 1):
-      r.log.report(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision &
+      r.note(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision &
         " read as Rev 2.1", o + 10, r.loc(field = "gh2.revision"))
   for n in 3..nGh:
     let o = r.input.offset
     let g = r.readBlock[:SegdGeneralHeaderN]()
     if g.blockNumber != uint8(n):
-      r.log.report(sevWarning, dcBadValue, "General Header #" & $n & " block number is " &
+      r.note(sevWarning, dcBadValue, "General Header #" & $n & " block number is " &
         $g.blockNumber, o + 18, r.loc(field = "gh" & $n & ".blockNumber"))
     if g.sourceSetNumber == 0:
-      r.log.report(sevInfo, dcBadValue, "General Header #" & $n & " source set number is 0 " &
+      r.note(sevInfo, dcBadValue, "General Header #" & $n & " source set number is 0 " &
         "(spec: not valid; common in real files)", o + 19, r.loc(field = "gh" & $n & ".sourceSetNumber"))
     rec.sourceHeaders.add g
 
@@ -188,8 +214,12 @@ proc readRecordHeaders(r: var SegdReader) =
     if v < 0 or v > MaxCount:
       raiseUnlocatable(dcBadBcd, "General Header #1 " & name & " is unreadable (" & $v &
         "), so the header cannot be located", rec.offset)
+  if nST * nCS > MaxDescriptors:
+    raiseUnlocatable(dcBadValue, "the record declares " & $nST & " scan types × " & $nCS &
+      " channel sets, more than " & $MaxDescriptors & "; the header is probably corrupt",
+      rec.offset + 27)
   if nST == 0 or nCS == 0:
-    r.log.report(sevWarning, dcBadValue, "the record declares " & $nST & " scan types and " &
+    r.note(sevWarning, dcBadValue, "the record declares " & $nST & " scan types and " &
       $nCS & " channel sets per scan type", rec.offset + 27, r.loc(field = "gh1.scanTypesPerRecord"))
 
   rec.traceCount = 0
@@ -200,11 +230,11 @@ proc readRecordHeaders(r: var SegdReader) =
       let c = r.readBlock[:SegdChannelSetDescriptor]()
       r.reportBcd(c, "csd", o)
       if c.scanTypeNumber != st + 1:
-        r.log.report(sevWarning, dcInconsistent, "channel set descriptor " & $(cs + 1) &
+        r.note(sevWarning, dcInconsistent, "channel set descriptor " & $(cs + 1) &
           " of scan type " & $(st + 1) & " says scan type " & $c.scanTypeNumber, o,
           r.loc(channelSet = cs, field = "csd.scanTypeNumber"))
       if c.arrayForming == 0 and c.channelCount > 0:
-        r.log.report(sevInfo, dcBadValue, "channel set " & $c.channelSetNumber &
+        r.note(sevInfo, dcBadValue, "channel set " & $c.channelSetNumber &
           " array forming code is 0 (spec: undefined; common in real files)", o + 31,
           r.loc(channelSet = cs, field = "csd.arrayForming"))
       if c.channelCount > 0: rec.traceCount += c.channelCount
@@ -249,18 +279,18 @@ proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
   if t.channelSet < 0:
     if not r.csdWarned:
       r.csdWarned = true
-      r.log.report(sevWarning, dcInconsistent, "trace header names scan type " &
+      r.note(sevWarning, dcInconsistent, "trace header names scan type " &
         $t.header.scanTypeNumber & ", channel set " & $t.header.channelSetNumber &
         ", which no channel set descriptor has (reported once per record)", t.offset + 2,
         r.loc(t.index, field = "trace.channelSetNumber"))
   else:
     let c = rec.scanTypes[t.scanType].descriptors[t.channelSet]
     if int(c.traceHeaderExtensions) != the:
-      r.log.report(sevWarning, dcInconsistent, "trace has " & $the & " header extensions, " &
+      r.note(sevWarning, dcInconsistent, "trace has " & $the & " header extensions, " &
         "its channel set descriptor says " & $c.traceHeaderExtensions, t.offset + 9,
         r.loc(t.index, t.channelSet, "trace.traceHeaderExtensions"))
   if the > 15:
-    r.log.report(sevWarning, dcBadValue, "trace header extension count " & $the &
+    r.note(sevWarning, dcBadValue, "trace header extension count " & $the &
       " exceeds 15", t.offset + 9, r.loc(t.index, field = "trace.traceHeaderExtensions"))
   t.hasExt1 = the >= 1
   t.extensions.setLen 0
@@ -278,11 +308,14 @@ proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
       raiseUnlocatable(dcBadValue, "trace has no sample count and its sample interval is 0",
         t.offset)
     t.numSamples = int(round((c.endTimeMs - c.startTimeMs) / si))
+    if t.numSamples < 0:
+      raiseUnlocatable(dcBadValue, "channel set ends (" & $c.endTimeMs & " ms) before it starts (" &
+        $c.startTimeMs & " ms), so the trace length is unknown", t.offset)
   else:
     raiseUnlocatable(dcInconsistent, "trace has no Trace Header Extension and no channel " &
       "set descriptor, so its length is unknown", t.offset)
   if rec.format == sd8015 and t.numSamples mod 4 != 0:
-    r.log.report(sevWarning, dcBadValue, "format 8015 needs a multiple of 4 samples, the " &
+    r.note(sevWarning, dcBadValue, "format 8015 needs a multiple of 4 samples, the " &
       "trace has " & $t.numSamples, t.offset, r.loc(t.index, t.channelSet, "trace.numSamples"))
   r.input.readInto(t.samples, dataBytes(rec.format, t.numSamples))
   inc r.tracesRead
@@ -294,7 +327,7 @@ proc readRecordTrailer(r: var SegdReader) =
     let o = r.input.offset
     let b = r.readBlock[:SegdTrailerBlock]()
     if b.channelType != 0xC:
-      r.log.report(sevWarning, dcBadValue, "general trailer block " & $i &
+      r.note(sevWarning, dcBadValue, "general trailer block " & $i &
         " has channel type " & $b.channelType & ", not 0xC", o + 10,
         r.loc(field = "trailer.channelType"))
     rec.trailer.add b
@@ -309,13 +342,13 @@ proc readTrace*(r: var SegdReader, t: var SegdTrace): bool =
   if r.tracesRead >= r.record.traceCount:
     r.inRecord = false
     discard r.log.tryRecord(r.loc(field = "trailer"), r.readRecordTrailer())
-    if r.log.isFatal: r.done = true
+    if r.log.isFatal: r.stop()
     return false
   if r.log.tryRecord(r.loc(r.tracesRead), r.readTraceBody(t)):
     result = true
   else:
     r.inRecord = false
-    r.done = true
+    r.stop()
     result = false
 
 proc nextRecord*(r: var SegdReader): bool =
@@ -330,7 +363,7 @@ proc nextRecord*(r: var SegdReader): bool =
   var ok = r.log.tryRecord(Location(file: r.name, record: r.records)):
     while r.input.stoppedAt == rkTapeMark: r.input.skipTapeMark()
   if not ok or not r.input.atData:
-    r.done = true
+    r.stop()
     return false
   r.record = SegdRecord(index: r.records)
   inc r.records
@@ -341,7 +374,7 @@ proc nextRecord*(r: var SegdReader): bool =
     r.inRecord = true
     result = true
   else:
-    r.done = true
+    r.stop()
     result = false
 
 func isDone*(r: SegdReader): bool {.inline.} = r.done

@@ -104,7 +104,9 @@ block fixed_point_and_mp:
   let b = g3.encoded
   doAssert b[3..7] == @[0xFF'u8, 0xFF, 0xFE, 0x80, 0x00] # -2 + 0.5
   doAssert decodeBlock[SegdGeneralHeaderN](b).sourceLineNumber == -1.5
-  g3.sourcePointNumber = 1.0 / 3.0 # not a multiple of 2^-16
+  g3.sourcePointNumber = 100.1 # not a multiple of 2^-16: rounds to the nearest
+  doAssert abs(decodeBlock[SegdGeneralHeaderN](g3.encoded).sourcePointNumber - 100.1) <= 0.5 / 65536
+  g3.sourcePointNumber = 1e13 # beyond i24
   doAssertRaises SegFormatError: discard g3.encoded
   var c: SegdChannelSetDescriptor
   c.mpFactor = -3.5

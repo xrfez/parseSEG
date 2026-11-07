@@ -21,6 +21,8 @@ import ../common/[errors, diagnostics]
 import ../io/records
 import ./[headers, samples, reader]
 
+const MaxFixedBlock* = 256 shl 20 ## Largest FIXREC block size the writer accepts.
+
 type
   SegdWriteOptions* = object
     lenient*: bool        ## Log problems instead of refusing to write.
@@ -66,15 +68,21 @@ proc openSegdWriter*(sink: RecordSink, opts = SegdWriteOptions(), hasLabel = fal
   ## first (its own block; padded to the block size for FIXREC).
   result = SegdWriter(sink: sink, opts: opts)
   if hasLabel:
-    if label.isFixedRecord:
-      if label.maxBlockSize <= 0:
-        raiseFormat("a FIXREC label needs a block size")
-      result.fixedBlock = int(label.maxBlockSize)
+    let raw = label.encoded # from the fields, so FIXREC padding and the label agree
+    let written = decodeLabel(raw)
+    if not isStorageUnitLabel(raw):
+      raiseFormat("the storage unit label revision '" & written.revision &
+        "' is not SDn.n, so readers would not recognize the label")
+    if written.isFixedRecord:
+      if written.maxBlockSize < 128 or written.maxBlockSize > MaxFixedBlock:
+        raiseFormat("a FIXREC label needs a block size of 128.." & $MaxFixedBlock &
+          " bytes, not " & $written.maxBlockSize)
+      result.fixedBlock = int(written.maxBlockSize)
       var blk = newSeq[byte](result.fixedBlock)
-      for i in 0..127: blk[i] = label.raw[i]
+      for i in 0..127: blk[i] = raw[i]
       sink.writeRecord(blk)
     else:
-      sink.writeRecord(label.raw)
+      sink.writeRecord(raw)
 
 proc checkRecord(w: var SegdWriter, rec: SegdRecord) =
   let g1 = rec.gh1
@@ -110,9 +118,12 @@ proc checkRecord(w: var SegdWriter, rec: SegdRecord) =
   if not rec.formatKnown or not toSegdFormat(g1.formatCode, f) or f != rec.format:
     w.problem("format code " & $g1.formatCode & " is undefined or does not match the " &
       "record's sample format", "gh1.formatCode")
-  if rec.revision.major >= 3:
+  if rec.hasGh2 and rec.gh2.revisionMajor >= 3:
     w.problem("Rev 3 records use another layout and are not written by this writer",
       "gh2.revision")
+  if isStorageUnitLabel(rec.gh1.encoded):
+    w.problem("General Header #1 bytes 5-9 read like a storage unit label ('SDn.n'), so " &
+      "readers would take the record for a label", "gh1.generalConstants")
 
 proc writeRecordHeaders*(w: var SegdWriter, rec: SegdRecord) =
   ## Validates `rec` and writes its general headers, scan type headers,
@@ -131,6 +142,11 @@ proc writeRecordHeaders*(w: var SegdWriter, rec: SegdRecord) =
   hdr.add rec.external
   w.emit(hdr)
   w.record = rec
+  # The trace count the reader will expect, from the descriptors as written.
+  w.record.traceCount = 0
+  for st in rec.scanTypes:
+    for c in st.descriptors:
+      if c.channelCount > 0: w.record.traceCount += c.channelCount
   w.inRecord = true
   w.tracesWritten = 0
 

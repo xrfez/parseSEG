@@ -31,14 +31,14 @@
 ## | `bcdAt(b, digits)` / `bcdAtL(b, digits)` | int: BCD digits from the high / low nibble of byte b; -1 = all `F` (sentinel), -2 = not BCD | digits nibbles |
 ## | `nibAt(b)` / `nibAtL(b)` | uint8: the high / low nibble of byte b, binary | 1 nibble |
 ## | `at24(b)` | int32 / uint32: 3-byte two's complement / unsigned | 3 |
-## | `fix40(b)` | float64: `i24.u16` fixed point (signed integer part, binary fraction) | 5 |
-## | `fix24(b)` | float64: `u16.u8` fixed point | 3 |
+## | `fix40(b)` | float64: `i24.u16` fixed point (signed integer part, binary fraction); encode rounds to 2^-16 | 5 |
+## | `fix24(b)` | float64: `u16.u8` fixed point; encode rounds to 2^-8 | 3 |
 ##
 ## `encodeChanged` writes only the fields that differ from the bytes already
 ## in the buffer, so undefined bytes, invalid BCD and vendor quirks in an
 ## unedited header survive a round trip unchanged.
 
-import std/macros
+import std/[macros, math]
 import ./[endians, bcd, errors]
 
 template at*(specByte: int) {.pragma.}
@@ -178,15 +178,17 @@ proc encodeBcdField(b: var openArray[byte], first, digits, value: int, name: str
   elif value == BcdInvalid:
     raiseFormat(name & ": the invalid-BCD marker cannot be written")
   else:
-    try:
-      putBcd(b, first, digits, value)
-    except SegFormatError as e:
-      raiseFormat(name & ": " & e.msg)
+    # Check before writing, so a refused value leaves the buffer untouched.
+    if value < 0 or (digits < 19 and value >= 10 ^ digits):
+      raiseFormat(name & ": " & $value & " does not fit " & $digits & " BCD digits")
+    putBcd(b, first, digits, value)
 
 proc fixedToInt(x: float64, scale: float64, lo, hi: int64, name: string): int64 =
-  let r = x * scale
-  if not (r >= float64(lo) and r <= float64(hi)) or r != r.int64.float64:
-    raiseFormat(name & ": " & $x & " is not representable in this fixed-point field")
+  # Rounds to the nearest representable value (e.g. 100.1 -> 100.1000061...);
+  # refuses NaN and values out of range.
+  let r = round(x * scale)
+  if not (r >= float64(lo) and r <= float64(hi)):
+    raiseFormat(name & ": " & $x & " is out of range for this fixed-point field")
   int64(r)
 
 template encodeOne(v: untyped, name: string, b: var openArray[byte], firstByte: static int,

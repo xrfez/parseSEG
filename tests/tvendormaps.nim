@@ -10,7 +10,8 @@ const here = currentSourcePath().parentDir
 const exampleDir = here / ".." / "SEG Spec" / "exampleFiles"
 
 proc ctxAcme(): VendorContext =
-  VendorContext(format: "segd", revision: 2.1, manufacturer: 13, serial: 77, byteOrder: boBig)
+  VendorContext(format: "segd", revision: VendorRevision(major: 2, minor: 1), manufacturer: 13,
+    serial: 77, byteOrder: boBig)
 
 proc area(kind: VendorTargetKind, blockIndex = -1, ext = -1): VendorArea =
   VendorArea(kind: kind, blockIndex: blockIndex, blockType: -1, extIndex: ext)
@@ -43,7 +44,8 @@ block load_example_map:
   doAssert reg.maps.len == 1
   let m = reg.maps[0]
   doAssert m.name == "acme-extended" and m.version == 1 and m.targets.len == 3
-  doAssert m.match.manufacturers == @[13] and m.match.revMin == 2.0 and m.match.revMax == 2.1
+  doAssert m.match.manufacturers == @[13] and m.match.revMin == VendorRevision(major: 2) and
+    m.match.revMax == VendorRevision(major: 2, minor: 1)
   doAssert m.targets[0].fields.len == 9 and m.targets[1].repeats[0].fields.len == 2
   doAssert m.targets[0].fields[5].hasSentinel and m.targets[0].fields[5].sentinel == 0xFFFFFF
   doAssert m.targets[2].fields[4].enums == @[(0xB0'i64, "status"), (0xB1'i64, "gps")]
@@ -87,7 +89,7 @@ block matching_and_precedence:
   other.manufacturer = 9
   doAssert not reg.decode(other, area(vtExtendedHeader, 1), block1(), blk, l)
   var old = ctxAcme()
-  old.revision = 1.0
+  old.revision = VendorRevision(major: 1)
   doAssert not reg.decode(old, area(vtExtendedHeader, 1), block1(), blk, l)
   doAssert not reg.decode(ctxAcme(), area(vtExtendedHeader, 3), block1(), blk, l)
   # A less specific map loses; an equally specific one is reported.
@@ -193,3 +195,51 @@ block applied_to_segy:
   let fb = r.decodeVendorAreas(f.file, l)
   doAssert fb.len == 1 and fb[0].name == "catalogStart"
   doAssert l.len == 0
+
+block review_hostile_maps_never_crash:
+  var deep = "(.nif27)\n(vendormap \"d\" "
+  for i in 0..<200_000: deep.add "("
+  var huge = "(.nif27)\n(vendormap \"h\" (target (kind block) (field x (at 1) (enc raw) (len 1))))"
+  while huge.len < 2_000_000: huge.add " "
+  for src in [
+      "(vendormap \"a\" (target (kind block) (name a@zzzzzzzzzzzz) (field x (at 1) (enc u8))))",
+      "(vendormap \"a\" (match (~anufacturer 13)) (target (kind block) (field x (at 1) (enc u8))))",
+      "(vendormap \"a\" (target (kind block) (name a.) (field x (at 1) (enc u8))))",
+      "(vendormap \"a\" (target (kind block) (field x (at 1) (enc f32) (scale 1.2.3e))))",
+      "(vendormap \"a\" (target (kind block) (field x (at 18446744073709551615u) (enc u8))))",
+      "(vendormap \"a\" (target (kind block) (field x (at 9223372036854775807) (enc u8))))",
+      "(vendormap \"a\" (target (kind block) (type 0xFFFFFFFFFFFFFFFFFFFF) (field x (at 1) (enc u8))))",
+      "(vendormap \"a\" (target (kind block) (repeat (count 5) (stride 9223372036854775807) (at 1) (field v (at 1) (enc u8)))))",
+      "(vendormap \"a\" (doc \"unterminated))",
+      deep, huge]:
+    try:
+      let m = loadVendorMap(src)
+      doAssert m.checkVendorMap.len >= 0
+    except ValueError:
+      discard
+
+block review_sentinels_are_raw_and_counts_checked:
+  var r: VendorRegistry
+  r.addMap loadVendorMap("""(.nif27)
+(vendormap "s" (match (format segd))
+  (target (kind externalHeader)
+    (field line (at 1) (enc i24) (sentinel 0xFFFFFF))
+    (field n (at 4) (enc i8))
+    (repeat (count (ref n)) (stride 1) (at 5) (field v (at 1) (enc u8)))))""")
+  var b = @[0xFF'u8, 0xFF, 0xFF, 0xFE, 1, 2]
+  var blk: VendorBlock
+  var l: DiagLog
+  doAssert r.decode(ctxAcme(), area(vtExternalHeader), b, blk, l)
+  doAssert "line" notin blk and "negative" in l[0].msg
+
+block review_revision_minor_ten:
+  var r: VendorRegistry
+  r.addMap loadVendorMap("""(.nif27)
+(vendormap "r" (match (format segd) (rev 2.10)) (target (kind externalHeader) (field x (at 1) (enc u8))))""")
+  var blk: VendorBlock
+  var l: DiagLog
+  var c = ctxAcme()
+  c.revision = VendorRevision(major: 3, minor: 0)
+  doAssert not r.decode(c, area(vtExternalHeader), [1'u8], blk, l)
+  c.revision = VendorRevision(major: 2, minor: 10)
+  doAssert r.decode(c, area(vtExternalHeader), [1'u8], blk, l)

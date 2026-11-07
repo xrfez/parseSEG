@@ -17,7 +17,9 @@
 ##
 ## - Offsets are 1-based within the target, like the spec tables. `(len 4 n)`
 ##   is a length in nibbles; `(nibble low)` starts a field at the low nibble.
-##   Hex numbers may be written `0xB0` or `"0xB0"`. `;` starts a comment.
+##   Hex numbers may be written `0xB0` or `"0xB0"`; `(len 4n)` = `(len 4 n)`.
+##   `;` starts a comment. Maps are limited to 1 MB, nesting depth 64 and
+##   offsets/lengths/counts of 1,000,000.
 ## - Encodings: `u8 u16 u24 u32 u64 i8 i16 i24 i32 i64 f32 f64 ibm32 bcd
 ##   fixedpt ascii ebcdic raw` (`fixedpt` = `i24.u16`, 5 bytes).
 ## - Per field: `byteOrder` (big/little; default: the file's), `scale`,
@@ -31,8 +33,7 @@
 ## that do not fit the data become diagnostics, and raw bytes are always kept
 ## by the format readers.
 
-import std/[strutils, os, math]
-import nifreader, nifcore
+import std/[strutils, os, math, parseutils]
 import ../common/[endians, ibmfloat, ebcdic, bcd, diagnostics]
 export diagnostics, endians
 
@@ -94,9 +95,14 @@ type
     fields*: seq[FieldPlan]
     repeats*: seq[RepeatPlan]
 
+  VendorRevision* = object
+    ## A revision as major.minor (minor 10 is not 1.0 more than 9).
+    major*, minor*: int
+
   VendorMatch* = object
     format*: string      ## `segd`, `segy`, "" = any.
-    revMin*, revMax*: float64 ## Inclusive; NaN = unbounded.
+    hasRev*: bool
+    revMin*, revMax*: VendorRevision ## Inclusive, when `hasRev`.
     manufacturers*: seq[int]
     serialMin*, serialMax*: int64 ## -1 = unbounded.
     textContains*: seq[string]
@@ -112,7 +118,7 @@ type
   VendorContext* = object
     ## Facts about a file that maps are matched against.
     format*: string      ## `segd` or `segy`.
-    revision*: float64   ## e.g. 2.1.
+    revision*: VendorRevision ## e.g. 2.1.
     manufacturer*: int   ## SEG-D GH#1 manufacturer code; -1 if unknown.
     serial*: int64       ## Manufacturer serial number; -1 if unknown.
     text*: string        ## SEG-Y textual header (for `textContains`).
@@ -162,6 +168,15 @@ type
     decoders: seq[CodeDecoder]
 
 # ------------------------------------------------------------- NIF trees --
+# Vendor maps are untrusted input, so they are read by a small dedicated
+# tokenizer for the NIF subset they use, not by the toolchain's NIF reader
+# (which can quit or assert on some tokens). It is iterative (no recursion),
+# bounds nesting, size and numbers, and only ever raises ValueError.
+
+const
+  MaxMapBytes = 1 shl 20 ## Larger map files are refused.
+  MaxDepth = 64          ## Deeper nesting is refused.
+  MaxOffset = 1_000_000  ## Bound for offsets, lengths, counts and strides.
 
 type
   NKind = enum nkTree, nkInt, nkFloat, nkIdent, nkStr
@@ -171,62 +186,113 @@ type
     kids: seq[NNode]
     i: int64
     f: float64
-    s: string
+    s: string  ## Identifier or string value; for numbers, the token as written.
     line: int
 
 proc mapError(msg: string, line = 0) {.noinline, noreturn.} =
   raise newException(ValueError, (if line > 0: "line " & $line & ": " else: "") & msg)
 
-func stripComments(src: string): string =
-  # Removes `;` comments outside string literals.
-  var inStr = false
-  var inComment = false
-  for c in src:
-    if inComment:
-      if c == '\n':
-        inComment = false
-        result.add c
-    elif inStr:
-      result.add c
-      if c == '"': inStr = false
-    elif c == '"':
-      inStr = true
-      result.add c
-    elif c == ';':
-      inComment = true
-    else:
-      result.add c
-
-proc parseTree(r: var Reader, t: var ExpandedToken): NNode =
-  # `t` is a ParLe; reads up to the matching ParRi.
-  result = NNode(kind: nkTree, tag: r.decodeStr(t), line: int(r.line))
-  var done = false
-  while not done:
-    next(r, t)
-    case t.tk
-    of ParRi: done = true
-    of ParLe: result.kids.add parseTree(r, t)
-    of IntLit: result.kids.add NNode(kind: nkInt, i: decodeInt(t), line: int(r.line))
-    of UIntLit: result.kids.add NNode(kind: nkInt, i: int64(decodeUInt(t)), line: int(r.line))
-    of FloatLit: result.kids.add NNode(kind: nkFloat, f: decodeFloat(t), line: int(r.line))
-    of Ident, Symbol, SymbolDef:
-      result.kids.add NNode(kind: nkIdent, s: r.decodeStr(t), line: int(r.line))
-    of StrLit: result.kids.add NNode(kind: nkStr, s: r.decodeStr(t), line: int(r.line))
-    of EofToken: mapError("unexpected end of the map (unbalanced parentheses)", int(r.line))
-    else: discard
+proc parseNumber(tok: string, line: int, n: var NNode): bool =
+  # Integer (decimal, optional sign, optional NIF `u` suffix), hex `0x...`, or
+  # float. False if `tok` is not a number.
+  var t = tok
+  if t.len > 1 and t[^1] == 'u' and t[0 ..< ^1].allCharsInSet(Digits): t.setLen t.len - 1
+  let body = if t.len > 0 and t[0] in {'-', '+'}: t[1..^1] else: t
+  if body.len == 0 or body[0] notin Digits:
+    return false
+  if body.len > 2 and body[0] == '0' and body[1] in {'x', 'X'}:
+    let h = body[2..^1]
+    if h.len == 0 or h.len > 16 or not h.allCharsInSet(HexDigits):
+      mapError("bad hex number " & tok, line)
+    let u = fromHex[uint64](h)
+    if u > uint64(high(int64)): mapError("number " & tok & " is out of range", line)
+    n = NNode(kind: nkInt, i: (if t[0] == '-': -int64(u) else: int64(u)), s: tok, line: line)
+    return true
+  if body.allCharsInSet(Digits):
+    try:
+      n = NNode(kind: nkInt, i: parseBiggestInt(t), s: tok, line: line)
+    except ValueError:
+      mapError("number " & tok & " is out of range", line)
+    return true
+  try:
+    n = NNode(kind: nkFloat, f: parseFloat(t), s: tok, line: line)
+  except ValueError:
+    return false
+  result = true
 
 proc parseNif(src: string): seq[NNode] =
-  var r = openFromBuffer(stripComments(src), "")
-  var t = default(ExpandedToken)
-  try:
-    while true:
-      next(r, t)
-      case t.tk
-      of EofToken: break
-      of ParLe: result.add parseTree(r, t)
-      else: discard
-  finally:
-    r.close()
+  if src.len > MaxMapBytes: mapError("map file exceeds " & $MaxMapBytes & " bytes")
+  var stack: seq[NNode]
+  var i = 0
+  var line = 1
+  const Delims = {' ', '\t', '\r', '\n', '(', ')', '"', ';'}
+  proc addNode(stack: var seq[NNode], roots: var seq[NNode], n: sink NNode) =
+    if stack.len > 0: stack[^1].kids.add n
+    elif n.kind == nkTree: roots.add n
+  while i < src.len:
+    let c = src[i]
+    case c
+    of '\n':
+      inc line
+      inc i
+    of ' ', '\t', '\r':
+      inc i
+    of ';':
+      while i < src.len and src[i] != '\n': inc i
+    of '(':
+      inc i
+      var tag = ""
+      while i < src.len and src[i] notin Delims:
+        tag.add src[i]
+        inc i
+      if tag.len == 0: mapError("'(' without a tag", line)
+      if stack.len >= MaxDepth: mapError("nesting deeper than " & $MaxDepth, line)
+      stack.add NNode(kind: nkTree, tag: tag, line: line)
+    of ')':
+      inc i
+      if stack.len == 0: mapError("unbalanced ')'", line)
+      let n = stack.pop
+      addNode(stack, result, n)
+    of '"':
+      inc i
+      var str = ""
+      var closed = false
+      while i < src.len and not closed:
+        let d = src[i]
+        if d == '"':
+          closed = true
+        elif d == '\\' and i + 1 < src.len:
+          let e = src[i + 1]
+          if e in {'"', '\\'}:
+            str.add e
+            inc i
+          elif i + 2 < src.len and e in HexDigits and src[i + 2] in HexDigits:
+            str.add char(fromHex[int](src[i + 1 .. i + 2]))
+            i += 2
+          else:
+            str.add d
+        else:
+          if d == '\n': inc line
+          str.add d
+        inc i
+      if not closed: mapError("unterminated string", line)
+      addNode(stack, result, NNode(kind: nkStr, s: str, line: line))
+    else:
+      var tok = ""
+      while i < src.len and src[i] notin Delims:
+        tok.add src[i]
+        inc i
+      var n: NNode
+      if parseNumber(tok, line, n):
+        addNode(stack, result, n)
+      elif tok.len > 1 and tok[^1] == 'n' and tok[0 ..< ^1].allCharsInSet(Digits) and
+          parseNumber(tok[0 ..< ^1], line, n):
+        # `4n`: a length in nibbles.
+        addNode(stack, result, n)
+        addNode(stack, result, NNode(kind: nkIdent, s: "n", line: line))
+      else:
+        addNode(stack, result, NNode(kind: nkIdent, s: tok, line: line))
+  if stack.len > 0: mapError("unbalanced parentheses: " & $stack.len & " not closed", line)
 
 func atoms(n: NNode): seq[NNode] =
   for k in n.kids:
@@ -238,41 +304,28 @@ func child(n: NNode, tag: string): int =
     if k.kind == nkTree and k.tag == tag: return i
 
 proc intAtom(n: NNode, i = 0): int64 =
-  # The i-th number of a tree's atoms: an integer, `0xB0` (read as 0 + xB0)
-  # or a string "0xB0".
-  let a = n.atoms
+  ## The i-th integer of a tree's atoms (a string "0xB0" counts too).
   var k = 0
-  var idx = 0
-  while idx < a.len:
-    var v: int64
-    var ok = true
-    if a[idx].kind == nkInt and idx + 1 < a.len and a[idx].i == 0 and a[idx + 1].kind == nkIdent and
-        a[idx + 1].s.len > 1 and a[idx + 1].s[0] in {'x', 'X'}:
-      try: v = int64(parseHexInt(a[idx + 1].s[1..^1]))
-      except ValueError: mapError("bad hex number 0" & a[idx + 1].s, n.line)
-      idx += 2
-    elif a[idx].kind == nkInt:
-      v = a[idx].i
-      inc idx
-    elif a[idx].kind in {nkStr, nkIdent} and a[idx].s.toLowerAscii.startsWith("0x"):
-      try: v = int64(parseHexInt(a[idx].s[2..^1]))
-      except ValueError: mapError("bad hex number " & a[idx].s, n.line)
-      inc idx
-    else:
-      ok = false
-      inc idx
-    if ok:
-      if k == i: return v
+  for a in n.atoms:
+    var x = a
+    if a.kind in {nkStr, nkIdent}:
+      var p: NNode
+      if parseNumber(a.s, a.line, p) and p.kind == nkInt: x = p
+    if x.kind == nkInt:
+      if k == i: return x.i
       inc k
-  mapError("(" & n.tag & ") needs a number", n.line)
+  mapError("(" & n.tag & ") needs an integer", n.line)
+
+proc boundedAtom(n: NNode, lo: int64, i = 0): int =
+  let v = n.intAtom(i)
+  if v < lo or v > MaxOffset: mapError("(" & n.tag & ") must be " & $lo & ".." & $MaxOffset, n.line)
+  int(v)
 
 proc tagInt(n: NNode): int64 =
   # A number written as a tag, e.g. the `0xB0` of `(0xB0 "status")`.
-  try:
-    result = if n.tag.toLowerAscii.startsWith("0x"): int64(parseHexInt(n.tag[2..^1]))
-             else: int64(parseBiggestInt(n.tag))
-  except ValueError:
-    mapError("expected a number, not (" & n.tag, n.line)
+  var p: NNode
+  if parseNumber(n.tag, n.line, p) and p.kind == nkInt: p.i
+  else: mapError("expected a number, not (" & n.tag, n.line)
 
 proc floatAtom(n: NNode, i = 0): float64 =
   var k = 0
@@ -281,6 +334,22 @@ proc floatAtom(n: NNode, i = 0): float64 =
       if k == i: return (if a.kind == nkInt: float64(a.i) else: a.f)
       inc k
   mapError("(" & n.tag & ") needs a number", n.line)
+
+proc revAtom(n: NNode, i: int, rev: var VendorRevision): bool =
+  # The i-th revision `major.minor` as written (so 2.10 is minor 10).
+  var k = 0
+  for a in n.atoms:
+    if a.kind in {nkInt, nkFloat, nkStr, nkIdent}:
+      if k == i:
+        let parts = a.s.split('.')
+        try:
+          rev = VendorRevision(major: parseInt(parts[0]),
+            minor: (if parts.len > 1: parseInt(parts[1]) else: 0))
+        except ValueError:
+          mapError("bad revision " & a.s, n.line)
+        return true
+      inc k
+  false
 
 proc textAtom(n: NNode): string =
   for a in n.atoms:
@@ -307,21 +376,18 @@ proc compileField(n: NNode): FieldPlan =
     if k.kind != nkTree: continue
     case k.tag
     of "at":
-      let a = k.intAtom
-      if a < 1: mapError("field " & result.name & ": (at) is 1-based", k.line)
-      result.byteOff = int(a - 1)
+      result.byteOff = k.boundedAtom(1) - 1
       atSeen = true
     of "nibble":
       let s = k.textAtom.toLowerAscii
       if s notin ["low", "high"]: mapError("(nibble) is high or low", k.line)
       result.lowNibble = s == "low"
     of "len":
-      let v = k.intAtom
+      let v = k.boundedAtom(1)
       var nib = false
       for a in k.atoms:
         if a.kind == nkIdent and a.s == "n": nib = true
-      if v < 1 or v > 1_000_000: mapError("field " & result.name & ": bad (len)", k.line)
-      if nib: lenNibbles = int(v) else: lenBytes = int(v)
+      if nib: lenNibbles = v else: lenBytes = v
     of "enc":
       try: result.enc = parseEnum[VendorEnc](k.textAtom)
       except ValueError: mapError("field " & result.name & ": unknown encoding " & k.textAtom, k.line)
@@ -383,18 +449,9 @@ proc compileRepeat(n: NNode): RepeatPlan =
     of "count":
       let r = k.child("ref")
       if r >= 0: result.countRef = k.kids[r].textAtom
-      else:
-        let c = k.intAtom
-        if c < 0 or c > 1_000_000: mapError("(count) out of range", k.line)
-        result.count = int(c)
-    of "stride":
-      let s = k.intAtom
-      if s < 1 or s > 1_000_000: mapError("(stride) out of range", k.line)
-      result.stride = int(s)
-    of "at":
-      let a = k.intAtom
-      if a < 1: mapError("(at) is 1-based", k.line)
-      result.byteOff = int(a - 1)
+      else: result.count = k.boundedAtom(0)
+    of "stride": result.stride = k.boundedAtom(1)
+    of "at": result.byteOff = k.boundedAtom(1) - 1
     of "field": result.fields.add compileField(k)
     else: mapError("unknown (repeat) attribute (" & k.tag & ")", k.line)
   if result.count < 0 and result.countRef.len == 0: mapError("(repeat) needs (count)", n.line)
@@ -415,12 +472,12 @@ proc compileTarget(n: NNode): VendorTarget =
       except ValueError: mapError("unknown target kind " & k.textAtom, k.line)
       kindSeen = true
     of "name": result.name = k.textAtom
-    of "blockIndex": result.blockIndex = int(k.intAtom)
-    of "type": result.blockType = int(k.intAtom)
+    of "blockIndex": result.blockIndex = k.boundedAtom(1)
+    of "type": result.blockType = k.boundedAtom(0)
     of "where": result.where = k.textAtom
     of "headerName": result.headerName = k.textAtom
     of "stanza": result.stanza = k.textAtom
-    of "extension": result.extIndex = int(k.intAtom)
+    of "extension": result.extIndex = k.boundedAtom(1)
     of "field": result.fields.add compileField(k)
     of "repeat": result.repeats.add compileRepeat(k)
     else: mapError("unknown target attribute (" & k.tag & ")", k.line)
@@ -437,24 +494,18 @@ proc compileTarget(n: NNode): VendorTarget =
 proc loadVendorMap*(nif: string, source = ""): VendorMap =
   ## Parses and compiles one vendor map. Raises `ValueError` (with a line
   ## number) for a malformed map.
-  var roots: seq[NNode]
-  try:
-    roots = parseNif(nif)
-  except ValueError as e:
-    raise e
-  except CatchableError as e:
-    mapError("not readable as NIF: " & e.msg)
+  let roots = parseNif(nif)
   var found = -1
   for i, n in roots:
     if n.tag == "vendormap": found = i
   if found < 0: mapError("no (vendormap ...) in the file")
   let m = roots[found]
   result = VendorMap(name: m.textAtom, source: source,
-    match: VendorMatch(revMin: NaN, revMax: NaN, serialMin: -1, serialMax: -1))
+    match: VendorMatch(serialMin: -1, serialMax: -1))
   for k in m.kids:
     if k.kind != nkTree: continue
     case k.tag
-    of "version": result.version = int(k.intAtom)
+    of "version": result.version = k.boundedAtom(0)
     of "doc": result.doc = k.textAtom
     of "match":
       for c in k.kids:
@@ -462,8 +513,9 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
         case c.tag
         of "format": result.match.format = c.textAtom.toLowerAscii
         of "rev":
-          result.match.revMin = c.floatAtom(0)
-          result.match.revMax = try: c.floatAtom(1) except ValueError: result.match.revMin
+          if not c.revAtom(0, result.match.revMin): mapError("(rev) needs a revision", c.line)
+          if not c.revAtom(1, result.match.revMax): result.match.revMax = result.match.revMin
+          result.match.hasRev = true
         of "manufacturer":
           for a in c.atoms:
             if a.kind == nkInt: result.match.manufacturers.add int(a.i)
@@ -532,8 +584,9 @@ func specificity(m: VendorMatch, ctx: VendorContext): int =
   if m.format.len > 0:
     if m.format != ctx.format: return -1
     inc result
-  if not m.revMin.isNaN:
-    if ctx.revision < m.revMin - 1e-9 or ctx.revision > m.revMax + 1e-9: return -1
+  if m.hasRev:
+    let r = (ctx.revision.major, ctx.revision.minor)
+    if r < (m.revMin.major, m.revMin.minor) or r > (m.revMax.major, m.revMax.minor): return -1
     inc result
   if m.manufacturers.len > 0:
     if ctx.manufacturer notin m.manufacturers: return -1
@@ -620,7 +673,11 @@ proc decodeField(f: FieldPlan, b: openArray[byte], base: int, order: ByteOrder,
     v = VendorValue(kind: vvBytes, bytes: b[pos ..< pos + f.len], unit: f.unit)
     return true
   if isInt:
-    if f.hasSentinel and iv == f.sentinel: return false
+    if f.hasSentinel:
+      # Compare the raw bit pattern: (sentinel 0xFFFFFF) matches an i24 of -1.
+      let w = encWidth(f.enc)
+      let mask = if f.enc == veBcd or w >= 8: not 0'u64 else: (1'u64 shl (8 * w)) - 1
+      if (cast[uint64](iv) and mask) == (cast[uint64](f.sentinel) and mask): return false
     if f.scaled:
       v = VendorValue(kind: vvFloat, floatVal: float64(iv) * f.scale + f.offset, unit: f.unit)
     else:
@@ -650,9 +707,13 @@ proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
     if r.countRef.len > 0:
       count = -1
       for (n, v) in blk.fields:
-        if n == r.countRef and v.kind == vvInt: count = int(min(v.intVal, 1_000_000))
-      if count < 0:
+        if n == r.countRef and v.kind == vvInt:
+          count = int(max(min(v.intVal, 1_000_000), -2))
+      if count == -1:
         problems.add "repeat count field " & r.countRef & " is missing"
+        count = 0
+      elif count < 0:
+        problems.add "repeat count field " & r.countRef & " is negative"
         count = 0
     let fit = if r.stride > 0: max(0, (b.len - r.byteOff) div r.stride) else: 0
     if count > fit:
