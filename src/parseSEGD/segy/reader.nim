@@ -35,8 +35,8 @@ import std/hashes
 import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio]
 import ../model/tensors
-import ./[textheader, binheader, traceheader, samples, exttext]
-export textheader, binheader, traceheader, samples, exttext, diagnostics, endians, tensors
+import ./[textheader, binheader, traceheader, samples, exttext, layout]
+export textheader, binheader, traceheader, samples, exttext, layout, diagnostics, endians, tensors
 
 const
   TapeLabelSize* = 128 ## Bytes in a SEG-Y tape label.
@@ -65,6 +65,10 @@ type
     format*: SampleFormat           ## Valid when `formatKnown`.
     formatKnown*: bool
     firstTraceOffset*: int64        ## Medium offset of the first trace.
+    layout*: TraceLayout
+      ## Effective trace header layout: the revision's standard layout with
+      ## the file's Layout stanza merged over it. Empty for files built in
+      ## memory (`layoutOf` then gives the standard layout).
     binaryAsRead: seq[byte]         ## Raw binary header as read; empty for new files.
     extendedAsRead: Hash            ## Hash of the extended records as read.
     extendedAsReadLen: int          ## -1 for new files.
@@ -270,6 +274,15 @@ proc readFileHeaders(r: var SegyReader) =
     r.readExtendedHeader(count, checkText = count == -1 or fromOffset)
   finally:
     r.reportIssues(f.extended, extStart, "extended")
+  f.layout = standardLayout(rev)
+  let li = f.extended.find("SEG:Layout")
+  if li >= 0:
+    let st = f.extended.stanzas[li]
+    try:
+      f.layout = merge(f.layout, parseLayout(f.extended.stanzaText(st)))
+    except ValueError as e:
+      r.log.report(sevWarning, dcBadValue, e.msg & "; using the standard layout",
+        extStart + st.headerStart, r.loc(field = "extended.layout"))
   f.extendedAsRead = hash(f.extended.data)
   f.extendedAsReadLen = f.extended.data.len
   if rev.major >= 2 and count > 0 and not f.extended.hasEndText:
@@ -287,6 +300,11 @@ func isBinaryAsRead*(f: SegyFile): bool =
     var b = newSeq[byte](BinaryHeaderSize)
     f.binary.encode(b, f.byteOrder)
     result = b == f.binaryAsRead
+
+func layoutOf*(f: SegyFile): TraceLayout =
+  ## The file's effective layout, or the standard one of its revision for a
+  ## file built in memory.
+  if f.layout.entries.len > 0: f.layout else: standardLayout(f.binary.rulesRevision)
 
 func binaryAsRead*(f: SegyFile): lent seq[byte] {.inline.} =
   ## The raw binary header bytes as read (in `byteOrder`); empty for files
