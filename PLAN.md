@@ -207,11 +207,11 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [x] 1.5 Review and verification against the real files (`segd_rev3_0_verified.md`, README index)
 - [x] 1.6 `segy_rev2_1.md` (delta on rev 1, verified on Inglewood)
 - [x] 1.6b `segd_rev2_0.md` from the standalone 2.0 PDF (word-diffed against 2.1, checked against `63.sgd`)
-- [ ] 1.7 `segd_rev3_1_delta.md` (also check 3.1 for new sensor types, e.g. rotational)
-- [ ] 1.8 The remaining revisions: `segy_rev2_0_delta.md` (SEG-Y 2.0 vs 2.1), `segy_rev0.md` and
+- [x] 1.7 `segd_rev3_1_delta.md` (also check 3.1 for new sensor types, e.g. rotational)
+- [x] 1.8 The remaining revisions: `segy_rev2_0_delta.md` (SEG-Y 2.0 vs 2.1), `segy_rev0.md` and
       `segd_rev0.md` from the original 1975 standards (owner PDFs, 2026-11-07), each with a gap
       analysis against the current readers. SEG-D Rev 1 stays known only from history sections.
-- [ ] 1.9 `seg2.md` (SEG-2, 1990), `sps.md` (SPS 1993 + Rev 2.1), `p1_p2_p3.md` (SEG 1983
+- [x] 1.9 `seg2.md` (SEG-2, 1990), `sps.md` (SPS 1993 + Rev 2.1), `p1_p2_p3.md` (SEG 1983
       positional exchange formats). New PDFs extracted to `SEG Spec/text/` (`SEG-Y Rev 0` had no
       extension; renamed to `SEG-Y Rev 0.pdf`).
 
@@ -261,6 +261,10 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 
 - [ ] 4.6 SEG-D Rev 0 (the original standard) from the 1.8 gap analysis: revision detection
       without a GH#2 revision, Rev 0 header fields and sample formats; synthetic tests
+
+- [ ] 4.7 Multiplexed SEG-D (Rev 0/1/2 codes 0015-0058): scan walker (start-of-scan and timing
+      words, GH1 bytes per scan and scans per block), the 0015 decoder, demultiplexing into
+      traces. Large; from `segd_rev0.md` §5 and §9.
 
 ### Phase 5: SEG-D Rev 3.0
 - [x] 5.1 Storage unit label, TOC, general headers 1-3 and all optional/typed blocks
@@ -390,7 +394,7 @@ Tasks:
 
 ### Phase 10: Survey (positioning) files
 Text formats, so no sample files are needed (owner, 2026-11-07; real samples will follow later).
-- [ ] 10.1 Specs ingested: SPS 1993 + Rev 2.1 and SEG P1/P2/P3 (1983) extracted and distilled
+- [x] 10.1 Specs ingested: SPS 1993 + Rev 2.1 and SEG P1/P2/P3 (1983) extracted and distilled
       (task 1.9). P1/90, P1/11 and SPS 3.0 are not available; add them if the owner finds them.
 - [ ] 10.2 Readers and writers into a survey model (`src/parseSEG/survey/`): SPS S/R/X + H
       records (both revisions, revision detected from the content), P1 (and P2/P3 records
@@ -687,3 +691,11 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
   - Every build target: `tests/ttargets.nim`.
   - `nim test` takes about 3.5 minutes.
 - 2026-11-07: Phase 9 done (task 9.1): project renamed to parseSEG; `nim test` passes. Historical log entries keep the old name. Owner actions: rename the working directory and the GitHub repository (then update the git remote URL). **Next: Phase 10** (needs the P1/SPS specs from the owner).
+- 2026-11-07: Tasks 1.7-1.9 and 10.1 done. The owner added the original SEG-D and SEG-Y (Rev 0), SEG-2, SPS (1993, 2.1) and SEG P1-P4 (1983) PDFs. They were extracted, and five parallel agents wrote `segd_rev0.md`, `segy_rev0.md`, `segd_rev3_1_delta.md`, `segy_rev2_0_delta.md`, `seg2.md`, `sps.md` and `p1_p2_p3.md`.
+  - The revision notes end with gap analyses (file:line), which drive tasks 3.5, 4.6, 4.7 and 5.5.
+  - Findings:
+    - SEG-D 3.1 adds only the little-endian formats 9036/9038/9058/9080 and P1/11 CRS text. There are no rotational sensor types.
+    - SEG-Y 2.0 differs from 2.1 only in bytes 3507-3510. Our reader treats revision bytes `00 02` as Rev 0.
+    - The SEG-D Rev 0 text mis-cites itself as 1975; it is c. 1980.
+    - The 1983 positional document defines P1-P4, where P3 is land survey observations and P4 is Transit Doppler. Only P1 carries joinable positions.
+

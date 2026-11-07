@@ -170,6 +170,8 @@ typedef struct SegTraceKeys {
     uint8_t depth_index, reshoot_index; /* SEG-D Rev 3 THE#1 bytes 10 and 8 */
     uint8_t sensor_type;  /* SEG-D THE#1 byte 21 */
     uint8_t component;    /* distinguishes the components of one station */
+    double  channel;      /* channel (trace) number in the field record: SEG-Y bytes 13-16,
+                             SEG-D demux trace number; survey relation records join on it */
 } SegTraceKeys;
 
 /* A typed header value. `text` is owned by the SegFile it came from (valid

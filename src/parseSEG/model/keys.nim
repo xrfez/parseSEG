@@ -38,12 +38,16 @@ type
     depthIndex*, reshootIndex*: uint8 ## SEG-D Rev 3 THE#1 bytes 10 and 8.
     sensorType*: uint8   ## SEG-D THE#1 byte 21.
     component*: uint8    ## Distinguishes the components of one station (see module doc).
+    channel*: float64
+      ## Channel (trace) number in the field record: SEG-Y bytes 13-16, SEG-D
+      ## the demux trace number (Rev 3: extended when `FFFF`). Survey relation
+      ## records (SPS X) map (record, channel) to stations.
 
 func initTraceKeys*(): TraceKeys =
   ## All values unknown.
   TraceKeys(record: NaN, ensemble: NaN, offset: NaN, srcLine: NaN, srcPoint: NaN, srcX: NaN,
     srcY: NaN, rcvLine: NaN, rcvPoint: NaN, rcvX: NaN, rcvY: NaN, srcZ: NaN, rcvZ: NaN,
-    cmpX: NaN, cmpY: NaN)
+    cmpX: NaN, cmpY: NaN, channel: NaN)
 
 func hasSourceXY*(k: TraceKeys): bool {.inline.} = not (k.srcX.isNaN or k.srcY.isNaN)
 func hasReceiverXY*(k: TraceKeys): bool {.inline.} = not (k.rcvX.isNaN or k.rcvY.isNaN)
@@ -95,6 +99,7 @@ proc traceKeys*(gr: GeometryReader, t: SegyTrace): TraceKeys =
     result.cmpX = g.cdpX
     result.cmpY = g.cdpY
   result.deriveGeometry()
+  if t.header.traceNumberInField > 0: result.channel = float64(t.header.traceNumberInField)
   let code = int(t.header.traceIdCode)
   let base = if code >= 0: code and 0x3FFF else: code
   if isComponentCode(base): result.component = uint8(base)
@@ -154,6 +159,7 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
   result.record = float64(if rec.isRev3: fileNumber(rec.gh1, rec.gh2r3)
                           elif rec.hasGh2: fileNumber(rec.gh1, rec.gh2)
                           else: int64(rec.gh1.fileNumber))
+  if t.header.traceNumber != BcdAllF: result.channel = float64(t.header.traceNumber)
   if rec.isRev3:
     if not sourceFrom(t.extensions, result): discard sourceFrom(rec.generalBlocks, result)
     if t.hasExt1:
@@ -163,6 +169,7 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
       result.rcvIndex = int16(e.receiverPointIndex)
       result.depthIndex = e.depthIndex
       result.reshootIndex = e.reshootIndex
+      result.channel = float64(traceNumber(t.header, e))
       result.sensorType = e.sensorType
       result.component = if e.groupIndex != 0: e.groupIndex else: e.sensorType
     positionsFrom(t.extensions, result, generalArea = false)

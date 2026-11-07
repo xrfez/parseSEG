@@ -687,6 +687,7 @@ proc segOffsetof(name, field: cstring): int64 {.segExport: "seg_offsetof".} =
   of "SegTraceKeys.reshoot_index": o(TraceKeys, reshootIndex)
   of "SegTraceKeys.sensor_type": o(TraceKeys, sensorType)
   of "SegTraceKeys.component": o(TraceKeys, component)
+  of "SegTraceKeys.channel": o(TraceKeys, channel)
   of "SegTensorView.data": o(SegTensorView, data)
   of "SegTensorView.dtype": o(SegTensorView, dtype)
   of "SegTensorView.rank": o(SegTensorView, rank)

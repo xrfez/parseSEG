@@ -54,6 +54,7 @@ static void test_layout(void) {
     OFF(SegTraceKeys, src_index);
     OFF(SegTraceKeys, rcv_index); OFF(SegTraceKeys, depth_index);
     OFF(SegTraceKeys, reshoot_index); OFF(SegTraceKeys, sensor_type); OFF(SegTraceKeys, component);
+    OFF(SegTraceKeys, channel);
     OFF(SegTensorView, data); OFF(SegTensorView, dtype); OFF(SegTensorView, rank);
     OFF(SegTensorView, shape); OFF(SegTensorView, strides);
     OFF(SegValue, kind); OFF(SegValue, i); OFF(SegValue, f); OFF(SegValue, text);
