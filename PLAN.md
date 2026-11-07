@@ -272,6 +272,27 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       words, GH1 bytes per scan and scans per block), the 0015 decoder, demultiplexing into
       traces. Large; from `segd_rev0.md` §5 and §9.
 
+      **Default chosen by the agent (2026-11-07):** the owner had no preference, so revisit it
+      if a real multiplexed file shows a problem. The choice is option (a): demultiplex once on
+      open.
+      - `openSeismic` detects multiplexed records and demultiplexes them into a temporary
+        demux SEG-D file. The headers are kept, and the format becomes the demux equivalent
+        (0015→8015, 0022→8022, ...).
+      - The temp file goes in a configurable directory (default: the OS temp dir). It is
+        deleted on `close`.
+      - The original file is never modified; the read-only rule holds.
+      - Every existing feature (index, range reads, keys, gathers, survey join, conversion)
+        then works unchanged.
+      - A warning diagnostic says the data was demultiplexed, and where the copy lives.
+
+      Why this option:
+      - Multiplexed data is legacy, tape-era data, so files are small and the copy is cheap.
+      - Option (b), a scan-strided codec, would add a second read path for every feature.
+      - Option (c), streaming only, would leave viewers without random access.
+
+      Known costs: one extra copy on disk, and in-place header edits apply to the copy, not
+      the original. The editor refuses multiplexed files and points to `convert` instead.
+
 ### Phase 5: SEG-D Rev 3.0
 - [x] 5.1 Storage unit label, TOC, general headers 1-3 and all optional/typed blocks
 - [x] 5.2 Trace headers and typed extensions (incl. Orientation 0x60), trailer, reader
@@ -813,3 +834,4 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
   - Owner: real SPS/P1 and SEG-2 files, and a multiplexed SEG-D file, would let these be verified.
 
 - 2026-11-07: Owner rule added to "Owner decisions": files change only on an explicit write. Confirmed that `applySurvey`/`applyGeometry` only change in-memory `TraceKeys`, and `openSeismic` maps read-only unless `writable = true` (`HeaderEditor`). New tasks: 6.8 `FileSummary` (format-independent metadata) and 6.9 trace time in `TraceKeys` (so viewers need no per-format branches); 10.5 explicit, journaled write-back of joined geometry. Still open: 4.7 (needs a decision), Phase 11.
+- 2026-11-07: 4.7 decided by the agent as a default (the owner had no preference): demultiplex into a temporary demux file on open, original never touched; rationale and costs in the 4.7 entry. Revisit if a real multiplexed file shows a problem. Also confirmed for the owner: `readTraces` decodes into a new tensor (a copy), so processing never touches the mapped file.
