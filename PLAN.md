@@ -766,4 +766,10 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
   - Converting Rev 0 to 2.x or 3.0 writes vertical stack 1 and array forming 1 instead of copying 0s, which mean "zeroed data" and "undefined" from Rev 1 on, and zeroes the GH1 multiplexed fields for 2.x.
   - Not done (noted): writer checks for Rev 0-only formats; trace lengths from tape block lengths.
   - Multiplexed data is task 4.7.
+- 2026-11-07: **Session hand-off.**
+  - Done: Phase 10 (survey files, reviewed), tasks 1.7-1.9 (spec notes for every new PDF), 3.5 (SEG-Y Rev 0/2.0), 4.6 (SEG-D Rev 0 demux) and 5.5 (SEG-D 3.1).
+  - Open:
+    - **4.7, multiplexed SEG-D.** It needs a design decision: multiplexed samples are interleaved across scans, so a trace has no contiguous byte range for `TraceEntry`. Options: (a) demultiplex once into a temporary demux file and index that; (b) a scan-strided `TraceCodec` that reads one sample per scan; (c) reader-only (streaming `readSegd`) without the index.
+    - Phase 11 (SEG-2).
+  - Owner: real SPS/P1 and SEG-2 files, and a multiplexed SEG-D file, would let these be verified.
 
