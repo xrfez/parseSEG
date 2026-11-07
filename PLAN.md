@@ -9,7 +9,32 @@ tape**. Priority formats:
 2. SEG-D Rev 2.1
 3. SEG-D Rev 3.0
 
-Later: SEG-D 3.1 (a small delta on 3.0), SEG-Y Rev 2.0/2.1, and older SEG-D revisions.
+Also required by the sample files: reading SEG-D **Rev 2.0**, SEG-Y **Rev 0 little-endian**,
+and the SEG-Y **Rev 2.1** features (needed to read the Inglewood sample).
+Later: SEG-D 3.1 (a small delta on 3.0) and SEG-D Rev 1.
+
+## Owner decisions (2026-11-07)
+- **Tape:** the goal is **tape-ready output**, not a full tape-drive stack. The format
+  layer emits a stream of *records* and *tape marks*, and pluggable sinks write it:
+  (a) a plain disk file (records concatenated; tape marks dropped or mapped to file
+  boundaries), (b) a tape-image file that preserves record lengths and tape marks,
+  (c) a minimal Linux `st` device sink (`write()` per record, `MTWEOF` ioctl). A Windows
+  tape sink can be added behind the same interface later. Reading works the same way
+  through a record source. The spec notes say how tape and disk layouts differ: block
+  sizes, the storage unit label, padding, and tape marks between files.
+- **Unsupported content must never fail silently.** Multiplexed SEG-D format codes (0015,
+  0022, ...) and any other unimplemented feature raise `SegUnsupportedError` with the code
+  and location. Headers stay readable, so callers can still inspect such files.
+
+## Sample files (`SEG Spec/exampleFiles/`)
+| File | Size | What the headers say | In git? |
+|---|---|---|---|
+| `63.sgd` | 4.3 KB | SEG-D **Rev 2.0** (GH2 bytes 11-12 = 02 00), format 8058, no storage unit label, GH1 has 2 extra GH blocks | yes |
+| `00000151_12900_11300.sgd` | 65 MB | SEG-D **Rev 3.0** (03 00), format 8058, no label, 2026 day 275, GH count extended (nibble F) | **no** (too big for git; ignored, and tests skip it if absent) |
+| `Sweep0.sgy` | 51 KB | SEG-Y **Rev 0**, **little-endian**, ASCII text, format 5 (IEEE), 1 trace × 12001 samples @ 1000 µs | yes |
+| `BO_3D-Inglewood_rev21_v7.sgy` | 2 MB | SEG-Y **Rev 2.1** (0x0201), EBCDIC, format 1 (IBM), 2001 samples @ 2000 µs, ext. text count −1 (Rev 2 "variable") | yes |
+Both SEG-D samples use format 8058 (IEEE float), so the 8015 one's vs two's complement
+question remains open. Implement per spec (one's complement) and test with synthetic data.
 
 ## Resume protocol (token budget rules)
 1. **Never open the PDFs** in `SEG Spec/*.pdf`. Their full text is already in
@@ -23,8 +48,8 @@ Later: SEG-D 3.1 (a small delta on 3.0), SEG-Y Rev 2.0/2.1, and older SEG-D revi
 4. Before writing any Nim, load the matching `nim-*` skill (see `AGENTS.md`). The
    `.agents/skills/*` symlinks are broken in this container. Read the skills from
    `/opt/nim-agent-template/skills/<name>/SKILL.md` instead.
-6. Run the tests with `nim test` (this runs `tests/tester.nim`, which discovers `tests/t*.nim`).
-5. Work branch: `seg-library`.
+5. Run the tests with `nim test` (this runs `tests/tester.nim`, which discovers `tests/t*.nim`).
+6. Work branch: `seg-library`.
 
 ## Architecture (target)
 ```
@@ -66,34 +91,43 @@ writers validate before emitting.
 - [x] 1.4 `docs/spec/segd_rev3_0_b.md`: SEG-D 3.0 pages 87-188 (parameters 8.x, trailer, appendices)
 - [ ] 1.5 Review the notes: resolve AMBIGUITY items (2.1: pages 14-17 and 61 are image-only figures;
       render them with `pdftoppm -f N -l N -r 80 -png` and view only those pages) and write `docs/spec/README.md` (index plus a cross-format summary)
-- [ ] 1.6 (later) `segd_rev3_1_delta.md`, `segy_rev2_x.md`
+- [ ] 1.6 `docs/spec/segy_rev2_1.md` (subagent): SEG-Y Rev 2.1 as a **delta on segy_rev1.md**
+      (text: `seg_y_rev2_1-oct2023.txt` plus `seg-y_rev2-1_clarification_2025-05-01.txt`; skip
+      the superseded Rev 2.0 doc). It must cover the byte-order marker (3297-3300), extended
+      text count −1, additional trace headers, data trailers, and new formats.
+- [ ] 1.7 (later) `segd_rev3_1_delta.md`
 
 ### Phase 2: Core primitives (with unit tests)
 - [x] 2.1 endians, bcd, ibmfloat, ebcdic, errors (`tests/tcommon.nim`)
-- [ ] 2.2 I/O layer: blockio, diskio, tapeio (tape tested with a mock record device)
+- [ ] 2.2 I/O layer: record source/sink interface (records + tape marks); disk-file,
+      tape-image-file and memory sinks/sources; minimal Linux `st` sink; `SegUnsupportedError`
 
 ### Phase 3: SEG-Y Rev 1
 - [ ] 3.1 Textual, binary, and trace headers (decode/encode, round-trip tests)
-- [ ] 3.2 Sample formats 1,2,3,5,8 and the reader/writer, including extended textual headers
-- [ ] 3.3 Validate against `SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy`
+- [ ] 3.2 Sample formats 1,2,3,5,8 and the reader/writer, including extended textual headers;
+      **byte-order detection** (Rev 2 marker, else a plausibility heuristic on format code/sizes)
+      and ASCII/EBCDIC text detection
+- [ ] 3.3 Validate against `Sweep0.sgy` (Rev 0, LE) and `BO_3D-Inglewood_rev21_v7.sgy` (Rev 2.1)
+- [ ] 3.4 Rev 2.1 extensions (from 1.6) needed to fully read the Inglewood file
 
-### Phase 4: SEG-D Rev 2.1
+### Phase 4: SEG-D Rev 2.1 (also reads Rev 2.0)
 - [ ] 4.1 Headers (general 1/2/N, scan type / channel set, extended, external, demux trace, trace extensions)
 - [ ] 4.2 Sample formats and the demux reader
 - [ ] 4.3 Writer and round-trip tests with synthetic records
+- [ ] 4.4 Validate against `63.sgd` (Rev 2.0)
 
 ### Phase 5: SEG-D Rev 3.0
 - [ ] 5.1 Storage unit label, TOC, general headers 1-3 and optional blocks
 - [ ] 5.2 Trace headers and extensions, trailer, reader
 - [ ] 5.3 Writer and round-trip tests
+- [ ] 5.4 Validate against `00000151_12900_11300.sgd` (Rev 3.0, local only)
 
 ### Phase 6: Tooling
 - [ ] 6.1 CLI: `parseSEGD dump|info|convert`
 - [ ] 6.2 Docs and CI updates
 
 ## Open questions for the owner
-- Are any real SEG-D 2.1 / 3.0 sample files available? (Only one SEG-Y rev 2.1 sample exists today.)
-- Target tape platform: Linux `st` only, or Windows tape too?
+- None outstanding. (It would help to have a SEG-D file with 8015/8022/8024 integer formats.)
 
 ## Log
 - 2026-11-06: Phase 0 done. The spec text is extracted and committed. Branch `seg-library` created.
@@ -103,3 +137,4 @@ writers validate before emitting.
 - 2026-11-06: Task 1.4 done: segd_rev3_0_b.md (902 lines). Follow-ups for 1.5: add the 2015/2017 leap seconds (the E.9 table stops at 2012); confirm the GH3 header-size formula against part A.
 - 2026-11-06: Task 1.3 done: segd_rev3_0_a.md (893 lines, 16 AMBIGUITY items). Phase 1 notes are complete; next is 1.5 (review/index).
 - 2026-11-06: Task 1.5 started: the 3.0 Additional Source Info ID is resolved as 0x20 (via the 3.1 text). Record each later resolution in a `## Resolutions` section at the end of the note concerned.
+- 2026-11-07: The owner added sample files and answered the questions (tape = tape-ready output; never fail silently). The sample headers were inspected and the plan updated: Rev 2.0 SEG-D, Rev 0 LE SEG-Y and the Rev 2.1 SEG-Y note were added. The 65 MB Rev 3.0 sample is git-ignored.
