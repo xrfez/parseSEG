@@ -317,6 +317,31 @@ Tasks:
       sizes via `computeRev3Sizes`, 96-byte CSDs, Rev 3 THE#1, GH#N → Source Description
       blocks) and re-encode formats Rev 3 no longer defines. Rev 3 → Rev 2 drops typed blocks,
       and that is logged.
+- [ ] 8.8 Python bindings with **nimpy** (owner request, 2026-11-07): a native extension module
+      (`parseseg.so` / `parseseg.pyd`, `import parseseg`), with nimpy added through Atlas.
+  - One custom export pragma (e.g. `{.segExport.}`) marks every boundary proc. A define chooses
+    what it expands to: `-d:segCapi` gives `exportc, dynlib, cdecl` (the `.so`/`.dll`/`.dylib`
+    C ABI of 8.3), `-d:segPython` gives nimpy's `exportpy`. Without either it adds nothing, so
+    plain Nim builds are unchanged. The C ABI and the Python module come from one source of
+    truth.
+  - Where the two need different shapes, keep thin per-target wrappers over shared
+    implementation procs. C uses status codes, out-pointers and handles; Python uses
+    exceptions, return values and objects with `close`/context managers.
+  - Samples must reach numpy zero-copy, through nimpy's raw buffers, the buffer protocol or
+    `__dlpack__`, since the tensors stay internal.
+  - Test it with a pytest-free `python3 -I` script in `nim test`, mirroring
+    `tests/python/smoke.py`, and with numpy whenever it is available.
+- [ ] 8.9 **Ongoing:** build tasks for every target, kept current whenever a target or flag
+      changes. Tasks in `config.nims`:
+  - `lib` (the C ABI for the host OS);
+  - `libLinux` / `libWindows` / `libMacos` (cross-builds through the existing zig tasks,
+    e.g. `zig cc -target x86_64-windows-gnu`);
+  - `pylib` (the nimpy module);
+  - `staticlib` (`--app:staticlib`, if wanted);
+  - the CLI binary (Phase 7).
+
+  Each task documents its flags (atomicArc, useMalloc, threads), and CI builds the matrix and
+  uploads the artifacts with `include/parseseg.h`.
 - Phase 7's CLI should be written against the 8.2 public API, so it doubles as an end-to-end test.
 - Processing itself (filters, FFT, gains, LMO/NMO, stacks) is a separate library consuming this one.
 
@@ -439,3 +464,4 @@ Tasks:
   - Rev 2 output also carries float64 coordinates, offset, midpoint, elevations, sample interval and count in Ext1, plus a `PSEGD001` proprietary header with line/point/index/sensor/component/record/channel set/type, described by a `((SEG:Layout))` stanza. `fieldValue(file, trace, "rec_line")` reads it back. Unmappable SEG-D content (extended/external headers, extra general blocks, trailers, 8080 into float32) gets one info note per kind; a value that does not fit a forced format zeroes its trace, with an error.
   - C ABI: `SegConvertOptions`, `seg_convert_options_default`, `seg_convert` (layout test and abi_test updated).
   - Tests (`tests/tconvert.nim`): 63.sgd → Rev 2.1 (samples, header and station values) and → Rev 1; INOVA Rev 3 → Rev 2.1 (Ext1 coordinates, scalar -1000, offset, aux trace ID, UTC time); descaling; an 8038 record → format 2 exactly; a forced int8 overflow; Inglewood IBM Rev 2.1 → Rev 1 IEEE (equal samples and headers) and → Rev 0; Sweep0 LE Rev 0 → Rev 2.1 LE → Rev 1 BE; invalid targets and inputs.
+- 2026-11-07: Owner additions to Phase 8: **8.8** nimpy Python bindings, with a define-switched export pragma (`-d:segCapi` / `-d:segPython`) so the C ABI and the Python module share one source, and **8.9** an ongoing task to keep build tasks for every target (`lib`, cross-builds per OS, `pylib`, `staticlib`, the CLI) plus a CI matrix. Order: fix the Phase 8 review findings, then 8.8 and 8.9, then 8.7.
