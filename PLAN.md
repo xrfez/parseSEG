@@ -337,7 +337,16 @@ Tasks:
   - `libLinux` / `libWindows` / `libMacos` (cross-builds through the existing zig tasks,
     e.g. `zig cc -target x86_64-windows-gnu`);
   - `pylib` (the nimpy module);
-  - `staticlib` (`--app:staticlib`, if wanted);
+  - `staticlib`: `--app:staticlib` gives `libparseseg.a` / `parseseg.lib` for static
+    linking. Hosts link it with `-lpthread -lm -ldl` (Linux). Verified 2026-11-07: abi_test
+    linked statically passes everything, with no runtime dependency on the `.so`;
+  - `csources`: a C source bundle per target triple, for users who build without Nim (their own
+    compiler, flags or build system). It uses `--compileOnly --genScript`; the generated `.c`
+    files (82 files, 7.4 MB for linux-x64) plus `nimbase.h`, a small Makefile and CMakeLists.txt
+    (compile every `.c`, archive) and `include/parseseg.h`. Verified 2026-11-07: built with gcc
+    alone, abi_test passes. The generated C is target-specific (word size; OS code such as
+    memfiles and tape), so ship one bundle per triple (linux-x64/arm64, windows-x64,
+    macos-arm64), never one for all;
   - the CLI binary (Phase 7).
 
   Each task documents its flags (atomicArc, useMalloc, threads), and CI builds the matrix and
