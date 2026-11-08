@@ -126,6 +126,15 @@ block tape_label:
   let f = readSegy(src)
   src.close()
   doAssert f.file.tapeLabel == label and f.samples == d.samples
+  # A label of the wrong length is refused, even when lenient, not asserted.
+  d.file.tapeLabel.setLen 100
+  var opts = initSegyWriteOptions(d.file)
+  opts.lenient = true
+  try:
+    d.copyTo(tmp / "badlabel.sgy", opts)
+    doAssert false, "a 100-byte tape label was written"
+  except SegFormatError as e:
+    doAssert "100-byte tape label" in e.msg, e.msg
 
 block truncated_file:
   let full = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")

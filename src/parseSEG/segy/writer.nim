@@ -84,6 +84,11 @@ proc checkFile(w: var SegyWriter) =
   let b = f.binary
   let rev = w.rev
   let loc = Location(file: w.sink.name)
+  if f.tapeLabel.len notin [0, TapeLabelSize]:
+    # Not even `lenient` can write this: the label's length is the layout.
+    w.log.report(sevError, dcValidation, "a tape label is " & $TapeLabelSize & " bytes, not " &
+      $f.tapeLabel.len, loc = Location(file: w.sink.name, field: "tapeLabel"))
+    raiseFormat("refusing to write a " & $f.tapeLabel.len & "-byte tape label")
   let extAsRead = f.isExtendedAsRead
   # Readable but spec-invalid values: a warning when every byte the finding
   # depends on is as read, else an error.
@@ -166,7 +171,6 @@ proc openSegyWriter*(sink: RecordSink, file: SegyFile, opts: SegyWriteOptions): 
   file.binary.encode(result.cur, file.byteOrder)
   result.checkFile()
   if file.tapeLabel.len > 0:
-    doAssert file.tapeLabel.len == TapeLabelSize, "a tape label is 128 bytes"
     sink.writeRecord(file.tapeLabel)
   var text = newSeq[byte](3200)
   file.text.encode(text)
