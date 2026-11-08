@@ -203,7 +203,7 @@ proc checkRecord(w: var SegdWriter, rec: SegdRecord) =
   elif f.get.isLittleEndian and rec.headerRevision < SegdRevision(major: 3, minor: 1):
     w.problem("format " & $ord(f.get) & " (little-endian) needs Rev 3.1, the record says " &
       $rec.headerRevision, "gh1.formatCode")
-  if rec.layout == slRev3: w.checkRev3Sizes(rec)
+  if rec.isRev3: w.checkRev3Sizes(rec)
   if isStorageUnitLabel(rec.gh1.encoded):
     w.problem("General Header #1 bytes 5-9 read like a storage unit label ('SDn.n'), so " &
       "readers would take the record for a label", "gh1.generalConstants")
@@ -238,24 +238,29 @@ proc writeRecordHeaders*(w: var SegdWriter, rec: SegdRecord) =
   w.record = rec
   # The trace count the reader will expect, from the descriptors as written.
   w.record.traceCount = rec.announcedTraces
-  if rec.layout == slRev3 and w.record.traceCount > 0:
+  if rec.isRev3 and w.record.traceCount > 0:
     w.padToBlock() # the first trace starts a device block
   w.inRecord = true
   w.tracesWritten = 0
 
 func declaredSamples(rec: SegdRecord, t: SegdTrace, cs: Option[SegdChannelSetRef]): int =
-  # The sample count the reader will give the trace, -1 if none.
+  # The sample count the reader will give the trace, -1 if none (also when
+  # a lenient record's scan type has another layout than the trace).
   case t.layout
   of slRev2:
     if t.ext1.isSome: return int(t.ext1.get.samplesPerTrace)
-    if cs.isSome:
-      template c: untyped = rec.scanTypes[cs.get.scanType].descriptors[cs.get.channelSet]
-      let si = c.sampleIntervalMs(rec.gh1)
-      if si > 0: return int(round((c.endTimeMs - c.startTimeMs) / si))
   of slRev3:
     if t.ext1Rev3.isSome: return int(t.ext1Rev3.get.numSamples)
-    if cs.isSome:
-      return int(rec.scanTypes[cs.get.scanType].descriptorsRev3[cs.get.channelSet].numSamples)
+  if cs.isSome:
+    template s: untyped = rec.scanTypes[cs.get.scanType]
+    if s.layout == t.layout:
+      case s.layout
+      of slRev2:
+        template c: untyped = s.descriptors[cs.get.channelSet]
+        let si = c.sampleIntervalMs(rec.gh1)
+        if si > 0: return int(round((c.endTimeMs - c.startTimeMs) / si))
+      of slRev3:
+        return int(s.descriptorsRev3[cs.get.channelSet].numSamples)
   -1
 
 proc checkTrace(w: var SegdWriter, t: SegdTrace) =
@@ -281,10 +286,12 @@ proc checkTrace(w: var SegdWriter, t: SegdTrace) =
   if declared != t.numSamples:
     w.problem("the headers give " & $declared & " samples, the trace has " & $t.numSamples,
       "trace.numSamples", t.index)
-  let f = w.record.format.get
-  if t.samples.len != dataBytes(f, t.numSamples):
+  if w.record.format.isNone:
+    w.problem("the record's format code " & $w.record.gh1.formatCode & " is unknown, so " &
+      "the trace's sample bytes cannot be checked", "gh1.formatCode", t.index)
+  elif t.samples.len != dataBytes(w.record.format.get, t.numSamples):
     w.problem("the trace has " & $t.samples.len & " sample bytes, " &
-      $dataBytes(f, t.numSamples) & " expected", "trace.samples", t.index)
+      $dataBytes(w.record.format.get, t.numSamples) & " expected", "trace.samples", t.index)
 
 proc writeTrace*(w: var SegdWriter, t: SegdTrace) =
   ## Validates and writes one trace of the current record.
@@ -317,7 +324,7 @@ proc setRev3Trailer*(w: var SegdWriter, trailer: sink seq[byte]) =
   ## progress, for a trailer known only after its traces. GH#2 and GH#3 were
   ## written with the record headers, so it must have the size they announce
   ## (`endRecord` checks).
-  doAssert w.inRecord and w.record.layout == slRev3,
+  doAssert w.inRecord and w.record.isRev3,
     "setRev3Trailer needs a Rev 3 record in progress"
   w.record.trailerRev3 = trailer
 
@@ -349,13 +356,14 @@ proc endRev3Record(w: var SegdWriter) =
 proc endRecord*(w: var SegdWriter, trailer: openArray[SegdTrailerBlock] = []) =
   ## Finishes the record: checks the trace count (and, for Rev 3, the GH#3
   ## sizes), writes the general trailer (Rev 0-2: `trailer`, or the record's
-  ## own when empty; Rev 3: `trailerRev3`), pads a FIXREC block and writes a
-  ## tape mark if `tapeMarkPerRecord`.
+  ## own when empty; Rev 3: `trailerRev3`, set with `setRev3Trailer`;
+  ## `trailer` is ignored), pads a FIXREC block and writes a tape mark if
+  ## `tapeMarkPerRecord`.
   doAssert w.inRecord, "no record in progress"
   if w.tracesWritten != w.record.traceCount:
     w.problem("the channel set descriptors announce " & $w.record.traceCount & " traces, " &
       $w.tracesWritten & " were written",
-      if w.record.layout == slRev3: "csd.channelsInSet" else: "csd.channelCount")
+      if w.record.isRev3: "csd.channelsInSet" else: "csd.channelCount")
   case w.record.layout
   of slRev2: w.endRev2Record(trailer)
   of slRev3: w.endRev3Record()
@@ -369,7 +377,9 @@ proc endRecord*(w: var SegdWriter, trailer: openArray[SegdTrailerBlock] = []) =
 proc computeRev3Sizes*(rec: var SegdRecord, traces: openArray[SegdTrace]) =
   ## Sets a Rev 3 record's GH#3 header, data and record sizes and its GH#2
   ## trailer block count from its blocks and `traces` (for records built in
-  ## memory).
+  ## memory). Raises `ValueError` for a record in the Rev 0-2 layout.
+  if not rec.isRev3:
+    raise newException(ValueError, "computeRev3Sizes needs a Rev 3 record")
   let header = rec.headerBytes
   rec.gh3.headerSize = uint32(header)
   var data = header

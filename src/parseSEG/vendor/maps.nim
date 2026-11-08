@@ -737,8 +737,8 @@ proc decodeField(f: VendorFieldPlan, b: openArray[byte], base: int,
           else: VendorValue(kind: vvInt, intVal: iv, unit: f.unit)
   for e in f.enums:
     if e.value == iv: v.label = e.label
-  for b in f.bits:
-    if ((cast[uint64](iv) shr b.bit) and 1) != 0: v.flags.add b.name
+  for flag in f.bits:
+    if ((cast[uint64](iv) shr flag.bit) and 1) != 0: v.flags.add flag.name
   some(v)
 
 proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,

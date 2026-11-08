@@ -581,6 +581,7 @@ proc withinRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecor
   ## 3.x to 3.y: the same layout, a new minor revision and maybe format.
   let target = c.opts.revision
   result = rec
+  result.revision = target
   result.gh2Rev3.revisionMinor = target.minor
   # The trailer comes after the traces; a placeholder of the announced size
   # until then (see setRev3Trailer).
@@ -610,6 +611,7 @@ proc withinRev2(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecor
   ## and maybe format.
   let target = c.opts.revision
   result = rec
+  result.revision = target
   result.gh1.formatCode = ord(fOut)
   result.format = some(fOut)
   if rec.gh2.isNone:

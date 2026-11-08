@@ -110,7 +110,8 @@ type
     of slRev2:
       ext1*: Option[SegdTraceHeaderExt1] ## Trace Header Extension #1, if the trace has one.
     of slRev3:
-      ext1Rev3*: Option[SegdTraceHeaderExt1Rev3] ## Trace Header Extension #1 (required).
+      ext1Rev3*: Option[SegdTraceHeaderExt1Rev3]
+        ## Trace Header Extension #1; none when the trace has none (Rev 3 requires one).
 
   SegdChannelSetRef* = object
     ## Where a trace's channel set descriptor is (see `findChannelSet`).
@@ -509,7 +510,7 @@ proc readScanTypes(r: var SegdReader) =
   template rec: untyped = r.record
   r.checkCounts()
   let nCS = rec.channelSetsPerScanType
-  if rec.layout == slRev2 and (rec.gh1.scanTypesPerRecord == 0 or nCS == 0):
+  if not rec.isRev3 and (rec.gh1.scanTypesPerRecord == 0 or nCS == 0):
     r.note(sevWarning, dcBadValue, "the record declares " & $rec.gh1.scanTypesPerRecord &
       " scan types and " & $nCS & " channel sets per scan type", rec.offset + 27,
       r.loc(field = "gh1.scanTypesPerRecord"))
@@ -836,6 +837,7 @@ proc nextRecord*(r: var SegdReader): bool =
   inc r.records
   r.tracesRead = 0
   r.csdWarned = false
+  r.record = SegdRecord(index: index) # not the previous record if GH#1 cannot be read
   if r.log.tryRecord(r.loc(), r.readRecordHeaders(index)):
     r.inRecord = true
     result = true

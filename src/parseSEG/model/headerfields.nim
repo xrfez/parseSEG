@@ -220,7 +220,7 @@ proc recordBlock(ix: TraceIndex, record: int, blockName: string, b: var FieldRef
   elif blockName.len in 3..6 and blockName.startsWith("gh") and
       blockName[2..^1].allCharsInSet(Digits) and blockName[2] != '0':
     let n = parseInt(blockName[2..^1])
-    if rec.layout == slRev3 or rec.gh2.isNone:
+    if rec.isRev3 or rec.gh2.isNone:
       b.error = "only Rev 1/2 records have source blocks gh3, gh4, ... (Rev 3 general " &
         "header blocks after GH#1 are not supported by name yet)"
     elif n < 3 or n - 3 >= rec.sourceHeaders.len:

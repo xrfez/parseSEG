@@ -390,7 +390,7 @@ func commonFormat(formats: set[SegdSampleFormat], rev: SegyRevision, descale: bo
              elif formats <= {sd8036, sd8038} and not descale: sfInt32
              else: sfFloat32
 
-func targetFormat(opts: ConvertOptions, rec: SegdRecord,
+func segyFormatFor(opts: ConvertOptions, rec: SegdRecord,
     recordFormats: set[SegdSampleFormat]): SampleFormat =
   # The SEG-Y format: the requested one, else one that holds every record
   # exactly (or at least the first one).
@@ -684,7 +684,7 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
       inc inRecord
       if not opened:
         # The file headers come from the first trace.
-        c.outFmt = targetFormat(opts, r.record, recordFormats)
+        c.outFmt = segyFormatFor(opts, r.record, recordFormats)
         try:
           w = openSegyWriter(sink, c.initSegyFileFor(r.record, t, src.name),
             SegyWriteOptions(byteOrder: opts.byteOrder, lenient: true))

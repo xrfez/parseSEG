@@ -409,3 +409,80 @@ block layout_variants_12_3:
       w.writeTrace(SegdTrace(layout: slRev3, header: t.header, numSamples: t.numSamples))
     doAssert w.log.len == 1 and "layout" in w.log[0].msg
   finally: sink.close()
+
+block review_12_4:
+  let d = readSegd(exampleDir / "63.sgd")
+  let t = d.records[0].traces[0]
+  # A lenient write of a record without a known format logs the trace's
+  # samples as unchecked instead of failing.
+  block:
+    var rec = d.records[0].record
+    rec.format = none(SegdSampleFormat)
+    let sink = openDiskSink(tmp / "nofmt.sgd")
+    try:
+      var w = openSegdWriter(sink, SegdWriteOptions(lenient: true))
+      w.writeRecordHeaders(rec)
+      w.writeTrace(t)
+      var found = false
+      for x in w.log:
+        if "cannot be checked" in x.msg: found = true
+      doAssert found, $w.log
+    finally: sink.close()
+  # A lenient record whose scan type has the other layout: the trace's
+  # declared sample count is unknown (-1), not a FieldDefect.
+  block:
+    var rec = d.records[0].record
+    rec.scanTypes[0] = SegdScanType(layout: slRev3, descriptorsRev3:
+      @[SegdChannelSetDescriptorRev3(channelSetNumber: uint16(channelSetNumber(t.header)))])
+    var t2 = t
+    t2.ext1 = none(SegdTraceHeaderExt1)
+    let sink = openDiskSink(tmp / "mixed.sgd")
+    try:
+      var w = openSegdWriter(sink, SegdWriteOptions(lenient: true))
+      w.writeRecordHeaders(rec)
+      w.writeTrace(t2)
+      var found = false
+      for x in w.log:
+        if "give -1 samples" in x.msg: found = true
+      doAssert found, $w.log
+    finally: sink.close()
+  # computeRev3Sizes needs a Rev 3 record.
+  block:
+    var rec = d.records[0].record
+    doAssertRaises(ValueError): rec.computeRev3Sizes([t])
+  # A failed GH#1 read leaves no stale record behind.
+  block:
+    var b = readBytes(exampleDir / "63.sgd")
+    b.add [1'u8, 2, 3]
+    writeBytes(tmp / "tail3.sgd", b)
+    var src: RecordSource = openDiskSource(tmp / "tail3.sgd")
+    try:
+      var r = openSegd(src)
+      doAssert r.nextRecord() and r.record.scanTypes.len == 1
+      doAssert not r.nextRecord()
+      doAssert r.record.index == 1 and r.record.scanTypes.len == 0
+    finally: src.close()
+  # A Rev 2 external header obeys maxHeaderBytes like the extended one.
+  block:
+    var e = d
+    template rec: untyped = e.records[0].record
+    rec.gh1.externalHeaderBlocks = 2
+    rec.external = newSeq[byte](64)
+    for i in 0 ..< 64: rec.external[i] = byte(i)
+    let log = e.toDisk(tmp / "ext2.sgd")
+    doAssert log.len == 0, $log
+    doAssert readSegd(tmp / "ext2.sgd").records[0].record.external == rec.external
+    var src: RecordSource = openDiskSource(tmp / "ext2.sgd")
+    try:
+      var r = openSegd(src)
+      r.maxHeaderBytes = 63 # the extended header (96 bytes) and the external (64)
+      doAssert r.nextRecord() and r.record.incomplete
+      doAssert r.record.external.len == 0 and r.record.extended.len == 0
+      var notes = 0
+      for x in r.log:
+        if "exceed the in-memory limit" in x.msg: inc notes
+      doAssert notes == 2, $r.log
+      r.maxHeaderBytes = 64
+      var tr: SegdTrace
+      doAssert r.readTrace(tr)
+    finally: src.close()
