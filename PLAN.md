@@ -802,7 +802,7 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
       - ABI version 3. `abi_test.c`, `test_pyapi.py`, the `ttargets` host and the docs
         follow the new names.
 - [x] 12.3 Apply the approved 12.1 findings, one module per commit, tests green after each.
-- [ ] 12.4 Review by an agent; fix its findings.
+- [x] 12.4 Review by an agent; fix its findings.
 
 ### Future (noted, not scheduled)
 - Sorting traces by header fields (offset, receiver, CMP, ...), decided 2026-11-07: a sort
@@ -1224,3 +1224,28 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
     - `SegConvertOptions.format` / `SegSegdConvertOptions.format` are enums (`SEG_SEGY_TARGET_FORMAT_*`, `SEG_SEGD_TARGET_FORMAT_*`; Python `"keep"`, `"5"`, ...).
   - Renames: the full old → new list is in the commit messages and `docs/api.md`, e.g. `decodeEbcdic`, `entriesFor`, `bytePos`, `text=`, `gh2Rev3`/`descriptorsRev3`/`ext1Rev3`, `scaffoldVendorMap`, `vendorContext`, `encodeSps`/`encodeP1`, `FieldValue.intVal/floatVal/text`, `SegyData.log`/`SegdData.log`.
   - Left (minor): a few `31`/`95` byte offsets in vendor apply/scaffold; markdown table rows over 100 columns in two module docs; the lowercase and uppercase hex helpers in edit/headernif; nested capturing procs in `writeSps`. Next: 12.4 (review by an agent).
+- 2026-11-08: **Task 12.4 done; Phase 12 complete.** Three read-only reviewers (segd/vendor/convert; model/survey/cli; common/io/abi/segy plus the C/Python surface) found no high-severity regression in 12.3. Their 21 confirmed findings were fixed in 4 commits (8c385b1, a8ef4cb, 5b94379, 482ce24), with the full suite green.
+  - Journal safety:
+    - the journal is unbuffered;
+    - a refused batch's entries are cut back with `ftruncate` (`_chsize_s` on Windows, compiled but not run);
+    - if the cut fails, the editor refuses every later edit.
+  - `HeaderEditor.close` raises `IOError` for a lost final batch. `current*Field` raises `IOError` for a sync failure.
+  - `importHeaders` moves dropped edits from `applied` to `refused`.
+  - Linux-only tests use `/dev/full` and `RLIMIT_FSIZE`.
+  - SEG-D:
+    - a lenient write of a record without a format, or with a mixed layout, no longer raises a Defect;
+    - the reader resets its record before GH#1;
+    - `computeRev3Sizes` refuses Rev 0-2 records.
+  - SEG-Y:
+    - a lenient write zeroes a partial last sample;
+    - `SegyReader` uses `PushbackInput`.
+  - Export/`dump` decode each block once.
+  - C/Python (still v4, unreleased):
+    - `SEG_SEGY_TARGET_FORMAT_*` values are the format codes (15 and 16; 13 and 14 are refused), and the generator handles enums with holes;
+    - Python's `SegTensorView` no longer gets an invalid dtype default.
+  - Decisions:
+    - `DiagLog[]` keeps Nim's `IndexDefect` convention, and the generated C wrapper checks the index (`c_abi.md` says so);
+    - an empty trace span must start in `0..len`;
+    - CLI `convert --format=0` keeps the SEG-Y format, as it does for SEG-D.
+  - Open from Phase 12: the minor items listed in the 12.3 log entry.
+  - Still open from earlier phases: 4.7 (multiplexed SEG-D), Phase 11 (SEG-2), 6.8-6.10 and 10.5.
