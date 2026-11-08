@@ -15,11 +15,11 @@
 ## | SOURCE_ / RECEIVER_STATION_NUMBER, LINE_ID | `TraceKeys` source / receiver point, receiver (else source) line |
 ## | SOURCE_ / RECEIVER_LOCATION | `TraceKeys` x y (z when known) |
 ## | RECEIVER | component 11 HYDROPHONE, 12 VERTICAL_GEOPHONE, 13 SH_, 14 SV_HORIZONTAL_GEOPHONE |
-## | SAMPLE_INTERVAL, DELAY | `sampleIntervalUs`; SEG-Y delay recording time, SEG-D channel set start time |
+## | SAMPLE_INTERVAL, DELAY | `sampleIntervalUs`; SEG-Y delay recording time (time scalar applied, Rev 1 on), SEG-D channel set start time |
 ## | TRACE_TYPE | SEG-Y trace id 2 DEAD, 5 UPHOLE, seismic codes SEISMIC_DATA, other auxiliary codes TEST_DATA; SEG-D seismic / EM SEISMIC_DATA (trace edit 1-2: DEAD), uphole UPHOLE, other channel types TEST_DATA |
-## | STACK, FIXED_GAIN, ALIAS_ / LOW_CUT_ / HIGH_CUT_FILTER, NOTCH_FREQUENCY, STATIC_CORRECTIONS | SEG-Y trace header (vertical sum, gain constant, filters, statics) |
-## | STACK, DESCALING_FACTOR, ALIAS_ / LOW_CUT_FILTER, NOTCH_FREQUENCY | SEG-D channel set (Rev 3 filters; MP factor or descale multiplier) |
-## | file: ACQUISITION_DATE / _TIME | SEG-Y trace 0 date and time; SEG-D GH#1 (Rev 3: GH#3 time zero) |
+## | STACK, FIXED_GAIN, ALIAS_ / LOW_CUT_ / HIGH_CUT_FILTER, NOTCH_FREQUENCY, STATIC_CORRECTIONS | SEG-Y trace header (vertical sum, gain constant, filters, statics with the time scalar) |
+## | STACK, DESCALING_FACTOR, ALIAS_ / LOW_CUT_FILTER, NOTCH_FREQUENCY | SEG-D channel set (Rev 3 filters; MP factor or descale multiplier × STACK: SEG-D descales to the mV of one shot, SEG-2 gives it as sample × DESCALING_FACTOR / STACK) |
+## | file: ACQUISITION_DATE / _TIME | trace 0's `TraceKeys.time`: SEG-Y date and time in its time basis; SEG-D trace timestamp, GH#3 time zero or GH#1 (two-digit years 1950-2049) |
 ## | file: TRACE_SORT, UNITS | SEG-Y sorting code and measurement system (SEG-D: AS_ACQUIRED, NONE) |
 ## | file: NOTE | where the data came from, then the SEG-Y textual header's non-blank cards |
 ##
@@ -44,7 +44,7 @@
 ## | GH#1 date and time, GH#3 time zero | ACQUISITION_DATE / _TIME (UTC assumed) |
 ## | GH#2 dominant sampling interval, record length | the first set's interval; the longest set's end time |
 ## | Source Description (0x15 VIBRATOR, 0x16 DYNAMITE, 0x17 GUN, else 0x1F) + Position | SOURCE, source station / line, SOURCE_LOCATION: in the general header when every trace has the same source, else in each trace's extensions |
-## | CSD | channel type (0x10 seismic and DEAD, 0x11 RADAR_DATA, 0x30 UPHOLE, 0x70 TEST_DATA), DELAY, interval (whole µs), samples, DESCALING_FACTOR (else 1), STACK, ALIAS_FILTER, LOW_CUT_FILTER, NOTCH_FREQUENCY |
+## | CSD | channel type (0x10 seismic and DEAD, 0x11 RADAR_DATA, 0x30 UPHOLE, 0x70 TEST_DATA), DELAY, interval (whole µs), samples, DESCALING_FACTOR / STACK as the descale multiplier (else 1), STACK, ALIAS_FILTER, LOW_CUT_FILTER, NOTCH_FREQUENCY |
 ## | demux header | CHANNEL_NUMBER (else the position in the file), trace edit 2 for DEAD |
 ## | THE#1 | LINE_ID and RECEIVER_STATION_NUMBER (when numeric), RECEIVER type as sensor type (1 HYDROPHONE, 2 VERTICAL_, 3 SV_ (inline), 4 SH_HORIZONTAL_GEOPHONE (crossline), 6 ACCELEROMETER) |
 ## | Position (trace extension) | RECEIVER_LOCATION (z plus DATUM) |
@@ -173,20 +173,17 @@ proc segyNum(f: SeismicFile, i: int, name: string): float64 =
   let v = f.findTraceField(i, name)
   if v.isSome: v.get.toFloat else: NaN
 
-proc segyTime(f: SeismicFile): float64 =
-  # UTC seconds of trace 0's date and time; NaN when not set.
-  let year = f.segyNum(0, "trace.year")
-  let doy = f.segyNum(0, "trace.dayOfYear")
-  if not (year > 0 and doy in 1.0..366.0): return NaN
-  let y = if year < 50: 2000 + int(year) elif year < 100: 1900 + int(year) else: int(year)
-  if y > 9999: return NaN
-  let jan1 = dateTime(y, mJan, 1, zone = utc()).toTime.toUnix
-  float64(jan1) + (doy - 1) * 86400 + max(f.segyNum(0, "trace.hour"), 0) * 3600 +
-    max(f.segyNum(0, "trace.minute"), 0) * 60 + max(f.segyNum(0, "trace.second"), 0)
+proc segyTimeMs(f: SeismicFile, i: int, name: string): float64 =
+  # A SEG-Y time field (bytes 95-114) in ms: the time scalar (bytes 215-216)
+  # applies from Rev 1 on (0 means 1); Rev 0 left those bytes unassigned.
+  let v = f.segyNum(i, name)
+  let scalar = if f.index.segy.revision.major >= 1: f.segyNum(i, "trace.timeScalar") else: 0
+  if scalar > 0: v * scalar elif scalar < 0: v / -scalar else: v
 
-proc segdTime(rec: SegdRecord): float64 =
-  if rec.isRev3 and rec.gh3.timeZero != 0: timestampToUnix(rec.gh3.timeZero)
-  else: generalHeaderUtc(rec.gh1)
+proc firstTraceTime(f: SeismicFile): float64 =
+  # UTC seconds of trace 0, as its keys give it (one century pivot, the
+  # SEG-Y time basis, SEG-D timestamps); NaN when not set.
+  if f.len > 0: f.traceKeys(0).time else: NaN
 
 func printable(s: string): string =
   result = s
@@ -220,7 +217,7 @@ proc fileStrings(c: var Conv, f: SeismicFile, fdb: var Seg2File) =
       of 1: "METERS"
       of 2: "FEET"
       else: "NONE"
-    t = f.segyTime
+    t = f.firstTraceTime
     for n in 1..40:
       let card = s.text.card(n).printable.strip
       let body = if card.len >= 3 and card[0] == 'C': card[3 .. ^1].strip else: card
@@ -240,7 +237,7 @@ proc fileStrings(c: var Conv, f: SeismicFile, fdb: var Seg2File) =
         " by " & ConverterName
       note.add "SEG-D manufacturer code " & $rec.gh1.manufacturerCode & " serial " &
         $rec.gh1.manufacturerSerial & ", format " & $rec.gh1.formatCode
-      t = segdTime(rec)
+      t = f.firstTraceTime
     for rec in f.index.segdRecords:
       if rec.extended.len > 0 or rec.external.len > 0:
         c.note(snSegdHeaders, "SEG-D extended/external headers are not carried into SEG-2")
@@ -315,7 +312,7 @@ proc traceStrings(c: var Conv, f: SeismicFile, i: int, t: var Seg2Trace) =
   let e = f.index.entries[i]
   case f.kind
   of skSegy:
-    put("DELAY", f.segyNum(i, "trace.delayRecordingTime") / 1000)
+    put("DELAY", f.segyTimeMs(i, "trace.delayRecordingTime") / 1000)
     var tt = f.traceTypeOf(i, f.segyNum(i, "trace.traceIdCode"))
     t["TRACE_TYPE"] = tt
     let stack = f.segyNum(i, "trace.numVertSummed")
@@ -331,8 +328,8 @@ proc traceStrings(c: var Conv, f: SeismicFile, i: int, t: var Seg2Trace) =
     filter("HIGH_CUT_FILTER", "highCutFreq", "highCutSlope")
     let notch = f.segyNum(i, "trace.notchFilterFreq")
     if notch != 0: put("NOTCH_FREQUENCY", notch)
-    let st = [f.segyNum(i, "trace.sourceStatic"), f.segyNum(i, "trace.groupStatic"),
-      f.segyNum(i, "trace.totalStatic")]
+    let st = [f.segyTimeMs(i, "trace.sourceStatic"), f.segyTimeMs(i, "trace.groupStatic"),
+      f.segyTimeMs(i, "trace.totalStatic")]
     if st[0] != 0 or st[1] != 0 or st[2] != 0:
       t["STATIC_CORRECTIONS"] = formatNumber(st[0] / 1000) & " " & formatNumber(st[1] / 1000) &
         " " & formatNumber(st[2] / 1000)
@@ -348,10 +345,12 @@ proc traceStrings(c: var Conv, f: SeismicFile, i: int, t: var Seg2Trace) =
     if tt == "SEISMIC_DATA" and edit.isSome and edit.get.toFloat in [1.0, 2.0]: tt = "DEAD"
     t["TRACE_TYPE"] = tt
     if e.channelSetIndex >= 0:
-      put("DESCALING_FACTOR", rec.descaleFactor(st))
+      # SEG-D's descale gives the mV at the system inputs (one shot);
+      # SEG-2's mV per shot is sample x DESCALING_FACTOR / STACK.
+      var stack = 1.0
       if rec.isRev3:
         let d = rec.scanTypes[st.scanType].descriptorsRev3[st.channelSet]
-        if d.verticalStack > 1: put("STACK", float64(d.verticalStack))
+        if d.verticalStack > 1: stack = float64(d.verticalStack)
         if d.aliasFilterFreq != 0:
           t["ALIAS_FILTER"] = formatNumber(d.aliasFilterFreq) & " " &
             formatNumber(d.aliasFilterSlope)
@@ -359,6 +358,8 @@ proc traceStrings(c: var Conv, f: SeismicFile, i: int, t: var Seg2Trace) =
           t["LOW_CUT_FILTER"] = formatNumber(d.lowCutFilterFreq) & " " &
             formatNumber(d.lowCutFilterSlope)
         if d.notch1Freq != 0: put("NOTCH_FREQUENCY", d.notch1Freq)
+      put("DESCALING_FACTOR", rec.descaleFactor(st) * stack)
+      if stack > 1: put("STACK", stack)
     if int(e.headerBytes) > SegdTraceHeaderSize + SegdBlockSize:
       c.note(snSegdExtensions, "SEG-D trace header extensions after #1 (positions, vendor " &
         "blocks) are carried only as far as the trace keys hold them")
@@ -576,7 +577,9 @@ proc writeSeg2AsSegd(c: var Conv, f: SeismicFile, sink: RecordSink, opts: SegdCo
         let key = SetKey(dtUs: int(round(dt)), ns: int(e.numSamples),
           startUs: int32(clamp(round(delay), -2147483648.0, 2147483647.0)),
           channelType: channelTypeOf(t), stack: uint8(clamp(t.number("STACK").get(1), 0, 255)),
-          descale: float32(t.number("DESCALING_FACTOR").get(1)), alias: al, aliasSlope: als,
+          # mV per shot (SEG-D's descale) = DESCALING_FACTOR / STACK.
+          descale: float32(t.number("DESCALING_FACTOR").get(1) /
+            max(t.number("STACK").get(1), 1)), alias: al, aliasSlope: als,
           lowCut: lc, lowCutSlope: lcs, notch: float32(t.number("NOTCH_FREQUENCY").get(0)))
         var s = sets.find(key)
         if s < 0:

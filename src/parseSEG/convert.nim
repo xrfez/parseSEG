@@ -69,7 +69,7 @@
 ## float32. Trace strings with no slot are listed in one info note.
 
 import std/[math, os, strutils, times]
-import ./common/[endians, errors, diagnostics, outputfile]
+import ./common/[endians, errors, diagnostics, outputfile, years]
 import ./io/[records, diskio, memsource]
 import ./segy/[reader as segyreader, writer as segywriter, textheader, binheader, traceheader,
   samples as segysamples, exttext, layout]
@@ -533,7 +533,7 @@ proc fillTime(h: var SegyTraceHeader, rec: SegdRecord): bool =
     h.timeBasisCode = 4 # UTC
   elif rec.gh1.year >= 0 and rec.gh1.julianDay in 0..366 and rec.gh1.hour in 0..24 and
       rec.gh1.minute in 0..60 and rec.gh1.second in 0..60:
-    h.year = int16(if rec.gh1.year < 70: 2000 + rec.gh1.year else: 1900 + rec.gh1.year)
+    h.year = int16(fullYear(rec.gh1.year))
     h.dayOfYear = int16(max(rec.gh1.julianDay, 0))
     h.hour = int16(max(rec.gh1.hour, 0))
     h.minute = int16(max(rec.gh1.minute, 0))

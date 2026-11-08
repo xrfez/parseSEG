@@ -252,7 +252,9 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
     let e = sh.entries[trace]
     c.log.report(sevError, fr.code, if fr.code == dcTruncated:
       "trace samples lie past the end of the file" else: "the sample format is not decodable",
-      e.offset, Location(file: p.path, record: int(e.record), trace: trace))
+      e.offset, Location(file: p.path, trace: trace,
+        # SEG-2: `record` indexes the codecs; the file is one record.
+        record: if sh.codecs[e.record].kind == skSeg2: 0 else: int(e.record)))
   if s.count == sh.chunkTraces:
     c.samples = move(p.tensors[i])
     p.tensors[i] = newTensorUninit[T](sh.chunkTraces, sh.cols)

@@ -254,3 +254,39 @@ block refusals:
   f.close()
   doAssert copyWithGeometry(path, path, initSurveyGeometry()).isFatal
   doAssert copyWithGeometry(tmp / "missing.sgy", tmp / "x.sgy", initSurveyGeometry()).isFatal
+
+when defined(linux):
+  import std/posix
+
+  var RLIMIT_FSIZE {.importc, header: "<sys/resource.h>".}: cint
+
+  proc limitFileSize(bytes: int) =
+    ## Writes past `bytes` into any file fail with EFBIG (SIGXFSZ ignored);
+    ## a negative `bytes` lifts the limit.
+    signal(SIGXFSZ, SIG_IGN)
+    var lim: RLimit
+    doAssert getrlimit(RLIMIT_FSIZE, lim) == 0
+    lim.rlim_cur = if bytes < 0: lim.rlim_max else: bytes
+    doAssert setrlimit(RLIMIT_FSIZE, lim) == 0
+
+  block failed_journal_sync_is_not_counted:
+    # 13.3 R1-5: when the batch's journal sync fails its edits are dropped,
+    # and the changes must not count them (they did: "4 traces").
+    let path = tmp / "sync.sgy"
+    segyFile(path)
+    let original = bytesOf(path)
+    var f = openSeismic(path, keys = true)
+    doAssert f.applySurvey(sps("sync.sps", segySurvey)) == 4
+    var ed = openEditor(path)
+    let session = getFileSize(path & ".edits.nif")
+    limitFileSize(int(session) + 20)
+    var w: GeometryChanges
+    try:
+      w = ed.writeGeometry(f)
+    finally:
+      limitFileSize(-1)
+    doAssert w.traces == 0 and w.sourceXy == 0 and w.offsets == 0, $w
+    doAssert ed.log.has("4 traces' geometry was not written", sevFatal), $ed.log
+    ed.close()
+    f.close()
+    doAssert bytesOf(path) == original

@@ -54,7 +54,7 @@
 ##   extended or external blocks.
 
 import std/[math, os, strutils]
-import ../common/[errors, diagnostics, endians, outputfile]
+import ../common/[errors, diagnostics, endians, outputfile, years]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer]
 import ../abi/pragmas
@@ -129,6 +129,7 @@ type
     zeroed: int
     adjusted: int
     srcSize: int64 # bytes of the input file; -1 unknown (a stream)
+    records, written: int # records read; records whose headers were written
 
 const
   WrapDescription = "SEG-D REV2 TRLR " ## Trailer group holding a Rev 2 trailer.
@@ -308,7 +309,7 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
     c.note(rnTrailerWrapped, "the Rev 2 general trailer is carried as one user trailer " &
       "group (0xA0, \"" & WrapDescription.strip & "\")")
   var g3 = SegdGeneralHeader3(blockType: BlockTypeGeneralHeader3)
-  let utc = generalHeaderUtc(g1, if g1.year < 80: 2000 else: 1900)
+  let utc = generalHeaderUtc(g1, fullYear(g1.year) - g1.year)
   if utc.isNaN:
     g3.relativeTimeMode = 1
     c.note(rnNoTimeZero, "General Header #1 has no valid date and time: GH#3 time zero is 0 " &
@@ -688,6 +689,7 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
   ## skipped with an error.
   let rec = r.record
   c.loc.record = rec.index
+  inc c.records
   if rec.format.isNone:
     c.log.report(sevError, dcUnsupportedFormat, "record " & $rec.index & ": SEG-D " &
       "format " & $rec.gh1.formatCode & " cannot be decoded; the record is skipped",
@@ -703,6 +705,7 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
       "as Rev " & $c.opts.revision & ": " & e.msg & "; it is skipped", rec.offset, c.loc)
     return
   w.writeRecordHeaders(outRec)
+  inc c.written
   var t: SegdTrace
   while r.readTrace(t):
     if t.scanType < 0 or t.channelSet < 0:
@@ -780,6 +783,10 @@ proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions
     w.close()
   except CatchableError as e:
     c.log.report(sevFatal, dcValidation, "conversion stopped: " & e.msg, loc = c.loc)
+  if c.records > 0 and c.written == 0 and not c.log.isFatal:
+    # Every record was skipped: an empty output is no conversion (13.3 R1-4).
+    c.log.report(sevFatal, dcValidation, "none of the " & $c.records & " records can be " &
+      "written as Rev " & $target & "; nothing was converted", loc = c.loc)
   if c.adjusted > 0:
     c.log.report(sevWarning, dcValidation, $c.adjusted & " traces were cut or zero-padded " &
       "to their channel set's sample count (Rev 3 requires one count per set)", loc = c.loc)

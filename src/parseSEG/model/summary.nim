@@ -247,7 +247,7 @@ proc summary*(f: SeismicFile): FileSummary {.segApi.} =
     result.revision = StandardRevision(major: int(s.revision))
     result.byteOrder = s.order
     if ix.codecs.len == 1 and ix.codecs[0].seg2Format.isSome:
-      result.formatCode = ord(ix.codecs[0].seg2Format.get) + 1
+      result.formatCode = ord(ix.codecs[0].seg2Format.get) # the code itself (1-5)
     result.coordinateUnits = case s.units.get(unNone)
       of unMeters: cuMeters
       of unFeet: cuFeet

@@ -36,6 +36,7 @@ import std/[math, tables, hashes, strutils, times]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
 import ../seg2/headers as seg2headers
+import ../common/years
 
 type
   TraceKeys* = object
@@ -99,10 +100,6 @@ func isComponentCode(code: int): bool {.inline.} =
 func unset(x: float64): bool {.inline.} = x == 0 or x.isNaN
 
 func isSourceBlock(t: uint8): bool {.inline.} = t in {0x15'u8..0x19'u8, 0x1F'u8}
-
-func fullYear(year: int): int {.inline.} =
-  # Two-digit years (SEG-D, SEG-Y Rev 0) in 1950-2049.
-  if year in 0..49: 2000 + year elif year in 50..99: 1900 + year else: year
 
 proc civilSeconds(year, day, hour, minute, second: int): float64 =
   # POSIX seconds of a date given as year and day of year, as if it were UTC;
