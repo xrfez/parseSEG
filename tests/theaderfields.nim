@@ -1,7 +1,7 @@
 ## Header fields by name (task 8.2): every named field read from the map
 ## equals the reader's decoded value, for every trace of the sample files.
 
-import std/[assertions, os, macros, strutils, math]
+import std/[assertions, os, macros, options, strutils, math]
 import parseSEG/segy/[reader as segyreader]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, headerfields, edit]
@@ -10,26 +10,28 @@ const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleF
 let tmp = getTempDir() / "parseseg_theaderfields"
 createDir(tmp)
 
-proc same[T](f: SeismicFile, get: proc (name: string, v: var FieldValue): bool, h: T,
+proc same[T](f: SeismicFile, get: proc (name: string): Option[FieldValue], h: T,
     blockName: string): int =
   ## Compares every layout field of `h` with the named read; returns the count.
   for n, x in fieldPairs(h):
     when isLayoutField(x):
-      var v: FieldValue
+      let r = get(blockName & "." & n)
       when x is array:
         when typeof(x[0]) is char:
-          doAssert get(blockName & "." & n, v) and v.kind == fvText
-          for k, c in x: doAssert v.s[k] == c
+          doAssert r.isSome and r.get.kind == fvText
+          for k, c in x: doAssert r.get.text[k] == c
           inc result
         else:
-          doAssert not get(blockName & "." & n, v) # raw bytes are not fields
+          doAssert r.isNone # raw bytes are not fields
       elif x is SomeFloat:
-        doAssert get(blockName & "." & n, v), n
-        doAssert v.kind == fvFloat and (v.f == float64(x) or (v.f != v.f and x != x)), n
+        doAssert r.isSome, n
+        let v = r.get
+        doAssert v.kind == fvFloat and (v.floatVal == float64(x) or (v.floatVal.isNaN and x.isNaN)), n
         inc result
       else:
-        doAssert get(blockName & "." & n, v), n
-        doAssert v.kind == fvInt and v.i == int64(x), blockName & "." & n & " " & $v
+        doAssert r.isSome, n
+        let v = r.get
+        doAssert v.kind == fvInt and v.intVal == int64(x), blockName & "." & n & " " & $v
         inc result
 
 block segy_every_field_of_every_trace:
@@ -37,9 +39,9 @@ block segy_every_field_of_every_trace:
     var f = openSeismic(exampleDir / n)
     let d = readSegyHeaders(exampleDir / n)
     for i, t in d.traces:
-      let get = proc (name: string, v: var FieldValue): bool = f.traceField(i, name, v)
+      let get = proc (name: string): Option[FieldValue] = f.findTraceField(i, name)
       doAssert f.same(get, t.header, "trace") > 80
-    let getFile = proc (name: string, v: var FieldValue): bool = f.fileField(name, v)
+    let getFile = proc (name: string): Option[FieldValue] = f.findFileField(name)
     doAssert f.same(getFile, d.file.binary, "binary") > 40
     f.close()
 
@@ -49,14 +51,14 @@ block segd_every_field_of_every_trace:
     let d = readSegdHeaders(exampleDir / n)
     var i = 0
     for r, rd in d.records:
-      let getRec = proc (name: string, v: var FieldValue): bool = f.recordField(r, name, v)
+      let getRec = proc (name: string): Option[FieldValue] = f.findRecordField(r, name)
       doAssert f.same(getRec, rd.record.gh1, "gh1") > 15
       if not rd.record.isRev3:
         for k, s in rd.record.sourceHeaders:
           doAssert f.same(getRec, s, "gh" & $(k + 3)) > 5
       for t in rd.traces:
         let ii = i
-        let getField = proc (name: string, v: var FieldValue): bool = f.traceField(ii, name, v)
+        let getField = proc (name: string): Option[FieldValue] = f.findTraceField(ii, name)
         doAssert f.same(getField, t.header, "trace") > 8
         case t.layout
         of slRev2:
@@ -72,13 +74,25 @@ block names_errors_and_edits:
   doAssert "headerName" in fieldNames(hbSegyTrace)      # text
   doAssert "groupIndex" in fieldNames(hbSegdExt1Rev3) and "groupIndex" notin fieldNames(hbSegdExt1)
   var f = openSeismic(exampleDir / "63.sgd")
-  var v: FieldValue
-  var err: string
-  doAssert not f.traceField(0, "trace.nope", v, err) and "not a field" in err
-  doAssert not f.traceField(1, "trace.traceNumber", v, err) and "no trace" in err
-  doAssert not f.recordField(0, "gh4.sourcePointNumber", v, err)
-  doAssert not f.fileField("binary.jobId", v, err) # SEG-D has no binary header
-  doAssert f.recordField(0, "gh3.sourcePointNumber", v) and v.toFloat == 99.5
+  template raisesWith(body: untyped, what: string) =
+    try:
+      discard body
+      doAssert false, "no ValueError"
+    except ValueError as e:
+      doAssert what in e.msg, e.msg
+  raisesWith(f.traceField(0, "trace.nope"), "trace.nope: is not a field")
+  raisesWith(f.traceField(1, "trace.traceNumber"), "no trace")
+  raisesWith(f.traceField(0, "traceNumber"), "expected <block>.<field>")
+  doAssert f.findTraceField(0, "trace.nope").isNone
+  doAssert f.findRecordField(0, "gh4.sourcePointNumber").isNone
+  doAssert f.findFileField("binary.jobId").isNone # SEG-D has no binary header
+  doAssert f.recordField(0, "gh3.sourcePointNumber").toFloat == 99.5
+  doAssert f.blockKind(hsTrace, 0, "ext1") == some(hbSegdExt1) and
+    f.blockKind(hsFile, 0, "binary").isNone
+  # `fieldByName` reads a decoded header object.
+  let d = readSegdHeaders(exampleDir / "63.sgd")
+  doAssert d.records[0].record.gh1.fieldByName("fileNumber") == some(toFieldValue(63))
+  doAssert d.records[0].record.gh1.fieldByName("raw").isNone
   f.close()
   # Reads go through the map, so they see edits at once.
   let path = tmp / "e.sgy"
@@ -86,7 +100,7 @@ block names_errors_and_edits:
   if fileExists(path & ".edits.nif"): removeFile(path & ".edits.nif")
   var ed = openEditor(path)
   doAssert ed.setTraceField(0, "trace.groupX", 4321)
-  doAssert ed.file.traceField(0, "trace.groupX", v) and v.i == 4321
+  doAssert ed.file.traceField(0, "trace.groupX").intVal == 4321
   ed.close()
 
 block sample_intervals:

@@ -18,7 +18,7 @@ block file_accessors:
   doAssert f.kind == skSegy and f.len == 200 and f.recordCount == 1 and f.maxSamples == 2001
   doAssert f.hasKeys and f.isOpen and f.traceEntry(5).numSamples == 2001
   doAssert f.traceKeys(0).ensemble == 1001001.0
-  doAssert f.traceField(5, "trace.sourceX").i == 1704188
+  doAssert f.traceField(5, "trace.sourceX").intVal == 1704188
   doAssert f.sampleIntervalUs() == 2000.0
   raisesValue(proc () = discard f.traceEntry(200))
   raisesValue(proc () = discard f.sampleIntervalUs(200))

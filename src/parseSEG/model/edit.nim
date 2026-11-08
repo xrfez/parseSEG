@@ -25,16 +25,19 @@
 ##   be rolled back.
 ##
 ## A refused edit returns false and leaves a diagnostic in `log`; it never
-## raises. Not available on tape (there is no map); `contiguous` sources
-## only.
+## raises. A journal entry that cannot be written or synced to disk refuses
+## its edit (and, in a batch, every edit not yet on the map): the map is
+## written only after its journal entry is safely on disk. Not available on
+## tape (there is no map); `contiguous` sources only.
 ##
 ## Fields are named `<block>.<field>`, with the field names of the header
 ## types:
 ##
-## | Standard | Blocks |
-## |---|---|
-## | SEG-Y | `binary` (`setFileField(name, value)`), `trace`, `ext1` (Trace Header Extension 1) |
-## | SEG-D | `trace` (demux header), `ext1` (THE#1, Rev 1/2 or Rev 3 layout by record), `gh1` and, for Rev 1/2, `gh3`, `gh4`, ... (source headers) via `setRecordField` |
+## - SEG-Y: `binary` (`setFileField(name, value)`), `trace` and `ext1` (Trace
+##   Header Extension 1);
+## - SEG-D: `trace` (demux header) and `ext1` (THE#1, in the Rev 1/2 or Rev 3
+##   layout of its record), and via `setRecordField` `gh1` and, for Rev 1/2,
+##   `gh3`, `gh4`, ... (source headers).
 ##
 ## The journal is NIF, one entry per line, so it can be read back even when
 ## the last line was cut short:
@@ -49,20 +52,17 @@
 ## hold the target are skipped, and bytes that hold neither the original
 ## nor the edited value are a conflict, logged and left alone.
 
-import std/[algorithm, macros, math, os, strutils, tables]
+import std/[algorithm, macros, math, options, os, strutils, tables]
 when defined(posix):
   import std/posix
-import ../common/[endians, errors, diagnostics, fieldlayout]
+import ../common/[endians, errors, diagnostics, fieldlayout, niftext]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ./[traceindex, headerfields]
 import ../abi/pragmas
 
-export headerfields
 
 type
-  EditValue* = FieldValue ## A new field value: an integer, a float or text.
-
   JournalFile = object
     ## The open journal: closed when it goes, so an editor dropped without
     ## `close` does not leak its descriptor (the file unmaps on its own).
@@ -107,45 +107,50 @@ const
     "externalHeaderBlocks"]
   segdGhNStructural = ["blockNumber"]
 
-func toEditValue*(v: SomeInteger | SomeFloat | string): EditValue {.inline.} =
-  toFieldValue(v)
-
 # ---------------------------------------------------------------- journal --
 
 func hexOf(b: openArray[byte]): string =
   result = newStringOfCap(2 * b.len)
   for x in b: result.add toHex(x, 2).toLowerAscii
 
-func nifEscape(s: string): string =
-  # NIF string body: `"`, `\`, control and non-ASCII bytes as `\hh`.
-  for c in s:
-    if c in {'"', '\\'} or ord(c) < 0x20 or ord(c) >= 0x7F: result.add "\\" & toHex(ord(c), 2)
-    else: result.add c
+proc c_fflush(f: File): cint {.importc: "fflush", header: "<stdio.h>".}
 
-proc syncJournal(ed: var HeaderEditor) =
+proc syncJournal(ed: HeaderEditor): bool =
   # The entry must be on disk before the map is written: mapped pages can
-  # reach the disk any time after.
-  ed.journal.f.flushFile()
+  # reach the disk any time after. False when the buffered entries cannot
+  # be written (`flushFile` does not report that) or synced.
+  if c_fflush(ed.journal.f) != 0: return false
   when defined(posix):
-    if fsync(getFileHandle(ed.journal.f)) != 0:
-      raise newException(IOError, "fsync failed: " & ed.journalPath)
+    if fsync(getFileHandle(ed.journal.f)) != 0: return false
+  true
 
 proc journalLine(ed: var HeaderEditor, line: string) =
   # After a failed write the file may end in a partial line: start afresh so
   # the next entry does not merge into it. In a batch the sync waits for
-  # `flushBatch` (the map is written only after it).
+  # `flushBatch` (the map is written only after it). Raises `IOError` when
+  # the line cannot be written or synced.
   if ed.journalBroken: ed.journal.f.write "\n"
   ed.journalBroken = true
   ed.journal.f.writeLine line
-  if not ed.batch: ed.syncJournal()
+  if not ed.batch and not ed.syncJournal():
+    raise newException(IOError, "cannot sync the journal " & ed.journalPath)
   ed.journalBroken = false
 
 const MaxPending = 4096 ## Batched edits held before a flush.
 
-proc flushBatch(ed: var HeaderEditor) =
-  # One fsync for every journaled edit of the batch, then the map writes.
+proc flushBatch(ed: var HeaderEditor): bool =
+  # One sync for every journaled edit of the batch, then the map writes.
+  # When the journal cannot be synced, the batch's edits are dropped (the
+  # map never sees them), logged, and the result is false.
+  result = true
   if ed.pending.len == 0: return
-  ed.syncJournal()
+  if not ed.syncJournal():
+    ed.journalBroken = true
+    ed.log.report(sevError, dcIo, "the journal " & ed.journalPath & " cannot be synced; " &
+      $ed.pending.len & " batched edits were not written", loc = Location(file: ed.file.path))
+    ed.edits -= ed.pending.len
+    ed.pending.setLen 0
+    return false
   let mem = ed.file.unsafeMemory
   for p in ed.pending:
     copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
@@ -161,20 +166,22 @@ proc beginBatch*(ed: var HeaderEditor) =
   ## Reads through `file` may not see an edit until `endBatch`.
   ed.batch = true
 
-proc endBatch*(ed: var HeaderEditor) =
-  ## Syncs the journal and writes the batch's edits; ends the batch.
-  ed.flushBatch()
+proc endBatch*(ed: var HeaderEditor): bool =
+  ## Syncs the journal and writes the batch's edits; ends the batch. False
+  ## when the journal cannot be synced: then the batch's pending edits are
+  ## not written (an error in `log` says how many).
+  result = ed.flushBatch()
   ed.batch = false
 
 proc openJournal(ed: var HeaderEditor) =
   if not open(ed.journal.f, ed.journalPath, fmAppend):
     raise newException(IOError, "cannot open the edit journal: " & ed.journalPath)
-  ed.journalLine "(session (file \"" & nifEscape(ed.file.path) & "\") (size " &
+  ed.journalLine "(session (file " & nifString(ed.file.path) & ") (size " &
     $ed.file.mappedSize & "))"
 
 proc journalEdit(ed: var HeaderEditor, at: int64, old, new: openArray[byte], label: string) =
-  ed.journalLine "(edit " & $at & " \"" & hexOf(old) & "\" \"" & hexOf(new) & "\" \"" &
-    nifEscape(label) & "\")"
+  ed.journalLine "(edit " & $at & " \"" & hexOf(old) & "\" \"" & hexOf(new) & "\" " &
+    nifString(label) & ")"
 
 type JournalEdit* = object
   ## One journaled edit.
@@ -370,20 +377,23 @@ proc applyJournal*(path, journalPath: string): DiagLog {.segApi.} =
 proc openEditor*(path: string, journalPath = ""): HeaderEditor {.segApi.} =
   ## Maps `path` read-write, builds its trace index and opens the journal
   ## (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
-  ## if either cannot be opened. Problems reading the file are in
-  ## `file.index.log`; a file whose index has a fatal problem can still be
-  ## edited where its headers were located.
+  ## if either cannot be opened, and `ValueError` if the journal is the file
+  ## itself. Problems reading the file are in `file.index.log`; a file whose
+  ## index has a fatal problem can still be edited where its headers were
+  ## located.
   let jp = if journalPath.len > 0: journalPath else: path & ".edits.nif"
   if jp == path or (fileExists(jp) and fileExists(path) and sameFile(jp, path)):
-    raise newException(IOError, "the journal " & jp & " is the file being edited")
+    raise newException(ValueError, "the journal " & jp & " is the file being edited")
   result = HeaderEditor(file: openSeismic(path, writable = true), journalPath: jp)
   result.openJournal()
 
 proc close*(ed: var HeaderEditor) {.segApi.} =
   ## Ends a batch, flushes the map and the journal and closes both. Both are
-  ## closed even when the flush fails (the error then propagates).
+  ## closed even when the flush fails (the error then propagates). Batched
+  ## edits whose journal entries cannot be synced are not written (see
+  ## `endBatch`).
   try:
-    if ed.batch: ed.endBatch()
+    if ed.batch: discard ed.endBatch()
     ed.file.flush()
   finally:
     ed.file.close()
@@ -395,16 +405,16 @@ func edits*(ed: HeaderEditor): int {.inline, segApi.} =
   ## Edits written in this session (no-op edits excluded).
   ed.edits
 
-proc assign[F](f: var F, v: EditValue, err: var string): bool =
+proc assign[F](f: var F, v: FieldValue, err: var string): bool =
   when F is SomeInteger:
     var i: int64
     case v.kind
-    of fvInt: i = v.i
+    of fvInt: i = v.intVal
     of fvFloat:
-      if not (v.f == trunc(v.f) and abs(v.f) < 9.2e18):
+      if not (v.floatVal == trunc(v.floatVal) and abs(v.floatVal) < 9.2e18):
         err = $v & " is not an integer"
         return false
-      i = int64(v.f)
+      i = int64(v.floatVal)
     of fvText:
       err = "expects a number"
       return false
@@ -421,8 +431,8 @@ proc assign[F](f: var F, v: EditValue, err: var string): bool =
   elif F is SomeFloat:
     var x: float64
     case v.kind
-    of fvInt: x = float64(v.i)
-    of fvFloat: x = v.f
+    of fvInt: x = float64(v.intVal)
+    of fvFloat: x = v.floatVal
     of fvText:
       err = "expects a number"
       return false
@@ -434,16 +444,16 @@ proc assign[F](f: var F, v: EditValue, err: var string): bool =
     f = F(x)
     true
   elif F is array and typeof(f[0]) is char:
-    if v.kind != fvText or v.s.len > f.len:
+    if v.kind != fvText or v.text.len > f.len:
       err = "expects text of at most " & $f.len & " characters"
       return false
-    for k in 0..<f.len: f[k] = (if k < v.s.len: v.s[k] else: ' ')
+    for k in 0..<f.len: f[k] = (if k < v.text.len: v.text[k] else: ' ')
     true
   else:
     err = "raw bytes cannot be edited as a field"
     false
 
-proc setByName[T](h: var T, name: string, v: EditValue, err: var string): bool =
+proc setByName[T](h: var T, name: string, v: FieldValue, err: var string): bool =
   var found = false
   for n, f in fieldPairs(h):
     when isLayoutField(f):
@@ -465,7 +475,7 @@ func structural(k: HeaderBlock): seq[string] =
   of hbSegdGhN: @segdGhNStructural
 
 proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, field: string,
-    v: EditValue, loc: Location): bool =
+    v: FieldValue, loc: Location): bool =
   # Decodes the block, sets the field, re-encodes only what changed, journals
   # the changed span and writes it.
   let at = b.offset
@@ -480,7 +490,8 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
   if field in structural(b.kind):
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
-  if ed.batch and ed.overlapsPending(at, size): ed.flushBatch() # decode current bytes
+  if ed.batch and ed.overlapsPending(at, size) and not ed.flushBatch(): # decode current bytes
+    refuse "the journal cannot be synced; nothing changed"
   let mem = ed.file.unsafeMemory
   let a = int(at)
   var h: T
@@ -506,15 +517,16 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
       buf.toOpenArray(first, last), label)
   except IOError as e:
     refuse "the journal cannot be written (" & e.msg & "); nothing changed"
+  inc ed.edits
   if ed.batch:
     ed.pending.add PendingWrite(at: at + first, bytes: buf[first .. last])
-    if ed.pending.len >= MaxPending: ed.flushBatch()
+    if ed.pending.len >= MaxPending and not ed.flushBatch():
+      refuse "the journal cannot be synced; this batch's pending edits were not written"
   else:
     copyMem(addr mem[a + first], addr buf[first], last - first + 1)
-  inc ed.edits
   true
 
-proc editLocated(ed: var HeaderEditor, b: BlockRef, field: string, v: EditValue,
+proc editLocated(ed: var HeaderEditor, b: BlockRef, field: string, v: FieldValue,
     loc: Location): bool =
   withBlockType(b.kind):
     result = ed.editBlock[:BlockT](b, firstByte, field, v, loc)
@@ -525,87 +537,68 @@ proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
   ed.log.report(sevError, dcValidation, name & ": " & msg, loc = l)
   false
 
-proc currentBlock(ed: var HeaderEditor, b: BlockRef, field: string, v: var FieldValue,
-    err: var string): bool =
-  if ed.batch and ed.overlapsPending(b.offset, b.size): ed.flushBatch()
-  ed.file.readBlockField(b, field, v, err)
+proc current(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
+  let r = ed.file.index.locate(scope, index, name)
+  if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
+  if ed.batch and ed.overlapsPending(r.blk.offset, r.blk.size) and not ed.flushBatch():
+    raise newException(ValueError, name & ": the journal cannot be synced (see the log)")
+  let v = ed.file.readField(r.blk, r.field)
+  if v.error.len > 0: raise newException(ValueError, name & ": " & v.error)
+  v.value
 
-proc currentTraceField*(ed: var HeaderEditor, trace: int, name: string, v: var FieldValue,
-    err: var string): bool =
+proc currentTraceField*(ed: var HeaderEditor, trace: int, name: string): FieldValue =
   ## Reads `trace.<field>` / `ext1.<field>` of trace `trace` as edited so far
-  ## (batched edits included).
-  var blockName, field: string
-  var b: BlockRef
-  if not splitName(name, blockName, field):
-    err = "expected <block>.<field>"
-    return false
-  ed.file.index.locateTraceBlock(trace, blockName, b, err) and ed.currentBlock(b, field, v, err)
+  ## (batched edits included). Raises `ValueError` like `traceField`.
+  ed.current(hsTrace, trace, name)
 
-proc currentRecordField*(ed: var HeaderEditor, record: int, name: string, v: var FieldValue,
-    err: var string): bool =
-  ## Reads a SEG-D record field as edited so far.
-  var blockName, field: string
-  var b: BlockRef
-  if not splitName(name, blockName, field):
-    err = "expected <block>.<field>"
-    return false
-  ed.file.index.locateRecordBlock(record, blockName, b, err) and ed.currentBlock(b, field, v, err)
+proc currentRecordField*(ed: var HeaderEditor, record: int, name: string): FieldValue =
+  ## Reads a SEG-D record field as edited so far. Raises `ValueError` like
+  ## `recordField`.
+  ed.current(hsRecord, record, name)
 
-proc currentFileField*(ed: var HeaderEditor, name: string, v: var FieldValue,
-    err: var string): bool =
-  ## Reads a SEG-Y binary header field as edited so far.
-  var blockName, field: string
-  var b: BlockRef
-  if not splitName(name, blockName, field):
-    err = "expected <block>.<field>"
-    return false
-  ed.file.index.locateFileBlock(blockName, b, err) and ed.currentBlock(b, field, v, err)
+proc currentFileField*(ed: var HeaderEditor, name: string): FieldValue =
+  ## Reads a SEG-Y binary header field as edited so far. Raises `ValueError`
+  ## like `fileField`.
+  ed.current(hsFile, 0, name)
 
-proc setTraceField*(ed: var HeaderEditor, trace: int, name: string, value: EditValue): bool {.
+proc setLocated(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string,
+    value: FieldValue, loc: Location, b: var BlockRef): bool =
+  # Locates `name` and edits it; refuses (false, logged) when it cannot.
+  let r = ed.file.index.locate(scope, index, name)
+  if r.error.len > 0: return ed.refuseName(name, r.error, loc)
+  b = r.blk
+  ed.editLocated(r.blk, r.field, value, loc)
+
+proc setTraceField*(ed: var HeaderEditor, trace: int, name: string, value: FieldValue): bool {.
     segApi.} =
   ## Sets field `name` (`trace.<field>` or `ext1.<field>`) of trace `trace`.
   ## False, with a diagnostic in `log`, if the edit is refused.
   var loc = Location(file: ed.file.path, trace: trace)
-  var blockName, field, err: string
+  if trace in 0 ..< ed.file.len: loc.record = int(ed.file.index.entries[trace].record)
   var b: BlockRef
-  if not splitName(name, blockName, field):
-    return ed.refuseName(name, "expected <block>.<field>", loc)
-  if not ed.file.index.locateTraceBlock(trace, blockName, b, err):
-    return ed.refuseName(name, err, loc)
-  loc.record = int(ed.file.index.entries[trace].record)
-  ed.editLocated(b, field, value, loc)
+  ed.setLocated(hsTrace, trace, name, value, loc, b)
 
-proc setFileField*(ed: var HeaderEditor, name: string, value: EditValue): bool {.segApi.} =
+proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool {.segApi.} =
   ## Sets a SEG-Y binary header field (`binary.<field>`); the index's copy of
-  ## the binary header is refreshed.
-  let loc = Location(file: ed.file.path)
-  var blockName, field, err: string
+  ## the binary header is refreshed. False, with a diagnostic in `log`, if
+  ## the edit is refused.
   var b: BlockRef
-  if not splitName(name, blockName, field):
-    return ed.refuseName(name, "expected <block>.<field>", loc)
-  if not ed.file.index.locateFileBlock(blockName, b, err):
-    return ed.refuseName(name, err, loc)
-  result = ed.editLocated(b, field, value, loc)
-  if result:
+  result = ed.setLocated(hsFile, 0, name, value, Location(file: ed.file.path), b) and
     ed.flushBatch() # the index copy is refreshed from the map
+  if result:
     ed.file.index.segy.binary = decodeBinaryHeader(ed.file.unsafeMemory.toOpenArray(int(b.offset),
       int(b.offset) + b.size - 1), b.order)
 
 proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
-    value: EditValue): bool {.segApi.} =
+    value: FieldValue): bool {.segApi.} =
   ## Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
   ## for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
-  ## copy of the record's headers is refreshed.
-  let loc = Location(file: ed.file.path, record: record)
-  var blockName, field, err: string
+  ## copy of the record's headers is refreshed. False, with a diagnostic in
+  ## `log`, if the edit is refused.
   var b: BlockRef
-  if not splitName(name, blockName, field):
-    return ed.refuseName(name, "expected <block>.<field>", loc)
-  if not ed.file.index.locateRecordBlock(record, blockName, b, err):
-    return ed.refuseName(name, err, loc)
-  result = ed.editLocated(b, field, value, loc)
+  result = ed.setLocated(hsRecord, record, name, value,
+    Location(file: ed.file.path, record: record), b) and ed.flushBatch()
   if result:
-    ed.flushBatch() # the index copy is refreshed from the map
     let (a, z) = (int(b.offset), int(b.offset) + b.size - 1)
     if b.kind == hbSegdGh1:
       ed.file.index.segdRecords[record].gh1 =
@@ -616,11 +609,15 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
 
 proc setTraceField*(ed: var HeaderEditor, trace: int, name: string,
     value: SomeNumber | string): bool {.inline.} =
-  ed.setTraceField(trace, name, toEditValue(value))
+  ## `setTraceField` with a plain number or text.
+  ed.setTraceField(trace, name, toFieldValue(value))
 
-proc setFileField*(ed: var HeaderEditor, name: string, value: SomeNumber | string): bool {.inline.} =
-  ed.setFileField(name, toEditValue(value))
+proc setFileField*(ed: var HeaderEditor, name: string,
+    value: SomeNumber | string): bool {.inline.} =
+  ## `setFileField` with a plain number or text.
+  ed.setFileField(name, toFieldValue(value))
 
 proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     value: SomeNumber | string): bool {.inline.} =
-  ed.setRecordField(record, name, toEditValue(value))
+  ## `setRecordField` with a plain number or text.
+  ed.setRecordField(record, name, toFieldValue(value))

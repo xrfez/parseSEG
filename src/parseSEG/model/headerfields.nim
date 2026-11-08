@@ -3,17 +3,24 @@
 ## names (and this module's block lookup) serve the in-place editor
 ## (`model/edit`) and the C ABI.
 ##
-## | Standard | Per trace (`traceField`) | Per record (`recordField`) | Per file (`fileField`) |
-## |---|---|---|---|
-## | SEG-Y | `trace`, `ext1` (Trace Header Extension 1) | | `binary` |
-## | SEG-D | `trace` (demux header), `ext1` (THE#1, Rev 1/2 or Rev 3 layout by record) | `gh1`, and for Rev 1/2 `gh3`, `gh4`, ... (source headers) | |
+## - per trace (`traceField`): `trace` (the SEG-Y trace header or SEG-D demux
+##   header) and `ext1` (SEG-Y Trace Header Extension 1; SEG-D THE#1, in the
+##   Rev 1/2 or Rev 3 layout of its record);
+## - per SEG-D record (`recordField`): `gh1`, and for Rev 1/2 `gh3`, `gh4`, ...
+##   (source headers);
+## - per file (`fileField`): the SEG-Y `binary` header.
 ##
 ## Values are read from the mapped bytes, so they reflect in-place edits at
 ## once. Integers (BCD included; -1 = all F, -2 = invalid BCD) come back as
 ## `fvInt`, floats and fixed point as `fvFloat`, character fields as
 ## `fvText`. Raw byte fields are not fields here.
+##
+## Lookups come in two forms: `traceField` (and `recordField`, `fileField`)
+## raise `ValueError` when the field cannot be read, for fields the caller
+## requires; `findTraceField` (...) return an `Option` for fields that may be
+## absent.
 
-import std/[macros, math, strutils]
+import std/[macros, math, options, strutils]
 import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
@@ -21,14 +28,18 @@ import ./traceindex
 import ../abi/pragmas
 
 type
-  FieldValueKind* = enum fvInt, fvFloat, fvText
+  FieldValueKind* = enum
+    ## The kind of value a header field holds.
+    fvInt   ## Integers, BCD included.
+    fvFloat ## Floats and fixed point.
+    fvText  ## Character fields.
 
   FieldValue* = object
     ## A header field's value.
     case kind*: FieldValueKind
-    of fvInt: i*: int64
-    of fvFloat: f*: float64
-    of fvText: s*: string
+    of fvInt: intVal*: int64
+    of fvFloat: floatVal*: float64
+    of fvText: text*: string
 
   HeaderBlock* = enum
     ## The header block types that have named fields.
@@ -41,6 +52,11 @@ type
     hbSegdGh1 = "SEG-D gh1"
     hbSegdGhN = "SEG-D ghN"
 
+  HeaderScope* = enum
+    ## Where a named field lives: the file (`fileField`), a SEG-D record
+    ## (`recordField`) or a trace (`traceField`).
+    hsFile = "file", hsRecord = "record", hsTrace = "trace"
+
   BlockRef* = object
     ## Where one header block of a file lies.
     kind*: HeaderBlock
@@ -50,34 +66,54 @@ type
     name*: string      ## The block name as written (`trace`, `gh3`, ...).
     sourceIndex*: int  ## For `hbSegdGhN`: index into `SegdRecord.sourceHeaders`.
 
-func toFieldValue*(v: SomeInteger): FieldValue = FieldValue(kind: fvInt, i: int64(v))
-func toFieldValue*(v: SomeFloat): FieldValue = FieldValue(kind: fvFloat, f: float64(v))
-func toFieldValue*(v: string): FieldValue = FieldValue(kind: fvText, s: v)
+  FieldRef* = object
+    ## **Internal.** A located field (`locate`): its block and field name, or
+    ## why there is none.
+    blk*: BlockRef
+    field*: string
+    error*: string ## Empty when the block was found.
+
+  FieldRead* = object
+    ## **Internal.** A field read from the map (`readField`), or why not.
+    value*: FieldValue
+    error*: string ## Empty when the value was read.
+
+func toFieldValue*(v: SomeInteger): FieldValue =
+  ## An integer value (`fvInt`).
+  FieldValue(kind: fvInt, intVal: int64(v))
+
+func toFieldValue*(v: SomeFloat): FieldValue =
+  ## A float value (`fvFloat`).
+  FieldValue(kind: fvFloat, floatVal: float64(v))
+
+func toFieldValue*(v: string): FieldValue =
+  ## A text value (`fvText`).
+  FieldValue(kind: fvText, text: v)
+
+func `==`*(a, b: FieldValue): bool =
+  ## Same kind and value (floats compare as floats: NaN differs from NaN).
+  a.kind == b.kind and (case a.kind
+    of fvInt: a.intVal == b.intVal
+    of fvFloat: a.floatVal == b.floatVal
+    of fvText: a.text == b.text)
 
 func `$`*(v: FieldValue): string =
+  ## The value as written in edits and listings: text quoted and escaped.
   case v.kind
-  of fvInt: $v.i
-  of fvFloat: $v.f
-  of fvText: v.s.escape
+  of fvInt: $v.intVal
+  of fvFloat: $v.floatVal
+  of fvText: v.text.escape
 
 func toFloat*(v: FieldValue): float64 =
   ## The value as a number (NaN for text).
   case v.kind
-  of fvInt: float64(v.i)
-  of fvFloat: v.f
+  of fvInt: float64(v.intVal)
+  of fvFloat: v.floatVal
   of fvText: NaN
 
-func splitName*(name: string, blockName, field: var string): bool =
-  ## Splits `<block>.<field>`.
-  let dot = name.find('.')
-  if dot <= 0 or dot == name.len - 1: return false
-  blockName = name[0 ..< dot]
-  field = name[dot + 1 .. ^1]
-  true
-
 template withBlockType*(k: HeaderBlock, body: untyped) =
-  ## Runs `body` with `BlockT` (the header type) and `firstByte` (its first
-  ## spec byte number) bound for block kind `k`.
+  ## **Internal.** Runs `body` with `BlockT` (the header type) and
+  ## `firstByte` (its first spec byte number) bound for block kind `k`.
   case k
   of hbSegyBinary:
     type BlockT {.inject.} = SegyBinaryHeader
@@ -113,7 +149,8 @@ template withBlockType*(k: HeaderBlock, body: untyped) =
     body
 
 template isLayoutField*(f: untyped): bool =
-  ## True for fields with a layout pragma (raw copies like `raw` are not).
+  ## **Internal.** True for fields with a layout pragma (raw copies like
+  ## `raw` are not).
   f.hasCustomPragma(fieldlayout.at) or f.hasCustomPragma(bcdAt) or
     f.hasCustomPragma(bcdAtL) or f.hasCustomPragma(nibAt) or f.hasCustomPragma(nibAtL) or
     f.hasCustomPragma(at24) or f.hasCustomPragma(fix40) or f.hasCustomPragma(fix24)
@@ -132,190 +169,177 @@ proc fieldNames*(k: HeaderBlock): seq[string] =
 
 # ----------------------------------------------------------------- lookup --
 
-proc locateTraceBlock*(ix: TraceIndex, trace: int, blockName: string, b: var BlockRef,
-    err: var string): bool =
-  ## Finds block `trace` or `ext1` of trace `trace`. False with `err` set if
-  ## there is no such block.
-  if trace < 0 or trace >= ix.len:
-    err = "no trace " & $trace
-    return false
+proc traceBlock(ix: TraceIndex, trace: int, blockName: string, b: var FieldRef) =
+  # Block `trace` or `ext1` of trace `trace`.
+  if trace notin 0 ..< ix.len:
+    b.error = "no trace " & $trace
+    return
   let e = ix.entries[trace]
   case blockName
   of "trace":
-    if ix.kind == skSegy:
-      b = BlockRef(kind: hbSegyTrace, offset: e.offset, size: TraceHeaderSize,
-        order: ix.segy.byteOrder, name: blockName)
-    else:
-      b = BlockRef(kind: hbSegdTrace, offset: e.offset, size: SegdTraceHeaderSize, order: boBig,
-        name: blockName)
-    true
+    b.blk = if ix.kind == skSegy:
+        BlockRef(kind: hbSegyTrace, offset: e.offset, size: TraceHeaderSize,
+          order: ix.segy.byteOrder, name: blockName)
+      else:
+        BlockRef(kind: hbSegdTrace, offset: e.offset, size: SegdTraceHeaderSize, order: boBig,
+          name: blockName)
   of "ext1":
     if ix.kind == skSegy:
       if int(e.headerBytes) < 2 * TraceHeaderSize:
-        err = "the trace has no Trace Header Extension 1"
-        return false
-      b = BlockRef(kind: hbSegyExt1, offset: e.offset + TraceHeaderSize, size: TraceHeaderSize,
-        order: ix.segy.byteOrder, name: blockName)
+        b.error = "the trace has no Trace Header Extension 1"
+      else:
+        b.blk = BlockRef(kind: hbSegyExt1, offset: e.offset + TraceHeaderSize,
+          size: TraceHeaderSize, order: ix.segy.byteOrder, name: blockName)
+    elif int(e.headerBytes) < SegdTraceHeaderSize + SegdBlockSize:
+      b.error = "the trace has no Trace Header Extension #1"
     else:
-      if int(e.headerBytes) < SegdTraceHeaderSize + SegdBlockSize:
-        err = "the trace has no Trace Header Extension #1"
-        return false
-      b = BlockRef(kind: if ix.segdRecords[e.record].isRev3: hbSegdExt1Rev3 else: hbSegdExt1,
+      b.blk = BlockRef(kind: if ix.segdRecords[e.record].isRev3: hbSegdExt1Rev3 else: hbSegdExt1,
         offset: e.offset + SegdTraceHeaderSize, size: SegdBlockSize, order: boBig,
         name: blockName)
-    true
   else:
-    err = "trace blocks are trace and ext1"
-    false
+    b.error = "trace blocks are trace and ext1"
 
-proc locateFileBlock*(ix: TraceIndex, blockName: string, b: var BlockRef,
-    err: var string): bool =
-  ## Finds the SEG-Y `binary` header.
+proc fileBlock(ix: TraceIndex, blockName: string, b: var FieldRef) =
+  # The SEG-Y `binary` header.
   if ix.kind != skSegy or blockName != "binary":
-    err = "the file-level block is the SEG-Y binary header (binary.<field>)"
-    return false
-  b = BlockRef(kind: hbSegyBinary, offset: int64(ix.segy.tapeLabel.len + TextHeaderSize),
-    size: BinaryHeaderSize, order: ix.segy.byteOrder, name: blockName)
-  true
+    b.error = "the file-level block is the SEG-Y binary header (binary.<field>)"
+  else:
+    b.blk = BlockRef(kind: hbSegyBinary, offset: int64(ix.segy.tapeLabel.len + TextHeaderSize),
+      size: BinaryHeaderSize, order: ix.segy.byteOrder, name: blockName)
 
-proc locateRecordBlock*(ix: TraceIndex, record: int, blockName: string, b: var BlockRef,
-    err: var string): bool =
-  ## Finds block `gh1`, or for Rev 1/2 `gh<N>` (N ≥ 3, a source header), of
-  ## SEG-D record `record`.
-  if ix.kind != skSegd or record < 0 or record >= ix.segdRecords.len:
-    err = "no SEG-D record " & $record
-    return false
+proc recordBlock(ix: TraceIndex, record: int, blockName: string, b: var FieldRef) =
+  # Block `gh1`, or for Rev 1/2 `gh<N>` (N >= 3, a source header), of a SEG-D
+  # record.
+  if ix.kind != skSegd or record notin 0 ..< ix.segdRecords.len:
+    b.error = "no SEG-D record " & $record
+    return
   template rec: untyped = ix.segdRecords[record]
   if blockName == "gh1":
-    b = BlockRef(kind: hbSegdGh1, offset: rec.offset, size: SegdBlockSize, order: boBig,
+    b.blk = BlockRef(kind: hbSegdGh1, offset: rec.offset, size: SegdBlockSize, order: boBig,
       name: blockName)
-    true
   elif blockName.len in 3..6 and blockName.startsWith("gh") and
       blockName[2..^1].allCharsInSet(Digits) and blockName[2] != '0':
     let n = parseInt(blockName[2..^1])
     if rec.layout == slRev3 or rec.gh2.isNone:
-      err = "only Rev 1/2 records have source blocks gh3, gh4, ... (Rev 3 general header " &
-        "blocks after GH#1 are not supported by name yet)"
-      false
+      b.error = "only Rev 1/2 records have source blocks gh3, gh4, ... (Rev 3 general " &
+        "header blocks after GH#1 are not supported by name yet)"
     elif n < 3 or n - 3 >= rec.sourceHeaders.len:
-      err = "the record has no general header #" & $n & " source block"
-      false
+      b.error = "the record has no general header #" & $n & " source block"
     else:
-      b = BlockRef(kind: hbSegdGhN, offset: rec.offset + int64(SegdBlockSize) * int64(n - 1),
+      b.blk = BlockRef(kind: hbSegdGhN, offset: rec.offset + int64(SegdBlockSize) * int64(n - 1),
         size: SegdBlockSize, order: boBig, name: blockName, sourceIndex: n - 3)
-      true
   else:
-    err = "SEG-D record blocks are gh1 and gh3, gh4, ..."
-    false
+    b.error = "SEG-D record blocks are gh1 and gh3, gh4, ..."
+
+proc locateBlock*(ix: TraceIndex, scope: HeaderScope, index: int,
+    blockName: string): FieldRef =
+  ## **Internal.** Block `blockName` of the file, of record `index` or of
+  ## trace `index`; `error` says why there is none.
+  case scope
+  of hsFile: ix.fileBlock(blockName, result)
+  of hsRecord: ix.recordBlock(index, blockName, result)
+  of hsTrace: ix.traceBlock(index, blockName, result)
+
+proc locate*(ix: TraceIndex, scope: HeaderScope, index: int, name: string): FieldRef =
+  ## **Internal.** The block and field of `<block>.<field>` in `scope`
+  ## (`index` is the record or trace; ignored for the file); `error` says why
+  ## there is none. The field itself is checked when it is read or set.
+  let dot = name.find('.')
+  if dot <= 0 or dot == name.len - 1:
+    return FieldRef(error: "expected <block>.<field>")
+  result = ix.locateBlock(scope, index, name[0 ..< dot])
+  result.field = name[dot + 1 .. ^1]
 
 # ---------------------------------------------------------------- reading --
 
-proc getByName*[T](h: T, name: string, v: var FieldValue): bool =
-  ## The value of layout field `name` of header `h`; false if there is none
-  ## (raw byte fields included).
-  result = false
+proc fieldByName*[T](h: T, name: string): Option[FieldValue] =
+  ## The value of layout field `name` of the decoded header `h`; none if `h`
+  ## has no such field (raw byte fields included).
   for n, f in fieldPairs(h):
     when isLayoutField(f):
       if n == name:
         when f is SomeInteger:
           when f is uint64:
-            v = if f > uint64(high(int64)): toFieldValue(float64(f)) else: toFieldValue(int64(f))
+            return some(if f > uint64(high(int64)): toFieldValue(float64(f))
+                        else: toFieldValue(int64(f)))
           else:
-            v = toFieldValue(int64(f))
-          result = true
+            return some(toFieldValue(int64(f)))
         elif f is SomeFloat:
-          v = toFieldValue(float64(f))
-          result = true
+          return some(toFieldValue(float64(f)))
         elif f is array:
           when typeof(f[0]) is char:
             var s = newString(f.len)
             for k, c in f: s[k] = c
-            v = toFieldValue(s)
-            result = true
+            return some(toFieldValue(s))
+  none(FieldValue)
 
-proc readBlockField*(f: SeismicFile, b: BlockRef, field: string, v: var FieldValue,
-    err: var string): bool =
-  ## Reads `field` of the located block from the mapped bytes.
+proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
+  ## **Internal.** Reads `field` of the located block from the mapped bytes;
+  ## `error` says why it cannot.
   let mem = f.unsafeMemory
-  if mem == nil:
-    err = "the file is closed"
-    return false
+  if mem == nil: return FieldRead(error: "the file is closed")
   if b.offset < 0 or b.offset + b.size > f.mappedSize:
-    err = "the header lies outside the file"
-    return false
+    return FieldRead(error: "the header lies outside the file")
   let a = int(b.offset)
+  var v = none(FieldValue)
   withBlockType(b.kind):
     var h: BlockT
     decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
-    result = getByName(h, field, v)
-  if not result: err = "is not a field of " & $b.kind
+    v = fieldByName(h, field)
+  if v.isSome: FieldRead(value: v.get)
+  else: FieldRead(error: "is not a field of " & $b.kind)
 
-proc traceField*(f: SeismicFile, trace: int, name: string, v: var FieldValue,
-    err: var string): bool =
-  ## Reads `trace.<field>` or `ext1.<field>` of trace `trace`.
-  var blockName, field: string
-  var b: BlockRef
-  if not splitName(name, blockName, field):
-    err = "expected <block>.<field>"
-    false
-  else:
-    f.index.locateTraceBlock(trace, blockName, b, err) and f.readBlockField(b, field, v, err)
-
-proc recordField*(f: SeismicFile, record: int, name: string, v: var FieldValue,
-    err: var string): bool =
-  ## Reads a SEG-D general header field (`gh1.<field>`, `gh3.<field>`, ...).
-  var blockName, field: string
-  var b: BlockRef
-  if not splitName(name, blockName, field):
-    err = "expected <block>.<field>"
-    false
-  else:
-    f.index.locateRecordBlock(record, blockName, b, err) and f.readBlockField(b, field, v, err)
-
-proc fileField*(f: SeismicFile, name: string, v: var FieldValue, err: var string): bool =
-  ## Reads a SEG-Y binary header field (`binary.<field>`).
-  var blockName, field: string
-  var b: BlockRef
-  if not splitName(name, blockName, field):
-    err = "expected <block>.<field>"
-    false
-  else:
-    f.index.locateFileBlock(blockName, b, err) and f.readBlockField(b, field, v, err)
-
-proc traceField*(f: SeismicFile, trace: int, name: string, v: var FieldValue): bool =
-  ## As above, without the reason.
-  var err: string
-  f.traceField(trace, name, v, err)
-
-proc recordField*(f: SeismicFile, record: int, name: string, v: var FieldValue): bool =
-  var err: string
-  f.recordField(record, name, v, err)
-
-proc fileField*(f: SeismicFile, name: string, v: var FieldValue): bool =
-  var err: string
-  f.fileField(name, v, err)
+proc lookup(f: SeismicFile, scope: HeaderScope, index: int, name: string): FieldRead =
+  let r = f.index.locate(scope, index, name)
+  if r.error.len > 0: FieldRead(error: r.error) else: f.readField(r.blk, r.field)
 
 proc raiseField(name, err: string) {.noinline, noreturn.} =
   raise newException(ValueError, name & ": " & err)
 
+proc required(r: sink FieldRead, name: string): FieldValue {.inline.} =
+  if r.error.len > 0: raiseField(name, r.error)
+  r.value
+
+func optional(r: sink FieldRead): Option[FieldValue] {.inline.} =
+  if r.error.len > 0: none(FieldValue) else: some(r.value)
+
 proc traceField*(f: SeismicFile, trace: int, name: string): FieldValue {.segApi.} =
   ## A trace header field by name, e.g. "trace.sourceX" or
-  ## "ext1.receiverLine". Raises `ValueError` for an unknown field or a trace
-  ## out of range.
-  var err: string
-  if not f.traceField(trace, name, result, err): raiseField(name, err)
+  ## "ext1.receiverLine". Raises `ValueError` for an unknown field, a trace
+  ## out of range or a closed file; the message says which.
+  f.lookup(hsTrace, trace, name).required(name)
 
 proc recordField*(f: SeismicFile, record: int, name: string): FieldValue {.segApi.} =
-  ## A SEG-D record (general header) field by name, e.g. "gh1.formatCode".
-  ## Raises `ValueError` for an unknown field or record.
-  var err: string
-  if not f.recordField(record, name, result, err): raiseField(name, err)
+  ## A SEG-D record (general header) field by name, e.g. "gh1.formatCode" or
+  ## "gh3.sourcePointNumber" (Rev 1/2 source headers). Raises `ValueError`
+  ## for an unknown field or record, or a closed file.
+  f.lookup(hsRecord, record, name).required(name)
 
 proc fileField*(f: SeismicFile, name: string): FieldValue {.segApi.} =
-  ## A file-level field by name, e.g. "binary.formatCode". Raises
-  ## `ValueError` for an unknown field.
-  var err: string
-  if not f.fileField(name, result, err): raiseField(name, err)
+  ## A file-level field by name, e.g. "binary.formatCode" (SEG-Y). Raises
+  ## `ValueError` for an unknown field or a closed file.
+  f.lookup(hsFile, 0, name).required(name)
+
+proc findTraceField*(f: SeismicFile, trace: int, name: string): Option[FieldValue] =
+  ## `traceField` when the trace has the field; none otherwise (e.g. a trace
+  ## without an `ext1` block).
+  f.lookup(hsTrace, trace, name).optional
+
+proc findRecordField*(f: SeismicFile, record: int, name: string): Option[FieldValue] =
+  ## `recordField` when the record has the field; none otherwise.
+  f.lookup(hsRecord, record, name).optional
+
+proc findFileField*(f: SeismicFile, name: string): Option[FieldValue] =
+  ## `fileField` when the file has the field; none otherwise.
+  f.lookup(hsFile, 0, name).optional
+
+proc blockKind*(f: SeismicFile, scope: HeaderScope, index: int,
+    blockName: string): Option[HeaderBlock] =
+  ## The kind of block `blockName` (`trace`, `ext1`, `gh1`, `binary`, ...) of
+  ## trace or record `index` (or the file), none if there is no such block;
+  ## `fieldNames` lists its fields.
+  let r = f.index.locateBlock(scope, index, blockName)
+  if r.error.len > 0: none(HeaderBlock) else: some(r.blk.kind)
 
 # ---------------------------------------------------------- sample timing --
 
@@ -338,11 +362,11 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
     template b: untyped = ix.segy.binary
     if ix.segy.revision.major >= 1 and b.fixedLengthTraces == 1:
       return b.effectiveSampleInterval
-    var v: FieldValue
-    if int(e.headerBytes) >= 2 * TraceHeaderSize and
-        f.traceField(trace, "ext1.extSampleInterval", v) and v.toFloat != 0:
-      return v.toFloat
-    if f.traceField(trace, "trace.sampleInterval", v): v.toFloat else: NaN
+    if int(e.headerBytes) >= 2 * TraceHeaderSize:
+      let x = f.findTraceField(trace, "ext1.extSampleInterval")
+      if x.isSome and x.get.toFloat != 0: return x.get.toFloat
+    let v = f.findTraceField(trace, "trace.sampleInterval")
+    if v.isSome: v.get.toFloat else: NaN
   else:
     let cs = if int(e.scanType) >= 0: e.channelSetIndex else: -1
     ix.segdRecords[e.record].sampleIntervalUs(int(e.scanType), cs)

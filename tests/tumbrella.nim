@@ -22,6 +22,8 @@ doAssert declared(copyBytes) and declared(isOpen)
 doAssert not declared(decodeEntry) and not declared(readTracesRaw) and
   not declared(mappedSize) and not declared(rowPtr) and not declared(requireKeys) and
   not declared(checkSpan)
+doAssert not declared(locate) and not declared(readField) and not declared(withBlockType) and
+  not declared(FieldRef)
 
 block copy_bytes_is_a_bounds_checked_copy:
   const sample = currentSourcePath().parentDir.parentDir / "SEG Spec" / "exampleFiles" / "63.sgd"

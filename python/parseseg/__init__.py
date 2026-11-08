@@ -1083,8 +1083,8 @@ class SeismicFile(_Handle, _SeismicFileExtras):
 
     def trace_field(self, trace, name):
         """A trace header field by name, e.g. "trace.sourceX" or
-        "ext1.receiverLine". Raises `ValueError` for an unknown field or a trace
-        out of range."""
+        "ext1.receiverLine". Raises `ValueError` for an unknown field, a trace
+        out of range or a closed file; the message says which."""
         _h = self._enter()
         try:
             _o = _value_out()
@@ -1094,8 +1094,9 @@ class SeismicFile(_Handle, _SeismicFileExtras):
             self._leave()
 
     def record_field(self, record, name):
-        """A SEG-D record (general header) field by name, e.g. "gh1.formatCode".
-        Raises `ValueError` for an unknown field or record."""
+        """A SEG-D record (general header) field by name, e.g. "gh1.formatCode" or
+        "gh3.sourcePointNumber" (Rev 1/2 source headers). Raises `ValueError`
+        for an unknown field or record, or a closed file."""
         _h = self._enter()
         try:
             _o = _value_out()
@@ -1105,8 +1106,8 @@ class SeismicFile(_Handle, _SeismicFileExtras):
             self._leave()
 
     def file_field(self, name):
-        """A file-level field by name, e.g. "binary.formatCode". Raises
-        `ValueError` for an unknown field."""
+        """A file-level field by name, e.g. "binary.formatCode" (SEG-Y). Raises
+        `ValueError` for an unknown field or a closed file."""
         _h = self._enter()
         try:
             _o = _value_out()
@@ -1224,7 +1225,9 @@ class HeaderEditor(_Handle):
 
     def _close_native(self):
         """Ends a batch, flushes the map and the journal and closes both. Both are
-        closed even when the flush fails (the error then propagates)."""
+        closed even when the flush fails (the error then propagates). Batched
+        edits whose journal entries cannot be synced are not written (see
+        `endBatch`)."""
         _h = self._enter()
         try:
             _call(_lib.seg_header_editor_close, _h)
@@ -1257,7 +1260,8 @@ class HeaderEditor(_Handle):
 
     def set_file_field(self, name, value):
         """Sets a SEG-Y binary header field (`binary.<field>`); the index's copy of
-        the binary header is refreshed."""
+        the binary header is refreshed. False, with a diagnostic in `log`, if
+        the edit is refused."""
         _h = self._enter()
         try:
             _o = ctypes.c_bool()
@@ -1270,7 +1274,8 @@ class HeaderEditor(_Handle):
     def set_record_field(self, record, name, value):
         """Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
         for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
-        copy of the record's headers is refreshed."""
+        copy of the record's headers is refreshed. False, with a diagnostic in
+        `log`, if the edit is refused."""
         _h = self._enter()
         try:
             _o = ctypes.c_bool()
@@ -1675,9 +1680,10 @@ def apply_journal(path, journal_path):
 def open_editor(path, journal_path=""):
     """Maps `path` read-write, builds its trace index and opens the journal
     (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
-    if either cannot be opened. Problems reading the file are in
-    `file.index.log`; a file whose index has a fatal problem can still be
-    edited where its headers were located."""
+    if either cannot be opened, and `ValueError` if the journal is the file
+    itself. Problems reading the file are in `file.index.log`; a file whose
+    index has a fatal problem can still be edited where its headers were
+    located."""
     _o = ctypes.c_void_p()
     if _call(_lib.seg_open_editor, _str(path, "path"), _str(journal_path, "journal_path"), ctypes.byref(_o)) > 0:
         return None

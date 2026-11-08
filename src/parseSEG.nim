@@ -31,7 +31,9 @@ import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif]
 export traceindex except unsafeMemory, decodeEntry, readTracesRaw, mappedSize, flush,
   requireKeys, checkSpan, spanLen
-export keys, gathers, prefetch, headerfields, edit, headernif
+export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
+  isLayoutField
+export keys, gathers, prefetch, edit, headernif
 
 import parseSEG/survey/[textrec, sps, p1, join]
 export textrec, sps, p1, join

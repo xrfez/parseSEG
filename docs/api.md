@@ -18,8 +18,12 @@ Conventions that hold throughout:
   truncation or I/O failure, and that is logged as `fatal`.
 - **Bad arguments raise `ValueError`.** An out-of-range trace or range, a closed file, or a
   file opened without `keys` where keys are needed, raise a catchable `ValueError` from the
-  public procs (the C ABI returns `SEG_ERR_ARGUMENT`). Lookups by name have a raising form
-  (`traceField(f, trace, name): FieldValue`) and a `bool` form with `var` results.
+  public procs (the C ABI returns `SEG_ERR_ARGUMENT`).
+- **Lookups: a raising form for required data, an `Option` for optional data.**
+  `traceField(f, trace, name): FieldValue` raises `ValueError` (with the reason) when the
+  field cannot be read; `findTraceField(f, trace, name): Option[FieldValue]` returns none.
+  The same pattern holds across the library (`findChannelSet`, `fieldValue`,
+  `parseFortranFloat`, `resolveLine`, `relation`, ...); no lookup fills `var` results.
 - **Trace ranges are `Slice[int]`** (`0 ..< f.len`, both ends included as in Nim) and
   selections are `openArray[int]`; both parameters are named `traces`.
 - **Samples are Arraymancer tensors** `[traces, samples]` (`float32`, or `float64` where it
@@ -57,7 +61,9 @@ Sorting is a selection: a sort produces a list of trace indices, and no data is 
 ## Headers
 | Proc | What |
 |---|---|
-| `traceField(f, trace, "trace.sourceX")`, `recordField(f, record, "gh1.year")`, `fileField(f, "binary.sampleInterval")` | Any named header field, read from the map (raises `ValueError` for an unknown name; the `bool` forms take `var v[, err]`). Names are listed by `fieldNames(HeaderBlock)`. |
+| `traceField(f, trace, "trace.sourceX")`, `recordField(f, record, "gh1.year")`, `fileField(f, "binary.sampleInterval")` | Any named header field, read from the map, as a `FieldValue` (`intVal`, `floatVal` or `text` by `kind`). Raises `ValueError` for an unknown name, trace or record. |
+| `findTraceField`, `findRecordField`, `findFileField` | The same, as an `Option[FieldValue]` (none when the field cannot be read). |
+| `fieldNames(HeaderBlock)`, `f.blockKind(scope, index, "ext1")`, `h.fieldByName("sourceX")` | The fields of a block kind; the kind of a file's block (`hsFile`, `hsRecord`, `hsTrace`); a field of a decoded header object (`Option`). |
 | `readSegyHeaders(path)`, `readSegdHeaders(path)`; `openSegy`/`openSegd(src, headersOnly = true)` | Every header object, samples skipped (also on tape). |
 | `traceKeys(...)`, `TraceKeys` | Per-trace geometry (record, source and receiver line/point/index/coordinates, component). |
 
@@ -91,14 +97,18 @@ C: `seg_survey_geometry_new`, `seg_survey_geometry_add_sps`, `..._add_p1`, `..._
 ## In-place edits
 `openEditor(path, journalPath)` and `setTraceField(trace, "trace.<f>", v)` /
 `setFileField("binary.<f>", v)` / `setRecordField(record, "gh1.<f>", v)` (each `false` when
-refused, with the reason in `log`), then `close`. Field names are as above. Edits are
-size-preserving and validated, and each is journaled before it is written.
+refused, with the reason in `log`; never raises), then `close`. `v` is a `FieldValue` or a
+plain number or string. Field names are as above. Edits are size-preserving and validated,
+and each is journaled, and synced to disk, before it is written: an edit whose journal
+entry cannot be synced is refused. `beginBatch` / `endBatch` (false when the batch's journal
+sync fails) share one sync among many edits; `currentTraceField` (...) read fields as edited
+so far. `openEditor` raises `ValueError` when the journal is the file itself.
 `rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them.
 
 Header documents (`model/headernif`): `exportHeaders(f, path, raw = true)` streams every named
-field (and raw bytes) as NIF; `diffHeaders(f, nifPath, log)` lists the fields an edited
-document changes; `importHeaders(path, nifPath, outPath, journal, dryRun)` applies them as a
-patch through the editor, in place or into a copy.
+field (and raw bytes) as NIF; `importHeaders(path, nifPath, ImportOptions(outPath, journal,
+dryRun, force, onChange))` applies an edited document as a patch through the editor, in
+place or into a copy (`dryRun` only lists the changes).
 
 ## Streaming readers and writers (disk and tape)
 - SEG-Y: `openSegy(src)` / `readTrace`, `readSegy(path)`, `openSegyWriter(sink, file, opts)` /

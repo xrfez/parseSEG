@@ -189,11 +189,11 @@ proc valueArg*(p: ptr SegValue, name: string): FieldValue =
   ## The field value a `SegValue` holds.
   if p == nil: argError(name & " must not be NULL")
   case p.kind
-  of SEG_VALUE_INT: FieldValue(kind: fvInt, i: p.i)
-  of SEG_VALUE_FLOAT: FieldValue(kind: fvFloat, f: p.f)
+  of SEG_VALUE_INT: FieldValue(kind: fvInt, intVal: p.i)
+  of SEG_VALUE_FLOAT: FieldValue(kind: fvFloat, floatVal: p.f)
   of SEG_VALUE_TEXT:
     if p.text == nil: argError(name & ": NULL text")
-    FieldValue(kind: fvText, s: $cast[cstring](p.text))
+    FieldValue(kind: fvText, text: $cast[cstring](p.text))
   else: argError(name & ": bad SegValue kind " & $p.kind)
 
 func toC*(x: Slice[int]): MSegSlice =
@@ -235,14 +235,14 @@ proc writeValue*(dst: ptr SegValue, v: FieldValue) =
   case v.kind
   of fvInt:
     dst.kind = SEG_VALUE_INT
-    dst.i = v.i
-    dst.f = float64(v.i)
+    dst.i = v.intVal
+    dst.f = float64(v.intVal)
   of fvFloat:
     dst.kind = SEG_VALUE_FLOAT
     dst.i = 0
-    dst.f = v.f
+    dst.f = v.floatVal
   of fvText:
     dst.kind = SEG_VALUE_TEXT
     if dst.textCap < 0: argError("SegValue.text_cap must be >= 0")
-    copyText(v.s, dst.text, dst.textCap)
-    dst.textLen = int64(v.s.len)
+    copyText(v.text, dst.text, dst.textCap)
+    dst.textLen = int64(v.text.len)

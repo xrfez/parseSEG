@@ -341,6 +341,7 @@ err = raises(parseseg.IOError, parseseg.apply_journal, path, os.path.join(scratc
 assert isinstance(err.diagnostics, parseseg.DiagLog)
 assert err.diagnostics[-1]["severity"] == "fatal"
 raises(parseseg.IOError, parseseg.open_editor, os.path.join(scratch, "missing.sgy"))
+raises(parseseg.ArgumentError, parseseg.open_editor, path, path)  # the journal is the file
 
 # ------------------------------------------------------------- conversion --
 dst = os.path.join(scratch, "rev1.sgy")

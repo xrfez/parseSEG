@@ -18,7 +18,7 @@
 ## checked and applied at once, then refined by hand.
 
 import std/[strutils, os, tables, hashes]
-import ../common/diagnostics
+import ../common/[diagnostics, niftext]
 import ../io/[records, diskio]
 import ../segd/reader as segdreader
 import ../segy/[reader as segyreader, binheader, traceheader]
@@ -190,14 +190,6 @@ func len*(s: VendorScaffold): int =
 
 func hexOf(b: openArray[byte]): string =
   for x in b: result.add toHex(x, 2)
-
-func nifString(s: string): string =
-  ## A NIF string literal: `"`, `\`, control and non-ASCII bytes as `\HH`.
-  result = "\""
-  for c in s:
-    if c in {'"', '\\'} or ord(c) < 0x20 or ord(c) >= 0x7F: result.add "\\" & toHex(ord(c), 2)
-    else: result.add c
-  result.add '"'
 
 func commentText(s: string): string =
   ## `s` safe inside a `;` comment (no line breaks or control bytes).

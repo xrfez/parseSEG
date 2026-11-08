@@ -446,6 +446,7 @@ static void test_edits(void) {
     fclose(w);
     remove(journal);
     SegHeaderEditor *e = NULL;
+    CHECK(seg_open_editor(copy, copy, &e) == SEG_ERR_ARGUMENT); /* the journal is the file */
     OK(seg_open_editor(copy, journal, &e));
     char jp[2048];
     int64_t len = 0;

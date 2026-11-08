@@ -487,20 +487,21 @@ SegStatus seg_seismic_file_component_group_ids(SegSeismicFile *seismic_file, int
 
 /*
  * A trace header field by name, e.g. "trace.sourceX" or
- * "ext1.receiverLine". Raises `ValueError` for an unknown field or a trace
- * out of range.
+ * "ext1.receiverLine". Raises `ValueError` for an unknown field, a trace
+ * out of range or a closed file; the message says which.
  */
 SegStatus seg_seismic_file_trace_field(SegSeismicFile *seismic_file, int64_t trace, const char *name, SegValue *out);
 
 /*
- * A SEG-D record (general header) field by name, e.g. "gh1.formatCode".
- * Raises `ValueError` for an unknown field or record.
+ * A SEG-D record (general header) field by name, e.g. "gh1.formatCode" or
+ * "gh3.sourcePointNumber" (Rev 1/2 source headers). Raises `ValueError`
+ * for an unknown field or record, or a closed file.
  */
 SegStatus seg_seismic_file_record_field(SegSeismicFile *seismic_file, int64_t record, const char *name, SegValue *out);
 
 /*
- * A file-level field by name, e.g. "binary.formatCode". Raises
- * `ValueError` for an unknown field.
+ * A file-level field by name, e.g. "binary.formatCode" (SEG-Y). Raises
+ * `ValueError` for an unknown field or a closed file.
  */
 SegStatus seg_seismic_file_file_field(SegSeismicFile *seismic_file, const char *name, SegValue *out);
 
@@ -534,15 +535,18 @@ SegStatus seg_apply_journal(const char *path, const char *journal_path, SegDiagL
 /*
  * Maps `path` read-write, builds its trace index and opens the journal
  * (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
- * if either cannot be opened. Problems reading the file are in
- * `file.index.log`; a file whose index has a fatal problem can still be
- * edited where its headers were located.
+ * if either cannot be opened, and `ValueError` if the journal is the file
+ * itself. Problems reading the file are in `file.index.log`; a file whose
+ * index has a fatal problem can still be edited where its headers were
+ * located.
  */
 SegStatus seg_open_editor(const char *path, const char *journal_path, SegHeaderEditor **out);
 
 /*
  * Ends a batch, flushes the map and the journal and closes both. Both are
- * closed even when the flush fails (the error then propagates).
+ * closed even when the flush fails (the error then propagates). Batched
+ * edits whose journal entries cannot be synced are not written (see
+ * `endBatch`).
  */
 SegStatus seg_header_editor_close(SegHeaderEditor *header_editor);
 
@@ -557,14 +561,16 @@ SegStatus seg_header_editor_set_trace_field(SegHeaderEditor *header_editor, int6
 
 /*
  * Sets a SEG-Y binary header field (`binary.<field>`); the index's copy of
- * the binary header is refreshed.
+ * the binary header is refreshed. False, with a diagnostic in `log`, if
+ * the edit is refused.
  */
 SegStatus seg_header_editor_set_file_field(SegHeaderEditor *header_editor, const char *name, const SegValue *value, bool *out);
 
 /*
  * Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
  * for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
- * copy of the record's headers is refreshed.
+ * copy of the record's headers is refreshed. False, with a diagnostic in
+ * `log`, if the edit is refused.
  */
 SegStatus seg_header_editor_set_record_field(SegHeaderEditor *header_editor, int64_t record, const char *name, const SegValue *value, bool *out);
 

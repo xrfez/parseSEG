@@ -30,14 +30,11 @@
 ## Memory does not grow with the file or the document.
 
 import std/[os, strutils, math]
-import ../common/[errors, diagnostics]
+import ../common/[errors, diagnostics, niftext]
 import ../segd/reader as segdreader
 import ./[traceindex, headerfields, edit]
 
 type
-  HeaderScope* = enum
-    hsFile = "file", hsRecord = "record", hsTrace = "trace"
-
   HeaderChange* = object
     ## One field the import changes (or, in a dry run, would change).
     scope*: HeaderScope
@@ -67,9 +64,10 @@ func sameValue(a, b: FieldValue): bool =
   ## Equal values; floats by bit pattern (so -0.0 differs from 0.0), every
   ## NaN equal to every NaN.
   a.kind == b.kind and (case a.kind
-    of fvInt: a.i == b.i
-    of fvFloat: (a.f.isNaN and b.f.isNaN) or cast[uint64](a.f) == cast[uint64](b.f)
-    of fvText: a.s == b.s)
+    of fvInt: a.intVal == b.intVal
+    of fvFloat: (a.floatVal.isNaN and b.floatVal.isNaN) or
+      cast[uint64](a.floatVal) == cast[uint64](b.floatVal)
+    of fvText: a.text == b.text)
 
 # ----------------------------------------------------------------- writer --
 
@@ -83,25 +81,18 @@ proc put(o: var NifOut, s: string) =
     o.f.write o.buf
     o.buf.setLen 0
 
-func nifString(s: string): string =
-  result = "\""
-  for c in s:
-    if c in {'"', '\\'} or ord(c) < 0x20 or ord(c) >= 0x7F: result.add "\\" & toHex(ord(c), 2)
-    else: result.add c
-  result.add '"'
-
 func nifValue(v: FieldValue): string =
   case v.kind
-  of fvInt: $v.i
-  of fvText: nifString(v.s)
+  of fvInt: $v.intVal
+  of fvText: nifString(v.text)
   of fvFloat:
-    case classify(v.f)
+    case classify(v.floatVal)
     of fcNan: "(nan)"
     of fcInf: "(inf)"
     of fcNegInf: "(neginf)"
     of fcNegZero: "-0.0"
     else:
-      var s = $v.f
+      var s = $v.floatVal
       if '.' notin s and 'e' notin s and 'E' notin s: s.add ".0"
       s
 
@@ -112,33 +103,34 @@ func hexOf(b: openArray[byte]): string =
 proc putBlock(o: var NifOut, f: SeismicFile, blk: BlockRef, raw: bool, indent: string) =
   o.put indent & "(block " & blk.name
   for n in fieldNames(blk.kind):
-    var v: FieldValue
-    var err: string
-    if f.readBlockField(blk, n, v, err):
-      o.put "\n" & indent & " (f " & n & " " & nifValue(v) & ")"
+    let r = f.readField(blk, n)
+    if r.error.len == 0:
+      o.put "\n" & indent & " (f " & n & " " & nifValue(r.value) & ")"
   if raw:
     o.put "\n" & indent & " (raw \"" &
       hexOf(f.unsafeMemory.toOpenArray(int(blk.offset), int(blk.offset) + blk.size - 1)) & "\")"
   o.put ")"
 
 proc recordBlocks(f: SeismicFile, record: int): seq[BlockRef] =
-  var err: string
-  var blk: BlockRef
-  if f.index.locateRecordBlock(record, "gh1", blk, err): result.add blk
+  var b = f.index.locateBlock(hsRecord, record, "gh1")
+  if b.error.len == 0: result.add b.blk
   var n = 3
-  while f.index.locateRecordBlock(record, "gh" & $n, blk, err):
-    result.add blk
+  b = f.index.locateBlock(hsRecord, record, "gh3")
+  while b.error.len == 0:
+    result.add b.blk
     inc n
+    b = f.index.locateBlock(hsRecord, record, "gh" & $n)
 
 proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   ## Writes every named header field of `f` to the NIF file `path`, streamed
   ## through a buffer (memory does not grow with the file). `raw` adds each
   ## block's bytes, and each trace's whole header, as hex. The document is
   ## written to `path.tmp` and renamed when complete. Raises `IOError` if it
-  ## cannot be written, or if `path` is the seismic file itself.
-  if not f.isOpen and f.len > 0: raise newException(IOError, "the file is not mapped")
+  ## cannot be written, and `ValueError` if `f` is closed or `path` is the
+  ## seismic file itself.
+  if not f.isOpen and f.len > 0: raise newException(ValueError, "the file is closed")
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
-    raise newException(IOError, "the output " & path & " is the seismic file itself")
+    raise newException(ValueError, "the output " & path & " is the seismic file itself")
   let tmp = path & ".tmp"
   var o = NifOut()
   if not open(o.f, tmp, fmWrite): raise newException(IOError, "cannot write " & tmp)
@@ -147,11 +139,10 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
       (if f.kind == skSegy: "segy" else: "segd") & ")\n (traces " & $f.len & ")\n"
     let records = if f.kind == skSegd: f.index.segdRecords.len else: 0
     o.put " (records " & $records & ")"
-    var blk: BlockRef
-    var err: string
-    if f.index.locateFileBlock("binary", blk, err):
+    let bin = f.index.locateBlock(hsFile, 0, "binary")
+    if bin.error.len == 0:
       o.put "\n (file\n"
-      o.putBlock(f, blk, raw, "  ")
+      o.putBlock(f, bin.blk, raw, "  ")
       o.put ")"
     for r in 0..<records:
       o.put "\n (record " & $r
@@ -162,11 +153,12 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
     for t in 0..<f.len:
       o.put "\n (trace " & $t
       for name in ["trace", "ext1"]:
-        if f.index.locateTraceBlock(t, name, blk, err):
+        let b = f.index.locateBlock(hsTrace, t, name)
+        if b.error.len == 0:
           o.put "\n"
-          o.putBlock(f, blk, false, "  ")
+          o.putBlock(f, b.blk, false, "  ")
       if raw:
-        let e = f.index.entries[t]
+        template e: untyped = f.index.entries[t]
         o.put "\n  (raw \"" & hexOf(f.unsafeMemory.toOpenArray(int(e.offset),
           int(e.offset) + int(e.headerBytes) - 1)) & "\")"
       o.put ")"
@@ -383,6 +375,7 @@ iterator entries(n: var NifIn, facts: var DocFacts): (HeaderScope, int64, string
 proc checkFacts(facts: DocFacts, f: SeismicFile, force: bool, nifPath: string,
     log: var DiagLog): bool =
   ## False (with a fatal diagnostic) when the document describes another file.
+  ## False (with a fatal diagnostic) when the document describes another file.
   var problems: seq[string]
   let std = if f.kind == skSegy: "segy" else: "segd"
   if facts.standard.len > 0 and facts.standard != std:
@@ -406,11 +399,11 @@ proc checkFacts(facts: DocFacts, f: SeismicFile, force: bool, nifPath: string,
 func normalized(v, cur: FieldValue): FieldValue =
   # An integral float for an integer field, or an integer for a float one.
   result = v
-  if cur.kind == fvInt and v.kind == fvFloat and v.f == trunc(v.f) and
-      abs(v.f) < 9.2e18:
-    result = toFieldValue(int64(v.f))
+  if cur.kind == fvInt and v.kind == fvFloat and v.floatVal == trunc(v.floatVal) and
+      abs(v.floatVal) < 9.2e18:
+    result = toFieldValue(int64(v.floatVal))
   elif cur.kind == fvFloat and v.kind == fvInt:
-    result = toFieldValue(float64(v.i))
+    result = toFieldValue(float64(v.intVal))
 
 proc sameFileAs(a, b: string): bool =
   a.len > 0 and b.len > 0 and (a == b or (fileExists(a) and fileExists(b) and sameFile(a, b)))
@@ -462,27 +455,30 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
       for scope, index, name, v in n.entries(facts):
         if not checked:
           checked = true
-          let fp = if opts.dryRun: addr f else: addr ed.file # (no copy of the map)
-          if not checkFacts(facts, fp[], opts.force, nifPath, result.log):
-            return
-        var cur: FieldValue
-        var err: string
+          let same = if opts.dryRun: checkFacts(facts, f, opts.force, nifPath, result.log)
+                     else: checkFacts(facts, ed.file, opts.force, nifPath, result.log)
+          if not same: return
         let i = int(clamp(index, -1, int64(high(int32))))
-        let found = if opts.dryRun:
-                      case scope
-                      of hsFile: f.fileField(name, cur, err)
-                      of hsRecord: f.recordField(i, name, cur, err)
-                      of hsTrace: f.traceField(i, name, cur, err)
-                    else:
-                      case scope
-                      of hsFile: ed.currentFileField(name, cur, err)
-                      of hsRecord: ed.currentRecordField(i, name, cur, err)
-                      of hsTrace: ed.currentTraceField(i, name, cur, err)
-        if not found:
+        var cur: FieldValue
+        var err = ""
+        try:
+          cur = if opts.dryRun:
+                  case scope
+                  of hsFile: f.fileField(name)
+                  of hsRecord: f.recordField(i, name)
+                  of hsTrace: f.traceField(i, name)
+                else:
+                  case scope
+                  of hsFile: ed.currentFileField(name)
+                  of hsRecord: ed.currentRecordField(i, name)
+                  of hsTrace: ed.currentTraceField(i, name)
+        except ValueError as e:
+          err = e.msg
+        if err.len > 0:
           inc entryErrors
           if entryErrors <= MaxLoggedErrors:
             result.log.report(sevError, dcValidation, "line " & $n.line & ": " & $scope & " " &
-              $index & ": " & name & ": " & err, loc = Location(file: nifPath, field: name))
+              $index & ": " & err, loc = Location(file: nifPath, field: name))
         else:
           let nv = normalized(v, cur)
           if not sameValue(cur, nv):

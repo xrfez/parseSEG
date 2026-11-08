@@ -5,7 +5,7 @@ import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, writer as segywriter]
 import parseSEG/segd/[reader as segdreader]
-import parseSEG/model/[traceindex, edit]
+import parseSEG/model/[traceindex, headerfields, edit]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 let tmp = getTempDir() / "parseseg_tedit"
@@ -219,3 +219,57 @@ block edit_through_the_mapped_index:
   let t = ed.file.readTraces(3..3)
   doAssert t.shape == [1, 2001]
   ed.close()
+
+block journal_is_the_file:
+  let (path, _) = fresh("Sweep0.sgy")
+  doAssertRaises(ValueError): discard openEditor(path, path)
+
+block current_fields_raise_like_the_reads:
+  let (path, _) = fresh("Sweep0.sgy")
+  var ed = openEditor(path)
+  ed.beginBatch()
+  doAssert ed.setTraceField(0, "trace.groupX", 77)
+  doAssert ed.currentTraceField(0, "trace.groupX").intVal == 77 # the batched edit
+  doAssertRaises(ValueError): discard ed.currentTraceField(0, "trace.nope")
+  doAssertRaises(ValueError): discard ed.currentRecordField(0, "gh1.year")
+  doAssert ed.endBatch()
+  ed.close()
+
+when defined(linux):
+  import std/posix
+
+  proc failJournal(journal: string) =
+    ## Points the open journal's descriptor at /dev/full: every write to it
+    ## from now on fails with ENOSPC, as on a full disk.
+    let want = expandFilename(journal)
+    for kind, p in walkDir("/proc/self/fd"):
+      var target = ""
+      try: target = expandSymlink(p)
+      except OSError: discard
+      if target == want:
+        let full = posix.open("/dev/full", O_WRONLY)
+        doAssert full >= 0 and dup2(full, cint(parseInt(p.extractFilename))) >= 0
+        discard posix.close(full)
+        return
+    doAssert false, "the journal is not open"
+
+  block journal_sync_failure_refuses_the_edit:
+    # The map is written only after its journal entry is on disk: when the
+    # journal cannot be written or synced, the edit is refused (false and an
+    # error in `log`), never raised, and the file keeps its bytes.
+    let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+    let original = readBytes(path)
+    var ed = openEditor(path)
+    let before = ed.file.traceField(3, "trace.groupX")
+    failJournal(journal)
+    ed.beginBatch()
+    doAssert ed.setTraceField(3, "trace.groupX", 4242) # journaled into the buffer only
+    doAssert not ed.endBatch()                          # the sync fails: nothing written
+    doAssert ed.file.traceField(3, "trace.groupX") == before and ed.edits == 0
+    doAssert ed.log.count(sevError) == 1 and "cannot be synced" in ed.log[0].msg
+    doAssert not ed.setTraceField(3, "trace.groupX", 4343) # unbatched: refused at once
+    doAssert ed.file.traceField(3, "trace.groupX") == before and ed.edits == 0
+    doAssert ed.log.count(sevError) == 2 and "journal cannot be written" in ed.log[1].msg
+    doAssert not ed.setFileField("binary.jobId", 5)
+    ed.close()
+    doAssert readBytes(path) == original

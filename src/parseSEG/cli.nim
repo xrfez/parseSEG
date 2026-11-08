@@ -334,14 +334,14 @@ proc dump(a: Args): int =
     for t in sel:
       echo "trace ", t
       for blockName in ["trace", "ext1"]:
-        var b: BlockRef
-        var err: string
-        if f.index.locateTraceBlock(t, blockName, b, err):
-          for n in fieldNames(b.kind):
-            var v: FieldValue
-            if f.readBlockField(b, n, v, err): echo "  ", blockName, ".", n, " = ", v
-            else:
-              echo "  ", blockName, ".", n, " = ? (", err, ")"
+        let kind = f.blockKind(hsTrace, t, blockName)
+        if kind.isSome:
+          for n in fieldNames(kind.get):
+            let name = blockName & "." & n
+            try:
+              echo "  ", name, " = ", f.traceField(t, name)
+            except ValueError as e:
+              echo "  ", name, " = ? (", e.msg, ")"
               result = 1
     return
   let fields = if a.has("fields"): a.get("fields").split(',').mapIt(it.strip)
@@ -354,16 +354,15 @@ proc dump(a: Args): int =
     var row = @[$t, $e.offset, $e.numSamples, $e.record,
       (if e.channelSetIndex < 0: "-" else: $e.channelSetIndex)]
     for name in fields:
-      var v: FieldValue
-      var err: string
-      row.add(if f.traceField(t, name, v, err): $v else: "?")
+      let v = f.findTraceField(t, name)
+      row.add(if v.isSome: $v.get else: "?")
     echo row.join("\t")
   for name in fields:
-    var v: FieldValue
-    var err: string
-    if sel.len > 0 and not f.traceField(sel[0], name, v, err):
-      stderr.writeLine "error: ", name, ": ", err
-      result = 1
+    if sel.len > 0:
+      try: discard f.traceField(sel[0], name)
+      except ValueError as e:
+        stderr.writeLine "error: ", e.msg
+        result = 1
 
 # ------------------------------------------------------------------- diag --
 
@@ -458,19 +457,19 @@ proc convertCmd(a: Args): int =
 
 # ------------------------------------------------------------------- edit --
 
-proc parseValue(s: string): EditValue =
-  if s.len >= 2 and s[0] == '"' and s[^1] == '"': return toEditValue(s[1 .. ^2])
-  try: return toEditValue(parseBiggestInt(s))
+proc parseValue(s: string): FieldValue =
+  if s.len >= 2 and s[0] == '"' and s[^1] == '"': return toFieldValue(s[1 .. ^2])
+  try: return toFieldValue(parseBiggestInt(s))
   except ValueError: discard
-  try: return toEditValue(parseFloat(s))
+  try: return toFieldValue(parseFloat(s))
   except ValueError: discard
-  toEditValue(s)
+  toFieldValue(s)
 
 type Assignment = object
-  scope: char        ## 't', 'r' or 'f' (file)
+  scope: HeaderScope
   targets: seq[int]  ## traces or records
   name: string
-  value: EditValue
+  value: FieldValue
 
 proc parseAssignments(f: SeismicFile, args: seq[string]): seq[Assignment] =
   ## Every assignment checked (syntax, scope, selection, field) before any edit.
@@ -484,26 +483,27 @@ proc parseAssignments(f: SeismicFile, args: seq[string]): seq[Assignment] =
     let raw = asg[eq + 1 .. ^1]
     if raw.len == 0: usage("assignment '" & asg & "' has no value")
     x.value = parseValue(raw)
-    var cur: FieldValue
-    var err: string
     if scope == "file":
-      x.scope = 'f'
-      if not f.fileField(x.name, cur, err): usage(x.name & ": " & err)
+      x.scope = hsFile
     elif scope.len > 1 and scope[0] == 't':
-      x.scope = 't'
+      x.scope = hsTrace
       x.targets = parseSelection(scope[1..^1], f.len, "trace", all = false)
-      if not f.traceField(x.targets[0], x.name, cur, err): usage(x.name & ": " & err)
     elif scope.len > 1 and scope[0] == 'r':
-      x.scope = 'r'
+      x.scope = hsRecord
       if f.kind != skSegd: usage("record scopes (r0, ...) are for SEG-D; SEG-Y has none")
       x.targets = parseSelection(scope[1..^1], f.index.segdRecords.len, "record", all = false)
-      if not f.recordField(x.targets[0], x.name, cur, err): usage(x.name & ": " & err)
     else:
       usage("bad scope '" & scope & "' (t5, t0..9, r0 or file)")
+    let cur = try:
+        case x.scope
+        of hsFile: f.fileField(x.name)
+        of hsRecord: f.recordField(x.targets[0], x.name)
+        of hsTrace: f.traceField(x.targets[0], x.name)
+      except ValueError as e: usage(e.msg)
     # A text field takes the value as written, even when it looks like a number.
     if cur.kind == fvText and x.value.kind != fvText:
-      x.value = toEditValue(if raw.len >= 2 and raw[0] == '"' and raw[^1] == '"': raw[1 .. ^2]
-                            else: raw)
+      x.value = toFieldValue(if raw.len >= 2 and raw[0] == '"' and raw[^1] == '"': raw[1 .. ^2]
+                             else: raw)
     result.add x
 
 proc edit(a: Args): int =
@@ -521,10 +521,10 @@ proc edit(a: Args): int =
     for x in plan:
       var ok = true
       case x.scope
-      of 'f': ok = ed.setFileField(x.name, x.value)
-      of 't':
+      of hsFile: ok = ed.setFileField(x.name, x.value)
+      of hsTrace:
         for i in x.targets: ok = ed.setTraceField(i, x.name, x.value) and ok
-      else:
+      of hsRecord:
         for i in x.targets: ok = ed.setRecordField(i, x.name, x.value) and ok
       if not ok: inc refused
   finally:

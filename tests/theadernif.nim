@@ -54,8 +54,7 @@ block last_entry_wins_and_exact_floats:
   writeFile(tmp / "dup.nif", "(headers (record 0 (block gh1 (f fileNumber 1) (f fileNumber 63))))")
   var r = importHeaders(p, tmp / "dup.nif")
   var f = openSeismic(p)
-  var v: FieldValue
-  doAssert f.recordField(0, "gh1.fileNumber", v) and v.i == 63, $v
+  doAssert f.recordField(0, "gh1.fileNumber").intVal == 63
   f.close()
   # An integral float for an integer field is no change.
   writeFile(tmp / "intf.nif", "(headers (record 0 (block gh1 (f fileNumber 63.0))))")
@@ -83,7 +82,7 @@ block documents_for_another_file:
 block outputs_journals_and_copies:
   let p = fresh("63.sgd")
   exportOf(p, tmp / "doc.nif")
-  doAssertRaises(IOError):
+  doAssertRaises(ValueError):
     var f = openSeismic(p)
     try: exportHeaders(f, p) finally: f.close()
   doAssert readFile(p) == readFile(ex / "63.sgd")

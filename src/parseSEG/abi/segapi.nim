@@ -348,7 +348,7 @@ proc classify(b: var Bindings, t0: NimNode, what: string): AbiType =
     result.pyType = "ctypes.c_void_p"
     return
   case result.nim
-  of "FieldValue", "EditValue":
+  of "FieldValue":
     result.kind = akValue
     return
   of "string":
