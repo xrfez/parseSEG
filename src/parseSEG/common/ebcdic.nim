@@ -43,14 +43,14 @@ func invert(t: array[256, uint8]): array[256, uint8] =
 
 const latin1ToEbcdic*: array[256, uint8] = invert(ebcdicToLatin1)
 
-func ebcdicToAscii*(b: openArray[byte]): string =
-  ## Decodes EBCDIC bytes to a Latin-1 string.
+func decodeEbcdic*(b: openArray[byte]): string =
+  ## Decodes EBCDIC (cp037) bytes to a Latin-1 string.
   result = newString(b.len)
   for i, c in b:
     result[i] = char(ebcdicToLatin1[c])
 
-func asciiToEbcdic*(s: openArray[char]): seq[byte] =
-  ## Encodes a Latin-1 string as EBCDIC bytes.
+func encodeEbcdic*(s: openArray[char]): seq[byte] =
+  ## Encodes a Latin-1 string as EBCDIC (cp037) bytes.
   result = newSeq[byte](s.len)
   for i, c in s:
     result[i] = latin1ToEbcdic[uint8(c)]

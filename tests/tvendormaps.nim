@@ -72,7 +72,7 @@ block decode_every_field_kind:
   var e = newSeq[byte](32)
   e[0] = 0xFF; e[1] = 0xFF; e[2] = 0xFE; e[3] = 0x80; e[4] = 0x00 # -1.5
   putBeU32(e, 5, float32ToIbm(-118.625))
-  let lbl = asciiToEbcdic("GPS1")
+  let lbl = encodeEbcdic("GPS1")
   for i in 0..3: e[9 + i] = lbl[i]
   e[13] = 0x01; e[14] = 0x23                                      # low nibble: 123
   e[15] = 0xB1

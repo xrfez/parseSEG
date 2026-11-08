@@ -118,7 +118,7 @@ iterator textRecords*(s: Stream, layout: TextLayout): TextRecord =
       let n = s.readData(buf[0].addr, CardWidth)
       if n <= 0: break
       var text = buf[0..<n]
-      if layout == tlEbcdic80: text = ebcdicToAscii(text.toOpenArrayByte(0, n - 1))
+      if layout == tlEbcdic80: text = decodeEbcdic(text.toOpenArrayByte(0, n - 1))
       rec.text = text
       rec.offset = offset
       rec.terminated = true

@@ -63,7 +63,7 @@ func decodeText*(b: openArray[byte], encoding: TextEncoding): string =
   ## Decodes text bytes to a Latin-1 string.
   case encoding
   of teEbcdic:
-    result = ebcdicToAscii(b)
+    result = decodeEbcdic(b)
   of teAscii:
     result = newString(b.len)
     for i, c in b: result[i] = char(c)
@@ -72,7 +72,7 @@ func encodeText*(s: openArray[char], encoding: TextEncoding): seq[byte] =
   ## Encodes a Latin-1 string to text bytes.
   case encoding
   of teEbcdic:
-    result = asciiToEbcdic(s)
+    result = encodeEbcdic(s)
   of teAscii:
     result = newSeq[byte](s.len)
     for i, c in s: result[i] = byte(c)

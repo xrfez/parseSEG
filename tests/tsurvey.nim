@@ -37,7 +37,7 @@ let x1 = "XB79480       111   5713.00 542525.002    1  3201   5646.00 534550.00 
 block textrec_layouts:
   doAssert detectLayout("H00 x\r\nR") == tlLines
   doAssert detectLayout(repeat('H', 1) & repeat(' ', 159)) == tlFixed80
-  let e = asciiToEbcdic("H00 SPS" & repeat(' ', 73))
+  let e = encodeEbcdic("H00 SPS" & repeat(' ', 73))
   var es = newString(e.len)
   for i, b in e: es[i] = char(b)
   doAssert detectLayout(es) == tlEbcdic80
@@ -131,7 +131,7 @@ block sps_files_on_disk:
   doAssert readFile(outp) == readFile(path) and not fileExists(outp & ".tmp")
   doAssert readSps(dir / "missing").log.isFatal
   # Fixed 80-byte EBCDIC records (a tape copy).
-  let eb = asciiToEbcdic(H00.alignLeft(80) & src1)
+  let eb = encodeEbcdic(H00.alignLeft(80) & src1)
   var ebs = newString(eb.len)
   for i, b in eb: ebs[i] = char(b)
   let g = parseSps(ebs)
@@ -322,7 +322,7 @@ block review_line_splitter:
 block review_detect_sps_or_p1:
   doAssert looksLikeSps(newStringStream([H00, src1, x1].join("\n")))
   doAssert not looksLikeSps(newStringStream(["H AREA", "CLIENT: SHELL", p1a].join("\n")))
-  let eb = asciiToEbcdic(H00.alignLeft(80) & src1)
+  let eb = encodeEbcdic(H00.alignLeft(80) & src1)
   var ebs = newString(eb.len)
   for i, b in eb: ebs[i] = char(b)
   doAssert looksLikeSps(newStringStream(ebs))

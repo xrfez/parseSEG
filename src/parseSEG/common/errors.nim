@@ -4,6 +4,8 @@
 ## record/trace boundary (see `diagnostics.tryRecord`), so a read never aborts
 ## on a format problem.
 
+import diagcodes
+
 type
   SegError* = object of CatchableError
     ## Base type for every recoverable error raised by this library.
@@ -17,7 +19,7 @@ type
     ## The rest of the data cannot be located (e.g. an unknown sample format
     ## leaves trace lengths unknown): readers stop. Raise it with
     ## `diagnostics.raiseUnlocatable`, which records the diagnostic code.
-    diagCode*: int ## `ord` of the `DiagCode` to report.
+    diagCode*: DiagCode ## The code to report.
 
 proc raiseFormat*(msg: string; offset: int64 = -1) {.noinline, noreturn.} =
   ## Raises `SegFormatError` with `msg` and the byte `offset` (-1 if unknown).

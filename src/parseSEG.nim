@@ -13,7 +13,8 @@ export version
 import parseSEG/common/[errors, diagnostics, endians]
 export errors, diagnostics, endians
 
-import parseSEG/segy/[textheader, binheader, traceheader, samples, exttext, layout, reader, writer, fields]
+import parseSEG/segy/[textheader, binheader, traceheader, samples, exttext, layout, reader,
+  writer, fields]
 export textheader, binheader, traceheader, samples, exttext, layout, reader, writer, fields
 
 import parseSEG/segd/[headers as segdheaders, samples as segdsamples, rev3 as segdrev3,

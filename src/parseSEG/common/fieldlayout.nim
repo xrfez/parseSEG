@@ -28,11 +28,14 @@
 ##
 ## | Pragma | Field type | Bytes |
 ## |---|---|---|
-## | `bcdAt(b, digits)` / `bcdAtL(b, digits)` | int: BCD digits from the high / low nibble of byte b; -1 = all `F` (sentinel), -2 = not BCD | digits nibbles |
+## | `bcdAt(b, digits)` / `bcdAtL(b, digits)` | int: BCD digits from the high / low nibble (note 1) | digits nibbles |
 ## | `nibAt(b)` / `nibAtL(b)` | uint8: the high / low nibble of byte b, binary | 1 nibble |
 ## | `at24(b)` | int32 / uint32: 3-byte two's complement / unsigned | 3 |
-## | `fix40(b)` | float64: `i24.u16` fixed point (signed integer part, binary fraction); encode rounds to 2^-16 | 5 |
+## | `fix40(b)` | float64: `i24.u16` fixed point (note 2); encode rounds to 2^-16 | 5 |
 ## | `fix24(b)` | float64: `u16.u8` fixed point; encode rounds to 2^-8 | 3 |
+##
+## Note 1: starting at byte b; -1 = all `F` (sentinel), -2 = not BCD.
+## Note 2: signed integer part, binary fraction.
 ##
 ## `encodeChanged` writes only the fields that differ from the bytes already
 ## in the buffer, so undefined bytes, invalid BCD and vendor quirks in an
@@ -230,14 +233,14 @@ template encodeOne(v: untyped, name: string, b: var openArray[byte], firstByte: 
     putBeU24(b, pos, uint32(fixedToInt(v, 256.0, 0, 0xFF_FFFF, name)))
 
 proc decodeFields*[T: object](h: var T, b: openArray[byte], firstByte: static int,
-    order: ByteOrder) {.inline.} =
+    order: ByteOrder) =
   ## Fills every layout field of `h` from `b`, where `b[0]` holds spec byte
   ## `firstByte`.
   for _, v in fieldPairs(h):
     decodeOne(v, b, firstByte, order)
 
 proc encodeFields*[T: object](h: T, b: var openArray[byte], firstByte: static int,
-    order: ByteOrder) {.inline.} =
+    order: ByteOrder) =
   ## Writes every layout field of `h` into `b`, where `b[0]` holds spec byte
   ## `firstByte`. Raises `SegFormatError` for a value the field cannot hold.
   for name, v in fieldPairs(h):

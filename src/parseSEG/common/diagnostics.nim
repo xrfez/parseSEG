@@ -24,35 +24,12 @@
 
 import std/strutils
 import nifbuilder, nifreader, nifcore, stringviews
-import errors
+import errors, diagcodes
 import ../abi/pragmas
 
+export diagcodes
+
 type
-  Severity* = enum
-    ## How bad a problem is. Order matters: later members are worse.
-    sevInfo = "info"       ## Noteworthy but valid, e.g. a vendor block kept raw.
-    sevWarning = "warning" ## Spec-invalid or suspicious, but the data was decoded.
-    sevError = "error"     ## A part could not be decoded and was kept raw.
-    sevFatal = "fatal"     ## The read had to stop early (I/O failure, truncation).
-
-  DiagCode* = enum
-    ## Catalog of problem kinds. The string spellings appear in NIF output and
-    ## are stable; add members, never rename them.
-    dcInternal = "internal"         ## Unexpected exception: a library bug or unhandled case.
-    dcIo = "io"                     ## The operating system reported an I/O failure.
-    dcTruncated = "truncated"       ## Data ends before an announced structure is complete.
-    dcBadValue = "badValue"         ## A field violates the spec; the value is kept as read.
-    dcBadBcd = "badBcd"             ## A BCD field holds a non-decimal nibble.
-    dcInconsistent = "inconsistent" ## Two header values disagree, e.g. counts vs lengths.
-    dcByteOrder = "byteOrder"       ## Byte order was inferred rather than declared.
-    dcUnsupportedRevision = "unsupportedRevision" ## Unknown revision; parsed as the nearest one.
-    dcUnsupportedFormat = "unsupportedFormat" ## Sample format not decodable; trace kept raw.
-    dcUnknownBlock = "unknownBlock" ## Block type not defined by the spec; kept raw.
-    dcVendorBlock = "vendorBlock"   ## Vendor block without a registered decoder; kept raw.
-    dcVendorMap = "vendorMap"       ## A vendor map is malformed or does not fit the data.
-    dcTapeLayout = "tapeLayout"     ## Tape marks, labels or block sizes deviate from the spec.
-    dcValidation = "validation"     ## A writer found spec-invalid content.
-
   Location* = object
     ## Where a problem sits: which file, and where in its logical structure.
     ## -1 / "" mean "not applicable" or "unknown".
@@ -122,9 +99,11 @@ func `[]`*(log: DiagLog; i: int): lent Diagnostic {.inline, segApi.} =
   log.entries[i]
 
 iterator items*(log: DiagLog): lent Diagnostic =
+  ## Yields the diagnostics, oldest first.
   for d in log.entries: yield d
 
 iterator pairs*(log: DiagLog): (int, lent Diagnostic) =
+  ## Yields `(index, diagnostic)` pairs, oldest first.
   for i, d in log.entries: yield (i, d)
 
 func count*(log: DiagLog; severity: Severity): int {.inline, segApi.} =
@@ -149,8 +128,7 @@ proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError) =
   let (severity, code) =
     if e of SegTruncatedError: (sevFatal, dcTruncated)
     elif e of SegUnlocatableError:
-      let c = (ref SegUnlocatableError)(e).diagCode
-      (sevFatal, if c in ord(DiagCode.low)..ord(DiagCode.high): DiagCode(c) else: dcBadValue)
+      (sevFatal, (ref SegUnlocatableError)(e).diagCode)
     elif e of SegFormatError: (sevError, dcBadValue)
     elif e of IOError or e of OSError: (sevFatal, dcIo)
     else: (sevError, dcInternal)
@@ -159,7 +137,7 @@ proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError) =
 proc raiseUnlocatable*(code: DiagCode, msg: string, offset: int64 = -1) {.noinline, noreturn.} =
   ## Raises `SegUnlocatableError`: the reader cannot locate the rest of the
   ## data and stops; `tryRecord` logs it as `fatal` with `code`.
-  raise (ref SegUnlocatableError)(msg: msg, offset: offset, diagCode: ord(code))
+  raise (ref SegUnlocatableError)(msg: msg, offset: offset, diagCode: code)
 
 template tryRecord*(log: var DiagLog; loc: Location; body: untyped): bool =
   ## Runs `body`; if it raises a `CatchableError`, records it in `log` (see
