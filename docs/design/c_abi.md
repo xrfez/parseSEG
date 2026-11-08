@@ -51,9 +51,10 @@ per-function documentation.
    int64_t x_len`); any other overload of an exported name fails the build. The prefix is
    `seg`, so the project name never reaches the C API.
 4. **The core declares its own boundary.** `{.segApi.}` sits on the public core procs
-   (`traceindex`, `headerfields`, `summary`, `gathers`, `edit`, `join`, `diagnostics`,
-   `convert`, `revconvert`), `{.segHandle.}` on the types that cross as handles (`SeismicFile`,
-   `HeaderEditor`, `SurveyGeometry`, `DiagLog`) and `{.segField.}` on fields exported as
+   (`traceindex`, `headerfields`, `summary`, `headerlist`, `headernif`, `gathers`, `edit`,
+   `join`, `diagnostics`, `convert`, `revconvert`), `{.segHandle.}` on the types that cross as handles (`SeismicFile`,
+   `HeaderEditor`, `SurveyGeometry`, `DiagLog`, `HeaderListing`, `HeaderPatch`) and
+   `{.segField.}` on fields exported as
    properties. The pragmas (`src/parseSEG/abi/pragmas.nim`) need only `std/macros`, and
    without `-d:segCapi` they change nothing.
    - Under `-d:segCapi` each pragma records the routine's resolved signature in a
@@ -89,6 +90,7 @@ per-function documentation.
    | object | `const SegX *` (NULL: `T()`), enum fields checked | `SegX *out` |
    | `seq[T]` | | `T *out, int64_t out_cap, int64_t *out_len` |
    | `FieldValue` | `const SegValue *` | `SegValue *out` (text into the caller's buffer) |
+   | `seq[string]` | | `char *out, int64_t out_cap, int64_t *out_len`: each string NUL-ended |
 
    - Text and lists are copied into the caller's buffer: at most `out_cap` bytes (with a
      NUL) or elements, and `*out_len` is the full length, so a short buffer is detected and
@@ -97,7 +99,11 @@ per-function documentation.
      keeps any Nim layout: `int` becomes `int64_t`, an enum `int32_t`, a `Slice[int]` a
      `SegSlice {a, b}`, and nested objects nest. A `string` field becomes a `const char *`
      borrowed from the receiver, so it is allowed only in a `lent` result (a
-     `SegDiagnostic`'s strings belong to its `SegDiagLog`).
+     `SegDiagnostic`'s strings belong to its `SegDiagLog`). A `FieldValue` field is a
+     `SegValueRef` (kind, `i`, `f`, borrowed `text` and `text_len`), under the same rule
+     (`SegHeaderRow.value`).
+   - A list of borrowed structs crosses as a handle with `len` and `[]`, which is the C
+     iterator: `seg_diag_log_len`/`_get`, `seg_header_listing_len`/`_get`.
 6. **Objects cross as opaque handles.** `SegSeismicFile` (a mapped file with its index and
    keys), `SegTensor`, `SegPrefetcher`, `SegHeaderEditor`, `SegSurveyGeometry`, `SegDiagLog`.
    - Each is a Nim `ref` (`Handle[T]` around a core value, or the adapter's own `ref`) kept

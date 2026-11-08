@@ -125,6 +125,37 @@ with parseseg.open_seismic(junk) as j:
     sj = j.summary()
     assert sj["standard"] == "unknown" and math.isnan(sj["sample_interval_us"])
 
+# Header listing (task 6.10): sequences of row dicts, read-only.
+rows = list(f.trace_headers(5))
+sx = [r for r in rows if r["block_name"] == "trace" and r["field"] == "sourceX"][0]
+assert sx["value"] == 1704188 and sx["kind"] == "SEG-Y trace" and sx["size"] == 4
+assert sx["offset"] == f.trace_entry(5)["offset"] + 72 and sx["block_size"] == 240
+assert set(sx) == {"block_name", "kind", "field", "value", "offset", "size", "block_offset",
+                   "block_size"}
+assert len(rows) == len(parseseg.field_names("SEG-Y trace"))
+assert parseseg.field_names("SEG-Y trace")[0] == "traceSeqLine" and parseseg.field_names("raw") == []
+raises(parseseg.ArgumentError, parseseg.field_names, "bogus")
+fh = f.file_headers()
+assert fh[0]["block_name"] == "text" and fh[0]["value"] == "textual header" and fh[0]["field"] == ""
+assert fh[-1]["block_name"] == "extended" and len(f.record_headers(0)) == 0
+raises(parseseg.ArgumentError, f.record_headers, 1)
+raises(parseseg.ArgumentError, f.trace_headers, 200)
+with parseseg.open_seismic(S63) as d2:
+    rec = d2.record_headers(0)
+    gh3 = [r for r in rec if r["block_name"] == "gh3" and r["field"] == "sourcePointNumber"][0]
+    assert gh3["value"] == 99.5 and gh3["kind"] == "SEG-D ghN"
+    assert d2.copy_bytes(gh3["block_offset"], gh3["block_size"])[:4] == bytes(d2.copy_bytes(gh3["block_offset"], 4))
+p = parseseg.HeaderPatch()
+p.add("trace", 5, "trace.sourceX", 1700000)
+p.add("file", 0, "binary.jobId", 7)
+assert len(p) == 2
+raises(parseseg.ArgumentError, p.add, "trace", 0, "nodot", 1)
+patch = os.path.join(scratch, "viewer.nif")
+p.write(patch)
+with open(patch) as fh_:
+    assert "(trace 5 (block trace (f sourceX 1700000)))" in fh_.read()
+p.close()
+
 # Text fields come back as str.
 assert isinstance(f.trace_field(0, "trace.headerName"), str)
 

@@ -42,7 +42,9 @@ type
     of fvText: text*: string
 
   HeaderBlock* = enum
-    ## The header block types that have named fields.
+    ## The header block types that have named fields. Fields and edits by
+    ## name reach the first eight; header listings (`model/headerlist`) show
+    ## them all.
     hbSegyBinary = "SEG-Y binary"
     hbSegyTrace = "SEG-Y trace"
     hbSegyExt1 = "SEG-Y ext1"
@@ -51,6 +53,21 @@ type
     hbSegdExt1Rev3 = "SEG-D Rev 3 ext1"
     hbSegdGh1 = "SEG-D gh1"
     hbSegdGhN = "SEG-D ghN"
+    hbSegdGh2 = "SEG-D gh2"
+    hbSegdGh2Rev3 = "SEG-D Rev 3 gh2"
+    hbSegdGh3Rev3 = "SEG-D Rev 3 gh3"
+    hbSegdChannelSet = "SEG-D channel set"
+    hbSegdChannelSetRev3 = "SEG-D Rev 3 channel set"
+    hbSegdPosition = "SEG-D position"
+    hbSegdSourceDescription = "SEG-D source description"
+    hbSegdAdditionalSourceInfo = "SEG-D additional source info"
+    hbSegdSensorInfo = "SEG-D sensor info"
+    hbSegdTimestamp = "SEG-D timestamp"
+    hbSegdSensorCalibration = "SEG-D sensor calibration"
+    hbSegdTimeDrift = "SEG-D time drift"
+    hbSegdOrientation = "SEG-D orientation"
+    hbSegdTrailerDescription = "SEG-D trailer description"
+    hbRaw = "raw" ## A block without named fields (listings only).
 
   HeaderScope* = enum
     ## Where a named field lives: the file (`fileField`), a SEG-D record
@@ -77,6 +94,9 @@ type
     ## **Internal.** A field read from the map (`readField`), or why not.
     value*: FieldValue
     error*: string ## Empty when the value was read.
+
+  RawBlock = object
+    ## The (fieldless) header type of `hbRaw`.
 
 func toFieldValue*(v: SomeInteger): FieldValue =
   ## An integer value (`fvInt`).
@@ -147,6 +167,66 @@ template withBlockType*(k: HeaderBlock, body: untyped) =
     type BlockT {.inject.} = SegdGeneralHeaderN
     const firstByte {.inject.} = 1
     body
+  of hbSegdGh2:
+    type BlockT {.inject.} = SegdGeneralHeader2
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdGh2Rev3:
+    type BlockT {.inject.} = SegdGeneralHeader2Rev3
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdGh3Rev3:
+    type BlockT {.inject.} = SegdGeneralHeader3
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdChannelSet:
+    type BlockT {.inject.} = SegdChannelSetDescriptor
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdChannelSetRev3:
+    type BlockT {.inject.} = SegdChannelSetDescriptorRev3
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdPosition:
+    type BlockT {.inject.} = SegdPositionBlock
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdSourceDescription:
+    type BlockT {.inject.} = SegdSourceDescription
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdAdditionalSourceInfo:
+    type BlockT {.inject.} = SegdAdditionalSourceInfo
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdSensorInfo:
+    type BlockT {.inject.} = SegdSensorInfo
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdTimestamp:
+    type BlockT {.inject.} = SegdTimestampHeader
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdSensorCalibration:
+    type BlockT {.inject.} = SegdSensorCalibration
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdTimeDrift:
+    type BlockT {.inject.} = SegdTimeDrift
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdOrientation:
+    type BlockT {.inject.} = SegdOrientation
+    const firstByte {.inject.} = 1
+    body
+  of hbSegdTrailerDescription:
+    type BlockT {.inject.} = SegdTrailerDescription
+    const firstByte {.inject.} = 1
+    body
+  of hbRaw:
+    type BlockT {.inject.} = RawBlock
+    const firstByte {.inject.} = 1
+    body
 
 template isLayoutField*(f: untyped): bool =
   ## **Internal.** True for fields with a layout pragma (raw copies like
@@ -155,14 +235,15 @@ template isLayoutField*(f: untyped): bool =
     f.hasCustomPragma(bcdAtL) or f.hasCustomPragma(nibAt) or f.hasCustomPragma(nibAtL) or
     f.hasCustomPragma(at24) or f.hasCustomPragma(fix40) or f.hasCustomPragma(fix24)
 
-template isNamedField(f: untyped): bool =
-  # A layout field `fieldNames` lists: raw byte arrays are not.
+template isNamedField*(f: untyped): bool =
+  ## **Internal.** A layout field `fieldNames` lists: raw byte arrays are
+  ## not.
   isLayoutField(f) and (when f is array: typeof(f[0]) is char else: true)
 
-proc fieldNames*(k: HeaderBlock): seq[string] =
-  ## The named fields of block kind `k`, in layout order (raw byte fields
-  ## excluded).
-  withBlockType(k):
+proc fieldNames*(kind: HeaderBlock): seq[string] {.segApi.} =
+  ## The named fields of block kind `kind`, in layout order (raw byte fields
+  ## excluded; none for `hbRaw`).
+  withBlockType(kind):
     var h: BlockT
     for n, f in fieldPairs(h):
       when isNamedField(f): result.add n
@@ -252,8 +333,8 @@ proc locate*(ix: TraceIndex, scope: HeaderScope, index: int, name: string): Fiel
 
 # ---------------------------------------------------------------- reading --
 
-proc toValue[F](f: F): Option[FieldValue] =
-  # A layout field's value; none for raw byte arrays.
+proc fieldValueOf*[F](f: F): Option[FieldValue] =
+  ## **Internal.** A decoded layout field's value; none for raw byte arrays.
   when f is SomeInteger:
     when f is uint64:
       some(if f > uint64(high(int64)): toFieldValue(float64(f)) else: toFieldValue(int64(f)))
@@ -273,7 +354,7 @@ proc fieldByName*[T](h: T, name: string): Option[FieldValue] =
   ## has no such field (raw byte fields included).
   for n, f in fieldPairs(h):
     when isLayoutField(f):
-      if n == name: return toValue(f)
+      if n == name: return fieldValueOf(f)
   none(FieldValue)
 
 proc checkBlock(f: SeismicFile, b: BlockRef): string =
@@ -310,7 +391,7 @@ proc readFields*(f: SeismicFile, b: BlockRef, values: var seq[Option[FieldValue]
       var h: BlockT
       decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
       for x in fields(h):
-        when isNamedField(x): values.add toValue(x)
+        when isNamedField(x): values.add fieldValueOf(x)
 
 proc lookup(f: SeismicFile, scope: HeaderScope, index: int, name: string): FieldRead =
   let r = f.index.locate(scope, index, name)

@@ -76,6 +76,17 @@ block dump:
   doAssert ok("dump", inglewood, "--traces=1,3").strip.splitLines.len == 3
   let all = ok("dump", s63, "--all", "--traces=0")
   doAssert "trace.traceNumber = " in all and "ext1.receiverLineNumber = " in all
+  # 6.10: the listing, with offsets; record and file headers.
+  doAssert "  trace.fileNumber = 63  (@" in all and "ext1.receiverLineNumber = " in all
+  let rec = ok("dump", s63, "--records=0")
+  doAssert rec.startsWith("record 0") and "gh3.sourcePointNumber = 99.5" in rec and
+    "st1cs1.channelSetNumber = 1" in rec and "trace\toffset" notin rec
+  let fh = ok("dump", inglewood, "--file")
+  doAssert "text: textual header  (@0, 3200 B)" in fh and
+    "binary.formatCode = 1  (@3224, 2 B)" in fh
+  doAssert "record 1 out of range" in fails(2, "dump", s63, "--records=1")
+  let i3 = ok("dump", inova, "--all", "--traces=3")
+  doAssert "ext2.tuple1Coord1 = " in i3 and "ext5: userDefined" in i3
   doAssert "out of range" in fails(2, "dump", inglewood, "--traces=200")
   doAssert "bad trace selection" in fails(2, "dump", inglewood, "--traces=x")
 

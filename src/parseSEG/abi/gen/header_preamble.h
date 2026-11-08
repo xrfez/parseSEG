@@ -130,6 +130,17 @@ typedef struct SegValue {
     int64_t  text_len;
 } SegValue;
 
+/* A header value inside a struct (SegHeaderRow.value): `text` is borrowed
+   from the struct's owner, like the struct's other strings. */
+typedef struct SegValueRef {
+    int32_t     kind;     /* SEG_VALUE_INT, SEG_VALUE_FLOAT or SEG_VALUE_TEXT */
+    int32_t     reserved;
+    int64_t     i;        /* SEG_VALUE_INT */
+    double      f;        /* SEG_VALUE_FLOAT (also set, as a double, for ints) */
+    const char *text;     /* SEG_VALUE_TEXT: NUL-terminated, `text_len` bytes */
+    int64_t     text_len;
+} SegValueRef;
+
 /* ---- DLPack v0.8 (https://github.com/dmlc/dlpack) -------------------- */
 #ifndef DLPACK_VERSION
 typedef struct { int32_t device_type; int32_t device_id; } DLDevice; /* CPU = 1 */

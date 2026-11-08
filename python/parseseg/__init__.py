@@ -197,6 +197,24 @@ class SegValue(ctypes.Structure):
                 ("text_len", ctypes.c_int64)]
 
 
+class SegValueRef(ctypes.Structure):
+    _fields_ = [("kind", ctypes.c_int32), ("reserved", ctypes.c_int32),
+                ("i", ctypes.c_int64), ("f", ctypes.c_double),
+                ("text", ctypes.c_void_p), ("text_len", ctypes.c_int64)]
+
+
+def _value_ref(v):
+    if v.kind == 1:
+        return v.i
+    if v.kind == 2:
+        return v.f
+    return ctypes.string_at(v.text, v.text_len).decode("utf-8", "replace") if v.text else ""
+
+
+def _strings(fn):
+    return _text(fn).split("\0")[:-1]
+
+
 def _value_in(x, name):
     v = SegValue()
     if isinstance(x, str):
@@ -339,12 +357,16 @@ _E_CoordinateUnits = {"unknown": 0, "meters": 1, "feet": 2, "length": 3, "arcSec
 _N_CoordinateUnits = {0: "unknown", 1: "meters", 2: "feet", 3: "length", 4: "arcSeconds", 5: "degrees", 6: "dms", }
 _E_CrsTextFormat = {"none": 0, "stanza": 1, "P1/11": 2, "unknown": 3, }
 _N_CrsTextFormat = {0: "none", 1: "stanza", 2: "P1/11", 3: "unknown", }
+_E_HeaderBlock = {"SEG-Y binary": 0, "SEG-Y trace": 1, "SEG-Y ext1": 2, "SEG-D trace": 3, "SEG-D ext1": 4, "SEG-D Rev 3 ext1": 5, "SEG-D gh1": 6, "SEG-D ghN": 7, "SEG-D gh2": 8, "SEG-D Rev 3 gh2": 9, "SEG-D Rev 3 gh3": 10, "SEG-D channel set": 11, "SEG-D Rev 3 channel set": 12, "SEG-D position": 13, "SEG-D source description": 14, "SEG-D additional source info": 15, "SEG-D sensor info": 16, "SEG-D timestamp": 17, "SEG-D sensor calibration": 18, "SEG-D time drift": 19, "SEG-D orientation": 20, "SEG-D trailer description": 21, "raw": 22, }
+_N_HeaderBlock = {0: "SEG-Y binary", 1: "SEG-Y trace", 2: "SEG-Y ext1", 3: "SEG-D trace", 4: "SEG-D ext1", 5: "SEG-D Rev 3 ext1", 6: "SEG-D gh1", 7: "SEG-D ghN", 8: "SEG-D gh2", 9: "SEG-D Rev 3 gh2", 10: "SEG-D Rev 3 gh3", 11: "SEG-D channel set", 12: "SEG-D Rev 3 channel set", 13: "SEG-D position", 14: "SEG-D source description", 15: "SEG-D additional source info", 16: "SEG-D sensor info", 17: "SEG-D timestamp", 18: "SEG-D sensor calibration", 19: "SEG-D time drift", 20: "SEG-D orientation", 21: "SEG-D trailer description", 22: "raw", }
 _E_SpsRevision = {"auto": 0, "1.0": 1, "2.1": 2, }
 _N_SpsRevision = {0: "auto", 1: "1.0", 2: "2.1", }
 _E_TextLayout = {"lines": 0, "fixed80": 1, "ebcdic80": 2, }
 _N_TextLayout = {0: "lines", 1: "fixed80", 2: "ebcdic80", }
 _E_Dtype = {"float32": 1, "float64": 2, }
 _N_Dtype = {1: "float32", 2: "float64", }
+_E_HeaderScope = {"file": 0, "record": 1, "trace": 2, }
+_N_HeaderScope = {0: "file", 1: "record", 2: "trace", }
 
 # ---------------------------------------------------------- structs
 
@@ -549,6 +571,23 @@ class SegChannelSetSummary(ctypes.Structure):
     _defaults = {}
 
 
+class SegHeaderRow(ctypes.Structure):
+    """One field of a header listing."""
+    _fields_ = [
+        ("block_name", ctypes.c_char_p),
+        ("kind", ctypes.c_int32),
+        ("field", ctypes.c_char_p),
+        ("value", SegValueRef),
+        ("offset", ctypes.c_int64),
+        ("size", ctypes.c_int64),
+        ("block_offset", ctypes.c_int64),
+        ("block_size", ctypes.c_int64),
+    ]
+    _out = (("block_name", lambda _v: _dec(_v)), ("kind", lambda _v: _N_HeaderBlock.get(_v, _v)), ("field", lambda _v: _dec(_v)), ("value", lambda _v: _value_ref(_v)), ("offset", lambda _v: _v), ("size", lambda _v: _v), ("block_offset", lambda _v: _v), ("block_size", lambda _v: _v), )
+    _in = {}
+    _defaults = {}
+
+
 class SegSpsOptions(ctypes.Structure):
     """How `readSps` reads a file."""
     _fields_ = [
@@ -602,6 +641,10 @@ _lib.seg_seismic_file_release.argtypes = [ctypes.c_void_p]
 _lib.seg_seismic_file_release.restype = None
 _lib.seg_header_editor_release.argtypes = [ctypes.c_void_p]
 _lib.seg_header_editor_release.restype = None
+_lib.seg_header_patch_release.argtypes = [ctypes.c_void_p]
+_lib.seg_header_patch_release.restype = None
+_lib.seg_header_listing_release.argtypes = [ctypes.c_void_p]
+_lib.seg_header_listing_release.restype = None
 _lib.seg_survey_geometry_release.argtypes = [ctypes.c_void_p]
 _lib.seg_survey_geometry_release.restype = None
 _lib.seg_tensor_release.argtypes = [ctypes.c_void_p]
@@ -650,6 +693,8 @@ _lib.seg_seismic_file_gathers.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegGat
 _lib.seg_seismic_file_gathers.restype = ctypes.c_int32
 _lib.seg_seismic_file_component_group_ids.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_seismic_file_component_group_ids.restype = ctypes.c_int32
+_lib.seg_field_names.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_field_names.restype = ctypes.c_int32
 _lib.seg_seismic_file_trace_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
 _lib.seg_seismic_file_trace_field.restype = ctypes.c_int32
 _lib.seg_seismic_file_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
@@ -674,12 +719,30 @@ _lib.seg_header_editor_set_file_field.argtypes = [ctypes.c_void_p, ctypes.c_char
 _lib.seg_header_editor_set_file_field.restype = ctypes.c_int32
 _lib.seg_header_editor_set_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue), ctypes.POINTER(ctypes.c_bool)]
 _lib.seg_header_editor_set_record_field.restype = ctypes.c_int32
+_lib.seg_header_patch_new.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_header_patch_new.restype = ctypes.c_int32
+_lib.seg_header_patch_add.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
+_lib.seg_header_patch_add.restype = ctypes.c_int32
+_lib.seg_header_patch_len.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_header_patch_len.restype = ctypes.c_int32
+_lib.seg_header_patch_write.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.seg_header_patch_write.restype = ctypes.c_int32
 _lib.seg_seismic_file_crs_text.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_seismic_file_crs_text.restype = ctypes.c_int32
 _lib.seg_seismic_file_summary.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegFileSummary)]
 _lib.seg_seismic_file_summary.restype = ctypes.c_int32
 _lib.seg_seismic_file_channel_sets.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegChannelSetSummary), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_seismic_file_channel_sets.restype = ctypes.c_int32
+_lib.seg_header_listing_len.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_header_listing_len.restype = ctypes.c_int32
+_lib.seg_header_listing_get.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegHeaderRow)]
+_lib.seg_header_listing_get.restype = ctypes.c_int32
+_lib.seg_seismic_file_trace_headers.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_trace_headers.restype = ctypes.c_int32
+_lib.seg_seismic_file_record_headers.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_record_headers.restype = ctypes.c_int32
+_lib.seg_seismic_file_file_headers.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_file_headers.restype = ctypes.c_int32
 _lib.seg_survey_geometry_relation_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_survey_geometry_relation_count.restype = ctypes.c_int32
 _lib.seg_survey_geometry_new.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
@@ -1242,6 +1305,47 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         finally:
             self._leave()
 
+    def trace_headers(self, trace):
+        """Every header block of trace `trace`, as rows in file order: `trace`,
+        `ext1` and any further extensions (see the module documentation).
+        Raises `ValueError` for a trace out of range or a closed file."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_trace_headers, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _wrap(HeaderListing, _o.value)
+        finally:
+            self._leave()
+
+    def record_headers(self, record):
+        """Every header block of SEG-D record `record`, as rows in file order:
+        general headers, channel set descriptors, skew, extended and external
+        headers, and the trailer (see the module documentation). Empty for
+        record 0 of a SEG-Y file, which has no record headers. Raises
+        `ValueError` for a record out of range or a closed file."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_record_headers, _h, _int(record, "record", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _wrap(HeaderListing, _o.value)
+        finally:
+            self._leave()
+
+    def file_headers(self):
+        """The file-level header blocks, as rows in file order: SEG-Y tape label,
+        textual, binary, extended textual headers and data trailer; SEG-D the
+        storage unit label. Raises `ValueError` for a closed file."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_file_headers, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _wrap(HeaderListing, _o.value)
+        finally:
+            self._leave()
+
     def apply_survey(self, g, overwrite=False):
         """Fills the trace keys from the survey, in memory only: the file does not
         change. Returns the traces changed. Raises `ValueError` for a file opened
@@ -1412,6 +1516,90 @@ class HeaderEditor(_Handle):
             return _text(lambda _b, _c, _n: _call(_lib.seg_header_editor_journal_path, _h, _b, _c, _n))
         finally:
             self._leave()
+
+
+class HeaderPatch(_Handle):
+    """A pending change set (a viewer's edits), saved with `writeHeaderPatch`."""
+    _release = _lib.seg_header_patch_release
+
+    def __init__(self):
+        """An empty change set."""
+        _o = ctypes.c_void_p()
+        _call(_lib.seg_header_patch_new, ctypes.byref(_o))
+        self._h = _o.value
+        self._mu = threading.Lock()
+
+    def add(self, scope, index, name, value):
+        """Adds a change of field `name` (`<block>.<field>`, as in the listings)
+        of the file (`hsFile`, index 0), record `index` or trace `index` to
+        `value`. A later change of the same field wins when the patch is
+        imported. Raises `ValueError` for a malformed name or index."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_header_patch_add, _h, _enum(_E_HeaderScope, scope, "scope"), _int(index, "index", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_value_in(value, "value")))
+        finally:
+            self._leave()
+
+    def __len__(self):
+        """The number of changes."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_header_patch_len, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def write(self, path):
+        """Writes the change set as a NIF patch (`writeHeaderPatch`): the
+        `exportHeaders` layout, for an explicit `importHeaders`. Raises
+        `IOError` if `path` cannot be written."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_header_patch_write, _h, _str(path, "path"))
+        finally:
+            self._leave()
+
+
+class HeaderListing(_Handle):
+    """The ordered header rows of one trace, record or file."""
+    _release = _lib.seg_header_listing_release
+
+    def __len__(self):
+        """The number of rows."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_header_listing_len, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def _getitem(self, i):
+        """Row `i`, in file order. As for a `seq`, an `i` outside `0 ..< len` is a
+        bug (`IndexDefect`)."""
+        _h = self._enter()
+        try:
+            _o = SegHeaderRow()
+            if _call(_lib.seg_header_listing_get, _h, _int(i, "i", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _struct_dict(_o)
+        finally:
+            self._leave()
+    def __getitem__(self, index):
+        i = operator.index(index)
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(f"{type(self).__name__} index out of range")
+        return self._getitem(i)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self._getitem(i)
 
 
 class SurveyGeometry(_Handle):
@@ -1768,6 +1956,11 @@ def convert_file(src_path, dst_path, opts=None):
     _o = ctypes.c_void_p()
     _st = _lib.seg_convert_file(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_o))
     return _logged(_st, _o)
+
+def field_names(kind):
+    """The named fields of block kind `kind`, in layout order (raw byte fields
+    excluded; none for `hbRaw`)."""
+    return _strings(lambda _b, _c, _n: _call(_lib.seg_field_names, _enum(_E_HeaderBlock, kind, "kind"), _b, _c, _n))
 
 def rollback_journal(path, journal_path):
     """Undoes the journal's edits on `path`, newest first. Locations already

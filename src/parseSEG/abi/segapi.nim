@@ -56,6 +56,8 @@
 ## `seq[T]`                                                    `T *out, int64_t out_cap,
 ##                                                              int64_t *out_len`
 ## `FieldValue`           `const SegValue *`                   `SegValue *out`
+## `seq[string]`                                               `char *out, int64_t out_cap,
+##                                                              int64_t *out_len` (each NUL-ended)
 ## =====================  ===================================  ==================================
 ##
 ## Out-pointers may be NULL (the result is dropped). Text and sequences are
@@ -63,7 +65,8 @@
 ## `*out_len` set to the full length, so the caller detects a buffer that is
 ## too small and calls again. Struct fields map like parameters. A `string`
 ## field is a `const char *` borrowed from the receiver, so it is allowed only
-## in a `lent` result. A `proc` that returns a `DiagLog` fails when the log
+## in a `lent` result; so is a `FieldValue` field, a `SegValueRef` whose text
+## is borrowed the same way. A `proc` that returns a `DiagLog` fails when the log
 ## `isFatal`, and still hands the log out.
 
 import std/[macros, macrocache, strutils, tables, math]
@@ -77,7 +80,7 @@ type
   AbiKind = enum
     ## How a Nim type crosses the boundary.
     akVoid, akInt, akFloat, akBool, akEnum, akString, akPointer, akHandle, akStruct, akSlice,
-    akIds, akSeq, akBytes, akValue
+    akIds, akSeq, akBytes, akValue, akStrings
 
   AbiType = object
     ## A Nim type and its C and ctypes forms.
@@ -151,10 +154,15 @@ func snake(s: string): string =
     elif c != '`': result.add c
 
 func upperSnake(s: string): string =
-  ## `badValue` -> `BAD_VALUE`, `SEG-Y` -> `SEG_Y`.
-  result = (if s.toUpperAscii == s: s else: snake(s)).toUpperAscii
-  for c in result.mitems:
-    if c notin {'A'..'Z', '0'..'9'}: c = '_'
+  ## `badValue` -> `BAD_VALUE`, `SEG-Y` -> `SEG_Y`, `SEG-D Rev 3 gh2` ->
+  ## `SEG_D_REV_3_GH2`: a word break before a capital that follows a lower
+  ## case letter, every other character an underscore, runs of them one.
+  result = ""
+  for i, c in s:
+    let brk = c.isUpperAscii and i > 0 and s[i - 1].isLowerAscii
+    let d = if c.isAlphaNumeric: c.toUpperAscii else: '_'
+    if (brk or d == '_') and result.len > 0 and result[^1] != '_': result.add '_'
+    if d != '_': result.add d
 
 func cComment(doc, indent: string): string =
   if doc.len == 0: return ""
@@ -400,6 +408,7 @@ proc classify(b: var Bindings, t0: NimNode, what: string): AbiType =
   of ntySequence:
     let e = b.classify(t[1], what & " element")
     if e.kind == akInt and e.cNim == "uint8": result.kind = akBytes
+    elif e.kind == akString: result.kind = akStrings
     elif e.kind in {akInt, akFloat, akStruct}:
       result.kind = akSeq
       result.elem = @[e]
@@ -440,7 +449,7 @@ proc mirrorIndex(b: var Bindings, t: NimNode): int =
       if $n in exported:
         let ft = b.classify(d[^2], nimName & "." & $n)
         case ft.kind
-        of akString:
+        of akString, akValue:
           m.strings = true
           m.input = false
         of akHandle: m.input = false
@@ -477,6 +486,8 @@ proc fieldC(b: var Bindings, f: MirrorField): (string, string, string, string, s
       "_N_" & t.nim & ".get($1, $1)")
   of akString:
     ("cstring", "const char *$1", "ctypes.c_char_p", "cstring($1)", "", "_dec($1)")
+  of akValue:
+    ("SegValueRef", "SegValueRef $1", "SegValueRef", "toValueRef($1)", "", "_value_ref($1)")
   of akPointer:
     ("pointer", "void *$1", "ctypes.c_void_p", "$1", "$1", "$1")
   of akHandle:
@@ -695,6 +706,7 @@ type
     pmSeq   ## Into a typed buffer (`seqType`), converted by `seqConv`.
     pmLog   ## A `DiagLog` that comes back even when the call fails.
     pmValue ## A `FieldValue`.
+    pmStrings ## Into a text buffer of NUL-ended strings, retried when too small.
 
   Gen = object
     ## One C wrapper and its Python function, built parameter by parameter.
@@ -824,6 +836,18 @@ proc genResult(b: var Bindings, g: var Gen, t: AbiType, call: string, isProc, ct
     g.pyArgTypes.add "ctypes.POINTER(ctypes.c_int64)"
     g.write = "writeText(" & call & ", o, ocap, olen)"
     g.pyMode = pmText
+  of akStrings:
+    g.cParams.add "o: ptr UncheckedArray[char]"
+    g.cParams.add "ocap: int64"
+    g.cParams.add "olen: ptr int64"
+    g.hParams.add "char *out"
+    g.hParams.add "int64_t out_cap"
+    g.hParams.add "int64_t *out_len"
+    g.pyArgTypes.add "ctypes.c_char_p"
+    g.pyArgTypes.add "ctypes.c_int64"
+    g.pyArgTypes.add "ctypes.POINTER(ctypes.c_int64)"
+    g.write = "writeStrings(" & call & ", o, ocap, olen)"
+    g.pyMode = pmStrings
   of akHandle:
     let h = b.handles[t.handle]
     g.cParams.add "o: ptr pointer"
@@ -895,6 +919,8 @@ proc pyBody(g: Gen, cName: string): seq[string] =
   case g.pyMode
   of pmText:
     result.add "return _text(lambda _b, _c, _n: _call(" & args & ", _b, _c, _n))"
+  of pmStrings:
+    result.add "return _strings(lambda _b, _c, _n: _call(" & args & ", _b, _c, _n))"
   of pmBytes:
     result.add "return _bytes(lambda _b, _c, _n: _call(" & args & ", _b, _c, _n))"
   of pmLog:
@@ -1220,10 +1246,14 @@ macro segFinish*(abiVersion: static int, moduleDoc: static string): untyped =
       for f in m.fields:
         off.add "  of \"" & m.cName & "." & f.c & "\": int64(offsetOf(" & m.mirror & ", " & f.nim &
           "))\n"
-    sz.add "  of \"SegValue\": sizeof(SegValue)\n  else: -1\n"
+    sz.add "  of \"SegValue\": sizeof(SegValue)\n  of \"SegValueRef\": sizeof(SegValueRef)\n" &
+      "  else: -1\n"
     for (n, c) in [("kind", "kind"), ("i", "i"), ("f", "f"), ("text", "text"),
         ("textCap", "text_cap"), ("textLen", "text_len")]:
       off.add "  of \"SegValue." & c & "\": int64(offsetOf(SegValue, " & n & "))\n"
+    for (n, c) in [("kind", "kind"), ("i", "i"), ("f", "f"), ("text", "text"),
+        ("textLen", "text_len")]:
+      off.add "  of \"SegValueRef." & c & "\": int64(offsetOf(SegValueRef, " & n & "))\n"
     off.add "  else: -1\n"
     b.text.hFns.add "\n/* Nim's size of a struct shared with C, for layout tests; " &
       "-1 if unknown. */\n" & "int64_t seg_sizeof(const char *type_name);\n" &

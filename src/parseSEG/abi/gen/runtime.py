@@ -191,6 +191,24 @@ class SegValue(ctypes.Structure):
                 ("text_len", ctypes.c_int64)]
 
 
+class SegValueRef(ctypes.Structure):
+    _fields_ = [("kind", ctypes.c_int32), ("reserved", ctypes.c_int32),
+                ("i", ctypes.c_int64), ("f", ctypes.c_double),
+                ("text", ctypes.c_void_p), ("text_len", ctypes.c_int64)]
+
+
+def _value_ref(v):
+    if v.kind == 1:
+        return v.i
+    if v.kind == 2:
+        return v.f
+    return ctypes.string_at(v.text, v.text_len).decode("utf-8", "replace") if v.text else ""
+
+
+def _strings(fn):
+    return _text(fn).split("\0")[:-1]
+
+
 def _value_in(x, name):
     v = SegValue()
     if isinstance(x, str):

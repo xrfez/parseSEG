@@ -69,6 +69,12 @@ static void test_layout(void) {
     SIZE(SegSlice); SIZE(SegConvertOptions); SIZE(SegSegyRevision); SIZE(SegSegdConvertOptions);
     SIZE(SegSegdRevision); SIZE(SegSpsOptions); SIZE(SegFileSummary);
     SIZE(SegStandardRevision); SIZE(SegChannelSetSummary);
+    SIZE(SegHeaderRow); SIZE(SegValueRef);
+    OFF(SegHeaderRow, block_name); OFF(SegHeaderRow, kind); OFF(SegHeaderRow, field);
+    OFF(SegHeaderRow, value); OFF(SegHeaderRow, offset); OFF(SegHeaderRow, size);
+    OFF(SegHeaderRow, block_offset); OFF(SegHeaderRow, block_size);
+    OFF(SegValueRef, kind); OFF(SegValueRef, i); OFF(SegValueRef, f); OFF(SegValueRef, text);
+    OFF(SegValueRef, text_len);
     OFF(SegTraceEntry, offset); OFF(SegTraceEntry, header_bytes); OFF(SegTraceEntry, num_samples);
     OFF(SegTraceEntry, record); OFF(SegTraceEntry, channel_set); OFF(SegTraceEntry, scan_type);
     OFF(SegTraceEntry, channel_type);
@@ -152,6 +158,57 @@ static void test_summary(void) {
     OK(seg_seismic_file_channel_sets(f, cs, 2, &len)); /* too small: the full length */
     CHECK(len == 4);
     seg_seismic_file_release(f);
+}
+
+/* ---- header listing and patches (task 6.10) --------------------------- */
+static void test_listing(void) {
+    SegSeismicFile *f = open_file("63.sgd", false);
+    SegHeaderListing *l = NULL;
+    OK(seg_seismic_file_record_headers(f, 0, &l));
+    int64_t n = -1;
+    OK(seg_header_listing_len(l, &n));
+    CHECK(n > 20);
+    bool found = false;
+    for (int64_t i = 0; i < n; i++) { /* the C iterator: len + get */
+        SegHeaderRow r;
+        OK(seg_header_listing_get(l, i, &r));
+        if (strcmp(r.block_name, "gh3") == 0 && strcmp(r.field, "sourcePointNumber") == 0) {
+            CHECK(r.kind == SEG_HEADER_BLOCK_SEG_D_GH_N && r.value.kind == SEG_VALUE_FLOAT);
+            CHECK(r.value.f == 99.5 && r.block_offset == 64 && r.block_size == 32);
+            found = true;
+        }
+    }
+    CHECK(found);
+    SegHeaderRow r;
+    CHECK(seg_header_listing_get(l, n, &r) == SEG_ERR_ARGUMENT);
+    seg_header_listing_release(l);
+    CHECK(seg_seismic_file_trace_headers(f, 1, &l) == SEG_ERR_ARGUMENT && l == NULL);
+    seg_seismic_file_release(f);
+    f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
+    OK(seg_seismic_file_file_headers(f, &l));
+    OK(seg_header_listing_get(l, 0, &r)); /* a raw block: its value names it */
+    CHECK(strcmp(r.block_name, "text") == 0 && r.field[0] == '\0' && r.kind == SEG_HEADER_BLOCK_RAW);
+    CHECK(r.value.kind == SEG_VALUE_TEXT && strcmp(r.value.text, "textual header") == 0 &&
+          r.value.text_len == 14 && r.block_size == 3200);
+    seg_header_listing_release(l);
+    seg_seismic_file_release(f);
+    char names[4096];
+    int64_t len = -1;
+    OK(seg_field_names(SEG_HEADER_BLOCK_SEG_Y_TRACE, names, sizeof names, &len));
+    CHECK(len < (int64_t)sizeof names && strcmp(names, "traceSeqLine") == 0);
+    CHECK(seg_field_names(99, names, sizeof names, &len) == SEG_ERR_ARGUMENT);
+    SegHeaderPatch *p = NULL;
+    OK(seg_header_patch_new(&p));
+    SegValue v = {0};
+    v.kind = SEG_VALUE_INT;
+    v.i = 1700000;
+    OK(seg_header_patch_add(p, SEG_HEADER_SCOPE_TRACE, 5, "trace.sourceX", &v));
+    CHECK(seg_header_patch_add(p, SEG_HEADER_SCOPE_TRACE, 5, "sourceX", &v) == SEG_ERR_ARGUMENT);
+    OK(seg_header_patch_len(p, &n));
+    CHECK(n == 1);
+    OK(seg_header_patch_write(p, path(tmp, "c_patch.nif")));
+    CHECK(seg_header_patch_write(p, path(tmp, "no-dir/x.nif")) == SEG_ERR_IO);
+    seg_header_patch_release(p);
 }
 
 /* ---- files, fields, logs --------------------------------------------- */
@@ -808,6 +865,7 @@ int main(int argc, char **argv) {
     test_layout();
     test_files();
     test_summary();
+    test_listing();
     test_reads();
     test_gathers_and_prefetch();
     test_edits();

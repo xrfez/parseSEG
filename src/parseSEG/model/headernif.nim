@@ -23,6 +23,9 @@
 ## bytes as `\HH`. A trace's `(raw ...)` holds all its header bytes; raw bytes
 ## are informational and are not imported.
 ##
+## `writeHeaderPatch` writes a change set (a viewer's edits, `HeaderPatch`)
+## in the same layout, for `importHeaders`.
+##
 ## Both directions stream: export writes through a buffer, import reads the
 ## document with a small strict tokenizer (documents are untrusted input; it
 ## bounds nesting, strings and numbers and only raises `SegFormatError`) and
@@ -33,6 +36,7 @@ import std/[os, strutils, math, options]
 import ../common/[errors, diagnostics, niftext]
 import ../segd/reader as segdreader
 import ./[traceindex, headerfields, edit]
+import ../abi/pragmas
 
 type
   HeaderChange* = object
@@ -531,3 +535,79 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
   if entryErrors > MaxLoggedErrors:
     result.log.report(sevError, dcValidation, $(entryErrors - MaxLoggedErrors) &
       " more entries name fields or traces the file does not have", loc = Location(file: nifPath))
+
+# ------------------------------------------------------------------ patch --
+
+type
+  HeaderPatch* {.segHandle.} = object
+    ## A pending change set (a viewer's edits), saved with `writeHeaderPatch`.
+    changes*: seq[HeaderChange]
+
+func validName(name: string): bool =
+  # `<block>.<field>`, both NIF identifiers.
+  let dot = name.find('.')
+  dot > 0 and dot < name.len - 1 and name.rfind('.') == dot and name[0] in IdentStart and
+    name[dot + 1] in IdentStart and name.allCharsInSet(IdentChars)
+
+proc checkChange(scope: HeaderScope, index: int, name: string) =
+  if not validName(name):
+    raise newException(ValueError, "expected <block>.<field>, not " & name.escape)
+  if index < 0 or (scope == hsFile and index != 0):
+    raise newException(ValueError, name & ": index " & $index & " is not a " & $scope &
+      " index")
+
+func initHeaderPatch*(): HeaderPatch {.segApi.} =
+  ## An empty change set.
+  HeaderPatch()
+
+proc add*(p: var HeaderPatch, scope: HeaderScope, index: int, name: string,
+    value: FieldValue) {.segApi.} =
+  ## Adds a change of field `name` (`<block>.<field>`, as in the listings)
+  ## of the file (`hsFile`, index 0), record `index` or trace `index` to
+  ## `value`. A later change of the same field wins when the patch is
+  ## imported. Raises `ValueError` for a malformed name or index.
+  checkChange(scope, index, name)
+  p.changes.add HeaderChange(scope: scope, index: index, name: name, new: value)
+
+func len*(p: HeaderPatch): int {.inline, segApi.} =
+  ## The number of changes.
+  p.changes.len
+
+proc writeHeaderPatch*(changes: openArray[HeaderChange], path: string) =
+  ## Writes `changes` (their `new` values) as a NIF patch in the
+  ## `exportHeaders` format, for `importHeaders` (a dry run first,
+  ## preferably into a copy with `outPath`). The patch names no standard or
+  ## counts, so `importHeaders` checks only its fields against the file.
+  ## Consecutive changes of one block share a `(block ...)`. Written to
+  ## `path.tmp` and renamed when complete. Raises `ValueError` for a
+  ## malformed name or index (nothing is written) and `IOError` if `path`
+  ## cannot be written.
+  for c in changes: checkChange(c.scope, c.index, c.name)
+  var s = "(.nif27)\n(.vendor \"parseSEG\")\n(headers"
+  var i = 0
+  while i < changes.len:
+    let c = changes[i]
+    s.add "\n (" & $c.scope & (if c.scope == hsFile: "" else: " " & $c.index)
+    while i < changes.len and changes[i].scope == c.scope and changes[i].index == c.index:
+      let blk = changes[i].name.split('.')[0]
+      s.add " (block " & blk
+      while i < changes.len and changes[i].scope == c.scope and
+          changes[i].index == c.index and changes[i].name.split('.')[0] == blk:
+        s.add " (f " & changes[i].name.split('.')[1] & " " & nifValue(changes[i].new) & ")"
+        inc i
+      s.add ")"
+    s.add ")"
+  s.add ")\n"
+  let tmp = path & ".tmp"
+  try:
+    writeFile(tmp, s)
+  except IOError:
+    if fileExists(tmp): removeFile(tmp)
+    raise
+  moveFile(tmp, path)
+
+proc write*(p: HeaderPatch, path: string) {.segApi.} =
+  ## Writes the change set as a NIF patch (`writeHeaderPatch`): the
+  ## `exportHeaders` layout, for an explicit `importHeaders`. Raises
+  ## `IOError` if `path` cannot be written.
+  writeHeaderPatch(p.changes, path)
