@@ -20,7 +20,7 @@
 ## requires; `findTraceField` (...) return an `Option` for fields that may be
 ## absent.
 
-import std/[macros, math, options, strutils]
+import std/[macros, options, strutils]
 import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
@@ -155,17 +155,17 @@ template isLayoutField*(f: untyped): bool =
     f.hasCustomPragma(bcdAtL) or f.hasCustomPragma(nibAt) or f.hasCustomPragma(nibAtL) or
     f.hasCustomPragma(at24) or f.hasCustomPragma(fix40) or f.hasCustomPragma(fix24)
 
+template isNamedField(f: untyped): bool =
+  # A layout field `fieldNames` lists: raw byte arrays are not.
+  isLayoutField(f) and (when f is array: typeof(f[0]) is char else: true)
+
 proc fieldNames*(k: HeaderBlock): seq[string] =
   ## The named fields of block kind `k`, in layout order (raw byte fields
   ## excluded).
   withBlockType(k):
     var h: BlockT
     for n, f in fieldPairs(h):
-      when isLayoutField(f):
-        when f is array:
-          when typeof(f[0]) is char: result.add n
-        else:
-          result.add n
+      when isNamedField(f): result.add n
 
 # ----------------------------------------------------------------- lookup --
 
@@ -252,34 +252,42 @@ proc locate*(ix: TraceIndex, scope: HeaderScope, index: int, name: string): Fiel
 
 # ---------------------------------------------------------------- reading --
 
+proc toValue[F](f: F): Option[FieldValue] =
+  # A layout field's value; none for raw byte arrays.
+  when f is SomeInteger:
+    when f is uint64:
+      some(if f > uint64(high(int64)): toFieldValue(float64(f)) else: toFieldValue(int64(f)))
+    else:
+      some(toFieldValue(int64(f)))
+  elif f is SomeFloat:
+    some(toFieldValue(float64(f)))
+  elif f is array and typeof(f[0]) is char:
+    var s = newString(f.len)
+    for k, c in f: s[k] = c
+    some(toFieldValue(s))
+  else:
+    none(FieldValue)
+
 proc fieldByName*[T](h: T, name: string): Option[FieldValue] =
   ## The value of layout field `name` of the decoded header `h`; none if `h`
   ## has no such field (raw byte fields included).
   for n, f in fieldPairs(h):
     when isLayoutField(f):
-      if n == name:
-        when f is SomeInteger:
-          when f is uint64:
-            return some(if f > uint64(high(int64)): toFieldValue(float64(f))
-                        else: toFieldValue(int64(f)))
-          else:
-            return some(toFieldValue(int64(f)))
-        elif f is SomeFloat:
-          return some(toFieldValue(float64(f)))
-        elif f is array:
-          when typeof(f[0]) is char:
-            var s = newString(f.len)
-            for k, c in f: s[k] = c
-            return some(toFieldValue(s))
+      if n == name: return toValue(f)
   none(FieldValue)
+
+proc checkBlock(f: SeismicFile, b: BlockRef): string =
+  # Why the located block cannot be read; empty when it can.
+  if f.unsafeMemory == nil: "the file is closed"
+  elif b.offset < 0 or b.offset + b.size > f.mappedSize: "the header lies outside the file"
+  else: ""
 
 proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
   ## **Internal.** Reads `field` of the located block from the mapped bytes;
   ## `error` says why it cannot.
+  let err = f.checkBlock(b)
+  if err.len > 0: return FieldRead(error: err)
   let mem = f.unsafeMemory
-  if mem == nil: return FieldRead(error: "the file is closed")
-  if b.offset < 0 or b.offset + b.size > f.mappedSize:
-    return FieldRead(error: "the header lies outside the file")
   let a = int(b.offset)
   var v = none(FieldValue)
   withBlockType(b.kind):
@@ -288,6 +296,21 @@ proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
     v = fieldByName(h, field)
   if v.isSome: FieldRead(value: v.get)
   else: FieldRead(error: "is not a field of " & $b.kind)
+
+proc readFields*(f: SeismicFile, b: BlockRef, values: var seq[Option[FieldValue]]): string =
+  ## **Internal.** Decodes the located block once: `values` gets the value of
+  ## each of `fieldNames(b.kind)`, in that order (none where `readField` would
+  ## fail). Returns why the block cannot be read (`values` is then empty), or "".
+  values.setLen 0
+  result = f.checkBlock(b)
+  if result.len == 0:
+    let mem = f.unsafeMemory
+    let a = int(b.offset)
+    withBlockType(b.kind):
+      var h: BlockT
+      decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
+      for x in fields(h):
+        when isNamedField(x): values.add toValue(x)
 
 proc lookup(f: SeismicFile, scope: HeaderScope, index: int, name: string): FieldRead =
   let r = f.index.locate(scope, index, name)

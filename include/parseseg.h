@@ -561,10 +561,10 @@ SegStatus seg_apply_journal(const char *path, const char *journal_path, SegDiagL
 SegStatus seg_open_editor(const char *path, const char *journal_path, SegHeaderEditor **out);
 
 /*
- * Ends a batch, flushes the map and the journal and closes both. Both are
- * closed even when the flush fails (the error then propagates). Batched
- * edits whose journal entries cannot be synced are not written (see
- * `endBatch`).
+ * Ends a batch, flushes the map and closes it and the journal. Both are
+ * closed even when something fails. Raises `IOError` when the map cannot
+ * be flushed, or when the batch's journal entries cannot be synced: then
+ * its pending edits are not written (see `endBatch`; `log` says how many).
  */
 SegStatus seg_header_editor_close(SegHeaderEditor *header_editor);
 

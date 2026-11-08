@@ -256,20 +256,79 @@ when defined(linux):
   block journal_sync_failure_refuses_the_edit:
     # The map is written only after its journal entry is on disk: when the
     # journal cannot be written or synced, the edit is refused (false and an
-    # error in `log`), never raised, and the file keeps its bytes.
+    # error in `log`), never raised, and the file keeps its bytes. /dev/full
+    # cannot be truncated either, so the refused entries cannot be cut from
+    # the journal: the editor then refuses every further edit.
     let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
     let original = readBytes(path)
     var ed = openEditor(path)
     let before = ed.file.traceField(3, "trace.groupX")
     failJournal(journal)
     ed.beginBatch()
-    doAssert ed.setTraceField(3, "trace.groupX", 4242) # journaled into the buffer only
+    doAssert ed.setTraceField(3, "trace.groupX", 4242) # journaled in memory only
     doAssert not ed.endBatch()                          # the sync fails: nothing written
     doAssert ed.file.traceField(3, "trace.groupX") == before and ed.edits == 0
-    doAssert ed.log.count(sevError) == 1 and "cannot be synced" in ed.log[0].msg
-    doAssert not ed.setTraceField(3, "trace.groupX", 4343) # unbatched: refused at once
+    doAssert ed.log.count(sevError) == 2 and "cut back" in ed.log[0].msg and
+      "cannot be synced" in ed.log[1].msg
+    doAssert not ed.setTraceField(3, "trace.groupX", 4343) # refused at once
     doAssert ed.file.traceField(3, "trace.groupX") == before and ed.edits == 0
-    doAssert ed.log.count(sevError) == 2 and "journal cannot be written" in ed.log[1].msg
+    doAssert ed.log.count(sevError) == 3 and "cut back" in ed.log[2].msg
     doAssert not ed.setFileField("binary.jobId", 5)
     ed.close()
-    doAssert readBytes(path) == original
+    doAssert readBytes(path) == original and editLines(journal) == 0
+
+  var RLIMIT_FSIZE {.importc, header: "<sys/resource.h>".}: cint
+
+  proc limitFileSize(bytes: int) =
+    ## Writes past `bytes` into any file fail with EFBIG (SIGXFSZ ignored);
+    ## a negative `bytes` lifts the limit.
+    var lim: RLimit
+    doAssert getrlimit(RLIMIT_FSIZE, lim) == 0
+    lim.rlim_cur = if bytes < 0: lim.rlim_max else: bytes
+    doAssert setrlimit(RLIMIT_FSIZE, lim) == 0
+
+  block failed_entries_are_cut_from_the_journal:
+    # A batch whose journal write fails part-way (the disk fills up) leaves
+    # no entry behind: `applyJournal` must not redo refused edits.
+    let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+    let original = readBytes(path)
+    var ed = openEditor(path)
+    let session = getFileSize(journal)
+    signal(SIGXFSZ, SIG_IGN)
+    limitFileSize(int(session) + 20) # room for part of an entry
+    try:
+      ed.beginBatch()
+      for t in 0..9: doAssert ed.setTraceField(t, "trace.groupX", 5000 + t)
+      doAssert not ed.endBatch() and ed.edits == 0
+      doAssert getFileSize(journal) == session # the partial write was cut off
+      doAssert not ed.setTraceField(0, "trace.groupY", 123456789) # the journal still fails
+      doAssert getFileSize(journal) == session
+    finally:
+      limitFileSize(-1)
+    doAssert ed.setTraceField(0, "trace.groupY", 7) and ed.edits == 1 # the journal works again
+    ed.beginBatch()
+    doAssert ed.setTraceField(1, "trace.groupY", 8)
+    ed.close()
+    doAssert editLines(journal) == 2
+    doAssert diffCount(readBytes(path), original) > 0
+    doAssert rollbackJournal(path, journal).len == 0 and readBytes(path) == original
+
+  block close_raises_when_the_last_batch_is_lost:
+    let (path, journal) = fresh("Sweep0.sgy")
+    let original = readBytes(path)
+    var ed = openEditor(path)
+    ed.beginBatch()
+    doAssert ed.setTraceField(0, "trace.groupX", 77)
+    failJournal(journal)
+    doAssertRaises(IOError): ed.close()
+    doAssert readBytes(path) == original and editLines(journal) == 0
+
+  block current_field_raises_ioerror_on_a_failed_sync:
+    let (path, journal) = fresh("Sweep0.sgy")
+    var ed = openEditor(path)
+    ed.beginBatch()
+    doAssert ed.setTraceField(0, "trace.groupX", 77)
+    failJournal(journal)
+    doAssertRaises(IOError): discard ed.currentTraceField(0, "trace.groupX")
+    doAssert ed.edits == 0
+    ed.close()

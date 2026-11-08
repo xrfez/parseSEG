@@ -8,6 +8,7 @@
 import std/[os, strutils, sequtils, tables, math, streams]
 import ../parseSEG
 import ./common/niftext
+from ./model/headerfields import locateBlock, readFields
 
 const
   Usage = """
@@ -335,17 +336,22 @@ proc dump(a: Args): int =
   result = if f.index.log.failed: 1 else: 0
   let sel = parseSelection(a.get("traces"), f.len)
   if a.has("all"):
+    var names: array[HeaderBlock, seq[string]]
+    for k in HeaderBlock: names[k] = fieldNames(k)
+    var values: seq[Option[FieldValue]]
     for t in sel:
       echo "trace ", t
       for blockName in ["trace", "ext1"]:
-        let kind = f.blockKind(hsTrace, t, blockName)
-        if kind.isSome:
-          for n in fieldNames(kind.get):
+        let b = f.index.locateBlock(hsTrace, t, blockName)
+        if b.error.len == 0:
+          let err = f.readFields(b.blk, values) # the block is decoded once
+          for i, n in names[b.blk.kind]:
             let name = blockName & "." & n
-            try:
-              echo "  ", name, " = ", f.traceField(t, name)
-            except ValueError as e:
-              echo "  ", name, " = ? (", e.msg, ")"
+            if err.len == 0 and values[i].isSome:
+              echo "  ", name, " = ", values[i].get
+            else:
+              echo "  ", name, " = ? (", name, ": ",
+                (if err.len > 0: err else: "is not a field of " & $b.blk.kind), ")"
               result = 1
     return
   let fields = if a.has("fields"): a.get("fields").split(',').mapIt(it.strip)

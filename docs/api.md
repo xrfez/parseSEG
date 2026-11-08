@@ -100,15 +100,20 @@ C: `seg_survey_geometry_new`, `seg_survey_geometry_add_sps`, `..._add_p1`, `..._
 refused, with the reason in `log`; never raises), then `close`. `v` is a `FieldValue` or a
 plain number or string. Field names are as above. Edits are size-preserving and validated,
 and each is journaled, and synced to disk, before it is written: an edit whose journal
-entry cannot be synced is refused. `beginBatch` / `endBatch` (false when the batch's journal
-sync fails) share one sync among many edits; `currentTraceField` (...) read fields as edited
-so far. `openEditor` raises `ValueError` when the journal is the file itself.
+entry cannot be synced is refused, and its entry is cut from the journal again (when that
+fails too, the editor refuses every further edit). `beginBatch` / `endBatch` (false when the
+batch's journal sync fails) share one sync among many edits; `close` raises `IOError` when
+the final batch cannot be journaled. `currentTraceField` (...) read fields as edited so far
+(`IOError` when pending batched edits must be synced first and cannot be). `openEditor`
+raises `ValueError` when the journal is the file itself.
 `rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them.
 
 Header documents (`model/headernif`): `exportHeaders(f, path, raw = true)` streams every named
 field (and raw bytes) as NIF; `importHeaders(path, nifPath, ImportOptions(outPath, journal,
 dryRun, force, onChange))` applies an edited document as a patch through the editor, in
-place or into a copy (`dryRun` only lists the changes).
+place or into a copy (`dryRun` only lists the changes). `onChange` reports each accepted
+edit; edits a later failed journal sync drops are moved from `applied` to `refused`, with a
+fatal diagnostic.
 
 ## Streaming readers and writers (disk and tape)
 - SEG-Y: `openSegy(src)` / `readTrace`, `readSegy(path)`, `openSegyWriter(sink, file, opts)` /

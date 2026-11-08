@@ -134,4 +134,57 @@ block scaffold_escapes_and_ranges:
   doAssert "(at 333)" in nif and "(at 101)" in nif # 3533-3600 and 3301-3500, 1-based in 400
   doAssert scaffoldVendorMap(ex / "BO_3D-Inglewood_rev21_v7.sgy", reg).toNif == ""
 
+when defined(linux):
+  import std/posix
+  var RLIMIT_FSIZE {.importc, header: "<sys/resource.h>".}: cint
+
+  proc limitFileSize(bytes: int) =
+    ## Writes past `bytes` into any file fail with EFBIG (SIGXFSZ ignored);
+    ## a negative `bytes` lifts the limit.
+    signal(SIGXFSZ, SIG_IGN)
+    var lim: RLimit
+    doAssert getrlimit(RLIMIT_FSIZE, lim) == 0
+    lim.rlim_cur = if bytes < 0: lim.rlim_max else: bytes
+    doAssert setrlimit(RLIMIT_FSIZE, lim) == 0
+
+  proc importLimited(p, doc: string, seen: var int): ImportResult =
+    ## Imports with room in the journal for its session line only.
+    var n = 0
+    limitFileSize(100)
+    try:
+      result = importHeaders(p, doc, ImportOptions(onChange: proc (c: HeaderChange) = inc n))
+    finally:
+      limitFileSize(-1)
+    seen = n
+
+  block failed_journal_syncs_are_reported:
+    # 12.4: batched edits reach the file only when their journal entries are
+    # synced; when that fails, `applied` must not claim written changes.
+    let name = "BO_3D-Inglewood_rev21_v7.sgy"
+    var p = fresh(name)
+    exportOf(p, tmp / "sync.nif", raw = false)
+    let d = readFile(tmp / "sync.nif")
+    # The last entry changes: only the final sync (`endBatch`) journals it.
+    let last = d.rfind("(f sourceMeasurementUnit 0)")
+    let tail = d.find(")", d.find("(f headerName", last)) + 1
+    writeFile(tmp / "sync2.nif", d[0 ..< last] & "(f sourceMeasurementUnit 3)" & d[tail .. ^1])
+    var seen = 0
+    var r = importLimited(p, tmp / "sync2.nif", seen)
+    doAssert seen == 1 and r.applied == 0 and r.refused == 1, $r.applied & " " & $r.log
+    doAssert r.log.has("1 accepted edits were not written", sevFatal)
+    doAssert readFile(p) == readFile(ex / name) and not readFile(p & ".edits.nif").contains("(edit")
+    # A change followed by more fields of the same header: reading them
+    # needs the sync, whose failure stops the import (an I/O error).
+    p = fresh(name)
+    let g = d.find("(f groupX ")
+    writeFile(tmp / "sync3.nif", d[0 ..< g] & "(f groupX 901" & d[d.find(")", g) .. ^1])
+    r = importLimited(p, tmp / "sync3.nif", seen)
+    doAssert seen == 1 and r.applied == 0 and r.refused == 1, $r.applied & " " & $r.log
+    var ioFatal = false
+    for x in r.log:
+      if x.severity == sevFatal and x.code == dcIo and "cannot be synced" in x.msg: ioFatal = true
+    doAssert ioFatal
+    doAssert not r.log.has("fields the file does not have", sevError)
+    doAssert readFile(p) == readFile(ex / name)
+
 echo "theadernif: ok"

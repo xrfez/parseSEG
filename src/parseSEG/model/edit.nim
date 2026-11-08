@@ -27,7 +27,9 @@
 ## A refused edit returns false and leaves a diagnostic in `log`; it never
 ## raises. A journal entry that cannot be written or synced to disk refuses
 ## its edit (and, in a batch, every edit not yet on the map): the map is
-## written only after its journal entry is safely on disk. Not available on
+## written only after its journal entry is safely on disk, and the entries
+## of refused edits are cut from the journal again (if that fails, the
+## editor refuses all further edits). Not available on
 ## tape (there is no map); `contiguous` sources only.
 ##
 ## Fields are named `<block>.<field>`, with the field names of the header
@@ -73,8 +75,9 @@ type
     file*: SeismicFile   ## The mapped file and its index (headers as opened).
     log* {.segField(readonly = true).}: DiagLog ## Refused edits and journal problems.
     journalPath* {.segField(readonly = true).}: string ## Where the edits are journaled.
-    journal: JournalFile
-    journalBroken: bool  ## A journal write failed part-way (see `journalLine`).
+    journal: JournalFile ## Unbuffered: entries wait in `unsynced` (see `syncJournal`).
+    unsynced: string     ## Journal lines not yet written and synced.
+    journalDead: bool    ## The journal could not be cut back after a failed write.
     edits: int
     batch: bool          ## Inside `beginBatch` / `endBatch`.
     pending: seq[PendingWrite] ## Batched writes, journaled but not yet on the map.
@@ -113,30 +116,73 @@ func hexOf(b: openArray[byte]): string =
   result = newStringOfCap(2 * b.len)
   for x in b: result.add toHex(x, 2).toLowerAscii
 
-proc c_fflush(f: File): cint {.importc: "fflush", header: "<stdio.h>".}
+when defined(windows):
+  proc c_fileno(f: File): cint {.importc: "_fileno", header: "<stdio.h>".}
+  proc c_chsize(fd: cint, size: int64): cint {.importc: "_chsize_s", header: "<io.h>".}
 
-proc syncJournal(ed: HeaderEditor): bool =
-  # The entry must be on disk before the map is written: mapped pages can
-  # reach the disk any time after. False when the buffered entries cannot
-  # be written (`flushFile` does not report that) or synced.
-  if c_fflush(ed.journal.f) != 0: return false
+proc journalSize(f: File): int64 =
+  # The journal's size on disk; -1 if it cannot be told.
   when defined(posix):
-    if fsync(getFileHandle(ed.journal.f)) != 0: return false
-  true
+    var st: Stat
+    if fstat(getFileHandle(f), st) != 0: -1'i64 else: int64(st.st_size)
+  else:
+    try: f.getFileSize except IOError: -1'i64
+
+proc cutJournal(f: File, size: int64): bool =
+  # Truncates the journal back to `size` bytes (it is unbuffered, so no
+  # stdio buffer holds anything to write later).
+  when defined(posix):
+    ftruncate(getFileHandle(f), Off(size)) == 0
+  elif defined(windows):
+    c_chsize(c_fileno(f), size) == 0
+  else:
+    false
+
+proc syncJournal(ed: var HeaderEditor): bool =
+  # Writes the unsynced journal lines and syncs them: they must be on disk
+  # before the map is written, as mapped pages can reach the disk any time
+  # after. On failure the journal is cut back to its size before them, so
+  # it never keeps entries of refused edits, and the result is false. When
+  # it cannot be cut back, the editor refuses every further edit.
+  if ed.unsynced.len == 0: return true
+  if ed.journalDead:
+    ed.unsynced.setLen 0
+    return false
+  let f = ed.journal.f
+  let mark = journalSize(f)
+  var ok = mark >= 0
+  if ok:
+    try:
+      ok = f.writeBuffer(addr ed.unsynced[0], ed.unsynced.len) == ed.unsynced.len
+    except IOError:
+      ok = false
+  when defined(posix):
+    if ok: ok = fsync(getFileHandle(f)) == 0
+  ed.unsynced.setLen 0
+  if not ok and mark >= 0 and not cutJournal(f, mark):
+    ed.journalDead = true
+    ed.log.report(sevError, dcIo, "the journal " & ed.journalPath & " could not be cut " &
+      "back after a failed write: it may end in entries of refused edits (remove them " &
+      "before applying it); no further edits are made", loc = Location(file: ed.file.path))
+  ok
 
 proc journalLine(ed: var HeaderEditor, line: string) =
-  # After a failed write the file may end in a partial line: start afresh so
-  # the next entry does not merge into it. In a batch the sync waits for
-  # `flushBatch` (the map is written only after it). Raises `IOError` when
-  # the line cannot be written or synced.
-  if ed.journalBroken: ed.journal.f.write "\n"
-  ed.journalBroken = true
-  ed.journal.f.writeLine line
+  # Adds a journal line; outside a batch it is synced at once, in a batch the
+  # sync waits for `flushBatch` (the map is written only after it). Raises
+  # `IOError` when the line cannot be written or synced.
+  ed.unsynced.add line
+  ed.unsynced.add '\n'
   if not ed.batch and not ed.syncJournal():
-    raise newException(IOError, "cannot sync the journal " & ed.journalPath)
-  ed.journalBroken = false
+    raise newException(IOError, "cannot write or sync the journal " & ed.journalPath)
 
 const MaxPending = 4096 ## Batched edits held before a flush.
+
+proc dropPending(ed: var HeaderEditor) =
+  # The batch's journal entries were not synced: its edits never reach the map.
+  ed.log.report(sevError, dcIo, "the journal " & ed.journalPath & " cannot be synced; " &
+    $ed.pending.len & " batched edits were not written", loc = Location(file: ed.file.path))
+  ed.edits -= ed.pending.len
+  ed.pending.setLen 0
 
 proc flushBatch(ed: var HeaderEditor): bool =
   # One sync for every journaled edit of the batch, then the map writes.
@@ -145,11 +191,7 @@ proc flushBatch(ed: var HeaderEditor): bool =
   result = true
   if ed.pending.len == 0: return
   if not ed.syncJournal():
-    ed.journalBroken = true
-    ed.log.report(sevError, dcIo, "the journal " & ed.journalPath & " cannot be synced; " &
-      $ed.pending.len & " batched edits were not written", loc = Location(file: ed.file.path))
-    ed.edits -= ed.pending.len
-    ed.pending.setLen 0
+    ed.dropPending()
     return false
   let mem = ed.file.unsafeMemory
   for p in ed.pending:
@@ -169,12 +211,13 @@ proc beginBatch*(ed: var HeaderEditor) =
 proc endBatch*(ed: var HeaderEditor): bool =
   ## Syncs the journal and writes the batch's edits; ends the batch. False
   ## when the journal cannot be synced: then the batch's pending edits are
-  ## not written (an error in `log` says how many).
+  ## not written (an error in `log` says how many) and their entries are cut
+  ## from the journal.
   result = ed.flushBatch()
   ed.batch = false
 
 proc openJournal(ed: var HeaderEditor) =
-  if not open(ed.journal.f, ed.journalPath, fmAppend):
+  if not open(ed.journal.f, ed.journalPath, fmAppend, bufSize = 0):
     raise newException(IOError, "cannot open the edit journal: " & ed.journalPath)
   ed.journalLine "(session (file " & nifString(ed.file.path) & ") (size " &
     $ed.file.mappedSize & "))"
@@ -388,18 +431,22 @@ proc openEditor*(path: string, journalPath = ""): HeaderEditor {.segApi.} =
   result.openJournal()
 
 proc close*(ed: var HeaderEditor) {.segApi.} =
-  ## Ends a batch, flushes the map and the journal and closes both. Both are
-  ## closed even when the flush fails (the error then propagates). Batched
-  ## edits whose journal entries cannot be synced are not written (see
-  ## `endBatch`).
+  ## Ends a batch, flushes the map and closes it and the journal. Both are
+  ## closed even when something fails. Raises `IOError` when the map cannot
+  ## be flushed, or when the batch's journal entries cannot be synced: then
+  ## its pending edits are not written (see `endBatch`; `log` says how many).
+  var synced = true
   try:
-    if ed.batch: discard ed.endBatch()
+    if ed.batch: synced = ed.endBatch()
     ed.file.flush()
   finally:
     ed.file.close()
     if ed.journal.f != nil:
       ed.journal.f.close()
       ed.journal.f = nil
+  if not synced:
+    raise newException(IOError, "the journal " & ed.journalPath &
+      " cannot be synced; the batch's pending edits were not written")
 
 func edits*(ed: HeaderEditor): int {.inline, segApi.} =
   ## Edits written in this session (no-op edits excluded).
@@ -487,6 +534,7 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
     return false
   if not ed.file.isOpen: refuse "the file is closed"
   if not ed.file.index.detected: refuse "the file is neither SEG-Y nor SEG-D"
+  if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
   if field in structural(b.kind):
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
@@ -541,24 +589,28 @@ proc current(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string)
   let r = ed.file.index.locate(scope, index, name)
   if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
   if ed.batch and ed.overlapsPending(r.blk.offset, r.blk.size) and not ed.flushBatch():
-    raise newException(ValueError, name & ": the journal cannot be synced (see the log)")
+    raise newException(IOError, name & ": the journal " & ed.journalPath &
+      " cannot be synced; the batch's pending edits were not written")
   let v = ed.file.readField(r.blk, r.field)
   if v.error.len > 0: raise newException(ValueError, name & ": " & v.error)
   v.value
 
 proc currentTraceField*(ed: var HeaderEditor, trace: int, name: string): FieldValue =
   ## Reads `trace.<field>` / `ext1.<field>` of trace `trace` as edited so far
-  ## (batched edits included). Raises `ValueError` like `traceField`.
+  ## (batched edits included). Raises `ValueError` like `traceField`, and
+  ## `IOError` when pending batched edits of the header must be written
+  ## first and the journal cannot be synced (they are then dropped, see
+  ## `endBatch`).
   ed.current(hsTrace, trace, name)
 
 proc currentRecordField*(ed: var HeaderEditor, record: int, name: string): FieldValue =
-  ## Reads a SEG-D record field as edited so far. Raises `ValueError` like
-  ## `recordField`.
+  ## Reads a SEG-D record field as edited so far. Raises like
+  ## `currentTraceField`.
   ed.current(hsRecord, record, name)
 
 proc currentFileField*(ed: var HeaderEditor, name: string): FieldValue =
-  ## Reads a SEG-Y binary header field as edited so far. Raises `ValueError`
-  ## like `fileField`.
+  ## Reads a SEG-Y binary header field as edited so far. Raises like
+  ## `currentTraceField`.
   ed.current(hsFile, 0, name)
 
 proc setLocated(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string,

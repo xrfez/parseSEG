@@ -1227,10 +1227,10 @@ class HeaderEditor(_Handle):
     _release = _lib.seg_header_editor_release
 
     def _close_native(self):
-        """Ends a batch, flushes the map and the journal and closes both. Both are
-        closed even when the flush fails (the error then propagates). Batched
-        edits whose journal entries cannot be synced are not written (see
-        `endBatch`)."""
+        """Ends a batch, flushes the map and closes it and the journal. Both are
+        closed even when something fails. Raises `IOError` when the map cannot
+        be flushed, or when the batch's journal entries cannot be synced: then
+        its pending edits are not written (see `endBatch`; `log` says how many)."""
         _h = self._enter()
         try:
             _call(_lib.seg_header_editor_close, _h)

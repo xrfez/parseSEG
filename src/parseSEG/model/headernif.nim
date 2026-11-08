@@ -29,7 +29,7 @@
 ## applies each entry as it is read, so the last entry for a field wins.
 ## Memory does not grow with the file or the document.
 
-import std/[os, strutils, math]
+import std/[os, strutils, math, options]
 import ../common/[errors, diagnostics, niftext]
 import ../segd/reader as segdreader
 import ./[traceindex, headerfields, edit]
@@ -48,11 +48,14 @@ type
     dryRun*: bool      ## Only list the changes.
     force*: bool       ## Apply a document made from another file.
     onChange*: proc (c: HeaderChange) {.closure.}
-      ## Called for each change (applied or, in a dry run, found).
+      ## Called for each change the editor accepts (in a dry run: finds).
+      ## Accepted edits reach the file when their journal entries are synced;
+      ## if that later fails, they are dropped, reported in the log and not
+      ## counted in `ImportResult.applied`.
 
   ImportResult* = object
     applied*: int      ## Fields written (dry run: fields that would be).
-    refused*: int      ## Edits the editor refused (see the log).
+    refused*: int      ## Edits the editor refused or dropped (see the log).
     log*: DiagLog
 
 const
@@ -74,6 +77,8 @@ func sameValue(a, b: FieldValue): bool =
 type NifOut = object
   f: File
   buf: string
+  names: array[HeaderBlock, seq[string]] ## `fieldNames` of each block kind.
+  values: seq[Option[FieldValue]]        ## One block's values (see `readFields`).
 
 proc put(o: var NifOut, s: string) =
   o.buf.add s
@@ -101,11 +106,12 @@ func hexOf(b: openArray[byte]): string =
   for x in b: result.add toHex(x, 2)
 
 proc putBlock(o: var NifOut, f: SeismicFile, blk: BlockRef, raw: bool, indent: string) =
+  # The block is decoded once, into `o.values`.
   o.put indent & "(block " & blk.name
-  for n in fieldNames(blk.kind):
-    let r = f.readField(blk, n)
-    if r.error.len == 0:
-      o.put "\n" & indent & " (f " & n & " " & nifValue(r.value) & ")"
+  if f.readFields(blk, o.values).len == 0:
+    for i, n in o.names[blk.kind]:
+      if o.values[i].isSome:
+        o.put "\n" & indent & " (f " & n & " " & nifValue(o.values[i].get) & ")"
   if raw:
     o.put "\n" & indent & " (raw \"" &
       hexOf(f.unsafeMemory.toOpenArray(int(blk.offset), int(blk.offset) + blk.size - 1)) & "\")"
@@ -133,6 +139,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
   let tmp = path & ".tmp"
   var o = NifOut()
+  for k in HeaderBlock: o.names[k] = fieldNames(k)
   if not open(o.f, tmp, fmWrite): raise newException(IOError, "cannot write " & tmp)
   try:
     o.put "(.nif27)\n(.vendor \"parseSEG\")\n(headers\n (standard " &
@@ -375,7 +382,6 @@ iterator entries(n: var NifIn, facts: var DocFacts): (HeaderScope, int64, string
 proc checkFacts(facts: DocFacts, f: SeismicFile, force: bool, nifPath: string,
     log: var DiagLog): bool =
   ## False (with a fatal diagnostic) when the document describes another file.
-  ## False (with a fatal diagnostic) when the document describes another file.
   var problems: seq[string]
   let std = if f.kind == skSegy: "segy" else: "segd"
   if facts.standard.len > 0 and facts.standard != std:
@@ -418,7 +424,10 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
   ## the file is refused unless `opts.force`. Entry errors (unknown fields or
   ## traces) are logged, the first 50 one by one; refused edits are errors.
   ## Never raises: I/O and document problems are fatal diagnostics, and an
-  ## import stopped by one keeps the edits made before it (journaled).
+  ## import stopped by one keeps the edits made before it (journaled). Edits
+  ## the editor accepted but could not journal (a failed sync) are not
+  ## written: they move from `applied` to `refused`, and a fatal diagnostic
+  ## says so.
   template fatal(msg: string, at = nifPath) =
     result.log.report(sevFatal, dcValidation, msg, loc = Location(file: at))
     return
@@ -435,9 +444,15 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
   var n = NifIn(path: nifPath, line: 1)
   if not open(n.f, nifPath, fmRead): fatal("cannot read the document")
   var entryErrors = 0
+  var dropped = 0 # accepted edits a failed journal sync dropped
+  var seen = 0    # `ed.edits` when last looked at
   try:
     var f: SeismicFile
     var ed: HeaderEditor
+    template account() =
+      # A failed sync drops the batch's pending edits: `ed.edits` goes down.
+      dropped += max(0, seen - ed.edits)
+      seen = ed.edits
     if opts.dryRun:
       f = openSeismic(path)
     else:
@@ -474,6 +489,8 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
                   of hsTrace: ed.currentTraceField(i, name)
         except ValueError as e:
           err = e.msg
+        finally:
+          if not opts.dryRun: account()
         if err.len > 0:
           inc entryErrors
           if entryErrors <= MaxLoggedErrors:
@@ -489,18 +506,28 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
                 of hsFile: ed.setFileField(name, nv)
                 of hsRecord: ed.setRecordField(i, name, nv)
                 of hsTrace: ed.setTraceField(i, name, nv)
+              account()
             if ok:
               inc result.applied
               if opts.onChange != nil: opts.onChange(c)
             else: inc result.refused
     finally:
       if not opts.dryRun:
-        ed.close()
+        discard ed.endBatch() # a failure is logged; `account` counts the drop
+        account()
         result.log.add ed.log
+        ed.close()
+  except IOError as e:
+    result.log.report(sevFatal, dcIo, e.msg, loc = Location(file: nifPath))
   except CatchableError as e:
     result.log.report(sevFatal, dcValidation, e.msg, loc = Location(file: nifPath))
   finally:
     n.f.close()
+  if dropped > 0:
+    result.applied -= dropped
+    result.refused += dropped
+    result.log.report(sevFatal, dcIo, $dropped & " accepted edits were not written: the " &
+      "journal could not be synced", loc = Location(file: path))
   if entryErrors > MaxLoggedErrors:
     result.log.report(sevError, dcValidation, $(entryErrors - MaxLoggedErrors) &
       " more entries name fields or traces the file does not have", loc = Location(file: nifPath))
