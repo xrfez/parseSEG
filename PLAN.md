@@ -268,7 +268,7 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
 - [x] 4.6 SEG-D Rev 0 (the original standard) from the 1.8 gap analysis: revision detection
       without a GH#2 revision, Rev 0 header fields and sample formats; synthetic tests
 
-- [ ] 4.7 Multiplexed SEG-D (Rev 0/1/2 codes 0015-0058): scan walker (start-of-scan and timing
+- [x] 4.7 Multiplexed SEG-D (Rev 0/1/2 codes 0015-0058): scan walker (start-of-scan and timing
       words, GH1 bytes per scan and scans per block), the 0015 decoder, demultiplexing into
       traces. Large; from `segd_rev0.md` §5 and §9.
 
@@ -484,7 +484,7 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
       `-o` or `--in-place` the CLI only reports what would change.
 
 ### Phase 11: SEG-2 (queued after Phase 10)
-- [ ] 11.1 `Seg2File` reader (descriptor blocks, keyword strings, formats 1-5, byte order),
+- [x] 11.1 `Seg2File` reader (descriptor blocks, keyword strings, formats 1-5, byte order),
       trace index and keys, `openSeismic` detection.
 - [ ] 11.2 Writer, conversion to and from SEG-Y / SEG-D, C ABI and Python, CLI.
 - [ ] 11.3 Validate against a Geospace SEG-2 sample *(owner: please provide one)*.
@@ -1249,3 +1249,27 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
     - CLI `convert --format=0` keeps the SEG-Y format, as it does for SEG-D.
   - Open from Phase 12: the minor items listed in the 12.3 log entry.
   - Still open from earlier phases: 4.7 (multiplexed SEG-D), Phase 11 (SEG-2), 6.8-6.10 and 10.5.
+- 2026-11-08: Tasks 4.7 and 11.1 done, by parallel agents in worktrees, merged into `seg-library`.
+  - 4.7 (multiplexed SEG-D, option (a)):
+    - The reader walks scans for 0015, 0022, 0024, 0036, 0038, 0042, 0044, 0048 and 0058 and returns demux traces in the twin format.
+    - 0015 is transcoded exactly to 8015.
+    - `demultiplexSegd` writes a demux copy.
+    - `openSeismic` indexes a temporary copy in `demuxDir` (`demuxPath`, a `dcMultiplexed` warning) and deletes it on close.
+    - `writable` and the editor refuse multiplexed files.
+    - C `seg_seismic_file_demux_path`, Python `demux_path`.
+  - 4.7 decisions:
+    - When the channel-set window disagrees with the scan count, the copy gives the traces a THE#1 with the sample count.
+    - Temp names avoid `std/tempfiles`, whose random source breaks the macOS zig build.
+    - The copy's log replaces the original walk's log.
+    - Rev 2 multiplexed records get a warning; Rev 3 multiplexed records are fatal.
+  - 4.7 not done: multiplexed output, resync after a corrupt scan, real tape and Rev 1 GH2/trailer cases. Synthetic tests only (`tsegdmux`).
+  - 11.1 (SEG-2 reader, `src/parseSEG/seg2/`):
+    - Memmapped and detected by `openSeismic`.
+    - Index, `readTraces`, keys, gathers and prefetch work.
+    - The index holds one codec per sample format; trace strings are re-read on demand (`seg2Trace`).
+    - Bad pointers keep the trace number with `valid` false and a zero row.
+    - Keys map SHOT_SEQUENCE_NUMBER, CDP, CHANNEL_NUMBER, the locations (+DATUM) and the geophone components.
+  - 11.1 risks:
+    - No real file, so the string-offset base and the format-3 bit layout are inferred (`seg2.md` §8).
+    - Mixed sample intervals are not resampled.
+  - Refused for SEG-2 until 11.2: named header fields and edits, header export, convert, vendor maps, CLI convert and vendormap.
