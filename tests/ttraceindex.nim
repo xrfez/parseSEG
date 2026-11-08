@@ -1,7 +1,7 @@
 ## Trace index, memory-mapped range reads (task 6.1) and the headers-only
 ## reads (task 6.5), on the sample files, tape images and damaged input.
 
-import std/[assertions, os]
+import std/[assertions, os, strutils]
 import parseSEG/common/errors
 import parseSEG/io/[records, diskio, tapeimage, tapedevice, memsource, pushback]
 import parseSEG/segy/[reader as segyreader, writer as segywriter]
@@ -44,18 +44,16 @@ proc indexOf(src: RecordSource, kind: SeismicKind): TraceIndex =
 
 block detect_kind:
   for n in segdFiles:
-    var k: SeismicKind
-    doAssert detectKind(readBytes(exampleDir / n), k) and k == skSegd, n
+    doAssert detectKind(readBytes(exampleDir / n)) == skSegd, n
   for n in segyFiles:
-    var k: SeismicKind
-    doAssert detectKind(readBytes(exampleDir / n), k) and k == skSegy, n
-  var k: SeismicKind
-  doAssert not detectKind(newSeq[byte](4000), k) # zeros: GH1 format code 0000 is not a format
+    doAssert detectKind(readBytes(exampleDir / n)) == skSegy, n
+  # zeros: GH1 format code 0000 is not a format
+  doAssert detectKind(newSeq[byte](4000)) == skUnknown
   # A SEG-D GH1 whose BCD file number starts with 43 ('C' in ASCII) stays SEG-D:
   # its binary-header bytes hold no SEG-Y format code.
   var b = readBytes(exampleDir / "63.sgd")
   b[0] = 0x43
-  doAssert detectKind(b, k) and k == skSegd
+  doAssert detectKind(b) == skSegd
 
 block index_matches_full_read_segd:
   for n in segdFiles:
@@ -94,7 +92,7 @@ block index_matches_full_read_segy:
     for j in 0..<10: doAssert narrow[3, j] == full.samples[0, j] and narrow[0, j] == 0
     var wide = newTraceTensor[float64](1, f.index.maxSamples + 7)
     for j in 0..<wide.shape[1]: wide[0, j] = 99.0
-    f.readTracesInto(f.len - 1 .. f.len - 1, wide)
+    doAssert f.readTracesInto(f.len - 1 .. f.len - 1, wide) == 0
     doAssert wide[0, f.index.maxSamples + 6] == 0.0
     doAssert float32(wide[0, 0]) == full.samples[f.len - 1, 0]
     f.close()
@@ -171,6 +169,23 @@ block range_read_of_damaged_trace_is_logged:
   var log: DiagLog
   doAssert f.readTracesInto(0..0, t, 0, log) == 1
   doAssert t[0, 0] == 0 and log.len == 1 and log.count(sevError) == 1
+  f.close()
+  f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  f.index.entries[0].numSamples = 1_000_000
+  var t2 = newTraceTensor[float32](2, 5)
+  doAssert f.readTracesInto(0..1, t2) == 1 # without a log: the count
+  # readTraces: with a log, the trace is a zero row and a diagnostic; without
+  # one, the failure is an exception naming the trace (never a silent zero).
+  var rlog: DiagLog
+  let r = f.readTraces([1, 0], rlog)
+  doAssert r.shape[0] == 2 and r[1, 0] == 0 and rlog.len == 1 and
+    rlog[0].loc.trace == 0 and rlog[0].code == dcTruncated
+  try:
+    discard f.readTraces(0..1)
+    doAssert false
+  except SegTruncatedError as e:
+    doAssert "trace 0" in e.msg
+  doAssert f.readTraces(1..1).shape[0] == 1 # good traces still read
   f.close()
 
 block not_seismic:

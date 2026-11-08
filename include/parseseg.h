@@ -337,6 +337,7 @@ typedef struct SegConvertOptions {
     bool station_header; /* SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza. */
 } SegConvertOptions;
 
+/* A run of consecutive traces that form one gather. */
 typedef struct SegGather {
     int32_t kind; /* SEG_GATHER_KIND_* */
     SegSlice traces; /* Trace indices into the index. */
@@ -416,11 +417,11 @@ SegStatus seg_convert_segd_revision(const char *src_path, const char *dst_path, 
 
 /*
  * Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
- * index (with per-trace geometry when `keys`). Format problems are in `index.log`; an
- * undetectable file gives a
- * fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
- * file cannot be opened or mapped. `writable` maps it read-write, for
- * in-place header edits (`model/edit`).
+ * index (with per-trace geometry when `keys`). Format problems are in
+ * `index.log`; an undetectable file gives a fatal diagnostic and an empty
+ * index. Raises `IOError`/`OSError` if the file cannot be opened or
+ * mapped. `writable` maps it read-write, for in-place header edits
+ * (`model/edit`).
  */
 SegStatus seg_open_seismic(const char *path, bool twos_complement8015, bool keys, SegSeismicFile **out);
 
@@ -509,7 +510,10 @@ SegStatus seg_seismic_file_file_field(SegSeismicFile *seismic_file, const char *
  * non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
  * binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
  * interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
- * interval. NaN when unknown (a closed file, an out-of-range trace).
+ * interval. NaN when the headers cannot give it (a SEG-Y trace header cut
+ * off by the end of the file): unknown data, not a caller error. Raises
+ * `ValueError` for a trace out of range or a closed file (the headers are
+ * read from the map, as `traceField` does).
  */
 SegStatus seg_seismic_file_sample_interval_us(SegSeismicFile *seismic_file, int64_t trace, double *out);
 
@@ -620,8 +624,9 @@ SegStatus seg_status_name(int32_t status, char *out, int64_t out_cap, int64_t *o
 
 /*
  * Decodes `traces` into new samples `[traces, maxSamples]` (shorter traces
- * are zero-padded, undecodable ones stay zero). Reads on one file may run
- * in parallel.
+ * are zero-padded). Fails with SEG_ERR_FORMAT naming the first trace that
+ * cannot be decoded (`readTracesInto` reads past them, counting them).
+ * Reads on one file may run in parallel.
  */
 SegStatus seg_seismic_file_read_traces_range(SegSeismicFile *seismic_file, int64_t traces_first, int64_t traces_last, int32_t dtype, SegTensor **out);
 
@@ -680,8 +685,11 @@ SegStatus seg_prefetcher_try_next(SegPrefetcher *prefetcher, SegPrefetchChunk *o
 /* True once every chunk has been taken. */
 SegStatus seg_prefetcher_at_end(SegPrefetcher *prefetcher, bool *out);
 
-/* Positions `seek` accepts: the file's trace count, or the list's length. */
-SegStatus seg_prefetcher_positions(SegPrefetcher *prefetcher, int64_t *out);
+/*
+ * The number of positions `seek` accepts: the file's trace count, or the
+ * list's length.
+ */
+SegStatus seg_prefetcher_len(SegPrefetcher *prefetcher, int64_t *out);
 
 /*
  * Restarts read-ahead over the positions `span` (traces in range mode).
@@ -692,8 +700,8 @@ SegStatus seg_prefetcher_positions(SegPrefetcher *prefetcher, int64_t *out);
 SegStatus seg_prefetcher_seek(SegPrefetcher *prefetcher, int64_t span_first, int64_t span_last);
 
 /*
- * The trace index at position `pos` (the position itself in range mode);
- * -1 for a position out of range.
+ * The trace index at position `pos` (the position itself in range mode).
+ * Raises `ValueError` for a position outside `0 ..< p.len`.
  */
 SegStatus seg_prefetcher_trace_at(SegPrefetcher *prefetcher, int64_t pos, int64_t *out);
 

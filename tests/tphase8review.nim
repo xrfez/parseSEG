@@ -107,7 +107,7 @@ block b4_selection_prefetchers_do_not_leak:
     block:
       var q = newPrefetcher[float32](f, newSeq[int](1_000_000), chunkTraces = 4, depth = 1,
         cols = 4)
-      discard q.positions # destroyed without close
+      discard q.len # destroyed without close
   doAssert getOccupiedMem() - before < 16 shl 20, $(getOccupiedMem() - before)
   f.close()
 

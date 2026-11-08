@@ -70,7 +70,8 @@ raises(AttributeError, getattr, parseseg, "NoSuchThing")
 f = parseseg.open_seismic(INGLEWOOD, keys=True)
 assert f.kind == "SEG-Y" and len(f) == 200 and f.max_samples == 2001 and f.has_keys
 assert f.record_count == 1 and f.sample_interval_us(0) == 2000.0 and f.sample_interval_us() == 2000.0
-assert math.isnan(f.sample_interval_us(200)) and f.is_open and f.path == INGLEWOOD
+assert f.is_open and f.path == INGLEWOOD
+raises(parseseg.ArgumentError, f.sample_interval_us, 200)
 assert "200 traces" in repr(f)
 e = f.trace_entry(5)
 assert e["num_samples"] == 2001 and e["header_bytes"] == 240 and e["offset"] > 3600
@@ -199,7 +200,8 @@ assert all(r == want for r in results)
 
 # --------------------------------------------------------------- prefetch --
 with parseseg.Prefetcher(f, range(len(f)), chunk_traces=64, depth=3) as p:
-    assert p.positions == 200 and p.trace_at(199) == 199 and p.trace_at(200) == -1
+    assert len(p) == 200 and p.trace_at(199) == 199
+    raises(parseseg.ArgumentError, p.trace_at, 200)
     got, firsts = b"", []
     for c in p:                                 # the iterator protocol
         firsts.append(c["first"])
@@ -207,7 +209,7 @@ with parseseg.Prefetcher(f, range(len(f)), chunk_traces=64, depth=3) as p:
         got += c["samples"].tobytes()
     assert firsts == [0, 64, 128, 192] and got == want and p.at_end
     assert p.next() is None and p.try_next() is None
-    p.seek(range(190, p.positions))
+    p.seek(range(190, len(p)))
     while (c := p.try_next()) is None:
         pass
     assert c["first"] == 190 and c["count"] == 10
@@ -215,7 +217,7 @@ with parseseg.Prefetcher(f, range(len(f)), chunk_traces=64, depth=3) as p:
 raises(parseseg.StateError, p.next)
 p.close()  # closing twice is fine
 with parseseg.Prefetcher(f, [5, 3, 1], chunk_traces=2, depth=2, dtype="float64") as p:
-    assert p.positions == 3 and p.trace_at(0) == 5
+    assert len(p) == 3 and p.trace_at(0) == 5
     c = p.next()
     assert c["first"] == 0 and c["count"] == 2 and c["samples"].dtype == "float64"
     assert c["samples"].tolist() == f.read_traces([5, 3], dtype="float64").tolist()

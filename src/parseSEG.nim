@@ -27,10 +27,11 @@ export maps, apply, scaffold
 import parseSEG/convert
 export convert
 
-import parseSEG/model/[tensors, keys, traceindex, gathers, prefetch, headerfields, edit,
+import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif]
-export traceindex except unsafeMemory
-export tensors, keys, gathers, prefetch, headerfields, edit, headernif
+export traceindex except unsafeMemory, decodeEntry, readTracesRaw, mappedSize, flush,
+  requireKeys, checkSpan, spanLen
+export keys, gathers, prefetch, headerfields, edit, headernif
 
 import parseSEG/survey/[textrec, sps, p1, join]
 export textrec, sps, p1, join

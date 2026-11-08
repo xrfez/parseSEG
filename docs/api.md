@@ -32,20 +32,24 @@ Conventions that hold throughout:
 | Proc | What |
 |---|---|
 | `openSeismic(path, twosComplement8015 = false, keys = false, writable = false): SeismicFile` | Memory-maps the file, detects SEG-Y or SEG-D, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (about 100 B per trace). |
-| `detectKind(bytes, kind): bool` | Detection only. |
+| `detectKind(bytes): SeismicKind` | Detection only (`skUnknown` when nothing fits). |
 | `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). |
 | `f.len`, `f.kind` (`skSegy`, `skSegd`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path` | File facts. |
-| `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval. |
+| `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval (`ValueError` for a trace out of range; `sampleIntervalUs` and `copyBytes` also for a closed file). |
 | `f.index.segy`, `f.index.segdRecords`, `f.close()` | The format's own headers. A `SeismicFile` that goes out of scope unmaps itself; `close` does it early. |
 
 ## Reading samples
 | Proc | What |
 |---|---|
-| `readTraces(f, traces: Slice[int], T = float32)` | A range as a new tensor. |
-| `readTraces(f, traces: openArray[int], T)` | A **selection** (gather, component group, sort order) in list order. |
-| `readTracesInto(f, traces, var tensor, row = 0[, log])` | Decode a range or a selection into an existing tensor. |
-| `readTracesRaw(f, traces, ptr, cols, rowStride, log)` | Decode into a caller-owned buffer (numpy, C). |
-| `newPrefetcher[T](f, traces, chunkTraces, depth, cols)` (a range or a list) | Read-ahead on a worker thread: `tryNext` (never blocks), `next`, `seek(span)`, `atEnd`, `traceAt`, `positions`, `close`. |
+| `readTraces(f, traces: Slice[int], log, T = float32)` | A range as a new tensor; a trace that cannot be decoded is a zero row and an error in `log`. |
+| `readTraces(f, traces: openArray[int], log, T)` | A **selection** (gather, component group, sort order) in list order. |
+| `readTraces(f, traces, T = float32)` | Without a log: raises `SegFormatError` (`SegTruncatedError`) naming the first trace that cannot be decoded. |
+| `readTracesInto(f, traces, var tensor, row = 0[, log]): int` | Decode a range or a selection into an existing tensor; returns the number of traces left zero (logged in `log`). |
+| `maxSamples(f, traces)` | Longest trace of a range or selection. |
+| `newPrefetcher[T](f, traces, chunkTraces, depth, cols)` (a range or a list) | Read-ahead on a worker thread: `tryNext` (never blocks), `next`, `seek(span)`, `atEnd`, `traceAt`, `len` (positions), `close`. A `PrefetchChunk` has `first`, `count`, `samples`, `failed` and `log` (one error per trace left zero, with its trace index). |
+
+Bad caller input (a trace, range or position out of range, a closed file) raises
+`ValueError` everywhere.
 
 Sorting is a selection: a sort produces a list of trace indices, and no data is moved
 (PLAN.md, "Future").

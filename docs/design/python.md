@@ -84,11 +84,11 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 | `len(f)`, `f.kind`, `f.record_count`, `f.max_samples`, `f.has_keys`, `f.is_open`, `f.path`, `f.log` | `len`, `kind`, ... |
 | `f.trace_entry(i)`, `f.trace_keys(i)` → dict; `f.copy_bytes(offset, n)` → bytes; `f.sample_interval_us(trace=0)` | `traceEntry`, `traceKeys`, `copyBytes`, `sampleIntervalUs` |
 | `f.trace_field(i, name)`, `record_field(r, name)`, `file_field(name)` → int/float/str | `traceField`, ... |
-| `f.read_traces(traces, dtype="float32")` → `Tensor` | `readTraces` |
+| `f.read_traces(traces, dtype="float32")` → `Tensor` (ArgumentError for traces out of range; FormatError when a trace cannot be decoded) | `readTraces` |
 | `f.read_traces_into(traces, dst, row=0)` → failed count | `readTracesInto` |
 | `f.gathers()` → list of dicts, `f.component_group_ids(traces)` → list | `gathers`, `componentGroupIds` |
 | `SurveyGeometry()`, `add_source`, `add_receiver`, `add_sps(path, opts=None)`, `add_p1(path, grid_decimals=0, depth_decimals=0, elevation=False)`, `map_line`, `trailing_digits`, `multi_component`, `tape`, `source_count`, `receiver_count`, `relation_count`, `log`; `f.apply_survey(g, overwrite=False)` | `SurveyGeometry` procs, `applySurvey` |
-| `Prefetcher(f, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32")`: `next()` / `try_next()` → `{"first", "count", "failed", "samples"}` or None, iteration, `at_end`, `positions`, `seek(span)`, `trace_at(pos)` | `newPrefetcher` and its procs |
+| `Prefetcher(f, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32")`: `next()` / `try_next()` → `{"first", "count", "failed", "samples"}` or None, iteration, `at_end`, `len(p)` (positions), `seek(span)`, `trace_at(pos)` | `newPrefetcher` and its procs |
 | `open_editor(path, journal_path="")` → `HeaderEditor`: `set_trace_field` / `set_record_field` / `set_file_field(..., value)` → bool, `edits`, `log`, `journal_path` | `openEditor`, ... |
 | `apply_journal(path, journal_path)`, `rollback_journal` → `DiagLog` | `applyJournal`, `rollbackJournal` |
 | `convert_file(src_path, dst_path, opts=None)`, `convert_segd_revision(src_path, dst_path, opts=None)` → `DiagLog` | `convertFile`, `convertSegdRevision` |

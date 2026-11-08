@@ -394,7 +394,8 @@ proc sourceKind(path: string): SeismicKind =
   var fh = open(path, fmRead)
   head.setLen fh.readBuffer(addr head[0], head.len)
   fh.close()
-  if not detectKind(head.toOpenArrayByte(0, head.len - 1), result):
+  result = detectKind(head.toOpenArrayByte(0, head.len - 1))
+  if result == skUnknown:
     quit("parseSEG: " & path & " is neither SEG-Y nor SEG-D", 1)
 
 proc parseRev(s: string, minParts, maxParts: int, what: string): (uint8, uint8) =

@@ -325,12 +325,17 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
   ## non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
   ## binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
   ## interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
-  ## interval. NaN when unknown (a closed file, an out-of-range trace).
+  ## interval. NaN when the headers cannot give it (a SEG-Y trace header cut
+  ## off by the end of the file): unknown data, not a caller error. Raises
+  ## `ValueError` for a trace out of range or a closed file (the headers are
+  ## read from the map, as `traceField` does).
   template ix: untyped = f.index
-  if trace < 0 or trace >= ix.len or not f.isOpen: return NaN
+  if trace notin 0 ..< ix.len:
+    raise newException(ValueError, "no trace " & $trace & " (the file has " & $ix.len & ")")
+  if not f.isOpen: raise newException(ValueError, "the file is closed")
   let e = ix.entries[trace]
   if ix.kind == skSegy:
-    let b = ix.segy.binary
+    template b: untyped = ix.segy.binary
     if ix.segy.revision.major >= 1 and b.fixedLengthTraces == 1:
       return b.effectiveSampleInterval
     var v: FieldValue

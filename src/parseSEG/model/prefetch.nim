@@ -12,32 +12,40 @@
 ## var c: PrefetchChunk[float32]
 ## while p.next(c):
 ##   show(c.first, c.samples)      # [c.count, cols] tensor, owned by the caller
+##   for d in c.log: echo d.msg    # one error per trace that could not be decoded
 ## p.close()
 ## ```
 ##
 ## Ownership: the worker shares no managed memory with the consumer (the
 ## only managed objects it makes are exceptions it raises and catches
-## itself). It reads the file's map
-## and index through raw pointers and decodes into slot buffers that the
-## consumer thread allocated (`decodeEntry`). When the consumer takes a chunk,
+## itself). It reads the file's map and index through raw pointers, decodes
+## into slot buffers that the consumer thread allocated (`decodeEntry`), and
+## notes the rows that failed in a plain array of the slot; the consumer
+## turns those into the chunk's diagnostics. When the consumer takes a chunk,
 ## it takes the slot's tensor and allocates a fresh one for the slot, so a
 ## returned tensor is never written again. Hence the contract: the
 ## `SeismicFile` must stay open and its index unchanged until `close`, and
 ## only one thread may call the consumer procs.
 
 import std/locks
+import ../common/[diagnostics, errors]
 import ../segy/samples
 import ./traceindex
 
 type
   SlotState = enum ssFree, ssBusy, ssReady
 
+  FailedRow = object
+    row: int       # row of the chunk
+    code: DiagCode # dcTruncated or dcUnsupportedFormat
+
   Slot[T] = object
     state: SlotState
     gen: int     # generation (see `seek`) the chunk was decoded for
     chunk: int   # chunk number since the last seek
     first, count: int
-    failed: int  # traces that could not be decoded
+    failed: int  # rows that could not be decoded: `fails[0 ..< failed]`
+    fails: ptr UncheckedArray[FailedRow] # `chunkTraces` entries
     data: ptr UncheckedArray[T]
 
   Shared[T] = object
@@ -65,6 +73,7 @@ type
     tensors: seq[Tensor[T]] # slot storage, consumer side
     last: int               # end of the whole range (exclusive)
     selection: seq[int]     # selection mode: the trace list (fixed for the prefetcher's life)
+    path: string            # the file's, for diagnostics
     untaken: int            # chunks of the range not yet taken: `sh.chunkCount - sh.takeChunk`,
                             # kept by the consumer so `atEnd` needs no lock
 
@@ -75,6 +84,9 @@ type
     count*: int         ## Traces in the chunk.
     samples*: Tensor[T] ## `[count, cols]`; shorter traces are zero-padded.
     failed*: int        ## Traces that could not be decoded (left zero).
+    log*: DiagLog
+      ## One error per trace that could not be decoded: its trace index
+      ## (`loc.trace`), record, byte offset and the reason.
 
 proc shutdown[T](sh: ptr Shared[T]) =
   # Stops and joins the worker, then frees the shared state.
@@ -86,6 +98,7 @@ proc shutdown[T](sh: ptr Shared[T]) =
   deinitCond(sh.work)
   deinitCond(sh.ready)
   deinitLock(sh.lock)
+  for i in 0..<sh.depth: freeShared(sh.slots[i].fails)
   freeShared(sh.slots)
   freeShared(sh)
 
@@ -101,17 +114,23 @@ proc `=copy`*[T](dst: var Prefetcher[T], src: Prefetcher[T]) {.error.}
 func chunkCount[T](sh: ptr Shared[T]): int {.inline.} =
   (sh.stop - sh.start + sh.chunkTraces - 1) div sh.chunkTraces
 
-proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) =
+proc traceOf[T](sh: ptr Shared[T], pos: int): int {.inline.} =
+  if sh.sel != nil: sh.sel[pos] else: pos
+
+proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) {.raises: [].} =
   # Runs without the lock: the slot is busy, so nobody else touches it.
+  # `decodeEntry` raises only `SegError`s (an undecodable format, samples
+  # past the end of the map).
   s.failed = 0
   for k in 0..<s.count:
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
-    let pos = s.first + k
-    let e = sh.entries[if sh.sel != nil: sh.sel[pos] else: pos]
+    let e = sh.entries[sh.traceOf(s.first + k)]
     try:
       decodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols)
-    except CatchableError:
+    except SegError as err:
       for c in 0..<sh.cols: row[c] = T(0)
+      s.fails[s.failed] = FailedRow(row: k,
+        code: if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat)
       inc s.failed
 
 proc worker[T](sh: ptr Shared[T]) {.thread.} =
@@ -153,9 +172,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
   if chunkTraces <= 0 or depth <= 0 or cols < -1:
     raiseArg("need chunkTraces > 0, depth > 0 and cols >= -1")
+  checkSpan(traces, f.len)
   let first = traces.a
-  if first < 0 or first > f.len or traces.b >= f.len:
-    raiseArg("traces " & $traces & " lie outside the file")
   let stop = if traces.b >= first: traces.b + 1 else: first
   let width = if cols >= 0: cols elif first < stop: f.maxSamples(first..<stop) else: 0
   # No range (even after a seek) holds more traces than the file.
@@ -175,10 +193,11 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   initLock(sh.lock)
   initCond(sh.work)
   initCond(sh.ready)
-  result = Prefetcher[T](sh: sh, last: f.len, untaken: sh.chunkCount)
+  result = Prefetcher[T](sh: sh, last: f.len, untaken: sh.chunkCount, path: f.path)
   for i in 0..<depth:
     result.tensors.add newTensorUninit[T](rows, width)
     sh.slots[i].data = rawData(result.tensors[i])
+    sh.slots[i].fails = cast[ptr UncheckedArray[FailedRow]](createShared(FailedRow, rows))
   createThread(sh.thread, worker[T], sh)
 
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
@@ -204,16 +223,16 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkT
   signal(sh.work)
   release(sh.lock)
 
-func positions*[T](p: Prefetcher[T]): int {.inline.} =
-  ## Positions `seek` accepts: the file's trace count, or the selection's length.
+func len*[T](p: Prefetcher[T]): int {.inline.} =
+  ## The number of positions `seek` accepts: the file's trace count, or the
+  ## selection's length.
   p.last
 
 proc traceAt*[T](p: Prefetcher[T], pos: int): int =
-  ## The trace index at position `pos` (the position itself in range mode);
-  ## -1 for a position out of range.
-  if pos notin 0 ..< p.last: -1
-  elif p.selection.len > 0: p.selection[pos]
-  else: pos
+  ## The trace index at position `pos` (the position itself in range mode).
+  ## Raises `ValueError` for a position outside `0 ..< p.len`.
+  if pos notin 0 ..< p.last: raiseArg("position " & $pos & " is outside 0.." & $(p.last - 1))
+  if p.selection.len > 0: p.selection[pos] else: pos
 
 proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
   # Called with the head slot ready; hands its tensor over and gives the slot
@@ -225,6 +244,14 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
   c.first = s.first
   c.count = s.count
   c.failed = s.failed
+  c.log = DiagLog()
+  for k in 0..<s.failed:
+    let fr = s.fails[k]
+    let trace = sh.traceOf(s.first + fr.row)
+    let e = sh.entries[trace]
+    c.log.report(sevError, fr.code, if fr.code == dcTruncated:
+      "trace samples lie past the end of the file" else: "the sample format is not decodable",
+      e.offset, Location(file: p.path, record: int(e.record), trace: trace))
   if s.count == sh.chunkTraces:
     c.samples = move(p.tensors[i])
     p.tensors[i] = newTensorUninit[T](sh.chunkTraces, sh.cols)
@@ -278,9 +305,8 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   ## finishes in the background and is discarded. A no-op after `close`.
   ## Raises `ValueError` for positions out of range.
   if p.sh == nil: return
+  checkSpan(span, p.last, "positions")
   let first = span.a
-  if first < 0 or first > p.last or span.b >= p.last:
-    raiseArg("positions " & $span & " are out of range")
   let stop = if span.b >= first: span.b + 1 else: first
   let sh = p.sh
   acquire(sh.lock)

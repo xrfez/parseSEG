@@ -178,8 +178,8 @@ proc scaffoldVendorMap*(path: string, reg: VendorRegistry): VendorScaffold =
   let fh = open(path, fmRead)
   try: head.setLen fh.readBuffer(addr head[0], head.len)
   finally: fh.close()
-  var kind: SeismicKind
-  if not detectKind(head.toOpenArrayByte(0, head.len - 1), kind):
+  let kind = detectKind(head.toOpenArrayByte(0, head.len - 1))
+  if kind == skUnknown:
     raise newException(ValueError, path & " is neither SEG-Y nor SEG-D")
   result = VendorScaffold(source: path, format: kind)
   if kind == skSegd: result.scanSegd(path, reg) else: result.scanSegy(path, reg)

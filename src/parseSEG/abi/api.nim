@@ -110,9 +110,8 @@ proc requireBuffer(rows, cols, elem: int) =
 
 func elemSize(d: Dtype): int = (if d == dtF32: 4 else: 8)
 
-proc checkTraces(f: SeismicFile, traces: Slice[int]) =
-  if traces.b >= traces.a and (traces.a < 0 or traces.b >= f.len):
-    argError("traces " & $traces & " lie outside the file (" & $f.len & " traces)")
+proc checkTraces(f: SeismicFile, traces: Slice[int]) {.inline.} =
+  checkSpan(traces, f.len)
 
 proc checkTraces(f: SeismicFile, traces: openArray[int]) =
   for t in traces:
@@ -169,7 +168,7 @@ proc statusName*(status: int32): string {.segApi(abiOnly).} =
 
 # ------------------------------------------------------------------ reads --
 
-func rows(traces: Slice[int]): int = (if traces.b < traces.a: 0 else: traces.len)
+func rows(traces: Slice[int]): int = traces.spanLen
 func rows(traces: openArray[int]): int = traces.len
 
 template readAs(f: SeismicFile, traces: untyped, dtype: Dtype): TensorObj =
@@ -180,8 +179,9 @@ template readAs(f: SeismicFile, traces: untyped, dtype: Dtype): TensorObj =
 proc readTraces*(f: Handle[SeismicFile], traces: Slice[int], dtype = dtF32): TensorObj {.
     segApi(concurrent).} =
   ## Decodes `traces` into new samples `[traces, maxSamples]` (shorter traces
-  ## are zero-padded, undecodable ones stay zero). Reads on one file may run
-  ## in parallel.
+  ## are zero-padded). Fails with SEG_ERR_FORMAT naming the first trace that
+  ## cannot be decoded (`readTracesInto` reads past them, counting them).
+  ## Reads on one file may run in parallel.
   f.v.checkTraces(traces)
   readAs(f.v, traces, dtype)
 
@@ -310,9 +310,10 @@ func atEnd*(p: PrefetcherObj): bool {.segApi.} =
   ## True once every chunk has been taken.
   if p.dt == dtF32: p.p32.atEnd else: p.p64.atEnd
 
-func positions*(p: PrefetcherObj): int {.segApi.} =
-  ## Positions `seek` accepts: the file's trace count, or the list's length.
-  if p.dt == dtF32: p.p32.positions else: p.p64.positions
+func len*(p: PrefetcherObj): int {.segApi.} =
+  ## The number of positions `seek` accepts: the file's trace count, or the
+  ## list's length.
+  if p.dt == dtF32: p.p32.len else: p.p64.len
 
 proc seek*(p: PrefetcherObj, span: Slice[int]) {.segApi.} =
   if p.dt == dtF32: p.p32.seek(span) else: p.p64.seek(span)

@@ -55,8 +55,7 @@ block a3_segd_file_number_43xx_with_format_like_bytes:
   b[1] = 0x21
   b[3224] = 0x00
   b[3225] = 0x05
-  var k: SeismicKind
-  doAssert detectKind(b, k) and k == skSegd
+  doAssert detectKind(b) == skSegd
   writeBytes(tmp / "4321.sgd", b)
   var f = openSeismic(tmp / "4321.sgd")
   doAssert f.kind == skSegd and f.len == 1 and not f.log.isFatal
@@ -191,7 +190,7 @@ block b7_prefetch_after_close:
   doAssert p.next(c) and c.count == 200
   p.close()
   doAssert p.atEnd and not p.tryNext(c) and not p.next(c)
-  p.seek(0 ..< p.positions)
+  p.seek(0 ..< p.len)
   var q: Prefetcher[float32] # never started
   doAssert q.atEnd and not q.tryNext(c)
   f.close()

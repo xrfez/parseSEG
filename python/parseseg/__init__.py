@@ -476,6 +476,7 @@ class SegConvertOptions(ctypes.Structure):
 
 
 class SegGather(ctypes.Structure):
+    """A run of consecutive traces that form one gather."""
     _fields_ = [
         ("kind", ctypes.c_int32),
         ("traces", SegSlice),
@@ -661,8 +662,8 @@ _lib.seg_prefetcher_try_next.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegPref
 _lib.seg_prefetcher_try_next.restype = ctypes.c_int32
 _lib.seg_prefetcher_at_end.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
 _lib.seg_prefetcher_at_end.restype = ctypes.c_int32
-_lib.seg_prefetcher_positions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_prefetcher_positions.restype = ctypes.c_int32
+_lib.seg_prefetcher_len.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_prefetcher_len.restype = ctypes.c_int32
 _lib.seg_prefetcher_seek.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64]
 _lib.seg_prefetcher_seek.restype = ctypes.c_int32
 _lib.seg_prefetcher_trace_at.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
@@ -1120,7 +1121,10 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
         binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
         interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
-        interval. NaN when unknown (a closed file, an out-of-range trace)."""
+        interval. NaN when the headers cannot give it (a SEG-Y trace header cut
+        off by the end of the file): unknown data, not a caller error. Raises
+        `ValueError` for a trace out of range or a closed file (the headers are
+        read from the map, as `traceField` does)."""
         _h = self._enter()
         try:
             _o = ctypes.c_double()
@@ -1145,8 +1149,9 @@ class SeismicFile(_Handle, _SeismicFileExtras):
 
     def _read_traces_range(self, traces, dtype="float32"):
         """Decodes `traces` into new samples `[traces, maxSamples]` (shorter traces
-        are zero-padded, undecodable ones stay zero). Reads on one file may run
-        in parallel."""
+        are zero-padded). Fails with SEG_ERR_FORMAT naming the first trace that
+        cannot be decoded (`readTracesInto` reads past them, counting them).
+        Reads on one file may run in parallel."""
         _h = self._enter()
         try:
             _o = ctypes.c_void_p()
@@ -1560,13 +1565,13 @@ class Prefetcher(_Handle):
         finally:
             self._leave()
 
-    @property
-    def positions(self):
-        """Positions `seek` accepts: the file's trace count, or the list's length."""
+    def __len__(self):
+        """The number of positions `seek` accepts: the file's trace count, or the
+        list's length."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_prefetcher_positions, _h, ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_prefetcher_len, _h, ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
@@ -1584,8 +1589,8 @@ class Prefetcher(_Handle):
             self._leave()
 
     def trace_at(self, pos):
-        """The trace index at position `pos` (the position itself in range mode);
-        -1 for a position out of range."""
+        """The trace index at position `pos` (the position itself in range mode).
+        Raises `ValueError` for a position outside `0 ..< p.len`."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
@@ -1631,11 +1636,11 @@ def convert_segd_revision(src_path, dst_path, opts=None):
 
 def open_seismic(path, twos_complement8015=False, keys=False):
     """Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
-    index (with per-trace geometry when `keys`). Format problems are in `index.log`; an
-    undetectable file gives a
-    fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
-    file cannot be opened or mapped. `writable` maps it read-write, for
-    in-place header edits (`model/edit`)."""
+    index (with per-trace geometry when `keys`). Format problems are in
+    `index.log`; an undetectable file gives a fatal diagnostic and an empty
+    index. Raises `IOError`/`OSError` if the file cannot be opened or
+    mapped. `writable` maps it read-write, for in-place header edits
+    (`model/edit`)."""
     _o = ctypes.c_void_p()
     if _call(_lib.seg_open_seismic, _str(path, "path"), bool(twos_complement8015), bool(keys), ctypes.byref(_o)) > 0:
         return None

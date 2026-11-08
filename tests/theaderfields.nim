@@ -97,8 +97,9 @@ block sample_intervals:
       let dt = f.sampleIntervalUs(i)
       doAssert dt > 0, n
       if us > 0: doAssert dt == us, n & " " & $dt
-    doAssert f.sampleIntervalUs(f.len).isNaN
+    doAssertRaises(ValueError): discard f.sampleIntervalUs(f.len)
     f.close()
+    doAssertRaises(ValueError): discard f.sampleIntervalUs(0) # closed
   # Against the readers: SEG-Y's trace interval, SEG-D's channel set.
   let d = readSegyHeaders(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")

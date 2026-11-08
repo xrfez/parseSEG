@@ -49,8 +49,13 @@ func initTraceKeys*(): TraceKeys =
     srcY: NaN, rcvLine: NaN, rcvPoint: NaN, rcvX: NaN, rcvY: NaN, srcZ: NaN, rcvZ: NaN,
     cmpX: NaN, cmpY: NaN, channel: NaN)
 
-func hasSourceXY*(k: TraceKeys): bool {.inline.} = not (k.srcX.isNaN or k.srcY.isNaN)
-func hasReceiverXY*(k: TraceKeys): bool {.inline.} = not (k.rcvX.isNaN or k.rcvY.isNaN)
+func hasSourceXY*(k: TraceKeys): bool {.inline.} =
+  ## Both source coordinates are known.
+  not (k.srcX.isNaN or k.srcY.isNaN)
+
+func hasReceiverXY*(k: TraceKeys): bool {.inline.} =
+  ## Both receiver coordinates are known.
+  not (k.rcvX.isNaN or k.rcvY.isNaN)
 
 func deriveGeometry*(k: var TraceKeys, overwrite = false) =
   ## Fills `offset` (the source-receiver distance) and the midpoint from the
@@ -105,7 +110,7 @@ proc traceKeys*(gr: GeometryReader, t: SegyTrace): TraceKeys =
   if isComponentCode(base): result.component = uint8(base)
 
 
-func finite(x: float64): bool {.inline.} = x == x and x != Inf and x != -Inf
+func finite(x: float64): bool {.inline.} = not x.isNaN and x != Inf and x != -Inf
 
 proc positionOf(area: openArray[byte], at: int, x, y, z: var float64): bool =
   # The first usable tuple of the 96-byte Position block at `at`: valid,
@@ -198,10 +203,12 @@ proc traceKeys*(f: SegyFile, t: SegyTrace): TraceKeys =
 
 type
   StationKey* = object
+    ## A survey station: line, point and point index (see `stationKey`).
     line*, point*: float64
     index*: int16 ## 0 in a table entry matches any index.
 
   Coordinates* = object
+    ## A station's position, in the survey's grid units.
     x*, y*, z*: float64 ## z may be NaN.
 
   GeometryTable* = object
@@ -209,6 +216,7 @@ type
     sources*, receivers*: Table[StationKey, Coordinates]
 
 func hash*(k: StationKey): Hash =
+  ## Consistent with `==` (0.0 and -0.0 hash alike).
   var h: Hash = 0
   h = h !& hash(if k.line == 0: 0.0 else: k.line)
   h = h !& hash(if k.point == 0: 0.0 else: k.point)
@@ -216,6 +224,7 @@ func hash*(k: StationKey): Hash =
   !$h
 
 func `==`*(a, b: StationKey): bool =
+  ## Same line, point and index.
   a.line == b.line and a.point == b.point and a.index == b.index
 
 func stationKey*(line, point: float64, index: int16): StationKey =

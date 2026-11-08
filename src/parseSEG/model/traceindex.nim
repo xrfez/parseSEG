@@ -27,7 +27,8 @@ import ../segd/[reader as segdreader]
 import ./[tensors, keys]
 import ../abi/pragmas
 
-export memsource, tensors, diagnostics, keys, seismickind
+export memsource, diagnostics, keys, seismickind
+export tensors except rowPtr
 
 type
   TraceEntry* = object
@@ -83,7 +84,9 @@ func channelSetIndex*(e: TraceEntry): int {.inline.} =
   ## The 0-based channel set index, -1 if unknown.
   if e.channelSet == NoChannelSet: -1 else: int(e.channelSet)
 
-func len*(ix: TraceIndex): int {.inline.} = ix.entries.len
+func len*(ix: TraceIndex): int {.inline.} =
+  ## The number of traces indexed.
+  ix.entries.len
 
 func sampleOffset*(e: TraceEntry): int64 {.inline.} =
   ## Medium offset of the trace's first sample byte.
@@ -149,23 +152,20 @@ func looksLikeSegy(head: openArray[byte], at: int): bool =
     if printable(head[i], ebcdic): inc n
   n >= 3200 * 6 div 10
 
-func detectKind*(head: openArray[byte], kind: var SeismicKind): bool =
+func detectKind*(head: openArray[byte]): SeismicKind =
   ## Guesses the standard from the first bytes of a stream (pass at least
   ## 3728). SEG-D: a storage unit label or a Table of Contents file. SEG-Y: a
   ## textual header starting with `C` that is mostly printable EBCDIC or
   ## ASCII, possibly after a 128-byte tape label. Otherwise SEG-D if the bytes
   ## are a plausible General Header #1 (a SEG-D file number 43xx starts with
-  ## ASCII `C`, but its next 3200 bytes are not text). False if nothing fits.
-  result = true
-  if isStorageUnitLabel(head) or isTocFile(head):
-    kind = skSegd
+  ## ASCII `C`, but its next 3200 bytes are not text). `skUnknown` if nothing
+  ## fits.
+  if isStorageUnitLabel(head) or isTocFile(head): skSegd
   elif looksLikeSegy(head, 0) or (head.len >= 6 and head[4] == 0x53 and head[5] == 0x59 and
       looksLikeSegy(head, 128)):
-    kind = skSegy
-  elif looksLikeSegdGh1(head):
-    kind = skSegd
-  else:
-    result = false
+    skSegy
+  elif looksLikeSegdGh1(head): skSegd
+  else: skUnknown
 
 # ------------------------------------------------------------------ walk --
 
@@ -255,8 +255,9 @@ type
 
 proc `=destroy`(m: MapOwner) =
   if m.src != nil:
+    # A destructor must not raise; the base methods raise [CatchableError].
     try: m.src.close()
-    except CatchableError: discard # a destructor must not raise; base methods raise [CatchableError]
+    except CatchableError: discard
   `=destroy`(m.src)
 
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
@@ -274,15 +275,15 @@ proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
 proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
     writable = false): SeismicFile {.segApi(hide = writable).} =
   ## Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
-  ## index (with per-trace geometry when `keys`). Format problems are in `index.log`; an
-  ## undetectable file gives a
-  ## fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
-  ## file cannot be opened or mapped. `writable` maps it read-write, for
-  ## in-place header edits (`model/edit`).
+  ## index (with per-trace geometry when `keys`). Format problems are in
+  ## `index.log`; an undetectable file gives a fatal diagnostic and an empty
+  ## index. Raises `IOError`/`OSError` if the file cannot be opened or
+  ## mapped. `writable` maps it read-write, for in-place header edits
+  ## (`model/edit`).
   result = SeismicFile(path: path, map: MapOwner(src: openMemFileSource(path, writable)))
   let n = int(min(result.map.src.size, 8192))
-  var kind: SeismicKind
-  if n > 0 and detectKind(result.map.src.memory.toOpenArray(0, n - 1), kind):
+  let kind = if n > 0: detectKind(result.map.src.memory.toOpenArray(0, n - 1)) else: skUnknown
+  if kind != skUnknown:
     result.index = buildIndex(result.map.src, kind, twosComplement8015, keys)
   else:
     result.index.contiguous = true
@@ -365,15 +366,34 @@ proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] {.segApi.}
   if n > 0: copyMem(addr result[0], addr f.map.src.memory[offset], n)
 
 proc mappedSize*(f: SeismicFile): int64 {.inline.} =
+  ## **Internal.** Bytes mapped (0 after `close`). Not exported by `parseSEG`.
   if f.map.src != nil: f.map.src.size else: 0
 
 proc flush*(f: SeismicFile) =
-  ## Writes modified pages of a writable map back to the file.
+  ## **Internal.** Writes modified pages of a writable map back to the file
+  ## (`HeaderEditor.close`). Not exported by `parseSEG`.
   if f.map.src != nil: f.map.src.flush()
 
-proc rowPtr[T](t: Tensor[T], row: int): ptr UncheckedArray[T] {.inline.} =
-  let base = cast[ptr UncheckedArray[T]](t.unsafe_raw_offset())
-  cast[ptr UncheckedArray[T]](addr base[row * t.strides[0]])
+# ------------------------------------------------- checks shared by model --
+# Exported for the sibling model modules (gathers, prefetch, survey/join);
+# the `parseSEG` umbrella does not re-export them.
+
+proc requireKeys*(ix: TraceIndex) =
+  ## **Internal.** Raises `ValueError` unless the index holds per-trace keys.
+  if ix.keys.len != ix.entries.len:
+    raise newException(ValueError, "open the file with keys = true")
+
+proc checkSpan*(span: Slice[int], len: int, what = "traces") =
+  ## **Internal.** Raises `ValueError` unless `span` lies in `0 ..< len`; an
+  ## empty span must start in `0 .. len`.
+  if span.a < 0 or span.a > len or span.b >= len:
+    raise newException(ValueError, what & " " & $span & " lie outside 0.." & $(len - 1))
+
+func spanLen*(span: Slice[int]): int {.inline.} =
+  ## **Internal.** The number of elements of `span`; 0 when empty.
+  if span.b < span.a: 0 else: span.len
+
+# ---------------------------------------------------------------- reading --
 
 template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: int,
     log: var DiagLog, T: typedesc): int =
@@ -399,10 +419,8 @@ proc checkReadable(f: SeismicFile, count: int) =
   if not f.index.contiguous:
     raise newException(ValueError, "range reads need a plain disk file")
 
-proc checkSelection(f: SeismicFile, traces: Slice[int]) =
-  if traces.b >= traces.a and (traces.a < 0 or traces.b >= f.len):
-    raise newException(ValueError, "traces " & $traces & " lie outside the file (" & $f.len &
-      " traces)")
+proc checkSelection(f: SeismicFile, traces: Slice[int]) {.inline.} =
+  checkSpan(traces, f.len)
 
 proc checkSelection(f: SeismicFile, traces: openArray[int]) =
   for i in traces:
@@ -420,7 +438,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   ## `dst.shape[1]`. A trace that cannot be decoded is left zero, logged in
   ## `log`, and counted in the result. Raises `ValueError` for traces outside
   ## the file, a closed file or a tensor without room.
-  let count = (if traces.b < traces.a: 0 else: traces.len)
+  let count = traces.spanLen
   f.checkReadable(count)
   f.checkSelection(traces)
   dst.checkRows(row, count)
@@ -443,10 +461,11 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
 
 proc readTracesRaw*[T: SampleType](f: SeismicFile, traces: openArray[int],
     dst: ptr UncheckedArray[T], cols, rowStride: int, log: var DiagLog): int =
-  ## Decodes the selected traces into a buffer the caller owns: trace
-  ## `traces[k]` into `dst[k * rowStride ..< k * rowStride + cols]`. For hosts
-  ## that decode straight into their own arrays (the C ABI, numpy). The
-  ## caller guarantees the buffer's size; `rowStride >= cols`.
+  ## **Internal** (not exported by `parseSEG`). Decodes the selected traces
+  ## into a buffer the caller owns: trace `traces[k]` into
+  ## `dst[k * rowStride ..< k * rowStride + cols]`, for hosts that decode
+  ## straight into their own arrays (the C ABI, numpy). The caller guarantees
+  ## the buffer's size; `rowStride >= cols`.
   f.checkReadable(traces.len)
   f.checkSelection(traces)
   if cols < 0 or rowStride < cols: raise newException(ValueError, "need 0 <= cols <= rowStride")
@@ -456,47 +475,78 @@ proc readTracesRaw*[T: SampleType](f: SeismicFile, traces: openArray[int],
   decodeLoop(f, traces.len, trace, rowOf, cols, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
-    row = 0): int {.discardable.} =
-  ## As above, without a log; returns the number of undecodable traces.
+    row = 0): int =
+  ## As above, without a log: returns the number of traces that could not be
+  ## decoded (left zero); pass a log to learn which and why.
   var log: DiagLog
   f.readTracesInto(traces, dst, row, log)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
-    dst: var Tensor[T], row = 0): int {.discardable.} =
-  ## As above, without a log; returns the number of undecodable traces.
+    dst: var Tensor[T], row = 0): int =
+  ## As above, without a log: returns the number of traces that could not be
+  ## decoded (left zero).
   var log: DiagLog
   f.readTracesInto(traces, dst, row, log)
 
 func maxSamples*(f: SeismicFile, traces: Slice[int]): int =
-  ## Largest sample count in the trace range.
+  ## Largest sample count in the trace range. Raises `ValueError` for traces
+  ## outside the file.
+  f.checkSelection(traces)
   for i in traces: result = max(result, int(f.index.entries[i].numSamples))
 
 func maxSamples*(f: SeismicFile, traces: openArray[int]): int =
-  ## Largest sample count of the selected traces.
+  ## Largest sample count of the selected traces. Raises `ValueError` for a
+  ## trace outside the file.
+  f.checkSelection(traces)
   for i in traces: result = max(result, int(f.index.entries[i].numSamples))
+
+proc readTraces*(f: SeismicFile, traces: Slice[int], log: var DiagLog,
+    T: typedesc[SampleType] = float32): Tensor[T] =
+  ## `traces` as a new `[traces.len, maxSamples]` tensor (shorter traces are
+  ## zero-padded). A trace that cannot be decoded stays zero and is logged in
+  ## `log`. Raises `ValueError` for traces outside the file or a closed file.
+  result = newTraceTensor[T](traces.spanLen, f.maxSamples(traces))
+  discard f.readTracesInto(traces, result, 0, log)
+
+proc readTraces*(f: SeismicFile, traces: openArray[int], log: var DiagLog,
+    T: typedesc[SampleType] = float32): Tensor[T] =
+  ## The selected traces, in list order, as a new `[traces.len, maxSamples]`
+  ## tensor; otherwise as the `Slice` form.
+  result = newTraceTensor[T](traces.len, f.maxSamples(traces))
+  discard f.readTracesInto(traces, result, 0, log)
+
+proc raiseUndecodable(log: DiagLog) {.noinline, noreturn.} =
+  # The first decode error of `log`, with the count, as the exception.
+  let first = log[0]
+  let msg = $log.len & " trace(s) could not be decoded; trace " & $first.loc.trace & ": " &
+    first.msg & " (pass a log to read past them)"
+  if first.code == dcTruncated: raiseTruncated(msg, first.offset)
+  else: raiseFormat(msg, first.offset)
 
 proc readTraces*(f: SeismicFile, traces: Slice[int],
     T: typedesc[SampleType] = float32): Tensor[T] =
   ## `traces` as a new `[traces.len, maxSamples]` tensor (shorter traces are
-  ## zero-padded; undecodable ones stay zero). Raises `ValueError` for traces
-  ## outside the file or a closed file.
-  f.checkSelection(traces)
-  result = newTraceTensor[T]((if traces.b < traces.a: 0 else: traces.len), f.maxSamples(traces))
-  if traces.b >= traces.a: f.readTracesInto(traces, result)
+  ## zero-padded). Raises `ValueError` for traces outside the file or a
+  ## closed file, and `SegFormatError` (`SegTruncatedError` for samples past
+  ## the end of the file) when a trace cannot be decoded: pass a `log` to
+  ## get zero rows and diagnostics instead.
+  var log: DiagLog
+  result = f.readTraces(traces, log, T)
+  if log.len > 0: raiseUndecodable(log)
 
 proc readTraces*(f: SeismicFile, traces: openArray[int],
     T: typedesc[SampleType] = float32): Tensor[T] =
   ## The selected traces, in list order, as a new `[traces.len, maxSamples]`
-  ## tensor.
-  f.checkSelection(traces)
-  result = newTraceTensor[T](traces.len, f.maxSamples(traces))
-  if traces.len > 0: f.readTracesInto(traces, result)
+  ## tensor; otherwise as the `Slice` form.
+  var log: DiagLog
+  result = f.readTraces(traces, log, T)
+  if log.len > 0: raiseUndecodable(log)
 
 proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): int =
   ## Joins external geometry (survey files, a host's database) to every
   ## trace's keys on (line, point, index); see `keys.applyGeometry`. Returns
   ## the number of traces changed. Raises `ValueError` for an index built
   ## without `keys = true`.
-  if ix.keys.len != ix.entries.len: raise newException(ValueError, "open the file with keys = true")
+  ix.requireKeys()
   for k in ix.keys.mitems:
     if k.applyGeometry(g, overwrite): inc result

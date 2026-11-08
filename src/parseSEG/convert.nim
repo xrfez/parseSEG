@@ -734,8 +734,8 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.
   except IOError as e:
     result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
     return
-  var kind: SeismicKind
-  if not detectKind(head, kind):
+  let kind = detectKind(head)
+  if kind == skUnknown:
     result.report(sevFatal, dcUnsupportedFormat, "neither a SEG-Y nor a SEG-D file",
       loc = Location(file: srcPath))
     return

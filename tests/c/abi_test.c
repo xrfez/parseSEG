@@ -119,8 +119,7 @@ static void test_files(void) {
     double si = 0;
     OK(seg_seismic_file_sample_interval_us(f, 0, &si));
     CHECK(si == 2000.0);
-    OK(seg_seismic_file_sample_interval_us(f, 200, &si));
-    CHECK(isnan(si));
+    CHECK(seg_seismic_file_sample_interval_us(f, 200, &si) == SEG_ERR_ARGUMENT);
     char name[2048];
     int64_t len = -1;
     OK(seg_seismic_file_path(f, name, sizeof name, &len));
@@ -404,9 +403,8 @@ static void test_gathers_and_prefetch(void) {
     int64_t at = 0;
     OK(seg_prefetcher_trace_at(p, 7, &at));
     CHECK(at == 7);
-    OK(seg_prefetcher_trace_at(p, 200, &at));
-    CHECK(at == -1);
-    OK(seg_prefetcher_positions(p, &n));
+    CHECK(seg_prefetcher_trace_at(p, 200, &at) == SEG_ERR_ARGUMENT);
+    OK(seg_prefetcher_len(p, &n));
     CHECK(n == 200);
     OK(seg_prefetcher_close(p));
     seg_prefetcher_release(p);

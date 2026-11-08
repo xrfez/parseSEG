@@ -21,12 +21,21 @@ block file_accessors:
   doAssert f.traceField(5, "trace.sourceX").i == 1704188
   doAssert f.sampleIntervalUs() == 2000.0
   raisesValue(proc () = discard f.traceEntry(200))
+  raisesValue(proc () = discard f.sampleIntervalUs(200))
+  raisesValue(proc () = discard f.sampleIntervalUs(-1))
+  raisesValue(proc () = discard f.maxSamples(0 .. 200))
+  raisesValue(proc () = discard f.maxSamples([3, 200]))
+  doAssert f.maxSamples(200 .. 199) == 0
   raisesValue(proc () = discard f.traceField(0, "trace.bogus"))
   raisesValue(proc () = discard f.fileField("gh1.year"))
   raisesValue(proc () = discard f.readTraces(199..200))
   raisesValue(proc () = discard f.readTraces([0, 200]))
   raisesValue(proc () = discard f.componentGroupIds(0 .. 1 shl 40))
   doAssert f.readTraces(200 .. 199).shape[0] == 0 # an empty range
+  block closed:
+    var g = openSeismic(exampleDir / "Sweep0.sgy")
+    g.close()
+    raisesValue(proc () = discard g.sampleIntervalUs(0))
   doAssert f.gathers.len >= 1 and f.componentGroupIds(0..9).len == 10
   let nokeys = openSeismic(exampleDir / "Sweep0.sgy")
   raisesValue(proc () = discard nokeys.traceKeys(0))
@@ -48,7 +57,8 @@ block prefetch_ranges:
   raisesValue(proc () = discard newPrefetcher[float32](f, 0 .. f.len))
   raisesValue(proc () = discard newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 0))
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 4)
-  doAssert p.traceAt(-1) == -1 and p.traceAt(f.len) == -1
+  raisesValue(proc () = discard p.traceAt(-1))
+  raisesValue(proc () = discard p.traceAt(f.len))
   p.seek(f.len ..< f.len)
   var c: PrefetchChunk[float32]
   doAssert not p.next(c) and p.atEnd

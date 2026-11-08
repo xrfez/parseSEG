@@ -34,14 +34,15 @@
 ## source: the components of a multi-component receiver (Rev 3 group index,
 ## else the sensor type; SEG-Y trace identification codes 11-17 and 27-41).
 
-import std/[tables, math]
+import std/[tables, sets, math]
 import ./[traceindex, keys]
 from ../segd/reader import isRev3
 import ../abi/pragmas
 
 type
   GatherKind* = enum
-    gkUnknown = "unknown"
+    ## What a gather holds, derived from its geometry (see the module doc).
+    gkUnknown = "unknown"   ## The keys cannot tell.
     gkShot = "shot"         ## Common source.
     gkReceiver = "receiver" ## Common receiver.
     gkCmp = "cmp"           ## Common midpoint / CDP / stack (declared by SEG-Y).
@@ -49,6 +50,7 @@ type
     gkOther = "other"       ## Several sources and several receivers.
 
   Gather* = object
+    ## A run of consecutive traces that form one gather.
     kind*: GatherKind
     traces*: Slice[int]     ## Trace indices into the index.
     sources*: int           ## Distinct known sources among its seismic traces.
@@ -61,6 +63,10 @@ type
     components*: seq[uint8] ## Component of each trace (parallel to `traces`).
 
   StationId = array[5, uint64]
+
+  SplitKey = enum
+    ## The key whose changes separate SEG-Y gathers.
+    byRecord, byEnsemble, byOffset, byReceiver
 
 func bitsOf(x: float64): uint64 {.inline.} =
   # Bit pattern with one NaN and one zero, so equal keys hash equally.
@@ -88,9 +94,6 @@ func isSeismic*(ix: TraceIndex, i: int): bool =
   elif ix.segdRecords[e.record].isRev3: e.channelType in {0x10'u8, 0x11'u8}
   else: e.channelType == 1
 
-proc requireKeys(ix: TraceIndex) =
-  if ix.keys.len != ix.entries.len: raise newException(ValueError, "open the file with keys = true")
-
 proc classify*(ix: TraceIndex, s: Slice[int]): Gather =
   ## Counts the distinct sources and receivers of the seismic traces in `s`
   ## (all traces, if none is seismic) and derives the gather kind from them;
@@ -100,14 +103,14 @@ proc classify*(ix: TraceIndex, s: Slice[int]): Gather =
   var anySeismic = false
   for i in s:
     if ix.isSeismic(i): anySeismic = true
-  var src, rcv: Table[StationId, int]
+  var src, rcv: HashSet[StationId]
   var n = 0
   var components: set[uint8]
   for i in s:
     if ix.isSeismic(i) or not anySeismic:
-      let k = ix.keys[i]
-      if knownSource(k): src[sourceId(k)] = 1
-      if knownReceiver(k): rcv[receiverId(k)] = 1
+      template k: untyped = ix.keys[i]
+      if knownSource(k): src.incl sourceId(k)
+      if knownReceiver(k): rcv.incl receiverId(k)
       components.incl k.component
       inc n
   result.sources = src.len
@@ -122,14 +125,14 @@ proc classify*(ix: TraceIndex, s: Slice[int]): Gather =
       if n == 1 or components.card == n: gkShot else: gkUnknown
     else: gkOther
 
-func sameKey(a, b: TraceKeys, by: int): bool =
+func sameKey(a, b: TraceKeys, by: SplitKey): bool =
   case by
-  of 0: bitsOf(a.record) == bitsOf(b.record)
-  of 1: bitsOf(a.ensemble) == bitsOf(b.ensemble)
-  of 2: bitsOf(a.offset) == bitsOf(b.offset)
-  else: receiverId(a) == receiverId(b)
+  of byRecord: bitsOf(a.record) == bitsOf(b.record)
+  of byEnsemble: bitsOf(a.ensemble) == bitsOf(b.ensemble)
+  of byOffset: bitsOf(a.offset) == bitsOf(b.offset)
+  of byReceiver: receiverId(a) == receiverId(b)
 
-proc constantKey(ix: TraceIndex, by: int): bool =
+proc constantKey(ix: TraceIndex, by: SplitKey): bool =
   result = true
   for i in 1..<ix.len:
     if not sameKey(ix.keys[i], ix.keys[0], by): return false
@@ -148,14 +151,14 @@ proc gathers*(ix: TraceIndex): seq[Gather] =
   else:
     let sorting = int(ix.segy.binary.traceSorting)
     var declared = gkUnknown
-    var by = 0 # 0 record, 1 ensemble, 2 offset, 3 receiver station
+    var by = byRecord
     case sorting
-    of 2, 3, 4, 8, 9: (declared, by) = (gkCmp, 1)
-    of 6: (declared, by) = (gkReceiver, 1)
-    of 7: (declared, by) = (gkOffset, 2)
+    of 2, 3, 4, 8, 9: (declared, by) = (gkCmp, byEnsemble)
+    of 6: (declared, by) = (gkReceiver, byEnsemble)
+    of 7: (declared, by) = (gkOffset, byOffset)
     else: discard
-    if by != 0 and ix.len > 1 and ix.constantKey(by):
-      by = if sorting == 6: 3 else: 0
+    if by != byRecord and ix.len > 1 and ix.constantKey(by):
+      by = if sorting == 6: byReceiver else: byRecord
     var first = 0
     for i in 1..ix.len:
       if i == ix.len or not sameKey(ix.keys[i], ix.keys[first], by):
@@ -173,12 +176,11 @@ proc componentGroups*(ix: TraceIndex, traces: Slice[int]): seq[ComponentGroup] =
   ## `ValueError` for traces outside the index or an index built without
   ## `keys = true`.
   ix.requireKeys()
-  if traces.b >= traces.a and (traces.a < 0 or traces.b >= ix.len):
-    raise newException(ValueError, "traces " & $traces & " lie outside the file")
+  checkSpan(traces, ix.len)
   var at: Table[(StationId, StationId, uint8, uint8), int]
   for i in traces:
     if ix.isSeismic(i):
-      let k = ix.keys[i]
+      template k: untyped = ix.keys[i]
       let key = (sourceId(k), receiverId(k), k.depthIndex, k.reshootIndex)
       var g = at.getOrDefault(key, -1)
       if g < 0:
@@ -206,7 +208,7 @@ proc componentGroupIds*(f: SeismicFile, traces: Slice[int]): seq[int] {.segApi.}
   ## numbered from 0 in order of first appearance; -1 for a trace in none
   ## (an auxiliary trace).
   let groups = f.index.componentGroups(traces) # checks the range first
-  result = newSeq[int]((if traces.b < traces.a: 0 else: traces.len))
+  result = newSeq[int](traces.spanLen)
   for k in 0 ..< result.len: result[k] = -1
   for g, grp in groups:
     for i in grp.traces: result[i - traces.a] = g

@@ -17,6 +17,12 @@ doAssert not declared(bcdAt) and not declared(fix40)
 doAssert not declared(unsafeMemory)
 doAssert declared(copyBytes) and declared(isOpen)
 
+# Model internals (raw-pointer decoders, the map's size, shared checks) stay
+# inside the library.
+doAssert not declared(decodeEntry) and not declared(readTracesRaw) and
+  not declared(mappedSize) and not declared(rowPtr) and not declared(requireKeys) and
+  not declared(checkSpan)
+
 block copy_bytes_is_a_bounds_checked_copy:
   const sample = currentSourcePath().parentDir.parentDir / "SEG Spec" / "exampleFiles" / "63.sgd"
   if fileExists(sample):
@@ -26,7 +32,7 @@ block copy_bytes_is_a_bounds_checked_copy:
     doAssert b.len == 32
     b[0] = not b[0]                                   # the copy, not the file
     doAssert f.copyBytes(0, 1)[0] == not b[0]
-    doAssertRaises(ValueError): discard f.copyBytes(f.mappedSize - 1, 2)
+    doAssertRaises(ValueError): discard f.copyBytes(getFileSize(sample) - 1, 2)
     f.close()
     doAssert not f.isOpen
     doAssertRaises(ValueError): discard f.copyBytes(0, 1)

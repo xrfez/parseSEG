@@ -35,7 +35,8 @@ import ../common/[errors, diagnostics]
 import ../io/[records, diskio, pushback]
 import ../model/tensors
 import ./[blocks, samples]
-export blocks, samples, diagnostics, tensors
+export blocks, samples, diagnostics
+export tensors except rowPtr
 
 const
   MaxCount = 65535 ## Bound for counts that size header areas.
