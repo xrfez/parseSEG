@@ -7,6 +7,9 @@
 ## are generated from `parseSEG/abi/api` (`include/parseseg.h`,
 ## `python/parseseg`).
 
+import parseSEG/version
+export version
+
 import parseSEG/common/[errors, diagnostics, endians]
 export errors, diagnostics, endians
 

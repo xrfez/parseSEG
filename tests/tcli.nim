@@ -3,6 +3,7 @@
 ## output, the files written and the exit status (0 ok, 1 errors, 2 usage).
 
 import std/[assertions, os, osproc, strutils]
+import parseSEG/version
 
 const
   root = currentSourcePath().parentDir.parentDir
@@ -44,7 +45,7 @@ proc fresh(src: string): string =
 # -------------------------------------------------------- 7.1: inspecting --
 
 block usage_and_version:
-  doAssert "parseSEG 0.2.0" in ok("version")
+  doAssert PackageVersion != "unknown" and "parseSEG " & PackageVersion in ok("version")
   doAssert "Usage: parseSEG" in ok("help")
   doAssert "unknown command" in fails(2, "frobnicate")
   doAssert "expected info <file>" in fails(2, "info")

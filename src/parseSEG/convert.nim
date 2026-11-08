@@ -51,9 +51,10 @@ import ./model/[traceindex, keys]
 import ./segy/layout
 import ./io/memsource
 import ./abi/pragmas
+import ./version
 
 const
-  ConverterName = "parseSEG 0.2.0"
+  ConverterName = "parseSEG " & PackageVersion
   StationHeaderName = "PSEGD001"
   stationLayout = """
 <segy-layout name="parseSEG SEG-D stations">
@@ -689,9 +690,9 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.
   ## problems, including I/O failures, are in the result.
   var head = newSeq[byte](8192)
   try:
-    var f = open(srcPath, fmRead)
-    head.setLen f.readBytes(head, 0, head.len)
-    f.close()
+    let f = open(srcPath, fmRead)
+    try: head.setLen f.readBytes(head, 0, head.len)
+    finally: f.close()
   except IOError as e:
     result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
     return

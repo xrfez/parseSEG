@@ -9,9 +9,8 @@ import std/[os, strutils, sequtils, tables, math, streams]
 import ../parseSEG
 
 const
-  Version = "0.2.0"
   Usage = """
-parseSEG """ & Version & """ — read, index, edit and convert SEG-Y and SEG-D
+parseSEG """ & PackageVersion & """ — read, index, edit and convert SEG-Y and SEG-D
 
 Usage: parseSEG <command> [options] <arguments>
 
@@ -246,10 +245,10 @@ proc info(a: Args): int =
   var f = openFile(a.pos[0], keys = a.has("keys") or a.wantsSurvey)
   defer: f.close()
   let surveyLog = if a.wantsSurvey: joinSurvey(a, f) else: DiagLog()
-  let ix = f.index
+  template ix: untyped = f.index
   echo "file:        ", a.pos[0], " (", getFileSize(a.pos[0]), " bytes)"
   if f.kind == skSegy:
-    let s = ix.segy
+    template s: untyped = ix.segy
     echo "standard:    SEG-Y rev ", s.revision, ", ", s.byteOrder, "-endian",
       (if s.byteOrderDeclared: " (declared)" else: "")
     echo "format:      ", (if s.formatKnown: formatName(s.format) else: "unknown")
@@ -832,7 +831,7 @@ proc run*(args: seq[string]): int =
     of "journal": journal(a)
     of "vendormap": vendormap(a)
     of "version", "--version":
-      echo "parseSEG ", Version
+      echo "parseSEG ", PackageVersion
       0
     of "help", "--help", "-h":
       stdout.write Usage
