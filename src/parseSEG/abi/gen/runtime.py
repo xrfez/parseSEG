@@ -104,10 +104,15 @@ def _str(x, name):
     if hasattr(x, "__fspath__"):
         x = os.fspath(x)
     if isinstance(x, bytes):
-        return x
-    if not isinstance(x, str):
+        b = x
+    elif isinstance(x, str):
+        b = x.encode("utf-8")
+    else:
         raise TypeError(f"{name} must be a str, not {type(x).__name__}")
-    return x.encode("utf-8")
+    if b"\0" in b:
+        # C would see only the text before it.
+        raise ArgumentError(f"{name} must not contain NUL characters")
+    return b
 
 
 def _enum(table, x, name):
@@ -123,10 +128,19 @@ def _ids(xs, name):
     return (ctypes.c_int64 * len(vals))(*vals), len(vals)
 
 
-def _handle(x, cls, name):
+def _arg(x, cls, name, held):
+    # A handle argument, counted in flight like the receiver until the call
+    # returns (`_leave_all`), so close() from another thread cannot free it.
     if not isinstance(x, cls):
         raise TypeError(f"{name} must be a parseseg.{cls.__name__}")
-    return x._ptr()
+    p = x._enter()
+    held.append(x)
+    return p
+
+
+def _leave_all(held):
+    for x in held:
+        x._leave()
 
 
 def _struct_arg(cls, x, name):
@@ -166,22 +180,26 @@ def _text(fn):
 
 
 def _bytes(fn):
+    # One call when the result fits a first guess; else once more, sized.
+    cap = 4096
     n = ctypes.c_int64()
-    fn(None, 0, ctypes.byref(n))
-    buf = (ctypes.c_uint8 * max(n.value, 1))()
-    fn(buf, n.value, ctypes.byref(n))
-    return bytes(buf[:n.value])
+    while True:
+        buf = (ctypes.c_uint8 * cap)()
+        fn(buf, cap, ctypes.byref(n))
+        if n.value <= cap:
+            return bytes(buf[:n.value])
+        cap = n.value
 
 
 def _seq(fn, ctype, conv):
+    cap = 256
     n = ctypes.c_int64()
-    fn(None, 0, ctypes.byref(n))
     while True:
-        cap = n.value
-        arr = (ctype * max(cap, 1))()
+        arr = (ctype * cap)()
         fn(arr, cap, ctypes.byref(n))
         if n.value <= cap:
             return [conv(arr[i]) for i in range(n.value)]
+        cap = n.value
 
 
 class SegValue(ctypes.Structure):
@@ -229,21 +247,26 @@ def _value_in(x, name):
     return v
 
 
-def _value_out():
+def _value_out(cap=4096):
     v = SegValue()
-    v._buf = ctypes.create_string_buffer(4096)
-    v.text, v.text_cap = ctypes.cast(v._buf, ctypes.c_void_p), 4096
+    v._buf = ctypes.create_string_buffer(cap)
+    v.text, v.text_cap = ctypes.cast(v._buf, ctypes.c_void_p), cap
     return v
 
 
-def _value(v):
-    if v.kind == 1:
-        return v.i
-    if v.kind == 2:
-        return v.f
-    if v.text_len >= v.text_cap:
-        raise InternalError("field text longer than 4 KiB")
-    return v._buf.raw[:v.text_len].decode("utf-8", "replace")
+def _value_call(fn):
+    # Text longer than the buffer: once more with room for all of it.
+    cap = 4096
+    while True:
+        v = _value_out(cap)
+        fn(v)
+        if v.kind == 1:
+            return v.i
+        if v.kind == 2:
+            return v.f
+        if v.text_len < v.text_cap:
+            return v._buf.raw[:v.text_len].decode("utf-8", "replace")
+        cap = v.text_len + 1
 
 
 def _wrap(cls, ptr):

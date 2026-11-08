@@ -956,6 +956,58 @@ static void test_release_unmaps(void) {
     seg_seismic_file_release(f);
 }
 
+/* ---- Phase 13 review regressions -------------------------------------- */
+static void *drain(void *arg) {
+    /* Takes chunks until the end (or a close from another thread). */
+    SegPrefetcher *p = (SegPrefetcher *)arg;
+    SegPrefetchChunk c;
+    SegStatus st;
+    while ((st = seg_prefetcher_next(p, &c)) == SEG_OK) seg_tensor_release(c.samples);
+    CHECK(st == SEG_END && c.samples == NULL);
+    return NULL;
+}
+
+static void test_review13(void) {
+    SegSeismicFile *f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
+    /* R3-7: a length query copies nothing and allocates nothing. */
+    int64_t n = -1, size = 0;
+    OK(seg_seismic_file_copy_bytes(f, 3600, 0, NULL, 0, &n));
+    CHECK(n == 0);
+    OK(seg_seismic_file_copy_bytes(f, 0, 3600, NULL, 0, &size));
+    CHECK(size == 3600);
+    uint8_t two[2] = {0, 0};
+    OK(seg_seismic_file_copy_bytes(f, 0, 3600, two, 2, &n));
+    CHECK(n == 3600 && two[0] == 0xC3);
+    /* R3-11: *out is zeroed when no chunk is delivered (SEG_END). */
+    SegPrefetcher *p = NULL;
+    OK(seg_prefetcher_new_range(f, 0, 9, 4, 2, -1, SEG_DTYPE_FLOAT32, &p));
+    SegPrefetchChunk c;
+    SegStatus st;
+    while ((st = seg_prefetcher_next(p, &c)) == SEG_OK) seg_tensor_release(c.samples);
+    memset(&c, 0xAB, sizeof c);
+    CHECK(seg_prefetcher_try_next(p, &c) == SEG_END && c.samples == NULL && c.count == 0);
+    memset(&c, 0xAB, sizeof c);
+    CHECK(seg_prefetcher_next(p, &c) == SEG_END && c.samples == NULL && c.first == 0);
+    seg_prefetcher_release(p);
+    /* R3-8: next waits without the prefetcher's lock: other calls on it go on
+       meanwhile, and a close from another thread ends the wait (SEG_END). */
+    for (int round = 0; round < 20; round++) {
+        OK(seg_prefetcher_new_range(f, 0, 199, 1, 1, -1, SEG_DTYPE_FLOAT32, &p));
+        pthread_t t;
+        pthread_create(&t, NULL, drain, p);
+        for (int k = 0; k < 50; k++) {
+            bool end = false;
+            OK(seg_prefetcher_len(p, &n));
+            CHECK(n == 200);
+            OK(seg_prefetcher_at_end(p, &end));
+        }
+        if (round % 2 == 1) OK(seg_prefetcher_close(p));
+        pthread_join(t, NULL);
+        seg_prefetcher_release(p);
+    }
+    seg_seismic_file_release(f);
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: abi_test <exampleFiles> <scratch>\n"); return 2; }
     snprintf(dir, sizeof dir, "%s", argv[1]);
@@ -980,6 +1032,7 @@ int main(int argc, char **argv) {
     test_release_unmaps();
     test_limits();
     test_threads();
+    test_review13();
     if (failures) { fprintf(stderr, "%d failures\n", failures); return 1; }
     printf("abi_test: all checks passed\n");
     return 0;

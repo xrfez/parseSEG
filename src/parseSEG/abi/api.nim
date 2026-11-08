@@ -229,6 +229,19 @@ proc readTracesInto*(f: Handle[SeismicFile], traces: openArray[int], dst: Tensor
   f.v.checkTraces(traces)
   f.v.intoView(traces, dst, row)
 
+proc copyBytes*(f: Handle[SeismicFile], offset: int64, n: Natural): ByteSpan {.segApi.} =
+  ## A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
+  ## hex view). Raises `ValueError` if the file is closed or the range lies
+  ## outside it. Changing the copy never changes the file.
+  # Copied from the map straight into the caller's buffer: no `n`-byte
+  # buffer of our own, also not for a length query (`out_cap` 0).
+  let size = f.v.mappedSize
+  if not f.v.isOpen: raise newException(ValueError, "the file is closed")
+  if offset < 0 or offset > size or int64(n) > size - offset:
+    raise newException(ValueError, "bytes " & $offset & "+" & $n & " lie outside the file (" &
+      $size & " bytes)")
+  ByteSpan(data: cast[ptr UncheckedArray[byte]](addr f.v.unsafeMemory[offset]), len: n)
+
 # ---------------------------------------------------------------- tensors --
 
 func view*(t: TensorObj): TensorView {.segApi(abiOnly).} =
@@ -287,13 +300,18 @@ proc newPrefetcher*(f: Handle[SeismicFile], traces: openArray[int], chunkTraces 
     result.p64 = newPrefetcher[float64](f.v, @traces, chunkTraces, depth, cols)
 
 proc take(p: PrefetcherObj, wait: bool): PrefetchChunkObj =
+  # Called holding the handle's lock. Waiting releases it (`waitReady`), so
+  # `len`, `at_end`, `seek` or `close` from another thread do not block on a
+  # chunk being decoded.
   template body(pf: untyped, T: typedesc) =
     var c: PrefetchChunk[T]
-    if (if wait: pf.next(c) else: pf.tryNext(c)):
-      return PrefetchChunkObj(first: c.first, count: c.count, failed: c.failed,
-        samples: newTensorObj(move c.samples))
-    elif pf.atEnd: raise newException(AbiEnd, "no more chunks")
-    else: raise newException(AbiNotReady, "the next chunk is not ready")
+    while true:
+      if pf.tryNext(c):
+        return PrefetchChunkObj(first: c.first, count: c.count, failed: c.failed,
+          samples: newTensorObj(move c.samples))
+      elif pf.atEnd: raise newException(AbiEnd, "no more chunks")
+      elif not wait: raise newException(AbiNotReady, "the next chunk is not ready")
+      else: pf.waitReady(handleLock(p))
   if p.dt == dtF32: body(p.p32, float32) else: body(p.p64, float64)
 
 proc next*(p: PrefetcherObj): PrefetchChunkObj {.segApi.} =

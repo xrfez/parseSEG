@@ -165,9 +165,15 @@ per-function documentation.
     - Any thread may call in.
     - Calls on one handle are serialized by a lock in the handle (the generated wrappers take
       it), except the reads (`seg_seismic_file_read_traces*`, `{.segApi(concurrent).}`),
-      which only read the map and run in parallel.
-    - `SegPrefetcher` runs its own worker thread; `seg_prefetcher_next` waits holding the
-      prefetcher's lock.
+      which only read the map and run in parallel. A call with several handle arguments
+      (`seg_header_editor_write_geometry(ed, f)`, `seg_seismic_file_apply_survey(f, g)`, ...)
+      locks every one of them, in address order (each once), so two such calls cannot
+      deadlock and no argument changes under the call.
+    - `SegPrefetcher` runs its own worker thread. `seg_prefetcher_next` waits for a chunk
+      with the prefetcher's lock released, so `len`, `at_end`, `seek` or `close` from another
+      thread go on meanwhile; a `close` ends the wait (`SEG_END`).
+    - A failed call leaves a struct result zeroed (`seg_prefetcher_next` on `SEG_END` or
+      `SEG_NOT_READY`: `samples` is NULL) and a handle result NULL.
     - A `SegPrefetcher` holds a reference to its `SegSeismicFile`. Releasing the file first
       is safe: the map stays open until the prefetcher is released too.
 11. **Inputs.** Paths and field names are NUL-terminated UTF-8. Counts and indices are

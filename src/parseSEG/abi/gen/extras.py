@@ -135,6 +135,10 @@ class _TensorExtras:
 
     def __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None):
         """A DLPack capsule sharing the samples (CPU, no copy)."""
+        if copy:
+            raise BufferError("the samples are shared, not copied (copy=True)")
+        if dl_device is not None and tuple(dl_device) != (1, 0):
+            raise BufferError("the samples are in CPU memory (device (1, 0))")
         p = self._to_dlpack()
         return _api.PyCapsule_New(p, _DLTENSOR,
                                   ctypes.cast(_capsule_destructor, ctypes.c_void_p))
@@ -149,8 +153,14 @@ class _TensorExtras:
         return numpy.from_dlpack(self)
 
     def __array__(self, dtype=None, copy=None):
+        import numpy
         a = self.numpy()
-        return a if dtype is None else a.astype(dtype)
+        if dtype is not None and a.dtype != numpy.dtype(dtype):
+            if copy is False:
+                raise ValueError("converting the samples to " + str(numpy.dtype(dtype)) +
+                                 " needs a copy (copy=False)")
+            return a.astype(dtype)
+        return a.copy() if copy else a
 
 
 class _SeismicFileExtras:

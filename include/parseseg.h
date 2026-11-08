@@ -649,13 +649,6 @@ SegStatus seg_seismic_file_trace_keys(SegSeismicFile *seismic_file, int64_t trac
 SegStatus seg_seismic_file_is_open(SegSeismicFile *seismic_file, bool *out);
 
 /*
- * A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
- * hex view). Raises `ValueError` if the file is closed or the range lies
- * outside it. Changing the copy never changes the file.
- */
-SegStatus seg_seismic_file_copy_bytes(SegSeismicFile *seismic_file, int64_t offset, int64_t n, uint8_t *out, int64_t out_cap, int64_t *out_len);
-
-/*
  * The named fields of block kind `kind`, in layout order (raw byte fields
  * excluded; none for `hbRaw`).
  */
@@ -993,6 +986,13 @@ SegStatus seg_seismic_file_read_traces_into_range(SegSeismicFile *seismic_file, 
 
 /* Decodes the listed traces into rows `row ..` of `dst`, one per trace. */
 SegStatus seg_seismic_file_read_traces_into(SegSeismicFile *seismic_file, const int64_t *traces, int64_t traces_len, const SegTensorView *dst, int64_t row, int64_t *out);
+
+/*
+ * A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
+ * hex view). Raises `ValueError` if the file is closed or the range lies
+ * outside it. Changing the copy never changes the file.
+ */
+SegStatus seg_seismic_file_copy_bytes(SegSeismicFile *seismic_file, int64_t offset, int64_t n, uint8_t *out, int64_t out_cap, int64_t *out_len);
 
 /*
  * The samples' memory: pointer, dtype, rank (2), shape and strides in

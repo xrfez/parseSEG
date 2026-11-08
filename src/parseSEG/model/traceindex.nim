@@ -523,7 +523,7 @@ func isOpen*(f: SeismicFile): bool {.inline, segApi.} =
   ## The file is still mapped (range reads work).
   f.map.src != nil
 
-proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] {.segApi.} =
+proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
   ## A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
   ## hex view). Raises `ValueError` if the file is closed or the range lies
   ## outside it. Changing the copy never changes the file.

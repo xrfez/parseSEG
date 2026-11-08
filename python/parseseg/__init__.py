@@ -110,10 +110,15 @@ def _str(x, name):
     if hasattr(x, "__fspath__"):
         x = os.fspath(x)
     if isinstance(x, bytes):
-        return x
-    if not isinstance(x, str):
+        b = x
+    elif isinstance(x, str):
+        b = x.encode("utf-8")
+    else:
         raise TypeError(f"{name} must be a str, not {type(x).__name__}")
-    return x.encode("utf-8")
+    if b"\0" in b:
+        # C would see only the text before it.
+        raise ArgumentError(f"{name} must not contain NUL characters")
+    return b
 
 
 def _enum(table, x, name):
@@ -129,10 +134,19 @@ def _ids(xs, name):
     return (ctypes.c_int64 * len(vals))(*vals), len(vals)
 
 
-def _handle(x, cls, name):
+def _arg(x, cls, name, held):
+    # A handle argument, counted in flight like the receiver until the call
+    # returns (`_leave_all`), so close() from another thread cannot free it.
     if not isinstance(x, cls):
         raise TypeError(f"{name} must be a parseseg.{cls.__name__}")
-    return x._ptr()
+    p = x._enter()
+    held.append(x)
+    return p
+
+
+def _leave_all(held):
+    for x in held:
+        x._leave()
 
 
 def _struct_arg(cls, x, name):
@@ -172,22 +186,26 @@ def _text(fn):
 
 
 def _bytes(fn):
+    # One call when the result fits a first guess; else once more, sized.
+    cap = 4096
     n = ctypes.c_int64()
-    fn(None, 0, ctypes.byref(n))
-    buf = (ctypes.c_uint8 * max(n.value, 1))()
-    fn(buf, n.value, ctypes.byref(n))
-    return bytes(buf[:n.value])
+    while True:
+        buf = (ctypes.c_uint8 * cap)()
+        fn(buf, cap, ctypes.byref(n))
+        if n.value <= cap:
+            return bytes(buf[:n.value])
+        cap = n.value
 
 
 def _seq(fn, ctype, conv):
+    cap = 256
     n = ctypes.c_int64()
-    fn(None, 0, ctypes.byref(n))
     while True:
-        cap = n.value
-        arr = (ctype * max(cap, 1))()
+        arr = (ctype * cap)()
         fn(arr, cap, ctypes.byref(n))
         if n.value <= cap:
             return [conv(arr[i]) for i in range(n.value)]
+        cap = n.value
 
 
 class SegValue(ctypes.Structure):
@@ -235,21 +253,26 @@ def _value_in(x, name):
     return v
 
 
-def _value_out():
+def _value_out(cap=4096):
     v = SegValue()
-    v._buf = ctypes.create_string_buffer(4096)
-    v.text, v.text_cap = ctypes.cast(v._buf, ctypes.c_void_p), 4096
+    v._buf = ctypes.create_string_buffer(cap)
+    v.text, v.text_cap = ctypes.cast(v._buf, ctypes.c_void_p), cap
     return v
 
 
-def _value(v):
-    if v.kind == 1:
-        return v.i
-    if v.kind == 2:
-        return v.f
-    if v.text_len >= v.text_cap:
-        raise InternalError("field text longer than 4 KiB")
-    return v._buf.raw[:v.text_len].decode("utf-8", "replace")
+def _value_call(fn):
+    # Text longer than the buffer: once more with room for all of it.
+    cap = 4096
+    while True:
+        v = _value_out(cap)
+        fn(v)
+        if v.kind == 1:
+            return v.i
+        if v.kind == 2:
+            return v.f
+        if v.text_len < v.text_cap:
+            return v._buf.raw[:v.text_len].decode("utf-8", "replace")
+        cap = v.text_len + 1
 
 
 def _wrap(cls, ptr):
@@ -737,8 +760,6 @@ _lib.seg_seismic_file_trace_keys.argtypes = [ctypes.c_void_p, ctypes.c_int64, ct
 _lib.seg_seismic_file_trace_keys.restype = ctypes.c_int32
 _lib.seg_seismic_file_is_open.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
 _lib.seg_seismic_file_is_open.restype = ctypes.c_int32
-_lib.seg_seismic_file_copy_bytes.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_seismic_file_copy_bytes.restype = ctypes.c_int32
 _lib.seg_field_names.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_field_names.restype = ctypes.c_int32
 _lib.seg_seismic_file_trace_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
@@ -845,6 +866,8 @@ _lib.seg_seismic_file_read_traces_into_range.argtypes = [ctypes.c_void_p, ctypes
 _lib.seg_seismic_file_read_traces_into_range.restype = ctypes.c_int32
 _lib.seg_seismic_file_read_traces_into.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(SegTensorView), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_seismic_file_read_traces_into.restype = ctypes.c_int32
+_lib.seg_seismic_file_copy_bytes.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_copy_bytes.restype = ctypes.c_int32
 _lib.seg_tensor_view.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegTensorView)]
 _lib.seg_tensor_view.restype = ctypes.c_int32
 _lib.seg_tensor_dtype.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
@@ -1033,6 +1056,10 @@ class _TensorExtras:
 
     def __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None):
         """A DLPack capsule sharing the samples (CPU, no copy)."""
+        if copy:
+            raise BufferError("the samples are shared, not copied (copy=True)")
+        if dl_device is not None and tuple(dl_device) != (1, 0):
+            raise BufferError("the samples are in CPU memory (device (1, 0))")
         p = self._to_dlpack()
         return _api.PyCapsule_New(p, _DLTENSOR,
                                   ctypes.cast(_capsule_destructor, ctypes.c_void_p))
@@ -1047,8 +1074,14 @@ class _TensorExtras:
         return numpy.from_dlpack(self)
 
     def __array__(self, dtype=None, copy=None):
+        import numpy
         a = self.numpy()
-        return a if dtype is None else a.astype(dtype)
+        if dtype is not None and a.dtype != numpy.dtype(dtype):
+            if copy is False:
+                raise ValueError("converting the samples to " + str(numpy.dtype(dtype)) +
+                                 " needs a copy (copy=False)")
+            return a.astype(dtype)
+        return a.copy() if copy else a
 
 
 class _SeismicFileExtras:
@@ -1255,16 +1288,6 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         finally:
             self._leave()
 
-    def copy_bytes(self, offset, n):
-        """A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
-        hex view). Raises `ValueError` if the file is closed or the range lies
-        outside it. Changing the copy never changes the file."""
-        _h = self._enter()
-        try:
-            return _bytes(lambda _b, _c, _n: _call(_lib.seg_seismic_file_copy_bytes, _h, _int(offset, "offset", -(1 << 63), (1 << 63) - 1), _int(n, "n", 0, 9223372036854775807), _b, _c, _n))
-        finally:
-            self._leave()
-
     def trace_field(self, trace, name):
         """A trace header field by name, e.g. "trace.sourceX" or
         "ext1.receiverLine" (SEG-2: "trace.numSamples", "trace.SAMPLE_INTERVAL").
@@ -1272,9 +1295,7 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         out of range or a closed file; the message says which."""
         _h = self._enter()
         try:
-            _o = _value_out()
-            _call(_lib.seg_seismic_file_trace_field, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_o))
-            return _value(_o)
+            return _value_call(lambda _o: _call(_lib.seg_seismic_file_trace_field, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_o)))
         finally:
             self._leave()
 
@@ -1284,9 +1305,7 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         for an unknown field or record, or a closed file."""
         _h = self._enter()
         try:
-            _o = _value_out()
-            _call(_lib.seg_seismic_file_record_field, _h, _int(record, "record", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_o))
-            return _value(_o)
+            return _value_call(lambda _o: _call(_lib.seg_seismic_file_record_field, _h, _int(record, "record", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_o)))
         finally:
             self._leave()
 
@@ -1296,9 +1315,7 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         `ValueError` for an unknown field or a closed file."""
         _h = self._enter()
         try:
-            _o = _value_out()
-            _call(_lib.seg_seismic_file_file_field, _h, _str(name, "name"), ctypes.byref(_o))
-            return _value(_o)
+            return _value_call(lambda _o: _call(_lib.seg_seismic_file_file_field, _h, _str(name, "name"), ctypes.byref(_o)))
         finally:
             self._leave()
 
@@ -1360,12 +1377,14 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         change. Returns the traces changed. Raises `ValueError` for a file opened
         without `keys = true`."""
         _h = self._enter()
+        _held = []
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_seismic_file_apply_survey, _h, _handle(g, SurveyGeometry, "g"), bool(overwrite), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_apply_survey, _h, _arg(g, SurveyGeometry, "g", _held), bool(overwrite), ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
+            _leave_all(_held)
             self._leave()
 
     def gathers(self):
@@ -1538,6 +1557,16 @@ class SeismicFile(_Handle, _SeismicFileExtras):
             if _call(_lib.seg_seismic_file_read_traces_into, _h, *_ids(traces, "traces"), ctypes.byref(_struct_arg(SegTensorView, dst, "dst")), _int(row, "row", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
             return _o.value
+        finally:
+            self._leave()
+
+    def copy_bytes(self, offset, n):
+        """A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
+        hex view). Raises `ValueError` if the file is closed or the range lies
+        outside it. Changing the copy never changes the file."""
+        _h = self._enter()
+        try:
+            return _bytes(lambda _b, _c, _n: _call(_lib.seg_seismic_file_copy_bytes, _h, _int(offset, "offset", -(1 << 63), (1 << 63) - 1), _int(n, "n", 0, 9223372036854775807), _b, _c, _n))
         finally:
             self._leave()
 
@@ -1807,12 +1836,14 @@ class HeaderEditor(_Handle):
         """`writeGeometry` with the joined keys of `f`: the editor's file, opened
         again with `keys = true` and joined by `applySurvey`."""
         _h = self._enter()
+        _held = []
         try:
             _o = SegGeometryChanges()
-            if _call(_lib.seg_header_editor_write_geometry, _h, _handle(f, SeismicFile, "f"), ctypes.byref(_struct_arg(SegGeometryFields, fields, "fields")), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_header_editor_write_geometry, _h, _arg(f, SeismicFile, "f", _held), ctypes.byref(_struct_arg(SegGeometryFields, fields, "fields")), ctypes.byref(_o)) > 0:
                 return None
             return _struct_dict(_o)
         finally:
+            _leave_all(_held)
             self._leave()
 
     @property
@@ -1970,18 +2001,26 @@ class Prefetcher(_Handle):
     def _init_range(self, f, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32"):
         """Decodes `traces` ahead on a worker thread, `chunkTraces` rows at a time,
         at most `depth` chunks buffered."""
-        _o = ctypes.c_void_p()
-        _call(_lib.seg_prefetcher_new_range, _handle(f, SeismicFile, "f"), *_range_arg(traces, "traces"), _int(chunk_traces, "chunk_traces", -(1 << 63), (1 << 63) - 1), _int(depth, "depth", -(1 << 63), (1 << 63) - 1), _int(cols, "cols", -(1 << 63), (1 << 63) - 1), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o))
-        self._h = _o.value
-        self._mu = threading.Lock()
+        _held = []
+        try:
+            _o = ctypes.c_void_p()
+            _call(_lib.seg_prefetcher_new_range, _arg(f, SeismicFile, "f", _held), *_range_arg(traces, "traces"), _int(chunk_traces, "chunk_traces", -(1 << 63), (1 << 63) - 1), _int(depth, "depth", -(1 << 63), (1 << 63) - 1), _int(cols, "cols", -(1 << 63), (1 << 63) - 1), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o))
+            self._h = _o.value
+            self._mu = threading.Lock()
+        finally:
+            _leave_all(_held)
 
     def _init_list(self, f, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32"):
         """Read-ahead over a list of traces, in list order (positions index the
         list)."""
-        _o = ctypes.c_void_p()
-        _call(_lib.seg_prefetcher_new, _handle(f, SeismicFile, "f"), *_ids(traces, "traces"), _int(chunk_traces, "chunk_traces", -(1 << 63), (1 << 63) - 1), _int(depth, "depth", -(1 << 63), (1 << 63) - 1), _int(cols, "cols", -(1 << 63), (1 << 63) - 1), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o))
-        self._h = _o.value
-        self._mu = threading.Lock()
+        _held = []
+        try:
+            _o = ctypes.c_void_p()
+            _call(_lib.seg_prefetcher_new, _arg(f, SeismicFile, "f", _held), *_ids(traces, "traces"), _int(chunk_traces, "chunk_traces", -(1 << 63), (1 << 63) - 1), _int(depth, "depth", -(1 << 63), (1 << 63) - 1), _int(cols, "cols", -(1 << 63), (1 << 63) - 1), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o))
+            self._h = _o.value
+            self._mu = threading.Lock()
+        finally:
+            _leave_all(_held)
 
     def next(self):
         """The next chunk, waiting for it: first (position), count, failed rows
@@ -2164,9 +2203,13 @@ def copy_with_geometry(src_path, dst_path, g, fields=None, overwrite=False):
     multiplexed SEG-D demultiplexed) with the survey geometry `g` joined and
     written (see `writeGeometry`). Never raises: problems are in the result,
     with an info summary of what changed."""
-    _o = ctypes.c_void_p()
-    _st = _lib.seg_copy_with_geometry(_str(src_path, "src_path"), _str(dst_path, "dst_path"), _handle(g, SurveyGeometry, "g"), ctypes.byref(_struct_arg(SegGeometryFields, fields, "fields")), bool(overwrite), ctypes.byref(_o))
-    return _logged(_st, _o)
+    _held = []
+    try:
+        _o = ctypes.c_void_p()
+        _st = _lib.seg_copy_with_geometry(_str(src_path, "src_path"), _str(dst_path, "dst_path"), _arg(g, SurveyGeometry, "g", _held), ctypes.byref(_struct_arg(SegGeometryFields, fields, "fields")), bool(overwrite), ctypes.byref(_o))
+        return _logged(_st, _o)
+    finally:
+        _leave_all(_held)
 
 def convert_with_geometry(src_path, dst_path, g, opts=None, fields=None, overwrite=False):
     """`convertFile` with the survey geometry `g` joined (`applySurvey`,
@@ -2174,9 +2217,13 @@ def convert_with_geometry(src_path, dst_path, g, opts=None, fields=None, overwri
     joined before they become SEG-Y headers; SEG-Y output is written with
     `writeGeometry` before it is moved into place. Never raises: problems
     are in the result."""
-    _o = ctypes.c_void_p()
-    _st = _lib.seg_convert_with_geometry(_str(src_path, "src_path"), _str(dst_path, "dst_path"), _handle(g, SurveyGeometry, "g"), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_struct_arg(SegGeometryFields, fields, "fields")), bool(overwrite), ctypes.byref(_o))
-    return _logged(_st, _o)
+    _held = []
+    try:
+        _o = ctypes.c_void_p()
+        _st = _lib.seg_convert_with_geometry(_str(src_path, "src_path"), _str(dst_path, "dst_path"), _arg(g, SurveyGeometry, "g", _held), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_struct_arg(SegGeometryFields, fields, "fields")), bool(overwrite), ctypes.byref(_o))
+        return _logged(_st, _o)
+    finally:
+        _leave_all(_held)
 
 def abi_version():
     """The library's ABI version (SEG_ABI_VERSION)."""
