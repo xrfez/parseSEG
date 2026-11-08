@@ -25,6 +25,15 @@
 ## branches of `SegdRecord`, `SegdScanType` and `SegdTrace`; accessors such
 ## as `sampleIntervalUs` and `channelType` resolve a value for either.
 ##
+## Multiplexed records (Rev 0 and Rev 1 format codes 0015 ... 0058, see
+## `segd/mux`) are demultiplexed as they are read: the reader walks the
+## record's scans (start-of-scan codes and timing words, GH#1 bytes per
+## scan), splits them into scan types, and `readTrace` gives one
+## demultiplexed trace per channel, in the demultiplexed twin format (8015
+## for 0015, ...), with the trace header a demultiplexing system writes. The
+## record is flagged `multiplexed`, and its headers stay as read (GH#1 still
+## says 0015). A record's scans are held in memory while its traces are read.
+##
 ## Like the SEG-Y reader it never raises on format problems; reading stops
 ## only when the rest cannot be located (truncation, an unknown sample
 ## format, an unsized trace), logged as `fatal`. Headers and traces keep
@@ -34,7 +43,7 @@ import std/[math, tables, strutils]
 import ../common/[errors, diagnostics]
 import ../io/[records, diskio, pushback]
 import ../model/tensors
-import ./[blocks, samples]
+import ./[blocks, samples, mux]
 export blocks, samples, diagnostics
 export tensors except rowPtr
 
@@ -80,7 +89,12 @@ type
     scanTypes*: seq[SegdScanType] ## Each of the record's layout.
     extended*: seq[byte]       ## Extended header blocks, raw.
     external*: seq[byte]       ## External header blocks, raw.
-    format*: Option[SegdSampleFormat] ## The sample format; none if not decodable.
+    format*: Option[SegdSampleFormat]
+      ## The sample format of the traces; none if not decodable. For a
+      ## `multiplexed` record, the demultiplexed twin of GH#1's code.
+    multiplexed*: bool
+      ## The record's data is multiplexed (GH#1 format 0015 ... 0058); the
+      ## reader gives its traces demultiplexed (see the module docs).
     traceCount*: int           ## Traces announced by the channel set descriptors.
     incomplete*: bool
       ## A header area or the trailer was too large to hold and was skipped.
@@ -101,11 +115,15 @@ type
     extensions*: seq[byte]
       ## Trace header extensions after #1, raw (32 bytes each; Rev 3: typed by byte 32).
     numSamples*: int
-    samples*: seq[byte]        ## Raw sample bytes.
+    samples*: seq[byte]
+      ## Raw sample bytes (of a multiplexed record: demultiplexed, in the
+      ## record's `format`).
     scanType*: int             ## 0-based scan type index, -1 if unknown.
     channelSet*: int           ## 0-based index into that scan type's descriptors, -1 if unknown.
     index*: int                ## 0-based trace index within the record.
-    offset*: int64             ## Medium offset of the trace header.
+    offset*: int64
+      ## Medium offset of the trace header (of a multiplexed record, which has
+      ## none: of the first scan of the trace's scan type).
     case layout*: SegdLayout   ## The layout of the trace's record.
     of slRev2:
       ext1*: Option[SegdTraceHeaderExt1] ## Trace Header Extension #1, if the trace has one.
@@ -117,6 +135,17 @@ type
     ## Where a trace's channel set descriptor is (see `findChannelSet`).
     scanType*: int   ## 0-based scan type index.
     channelSet*: int ## 0-based index into that scan type's descriptors.
+
+  MuxBody = object
+    # The scans of the multiplexed record being read, and the next channel.
+    data: seq[byte]          # whole scans, back to back (empty with headersOnly)
+    heads: seq[ScanHeader]   # every scan's start of scan and timing word
+    stride: int              # bytes per scan
+    offset: int64            # medium offset of the first scan
+    layouts: seq[MuxScanLayout] # per scan type
+    first, count: seq[int]   # first scan and scans of each scan type
+    timeBreakWindow: array[3, byte] # timing word of the scan where TWI became 1
+    st, cs, ch: int          # the next trace's scan type, channel set, channel
 
   SegdReader* = object
     ## Streaming reader state.
@@ -137,6 +166,7 @@ type
     csdWarned: bool
     noted: Table[(Severity, string), int] ## Diagnostics per (severity, field), for `note`.
     headersOnly: bool          ## Skip sample bytes (`SegdTrace.samples` stays empty).
+    mux: MuxBody               ## The current record's scans, when it is multiplexed.
 
 func `$`*(r: SegdRevision): string =
   ## `major.minor`, e.g. `2.1`.
@@ -522,14 +552,205 @@ proc readScanTypes(r: var SegdReader) =
   rec.traceCount = rec.announcedTraces
   rec.extended = r.readArea(SegdBlockSize * int64(rec.extendedHeaderBlocks), "extended")
   rec.external = r.readArea(SegdBlockSize * int64(rec.externalHeaderBlocks), "external")
-  rec.format = toSegdFormat(rec.gh1.formatCode)
-  if rec.format.isNone:
-    raiseUnlocatable(dcUnsupportedFormat, "sample format code " & $rec.gh1.formatCode &
-      " is undefined or multiplexed, so trace lengths are unknown", rec.offset + 2)
+  let code = rec.gh1.formatCode
+  rec.format = toSegdFormat(code)
+  if rec.format.isNone and code.isMultiplexedCode and not rec.isRev3:
+    rec.format = demuxFormat(code)
+    rec.multiplexed = true
+    r.note(sevInfo, dcMultiplexed, "the record is multiplexed (format " & align($code, 4, '0') &
+      "); its traces are demultiplexed as format " & $ord(rec.format.get), rec.offset + 2,
+      r.loc(field = "gh1.formatCode"))
+    if SegdRevision(major: 2, minor: 0) <= rec.revision:
+      r.note(sevWarning, dcBadValue, "Rev " & $rec.revision & " does not allow multiplexed " &
+        "data; demultiplexed anyway", rec.offset + 2, r.loc(field = "gh1.formatCode"))
+  elif rec.format.isNone:
+    let what = if code.isMultiplexedCode: " is multiplexed, which Rev 3 does not allow"
+               elif code in 0..999: " is an undefined multiplexed code (supported: 0015, " &
+                 "0022, 0024, 0036, 0038, 0042, 0044, 0048, 0058)"
+               else: " is undefined"
+    raiseUnlocatable(dcUnsupportedFormat, "sample format code " & $code & what &
+      ", so trace lengths are unknown", rec.offset + 2)
   if rec.format.get.isLittleEndian and rec.revision < SegdRevision(major: 3, minor: 1):
     r.note(sevWarning, dcBadValue, "format " & $rec.gh1.formatCode & " (little-endian) is " &
       "defined from Rev 3.1, but the record says " & $rec.revision & "; decoded anyway",
       rec.offset + 2, r.loc(field = "gh1.formatCode"))
+
+# ------------------------------------------------------------ multiplexed --
+
+func windowScans(rec: SegdRecord, st: int): int =
+  # Scans of scan type `st` by its first non-dummy channel set's window
+  # (all channel sets of a multiplexed scan type have the same length);
+  # -1 when it has none or the base scan interval is 0.
+  let bsi = rec.gh1.baseScanIntervalMs
+  result = -1
+  if bsi > 0:
+    for c in rec.scanTypes[st].descriptors:
+      if c.channelCount > 0:
+        return int(round((c.endTimeMs - c.startTimeMs) / bsi))
+
+proc muxStride(r: var SegdReader): int =
+  # Bytes per scan: GH#1 bytes 20-22, checked against the descriptors.
+  template rec: untyped = r.record
+  template m: untyped = r.mux
+  let declared = rec.gh1.bytesPerScan
+  result = if declared > 0: declared
+           elif m.layouts.len > 0: m.layouts[0].bytesPerScan
+           else: ScanHeaderSize
+  if declared <= 0:
+    r.note(sevWarning, dcBadValue, "General Header #1 bytes per scan is " &
+      (if declared == 0: "0" else: "not BCD") & "; using the " & $result &
+      " bytes the channel set descriptors give", rec.offset + 19, r.loc(field = "gh1.bytesPerScan"))
+  for i, l in m.layouts:
+    if l.bytesPerScan > result:
+      raiseUnlocatable(dcInconsistent, "scan type " & $(i + 1) & " needs " & $l.bytesPerScan &
+        " bytes per scan, General Header #1 says " & $result & ", so its samples cannot be " &
+        "located", rec.offset + 19)
+    if l.bytesPerScan != result:
+      r.note(sevWarning, dcInconsistent, "scan type " & $(i + 1) & " has " & $l.bytesPerScan &
+        " bytes per scan, General Header #1 says " & $result & "; the rest of each scan is " &
+        "ignored", rec.offset + 19, r.loc(field = "gh1.bytesPerScan"))
+    if rec.gh1.formatCode == 15:
+      for k, c in l.channelSets:
+        if c.channels mod 4 != 0:
+          r.note(sevWarning, dcBadValue, "format 0015 needs a multiple of 4 channels per " &
+            "channel set, channel set " & $(k + 1) & " of scan type " & $(i + 1) & " has " &
+            $c.channels, rec.offset + 2, r.loc(channelSet = k, field = "csd.channelCount"))
+
+proc walkScans(r: var SegdReader) =
+  # Reads scans for as long as they start with a start-of-scan code (to the
+  # end of the data, a tape mark, or the next record's General Header #1,
+  # which cannot start with FF FF FF).
+  template m: untyped = r.mux
+  var head: array[ScanHeaderSize, byte]
+  var going = true
+  while going:
+    let at = r.input.offset
+    let got = r.input.readAvail(head)
+    if got < ScanHeaderSize or not isStartOfScan(head):
+      r.input.unread(head.toOpenArray(0, got - 1))
+      going = false
+    else:
+      if int64(m.heads.len + 1) * m.stride > r.maxTraceBytes:
+        raiseUnlocatable(dcBadValue, "the multiplexed record's scans exceed maxTraceBytes",
+          at)
+      let rest = m.stride - ScanHeaderSize
+      var full: bool
+      if r.headersOnly:
+        full = r.input.skip(rest) == int64(rest)
+      else:
+        let old = m.data.len
+        m.data.setLen old + m.stride
+        for i in 0..<ScanHeaderSize: m.data[old + i] = head[i]
+        full = rest == 0 or
+          r.input.readAvail(m.data.toOpenArray(old + ScanHeaderSize, old + m.stride - 1)) == rest
+        if not full: m.data.setLen old
+      if full:
+        let h = scanHeader(head)
+        if h.byte8 != 0:
+          r.note(sevWarning, dcBadValue, "timing word byte 8 is " & $h.byte8 & ", not 0",
+            at + 7, r.loc(field = "scan.timingWord"))
+        m.heads.add h
+      else:
+        r.note(sevWarning, dcTruncated, "the last scan is cut short; it is dropped", at,
+          r.loc(field = "scan"))
+        going = false
+
+proc splitScanTypes(r: var SegdReader) =
+  # The scans of each scan type: the DP bit toggles at each new scan type;
+  # without such toggles, the channel set windows decide.
+  template rec: untyped = r.record
+  template m: untyped = r.mux
+  let n = m.heads.len
+  let nST = rec.scanTypes.len
+  var toggles: seq[int]
+  for i in 1..<n:
+    if m.heads[i].dp != m.heads[i - 1].dp: toggles.add i
+  var starts = @[0]
+  if nST > 1 and toggles.len == nST - 1:
+    starts.add toggles
+  else:
+    if nST > 1:
+      r.note(sevWarning, dcInconsistent, "the start-of-scan DP bit changes " & $toggles.len &
+        " times, not at each of the " & $nST & " scan types; scan types are split by their " &
+        "channel set windows", m.offset, r.loc(field = "scan.dp"))
+    elif toggles.len > 0:
+      r.note(sevWarning, dcInconsistent, "the start-of-scan DP bit changes in a record with " &
+        "one scan type", m.offset, r.loc(field = "scan.dp"))
+    for st in 0 ..< nST - 1:
+      starts.add min(n, starts[^1] + max(0, rec.windowScans(st)))
+  for st in 0..<nST:
+    let a = starts[st]
+    let b = if st + 1 < nST: starts[st + 1] else: n
+    m.first.add a
+    m.count.add b - a
+    let w = rec.windowScans(st)
+    if w >= 0 and w != b - a:
+      r.note(sevInfo, dcInconsistent, "scan type " & $(st + 1) & " has " & $(b - a) &
+        " scans, its channel set window gives " & $w & "; the traces have the scans' length",
+        m.offset, r.loc(field = "csd.endTime"))
+
+proc readMuxBody(r: var SegdReader) =
+  # The scans of a multiplexed record, after its headers.
+  template rec: untyped = r.record
+  template m: untyped = r.mux
+  m = MuxBody(offset: r.input.offset)
+  for s in rec.scanTypes: m.layouts.add muxLayout(rec.gh1.formatCode, s.descriptors)
+  m.stride = r.muxStride()
+  r.walkScans()
+  if m.heads.len == 0 and rec.traceCount > 0:
+    raiseUnlocatable(dcBadValue, "the multiplexed record's data does not start with a " &
+      "start-of-scan code", m.offset)
+  r.splitScanTypes()
+  for h in m.heads:
+    if h.twi:
+      m.timeBreakWindow = h.timing
+      break
+
+proc nextChannel(m: var MuxBody): bool =
+  # Moves the cursor to the next channel, at or after it; false after the last.
+  while m.st < m.layouts.len:
+    if m.cs >= m.layouts[m.st].channelSets.len:
+      inc m.st
+      m.cs = 0
+      m.ch = 0
+    elif m.ch >= m.layouts[m.st].channelSets[m.cs].channels:
+      inc m.cs
+      m.ch = 0
+    else:
+      return true
+  false
+
+proc readMuxTrace(r: var SegdReader, t: var SegdTrace) =
+  # The next channel of a multiplexed record, demultiplexed.
+  template rec: untyped = r.record
+  template m: untyped = r.mux
+  if not m.nextChannel():
+    raiseUnlocatable(dcInconsistent, "the multiplexed record has fewer channels than its " &
+      "descriptors announce", m.offset)
+  let (st, cs, ch) = (m.st, m.cs, m.ch)
+  inc m.ch
+  let l = m.layouts[st].channelSets[cs]
+  template s: untyped = rec.scanTypes[st]
+  if t.layout != slRev2: t = SegdTrace(layout: slRev2) # else its buffers are reused
+  t.index = r.tracesRead
+  t.scanType = st
+  t.channelSet = cs
+  t.offset = m.offset + int64(m.first[st]) * m.stride
+  t.extensions.setLen 0
+  t.ext1 = none(SegdTraceHeaderExt1)
+  t.numSamples = m.count[st] * l.subscans
+  let skew = if l.firstSample + ch < s.skew.len: s.skew[l.firstSample + ch] else: 0'u8
+  let timing = if m.count[st] > 0: m.heads[m.first[st]].timing else: [0'u8, 0, 0]
+  t.header = muxTraceHeader(rec.gh1, rec.gh2, s.descriptors[cs], ch, timing, skew,
+    m.timeBreakWindow)
+  if r.headersOnly or t.numSamples == 0:
+    t.samples.setLen 0
+  else:
+    t.samples.setLen dataBytes(rec.format.get, t.numSamples)
+    let a = m.first[st] * m.stride
+    demuxChannel(rec.gh1.formatCode, m.data.toOpenArray(a, a + m.count[st] * m.stride - 1),
+      m.stride, m.count[st], l, ch, t.samples, r.twosComplement8015)
+  inc r.tracesRead
 
 proc readRev2Headers(r: var SegdReader, gh2Offset: int64) =
   # After GH#1 and GH#2 (if any): source headers, then the scan type headers.
@@ -554,6 +775,7 @@ proc readRev2Headers(r: var SegdReader, gh2Offset: int64) =
         r.loc(field = "gh" & $n & ".sourceSetNumber"))
     rec.sourceHeaders.add g
   r.readScanTypes()
+  if rec.multiplexed: r.readMuxBody()
 
 proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
   # After GH#1 and GH#2: GH#3, the other general header blocks, then the
@@ -787,7 +1009,9 @@ proc readTrace*(r: var SegdReader, t: var SegdTrace): bool =
     discard r.log.tryRecord(r.loc(field = "trailer"), r.readRecordTrailer())
     if r.log.isFatal: r.stop()
     return false
-  if r.log.tryRecord(r.loc(r.tracesRead), r.readTraceBody(t)):
+  let ok = r.log.tryRecord(r.loc(r.tracesRead)):
+    if r.record.multiplexed: r.readMuxTrace(t) else: r.readTraceBody(t)
+  if ok:
     result = true
   else:
     r.inRecord = false
@@ -837,6 +1061,7 @@ proc nextRecord*(r: var SegdReader): bool =
   inc r.records
   r.tracesRead = 0
   r.csdWarned = false
+  r.mux = MuxBody()
   r.record = SegdRecord(index: index) # not the previous record if GH#1 cannot be read
   if r.log.tryRecord(r.loc(), r.readRecordHeaders(index)):
     r.inRecord = true

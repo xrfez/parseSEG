@@ -70,7 +70,7 @@ raises(AttributeError, getattr, parseseg, "NoSuchThing")
 f = parseseg.open_seismic(INGLEWOOD, keys=True)
 assert f.kind == "SEG-Y" and len(f) == 200 and f.max_samples == 2001 and f.has_keys
 assert f.record_count == 1 and f.sample_interval_us(0) == 2000.0 and f.sample_interval_us() == 2000.0
-assert f.is_open and f.path == INGLEWOOD
+assert f.is_open and f.path == INGLEWOOD and f.demux_path == ""
 raises(parseseg.ArgumentError, f.sample_interval_us, 200)
 assert "200 traces" in repr(f)
 e = f.trace_entry(5)

@@ -28,3 +28,4 @@ type
     dcVendorMap = "vendorMap"       ## A vendor map is malformed or does not fit the data.
     dcTapeLayout = "tapeLayout"     ## Tape marks, labels or block sizes deviate from the spec.
     dcValidation = "validation"     ## A writer found spec-invalid content.
+    dcMultiplexed = "multiplexed"   ## Multiplexed SEG-D data, demultiplexed as it was read.

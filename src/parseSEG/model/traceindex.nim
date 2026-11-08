@@ -19,11 +19,17 @@
 ## range reads decode straight from the mapped bytes into the tensor's
 ## buffer (`decodeEntry`), with no intermediate copy. The OS pages the file
 ## in on demand, and all offsets are 64-bit, so files larger than RAM work.
+##
+## A SEG-D file with multiplexed records (Rev 0/1 formats 0015 ... 0058) has
+## no contiguous bytes per trace, so `openSeismic` demultiplexes it once into
+## a temporary demultiplexed copy (`segd/demux`) and maps and indexes that
+## instead (`demuxPath`); the copy is deleted on `close`.
 
+import std/[os, times]
 import ../common/[endians, errors, diagnostics, bcd, seismickind]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
-import ../segd/[reader as segdreader]
+import ../segd/[reader as segdreader, mux, demux]
 import ./[tensors, keys]
 import ../abi/pragmas
 
@@ -62,7 +68,8 @@ type
     codecs*: seq[TraceCodec]  ## One per SEG-D record; one for SEG-Y.
     contiguous*: bool
       ## Offsets are byte offsets in a plain file, so each trace's headers and
-      ## samples are contiguous there (false for tape images and devices).
+      ## samples are contiguous there (false for tape images and devices, and
+      ## for multiplexed SEG-D).
     maxSamples*: int          ## Largest `numSamples`.
     segy*: SegyFile           ## SEG-Y file headers, when `kind == skSegy`.
     segdLabel*: Option[SegdStorageUnitLabel] ## The SEG-D storage unit label, if any.
@@ -129,7 +136,7 @@ func looksLikeSegdGh1(b: openArray[byte]): bool =
     let d = int(nibble(b, n))
     if d > 9: return false
     code = code * 10 + d
-  fileOk and (toSegdFormat(code).isSome or code in [15, 22, 24, 42, 44, 48, 58, 1015, 1022])
+  fileOk and (toSegdFormat(code).isSome or code.isMultiplexedCode or code in [1015, 1022])
 
 func printable(b: byte, ebcdic: bool): bool {.inline.} =
   if ebcdic:
@@ -202,6 +209,8 @@ proc indexSegd(src: RecordSource, twosComplement8015, keys: bool): TraceIndex =
       if keys: result.keys.add traceKeys(r.record, t)
     result.codecs.add TraceCodec(kind: skSegd, segdFormat: r.record.format,
       twosComplement8015: twosComplement8015)
+    # A multiplexed record's traces have no bytes of their own to read.
+    if r.record.multiplexed: result.contiguous = false
     result.segdRecords.add r.record
   result.segdLabel = r.label
   result.segdToc = r.toc
@@ -213,6 +222,11 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
   ## indexes every trace; with `keys`, also collects each trace's geometry
   ## (for `gathers` and `componentGroups`). Problems go to `log`, as with the
   ## readers. Raises `ValueError` for `skUnknown`.
+  ##
+  ## The entries of a multiplexed SEG-D record point at its scans (its
+  ## traces have no bytes of their own), so such an index is not
+  ## `contiguous` and refuses range reads; `openSeismic` indexes a
+  ## demultiplexed copy instead.
   result = case kind
     of skSegy: indexSegy(src, keys)
     of skSegd: indexSegd(src, twosComplement8015, keys)
@@ -252,13 +266,16 @@ type
     ## Owns a file's mapping: unmaps when it goes, so a `SeismicFile` that goes
     ## out of scope without `close` leaves no mapping behind.
     src: MemFileSource
+    tempPath: string ## A demultiplexed copy to delete with the map ("" if none).
 
 proc `=destroy`(m: MapOwner) =
   if m.src != nil:
     # A destructor must not raise; the base methods raise [CatchableError].
     try: m.src.close()
     except CatchableError: discard
+  if m.tempPath.len > 0: discard tryRemoveFile(m.tempPath)
   `=destroy`(m.src)
+  `=destroy`(m.tempPath)
 
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
 
@@ -267,36 +284,92 @@ type
     ## A memory-mapped disk file with its trace index.
     index*: TraceIndex
     path* {.segField(readonly = true).}: string ## The file's path, as opened.
+    demuxPath* {.segField(readonly = true).}: string
+      ## The temporary demultiplexed copy that is mapped and indexed instead
+      ## of a multiplexed SEG-D file ("" for any other file); deleted on
+      ## `close`. Index offsets and `copyBytes` refer to it.
     map: MapOwner
 
 proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
   # A copy would share the map, and outlive `close` with a dangling view.
 
+func multiplexed(ix: TraceIndex): bool =
+  for r in ix.segdRecords:
+    if r.multiplexed: return true
+
+var demuxCopies {.threadvar.}: int ## Copies made by this thread, for unique names.
+
+proc newDemuxPath(dir: string): string =
+  # A file name no other copy uses: process id, time and a counter (not
+  # `std/tempfiles`, whose random source needs a framework the macOS
+  # cross-build lacks). The file is created empty.
+  let d = if dir.len > 0: dir else: getTempDir()
+  while result.len == 0 or fileExists(result):
+    inc demuxCopies
+    result = d / ("parseseg_demux_" & $getCurrentProcessId() & "_" &
+      $(epochTime() * 1e6).int64 & "_" & $demuxCopies & ".sgd")
+  writeFile(result, "")
+
+proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: string) =
+  # Replaces the map and index of a multiplexed SEG-D file by those of a
+  # demultiplexed copy in `dir`. The original's walk is dropped: the copy's
+  # log repeats its reader diagnostics.
+  let tmp = newDemuxPath(dir)
+  f.map.src.close()
+  f.map.src = nil
+  f.map.tempPath = tmp # deleted with the map from here on
+  var log = demultiplexSegd(f.path, tmp, twosComplement8015)
+  log.report(sevWarning, dcMultiplexed, "the file holds multiplexed SEG-D, demultiplexed into " &
+    "the temporary copy " & tmp & " (deleted on close); the index, range reads and keys " &
+    "use the copy", 0, Location(file: f.path))
+  f.map.src = openMemFileSource(tmp)
+  f.demuxPath = tmp
+  f.index = buildIndex(f.map.src, skSegd, twosComplement8015, keys)
+  log.add f.index.log
+  f.index.log = log
+
 proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
-    writable = false): SeismicFile {.segApi(hide = writable).} =
+    writable = false, demuxDir = ""): SeismicFile {.segApi(hide = writable,
+    hide = demuxDir).} =
   ## Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
   ## index (with per-trace geometry when `keys`). Format problems are in
   ## `index.log`; an undetectable file gives a fatal diagnostic and an empty
   ## index. Raises `IOError`/`OSError` if the file cannot be opened or
   ## mapped. `writable` maps it read-write, for in-place header edits
   ## (`model/edit`).
+  ##
+  ## A SEG-D file with multiplexed records is demultiplexed once into a
+  ## temporary copy in `demuxDir` (default: the OS temp directory), which is
+  ## mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
+  ## on `close`; the file itself is never changed. With `writable`, such a
+  ## file raises `ValueError`: edits would change only the copy.
   result = SeismicFile(path: path, map: MapOwner(src: openMemFileSource(path, writable)))
   let n = int(min(result.map.src.size, 8192))
   let kind = if n > 0: detectKind(result.map.src.memory.toOpenArray(0, n - 1)) else: skUnknown
   if kind != skUnknown:
     result.index = buildIndex(result.map.src, kind, twosComplement8015, keys)
+    if kind == skSegd and result.index.multiplexed:
+      if writable:
+        raise newException(ValueError, path & " holds multiplexed SEG-D, which cannot be " &
+          "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
+          "--to=segd`, `convertSegdRevision`) and edit that")
+      result.openDemultiplexed(twosComplement8015, keys, demuxDir)
   else:
     result.index.contiguous = true
     result.index.log.report(sevFatal, dcUnsupportedFormat,
       "neither a SEG-Y nor a SEG-D file", 0, Location(file: path))
 
 proc close*(f: var SeismicFile) =
-  ## Unmaps the file. The index stays usable; range reads do not. (Not on the
-  ## C/Python boundary: there a prefetcher may share the map, and releasing
-  ## the handle unmaps it once the last user is gone.)
+  ## Unmaps the file and deletes a demultiplexed copy (`demuxPath`). The
+  ## index stays usable; range reads do not. (Not on the C/Python boundary:
+  ## there a prefetcher may share the map, and releasing the handle unmaps it
+  ## once the last user is gone.)
   if f.map.src != nil:
     f.map.src.close()
     f.map.src = nil
+  if f.map.tempPath.len > 0:
+    discard tryRemoveFile(f.map.tempPath)
+    f.map.tempPath = ""
 
 func len*(f: SeismicFile): int {.inline, segApi.} =
   ## The number of traces.

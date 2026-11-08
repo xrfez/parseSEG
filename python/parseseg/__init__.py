@@ -321,8 +321,8 @@ def _logged(st, out):
 
 _E_Severity = {"info": 0, "warning": 1, "error": 2, "fatal": 3, }
 _N_Severity = {0: "info", 1: "warning", 2: "error", 3: "fatal", }
-_E_DiagCode = {"internal": 0, "io": 1, "truncated": 2, "badValue": 3, "badBcd": 4, "inconsistent": 5, "byteOrder": 6, "unsupportedRevision": 7, "unsupportedFormat": 8, "unknownBlock": 9, "vendorBlock": 10, "vendorMap": 11, "tapeLayout": 12, "validation": 13, }
-_N_DiagCode = {0: "internal", 1: "io", 2: "truncated", 3: "badValue", 4: "badBcd", 5: "inconsistent", 6: "byteOrder", 7: "unsupportedRevision", 8: "unsupportedFormat", 9: "unknownBlock", 10: "vendorBlock", 11: "vendorMap", 12: "tapeLayout", 13: "validation", }
+_E_DiagCode = {"internal": 0, "io": 1, "truncated": 2, "badValue": 3, "badBcd": 4, "inconsistent": 5, "byteOrder": 6, "unsupportedRevision": 7, "unsupportedFormat": 8, "unknownBlock": 9, "vendorBlock": 10, "vendorMap": 11, "tapeLayout": 12, "validation": 13, "multiplexed": 14, }
+_N_DiagCode = {0: "internal", 1: "io", 2: "truncated", 3: "badValue", 4: "badBcd", 5: "inconsistent", 6: "byteOrder", 7: "unsupportedRevision", 8: "unsupportedFormat", 9: "unknownBlock", 10: "vendorBlock", 11: "vendorMap", 12: "tapeLayout", 13: "validation", 14: "multiplexed", }
 _E_SegdTargetFormat = {"keep": 0, "8015": 1, "8022": 2, "8024": 3, "8036": 4, "8038": 5, "8042": 6, "8044": 7, "8048": 8, "8058": 9, "8080": 10, "9036": 11, "9038": 12, "9058": 13, "9080": 14, }
 _N_SegdTargetFormat = {0: "keep", 1: "8015", 2: "8022", 3: "8024", 4: "8036", 5: "8038", 6: "8042", 7: "8044", 8: "8048", 9: "8058", 10: "8080", 11: "9036", 12: "9038", 13: "9058", 14: "9080", }
 _E_ByteOrder = {"big": 0, "little": 1, "pairSwapped": 2, }
@@ -675,6 +675,8 @@ _lib.seg_prefetcher_close.argtypes = [ctypes.c_void_p]
 _lib.seg_prefetcher_close.restype = ctypes.c_int32
 _lib.seg_seismic_file_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_seismic_file_path.restype = ctypes.c_int32
+_lib.seg_seismic_file_demux_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_demux_path.restype = ctypes.c_int32
 _lib.seg_header_editor_log.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
 _lib.seg_header_editor_log.restype = ctypes.c_int32
 _lib.seg_header_editor_journal_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
@@ -1222,6 +1224,15 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         finally:
             self._leave()
 
+    @property
+    def demux_path(self):
+        """The temporary demultiplexed copy that is mapped and indexed instead of a multiplexed SEG-D file ("" for any other file); deleted on `close`. Index offsets and `copyBytes` refer to it."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_seismic_file_demux_path, _h, _b, _c, _n))
+        finally:
+            self._leave()
+
 
 class HeaderEditor(_Handle):
     """An open file with its journal. Call `close` to flush both."""
@@ -1650,7 +1661,13 @@ def open_seismic(path, twos_complement8015=False, keys=False):
     `index.log`; an undetectable file gives a fatal diagnostic and an empty
     index. Raises `IOError`/`OSError` if the file cannot be opened or
     mapped. `writable` maps it read-write, for in-place header edits
-    (`model/edit`)."""
+    (`model/edit`).
+    
+    A SEG-D file with multiplexed records is demultiplexed once into a
+    temporary copy in `demuxDir` (default: the OS temp directory), which is
+    mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
+    on `close`; the file itself is never changed. With `writable`, such a
+    file raises `ValueError`: edits would change only the copy."""
     _o = ctypes.c_void_p()
     if _call(_lib.seg_open_seismic, _str(path, "path"), bool(twos_complement8015), bool(keys), ctypes.byref(_o)) > 0:
         return None
@@ -1686,9 +1703,10 @@ def open_editor(path, journal_path=""):
     """Maps `path` read-write, builds its trace index and opens the journal
     (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
     if either cannot be opened, and `ValueError` if the journal is the file
-    itself. Problems reading the file are in `file.index.log`; a file whose
-    index has a fatal problem can still be edited where its headers were
-    located."""
+    itself or the file holds multiplexed SEG-D (convert it to a
+    demultiplexed file first; see `openSeismic`). Problems reading the file
+    are in `file.index.log`; a file whose index has a fatal problem can
+    still be edited where its headers were located."""
     _o = ctypes.c_void_p()
     if _call(_lib.seg_open_editor, _str(path, "path"), _str(journal_path, "journal_path"), ctypes.byref(_o)) > 0:
         return None

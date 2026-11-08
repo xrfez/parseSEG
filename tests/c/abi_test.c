@@ -124,6 +124,8 @@ static void test_files(void) {
     int64_t len = -1;
     OK(seg_seismic_file_path(f, name, sizeof name, &len));
     CHECK(strstr(name, "Inglewood") != NULL && len == (int64_t)strlen(name));
+    OK(seg_seismic_file_demux_path(f, name, sizeof name, &len));
+    CHECK(len == 0 && name[0] == 0); /* not multiplexed SEG-D */
     SegTraceEntry e;
     OK(seg_seismic_file_trace_entry(f, 199, &e));
     CHECK(e.num_samples == 2001 && e.header_bytes == 240 && e.channel_set == 0xFFFF);

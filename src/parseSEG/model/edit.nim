@@ -421,9 +421,10 @@ proc openEditor*(path: string, journalPath = ""): HeaderEditor {.segApi.} =
   ## Maps `path` read-write, builds its trace index and opens the journal
   ## (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
   ## if either cannot be opened, and `ValueError` if the journal is the file
-  ## itself. Problems reading the file are in `file.index.log`; a file whose
-  ## index has a fatal problem can still be edited where its headers were
-  ## located.
+  ## itself or the file holds multiplexed SEG-D (convert it to a
+  ## demultiplexed file first; see `openSeismic`). Problems reading the file
+  ## are in `file.index.log`; a file whose index has a fatal problem can
+  ## still be edited where its headers were located.
   let jp = if journalPath.len > 0: journalPath else: path & ".edits.nif"
   if jp == path or (fileExists(jp) and fileExists(path) and sameFile(jp, path)):
     raise newException(ValueError, "the journal " & jp & " is the file being edited")
