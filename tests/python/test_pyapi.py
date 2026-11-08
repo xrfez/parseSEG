@@ -346,7 +346,7 @@ raises(parseseg.ArgumentError, parseseg.open_editor, path, path)  # the journal 
 # ------------------------------------------------------------- conversion --
 dst = os.path.join(scratch, "rev1.sgy")
 log = parseseg.convert_file(INGLEWOOD, dst, {"revision": (1, 0), "byte_order": "big",
-                                             "format": 5})
+                                             "format": "5"})
 assert isinstance(log, parseseg.DiagLog) and not log.is_fatal
 with parseseg.open_seismic(dst) as c1, parseseg.open_seismic(INGLEWOOD) as c0:
     assert len(c1) == 200 and c1.file_field("binary.formatCode") == 5

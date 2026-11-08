@@ -511,7 +511,8 @@ static void test_convert(void) {
     SegConvertOptions o;
     seg_init_convert_options(&o);
     CHECK(o.revision.major == 2 && o.revision.minor == 1 && o.byte_order == SEG_BYTE_ORDER_BIG &&
-          o.text_encoding == SEG_TEXT_ENCODING_EBCDIC && o.station_header && !o.apply_descale);
+          o.text_encoding == SEG_TEXT_ENCODING_EBCDIC && o.station_header && !o.apply_descale &&
+          o.format == SEG_SEGY_TARGET_FORMAT_KEEP);
     OK(seg_convert_file(path(dir, "inova_rev30_5traces.sgd"), path(tmp, "inova.sgy"), &o, &log));
     CHECK(log_count(log, SEG_SEVERITY_ERROR) == 0 && log_len(log) > 0);
     seg_diag_log_release(log);
@@ -539,6 +540,12 @@ static void test_convert(void) {
     o.byte_order = 5;
     CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) ==
           SEG_ERR_ARGUMENT); /* no such byte order */
+    seg_init_convert_options(&o);
+    o.format = 99; /* not a SEG_SEGY_TARGET_FORMAT_* value */
+    CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) ==
+          SEG_ERR_ARGUMENT);
+    o.format = SEG_SEGY_TARGET_FORMAT_5;
+    OK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "sw5.sgy"), &o, NULL));
     OK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "sw.sgy"), NULL, NULL)); /* defaults */
     /* SEG-D revisions (task 8.7). */
     SegDiagLog *slog = NULL;

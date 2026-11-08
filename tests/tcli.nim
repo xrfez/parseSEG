@@ -227,7 +227,7 @@ block review_outputs_never_clobber_inputs:
   doAssert readFile(f) == readFile(inglewood)
   # A failed conversion leaves an existing destination alone and no partial file.
   writeFile(tmp / "keep.sgy", "precious")
-  discard fails(1, "convert", inglewood, tmp / "keep.sgy", "--format=99")
+  doAssert "not a SEG-Y format" in fails(2, "convert", inglewood, tmp / "keep.sgy", "--format=99")
   doAssert readFile(tmp / "keep.sgy") == "precious"
   doAssert not fileExists(tmp / "keep.sgy.tmp")
   writeFile(tmp / "half.sgy", readFile(inglewood)[0 ..< 1_000_000])

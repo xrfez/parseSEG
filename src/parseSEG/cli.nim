@@ -438,7 +438,10 @@ proc convertCmd(a: Args): int =
     if a.has("rev"):
       let (ma, mi) = parseRev(a.get("rev"), 1, 2, "0, 1, 2.0 or 2.1")
       o.revision = SegyRevision(major: ma, minor: mi)
-    o.format = parseIntOpt(a.get("format", "0"), "format")
+    if a.has("format"):
+      let code = toSampleFormat(parseIntOpt(a.get("format"), "format"))
+      if code.isNone: usage("--format: " & a.get("format") & " is not a SEG-Y format code")
+      o.format = targetFormat(code.get)
     try:
       o.byteOrder = parseEnum[ByteOrder](a.get("byte-order", "big"))
       o.textEncoding = parseEnum[TextEncoding](a.get("text", "ebcdic"))

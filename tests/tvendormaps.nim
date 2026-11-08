@@ -51,8 +51,8 @@ block load_example_map:
   doAssert reg.maps.len == 1
   let m = reg.maps[0]
   doAssert m.name == "acme-extended" and m.version == 1 and m.targets.len == 3
-  doAssert m.match.manufacturers == @[13] and m.match.revMin == VendorRevision(major: 2) and
-    m.match.revMax == VendorRevision(major: 2, minor: 1)
+  doAssert m.match.manufacturers == @[13] and m.match.revisions.get.first == VendorRevision(major: 2) and
+    m.match.revisions.get.last == VendorRevision(major: 2, minor: 1)
   doAssert m.targets[0].fields.len == 9 and m.targets[1].repeats[0].fields.len == 2
   doAssert m.targets[0].fields[5].sentinel == some(0xFFFFFF'i64)
   doAssert m.targets[2].fields[4].enums == @[VendorEnumLabel(value: 0xB0, label: "status"),

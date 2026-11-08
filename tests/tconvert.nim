@@ -104,7 +104,7 @@ block lossless_format_choice:
   doAssert raw == vals
   # A forced format that cannot hold the values zeroes the trace, with an error.
   let log = convertFile(tmp / "i32.sgd", tmp / "i8.sgy",
-    ConvertOptions(format: 8)) # int8
+    ConvertOptions(format: st8)) # int8
   doAssert log.count(sevError) == 1 and log.noted("do not fit")
 
 block segy_revision_and_byte_order_changes:
@@ -112,7 +112,7 @@ block segy_revision_and_byte_order_changes:
   let a = readSegy(ing)
   # Rev 2.1 IBM → Rev 1 IEEE float: same values, extended text kept.
   var log = convertFile(ing, tmp / "ing_r1.sgy",
-    ConvertOptions(revision: SegyRevision(major: 1), format: 5))
+    ConvertOptions(revision: SegyRevision(major: 1), format: st5))
   doAssert log.errorsAndWorse == 0, $log
   let b = readSegy(tmp / "ing_r1.sgy")
   doAssert b.file.revision.major == 1 and b.file.format == some(sfFloat32)
@@ -140,8 +140,7 @@ block segy_revision_and_byte_order_changes:
 block invalid_targets_and_inputs:
   let sw = exampleDir / "Sweep0.sgy"
   for o in [ConvertOptions(revision: SegyRevision(major: 1), byteOrder: boLittle),
-      ConvertOptions(revision: SegyRevision(major: 1), format: 6), # float64 needs Rev 2
-      ConvertOptions(format: 13),
+      ConvertOptions(revision: SegyRevision(major: 1), format: st6), # float64 needs Rev 2
       ConvertOptions(revision: SegyRevision(major: 3))]:
     doAssert convertFile(sw, tmp / "bad.sgy", o).isFatal
   doAssert convertFile(tmp / "missing", tmp / "x.sgy").isFatal

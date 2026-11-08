@@ -140,6 +140,9 @@ place or into a copy (`dryRun` only lists the changes).
 
 ## Conversion
 - `convertFile(src, dst, ConvertOptions(...))` detects the input and writes SEG-Y.
+  `ConvertOptions.format` is a `SegyTargetFormat`: `stKeep` (the default: keep a SEG-Y
+  input's format, or choose a lossless one for SEG-D) or `st1` .. `st16` (a format code;
+  `targetFormat(sfFloat32)` gives `st5`).
 - `convertSegy(src, sink, opts)` converts SEG-Y to SEG-Y: a new revision (0, 1, 2.0, 2.1),
   byte order or sample format. It drops what the target cannot hold and reports each kind of
   loss once.

@@ -114,11 +114,14 @@ type
     ## A revision as major.minor (minor 10 is not 1.0 more than 9).
     major*, minor*: int
 
+  VendorRevisionRange* = object
+    ## Revisions `first .. last`, both included.
+    first*, last*: VendorRevision
+
   VendorMatch* = object
     ## A map's `(match ...)`: the files it applies to.
     format*: Option[SeismicKind] ## `skSegd` or `skSegy`; none = any.
-    hasRev*: bool
-    revMin*, revMax*: VendorRevision ## Inclusive, when `hasRev`.
+    revisions*: Option[VendorRevisionRange] ## The `(rev min [max])` clause; none = any.
     manufacturers*: seq[int] ## SEG-D manufacturer codes; empty = any.
     serialMin*, serialMax*: int64 ## -1 = unbounded.
     textContains*: seq[string] ## Texts the SEG-Y textual header must hold.
@@ -551,9 +554,10 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
         case c.tag
         of "format": result.match.format = some(c.seismicKindAtom)
         of "rev":
-          if not c.revAtom(0, result.match.revMin): mapError("(rev) needs a revision", c.line)
-          if not c.revAtom(1, result.match.revMax): result.match.revMax = result.match.revMin
-          result.match.hasRev = true
+          var r: VendorRevisionRange
+          if not c.revAtom(0, r.first): mapError("(rev) needs a revision", c.line)
+          if not c.revAtom(1, r.last): r.last = r.first
+          result.match.revisions = some(r)
         of "manufacturer":
           for a in c.atoms:
             if a.kind == nkInt: result.match.manufacturers.add int(a.i)
@@ -625,9 +629,10 @@ func specificity(m: VendorMatch, ctx: VendorContext): int =
   if m.format.isSome:
     if m.format.get != ctx.format: return -1
     inc result
-  if m.hasRev:
+  if m.revisions.isSome:
     let r = (ctx.revision.major, ctx.revision.minor)
-    if r < (m.revMin.major, m.revMin.minor) or r > (m.revMax.major, m.revMax.minor): return -1
+    let (a, b) = (m.revisions.get.first, m.revisions.get.last)
+    if r < (a.major, a.minor) or r > (b.major, b.minor): return -1
     inc result
   if m.manufacturers.len > 0:
     if ctx.manufacturer notin m.manufacturers: return -1

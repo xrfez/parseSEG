@@ -204,6 +204,23 @@ const char *seg_last_error(void);
 #define SEG_BYTE_ORDER_LITTLE 1
 #define SEG_BYTE_ORDER_PAIR_SWAPPED 2
 
+/* SegyTargetFormat */
+#define SEG_SEGY_TARGET_FORMAT_KEEP 0
+#define SEG_SEGY_TARGET_FORMAT_1 1
+#define SEG_SEGY_TARGET_FORMAT_2 2
+#define SEG_SEGY_TARGET_FORMAT_3 3
+#define SEG_SEGY_TARGET_FORMAT_4 4
+#define SEG_SEGY_TARGET_FORMAT_5 5
+#define SEG_SEGY_TARGET_FORMAT_6 6
+#define SEG_SEGY_TARGET_FORMAT_7 7
+#define SEG_SEGY_TARGET_FORMAT_8 8
+#define SEG_SEGY_TARGET_FORMAT_9 9
+#define SEG_SEGY_TARGET_FORMAT_10 10
+#define SEG_SEGY_TARGET_FORMAT_11 11
+#define SEG_SEGY_TARGET_FORMAT_12 12
+#define SEG_SEGY_TARGET_FORMAT_15 13
+#define SEG_SEGY_TARGET_FORMAT_16 14
+
 /* TextEncoding */
 #define SEG_TEXT_ENCODING_EBCDIC 0
 #define SEG_TEXT_ENCODING_ASCII 1
@@ -331,7 +348,7 @@ typedef struct SegSegyRevision {
 typedef struct SegConvertOptions {
     SegSegyRevision revision;
     int32_t byte_order; /* SEG_BYTE_ORDER_* */
-    int64_t format; /* SEG-Y format code; 0 = keep (SEG-Y) or choose losslessly. */
+    int32_t format; /* SEG_SEGY_TARGET_FORMAT_*: Target sample format (`stKeep`: keep or choose). */
     int32_t text_encoding; /* SEG_TEXT_ENCODING_*: SEG-D → SEG-Y: the textual header's encoding. */
     bool apply_descale; /* SEG-D: write millivolts (MP factor / descale multiplier). */
     bool station_header; /* SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza. */

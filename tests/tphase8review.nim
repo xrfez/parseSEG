@@ -122,7 +122,7 @@ block b5_8036_to_pair_swapped_stays_exact:
   let y = readSegy(tmp / "i24.sgy")
   doAssert y.file.format == some(sfInt32) and y.decoded(0) == vals
   doAssert convertFile(tmp / "i24.sgd", tmp / "x.sgy",
-    ConvertOptions(byteOrder: boPairSwapped, format: 7)).isFatal
+    ConvertOptions(byteOrder: boPairSwapped, format: st7)).isFatal
 
 block b6_losses_are_reported_and_ibm_is_copied:
   # Descaled int32 values stay exact in float64 (Rev 2).
@@ -143,11 +143,11 @@ block b6_losses_are_reported_and_ibm_is_copied:
   var e: SegdData
   e.records.add recordAs(sd8058, fr, 7)
   writeSegdFile(e, tmp / "fr.sgd")
-  doAssert convertFile(tmp / "fr.sgd", tmp / "fr.sgy", ConvertOptions(format: 3)).
+  doAssert convertFile(tmp / "fr.sgd", tmp / "fr.sgy", ConvertOptions(format: st3)).
     warned("could not be written exactly in SEG-Y format 3")
   # SEG-Y → SEG-Y to a narrower format is reported too.
-  doAssert convertFile(tmp / "fr.sgy", tmp / "fr16.sgy", ConvertOptions(format: 3)).len >= 0
-  doAssert convertFile(tmp / "d.sgy", tmp / "d32.sgy", ConvertOptions(format: 5)).
+  doAssert convertFile(tmp / "fr.sgy", tmp / "fr16.sgy", ConvertOptions(format: st3)).len >= 0
+  doAssert convertFile(tmp / "d.sgy", tmp / "d32.sgy", ConvertOptions(format: st5)).
     warned("could not be written exactly in SEG-Y format 5")
   # 8048 IBM words beyond float32's range are copied, not rounded.
   var ibm: SegdData

@@ -327,6 +327,8 @@ _E_SegdTargetFormat = {"keep": 0, "8015": 1, "8022": 2, "8024": 3, "8036": 4, "8
 _N_SegdTargetFormat = {0: "keep", 1: "8015", 2: "8022", 3: "8024", 4: "8036", 5: "8038", 6: "8042", 7: "8044", 8: "8048", 9: "8058", 10: "8080", 11: "9036", 12: "9038", 13: "9058", 14: "9080", }
 _E_ByteOrder = {"big": 0, "little": 1, "pairSwapped": 2, }
 _N_ByteOrder = {0: "big", 1: "little", 2: "pairSwapped", }
+_E_SegyTargetFormat = {"keep": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12, "15": 13, "16": 14, }
+_N_SegyTargetFormat = {0: "keep", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "11", 12: "12", 13: "15", 14: "16", }
 _E_TextEncoding = {"ebcdic": 0, "ascii": 1, }
 _N_TextEncoding = {0: "ebcdic", 1: "ascii", }
 _E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
@@ -465,13 +467,13 @@ class SegConvertOptions(ctypes.Structure):
     _fields_ = [
         ("revision", SegSegyRevision),
         ("byte_order", ctypes.c_int32),
-        ("format", ctypes.c_int64),
+        ("format", ctypes.c_int32),
         ("text_encoding", ctypes.c_int32),
         ("apply_descale", ctypes.c_bool),
         ("station_header", ctypes.c_bool),
     ]
-    _out = (("revision", lambda _v: _struct_dict(_v)), ("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format", lambda _v: _v), ("text_encoding", lambda _v: _N_TextEncoding.get(_v, _v)), ("apply_descale", lambda _v: _v), ("station_header", lambda _v: _v), )
-    _in = {"revision": lambda _x, _n: _struct_arg(SegSegyRevision, _x, _n), "byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "text_encoding": lambda _x, _n: _enum(_E_TextEncoding, _x, _n), "apply_descale": lambda _x, _n: bool(_x), "station_header": lambda _x, _n: bool(_x), }
+    _out = (("revision", lambda _v: _struct_dict(_v)), ("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format", lambda _v: _N_SegyTargetFormat.get(_v, _v)), ("text_encoding", lambda _v: _N_TextEncoding.get(_v, _v)), ("apply_descale", lambda _v: _v), ("station_header", lambda _v: _v), )
+    _in = {"revision": lambda _x, _n: _struct_arg(SegSegyRevision, _x, _n), "byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format": lambda _x, _n: _enum(_E_SegyTargetFormat, _x, _n), "text_encoding": lambda _x, _n: _enum(_E_TextEncoding, _x, _n), "apply_descale": lambda _x, _n: bool(_x), "station_header": lambda _x, _n: bool(_x), }
     _defaults = {}
 
 
@@ -529,7 +531,7 @@ class SegPrefetchChunk(ctypes.Structure):
 SegSegdRevision._defaults = {"major": 0, "minor": 0}
 SegSegdConvertOptions._defaults = {"revision": {"major": 3, "minor": 0}, "format": "keep", "twos_complement8015": False}
 SegSegyRevision._defaults = {"major": 0, "minor": 0}
-SegConvertOptions._defaults = {"revision": {"major": 2, "minor": 1}, "byte_order": "big", "format": 0, "text_encoding": "ebcdic", "apply_descale": False, "station_header": True}
+SegConvertOptions._defaults = {"revision": {"major": 2, "minor": 1}, "byte_order": "big", "format": "keep", "text_encoding": "ebcdic", "apply_descale": False, "station_header": True}
 SegSpsOptions._defaults = {"revision": "auto", "strict_implied_decimals": False, "layout": "lines", "force_layout": False}
 SegTensorView._defaults = {"data": None, "dtype": "Dtype 0", "rank": 0, "shape": None, "strides": None}
 

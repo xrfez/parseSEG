@@ -14,7 +14,7 @@
 ## - `convertFile`: detects the input standard and dispatches.
 ##
 ## Samples go through float64 (exact for every SEG-D and SEG-Y format) and
-## are re-encoded in the target format. The default (`format = 0`) picks a
+## are re-encoded in the target format. The default (`format = stKeep`) picks a
 ## lossless one: 8048 → 1 (IBM), 8036 → 7 (int24, Rev 2) or 2, 8038 → 2,
 ## 8080 → 6 (Rev 2) or 5, everything else → 5 (IEEE float32, exact for the
 ## SEG-D binary-exponent formats). Values are the recorded ones unless
@@ -72,12 +72,20 @@ const
 </segy-layout>"""
 
 type
+  SegyTargetFormat* = enum
+    ## The SEG-Y sample format `convertFile` writes: a format code, or `stKeep`.
+    stKeep = "keep"
+      ## SEG-Y input: its own format. SEG-D input: one that holds every
+      ## record's samples exactly (see the module doc).
+    st1 = "1", st2 = "2", st3 = "3", st4 = "4", st5 = "5", st6 = "6", st7 = "7", st8 = "8",
+    st9 = "9", st10 = "10", st11 = "11", st12 = "12", st15 = "15", st16 = "16"
+
   ConvertOptions* = object
     ## Target settings. The defaults give SEG-Y Rev 2.1, big-endian, EBCDIC
     ## text, a lossless sample format and recorded (not descaled) values.
     revision*: SegyRevision = SegyRevision(major: 2, minor: 1)
     byteOrder*: ByteOrder = boBig
-    format*: int = 0            ## SEG-Y format code; 0 = keep (SEG-Y) or choose losslessly.
+    format*: SegyTargetFormat = stKeep ## Target sample format (`stKeep`: keep or choose).
     textEncoding*: TextEncoding = teEbcdic ## SEG-D → SEG-Y: the textual header's encoding.
     applyDescale*: bool = false ## SEG-D: write millivolts (MP factor / descale multiplier).
     stationHeader*: bool = true ## SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza.
@@ -109,18 +117,28 @@ proc note(log: var DiagLog, seen: var set[LossNote], kind: LossNote, msg: string
     seen.incl kind
     log.report(sevInfo, dcValidation, msg, loc = loc)
 
+static:
+  # `SegyTargetFormat` lists `definedSampleFormats` in order, after `stKeep`.
+  for i, f in definedSampleFormats: doAssert $SegyTargetFormat(i + 1) == $ord(f)
+
+func sampleFormat(t: SegyTargetFormat): SampleFormat =
+  # The sample format of a target other than `stKeep`.
+  definedSampleFormats[ord(t) - 1]
+
+func targetFormat*(f: SampleFormat): SegyTargetFormat =
+  ## The target format that writes `f`.
+  for i, x in definedSampleFormats:
+    if x == f: return SegyTargetFormat(i + 1)
+  stKeep # not reached: every format has a target
+
 func checkTarget(opts: ConvertOptions, err: var string): bool =
   let r = opts.revision
   if not (r.major == 0 and r.minor == 0 or r.major == 1 and r.minor == 0 or
       r.major == 2 and r.minor in {0'u8, 1}):
     err = "target revision " & $r & " is not 0, 1, 2.0 or 2.1"
     return false
-  if opts.format != 0:
-    let code = toSampleFormat(opts.format)
-    if code.isNone:
-      err = "target format " & $opts.format & " is not a writable SEG-Y format"
-      return false
-    let f = code.get
+  if opts.format != stKeep:
+    let f = opts.format.sampleFormat
     if f.isRev2Format and r.major < 2:
       err = "format " & $opts.format & " needs SEG-Y Rev 2"
       return false
@@ -187,7 +205,7 @@ proc reorderProprietary(lay: TraceLayout, blocks: var seq[byte], src, dst: ByteO
 
 proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()): DiagLog =
   ## Rewrites the SEG-Y file at `src` with the target revision, byte order and
-  ## format of `opts` (`format = 0` keeps the input format). The reader's,
+  ## format of `opts` (`stKeep` keeps the input format). The reader's,
   ## the writer's and the conversion's diagnostics are all in the result; a
   ## fatal one means the output is incomplete.
   var err: string
@@ -204,8 +222,7 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
   let fromRev = f.revision
   let rev = opts.revision
   let inFmt = f.format.get # known: else the read is fatal
-  let outFmt = if opts.format != 0: toSampleFormat(opts.format).get # checked above
-               else: inFmt
+  let outFmt = if opts.format != stKeep: opts.format.sampleFormat else: inFmt
   if outFmt.isRev2Format and rev.major < 2:
     result.add r.log
     result.report(sevFatal, dcUnsupportedFormat, "the input format " & $ord(outFmt) &
@@ -378,7 +395,7 @@ func targetFormat(opts: ConvertOptions, rec: SegdRecord,
   # The SEG-Y format: the requested one, else one that holds every record
   # exactly (or at least the first one).
   let rev = opts.revision
-  if opts.format != 0: toSampleFormat(opts.format).get # checked by `checkTarget`
+  if opts.format != stKeep: opts.format.sampleFormat
   elif recordFormats.card > 0: commonFormat(recordFormats, rev, opts.applyDescale, opts.byteOrder)
   elif rec.format.isSome: losslessFormat(rec.format.get, rev, opts.applyDescale, opts.byteOrder)
   else: sfFloat32
@@ -742,7 +759,7 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.
   if sameAsInput(srcPath, dstPath, result):
     return
   # SEG-D: one target format must hold every record.
-  let formats = if kind == skSegd and opts.format == 0: recordFormats(srcPath) else: {}
+  let formats = if kind == skSegd and opts.format == stKeep: recordFormats(srcPath) else: {}
   let tmp = tmpPathFor(dstPath)
   var src: RecordSource
   var sink: RecordSink
