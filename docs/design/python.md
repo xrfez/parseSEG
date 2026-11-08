@@ -95,6 +95,7 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 | `open_editor(path, journal_path="")` → `HeaderEditor`: `set_trace_field` / `set_record_field` / `set_file_field(..., value)` → bool, `edits`, `log`, `journal_path` | `openEditor`, ... |
 | `apply_journal(path, journal_path)`, `rollback_journal` → `DiagLog` | `applyJournal`, `rollbackJournal` |
 | `convert_file(src_path, dst_path, opts=None)`, `convert_segd_revision(src_path, dst_path, opts=None)` → `DiagLog` | `convertFile`, `convertSegdRevision` |
+| `f.seg2_string_count(trace)`, `f.seg2_keyword(trace, n)`, `f.seg2_value(trace, n)` (trace -1: the File Descriptor Block); `f.trace_field(i, "trace.SAMPLE_INTERVAL")`, `f.file_field("file.UNITS")` → str | `seg2StringCount`, ... (SEG-2 keyword strings) |
 | `version()`, `abi_version()`, `status_name(status)` | |
 
 - Handles have `close()` and are context managers. After `close()` any call raises
@@ -102,7 +103,9 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 - Options are dicts of `ConvertOptions` / `SegdConvertOptions` / `SpsOptions` fields:
   `convert_file(src, dst, {"revision": (1, 0), "byte_order": "little"})`. Enum fields take
   the value's name: `convert_segd_revision(src, dst, {"revision": (2, 1), "format": "8058"})`,
-  `convert_file(src, dst, {"format": "5"})` (`"keep"` is the default for both).
+  `convert_file(src, dst, {"format": "5"})` (`"keep"` is the default for both). The output
+  standard is `target`: `convert_file(src, "x.sg2", {"target": "SEG-2", "seg2":
+  {"byte_order": "big", "format": "4"}})`, `{"target": "SEG-D", "segd": {"revision": (3, 1)}}`.
 - A diagnostic dict holds `severity` ("info", "warning", "error", "fatal"), `code`, `offset`,
   `loc` (`file`, `record`, `channel_set`, `trace`, `block_index`, `field`) and `msg`, as the
   Nim `Diagnostic`.

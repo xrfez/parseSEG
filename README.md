@@ -1,8 +1,8 @@
 # parseSEG
 
 Read, write, index, edit and convert SEG-Y (Rev 0, 1, 2.0, 2.1) and SEG-D (Rev 0 and 1 multiplexed
-or demultiplexed, 2.0, 2.1, 3.0, 3.1) seismic data, on disk and tape, for viewers and HPC processing, read and
-index SEG-2, and the SPS and SEG P1 survey files that give traces their geometry. Files of any size are
+or demultiplexed, 2.0, 2.1, 3.0, 3.1) seismic data, on disk and tape, for viewers and HPC processing, read,
+write, index and convert SEG-2, and the SPS and SEG P1 survey files that give traces their geometry. Files of any size are
 memory-mapped and indexed, never loaded whole. Problems are reported as diagnostics instead of
 stopping a read.
 
@@ -22,6 +22,8 @@ parseSEG dump shot.sgd --traces=3 --all --records=0 --file  # every header, with
 parseSEG diag shot.sgd --min=warning           # the diagnostics (--nif: as NIF)
 parseSEG convert shot.sgd shot.sgy --rev=2.1   # SEG-D or SEG-Y to SEG-Y
 parseSEG convert old.sgd new.sgd --rev=3.0     # SEG-D revisions
+parseSEG convert shot.sgd shot.sg2             # any standard to SEG-2 (--to=seg2)
+parseSEG convert shot.sg2 shot.sgd --to=segd   # SEG-2 to SEG-D (or SEG-Y)
 parseSEG edit line.sgy t5:trace.sourceX=1200 file:binary.jobId=7    # in place, journaled
 parseSEG headers export line.sgy -o h.nif      # edit h.nif, then:
 parseSEG headers import line.sgy h.nif -o fixed.sgy                # only changed fields

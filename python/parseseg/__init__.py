@@ -345,20 +345,22 @@ _E_SegdTargetFormat = {"keep": 0, "8015": 1, "8022": 2, "8024": 3, "8036": 4, "8
 _N_SegdTargetFormat = {0: "keep", 1: "8015", 2: "8022", 3: "8024", 4: "8036", 5: "8038", 6: "8042", 7: "8044", 8: "8048", 9: "8058", 10: "8080", 11: "9036", 12: "9038", 13: "9058", 14: "9080", }
 _E_ByteOrder = {"big": 0, "little": 1, "pairSwapped": 2, }
 _N_ByteOrder = {0: "big", 1: "little", 2: "pairSwapped", }
+_E_Seg2TargetFormat = {"keep": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, }
+_N_Seg2TargetFormat = {0: "keep", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5", }
 _E_SegyTargetFormat = {"keep": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12, "15": 15, "16": 16, }
 _N_SegyTargetFormat = {0: "keep", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "11", 12: "12", 15: "15", 16: "16", }
 _E_TextEncoding = {"ebcdic": 0, "ascii": 1, }
 _N_TextEncoding = {0: "ebcdic", 1: "ascii", }
-_E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
-_N_GatherKind = {0: "unknown", 1: "shot", 2: "receiver", 3: "cmp", 4: "offset", 5: "other", }
 _E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, "SEG-2": 3, }
 _N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", 3: "SEG-2", }
+_E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
+_N_GatherKind = {0: "unknown", 1: "shot", 2: "receiver", 3: "cmp", 4: "offset", 5: "other", }
 _E_CoordinateUnits = {"unknown": 0, "meters": 1, "feet": 2, "length": 3, "arcSeconds": 4, "degrees": 5, "dms": 6, }
 _N_CoordinateUnits = {0: "unknown", 1: "meters", 2: "feet", 3: "length", 4: "arcSeconds", 5: "degrees", 6: "dms", }
 _E_CrsTextFormat = {"none": 0, "stanza": 1, "P1/11": 2, "unknown": 3, }
 _N_CrsTextFormat = {0: "none", 1: "stanza", 2: "P1/11", 3: "unknown", }
-_E_HeaderBlock = {"SEG-Y binary": 0, "SEG-Y trace": 1, "SEG-Y ext1": 2, "SEG-D trace": 3, "SEG-D ext1": 4, "SEG-D Rev 3 ext1": 5, "SEG-D gh1": 6, "SEG-D ghN": 7, "SEG-D gh2": 8, "SEG-D Rev 3 gh2": 9, "SEG-D Rev 3 gh3": 10, "SEG-D channel set": 11, "SEG-D Rev 3 channel set": 12, "SEG-D position": 13, "SEG-D source description": 14, "SEG-D additional source info": 15, "SEG-D sensor info": 16, "SEG-D timestamp": 17, "SEG-D sensor calibration": 18, "SEG-D time drift": 19, "SEG-D orientation": 20, "SEG-D trailer description": 21, "raw": 22, }
-_N_HeaderBlock = {0: "SEG-Y binary", 1: "SEG-Y trace", 2: "SEG-Y ext1", 3: "SEG-D trace", 4: "SEG-D ext1", 5: "SEG-D Rev 3 ext1", 6: "SEG-D gh1", 7: "SEG-D ghN", 8: "SEG-D gh2", 9: "SEG-D Rev 3 gh2", 10: "SEG-D Rev 3 gh3", 11: "SEG-D channel set", 12: "SEG-D Rev 3 channel set", 13: "SEG-D position", 14: "SEG-D source description", 15: "SEG-D additional source info", 16: "SEG-D sensor info", 17: "SEG-D timestamp", 18: "SEG-D sensor calibration", 19: "SEG-D time drift", 20: "SEG-D orientation", 21: "SEG-D trailer description", 22: "raw", }
+_E_HeaderBlock = {"SEG-Y binary": 0, "SEG-Y trace": 1, "SEG-Y ext1": 2, "SEG-D trace": 3, "SEG-D ext1": 4, "SEG-D Rev 3 ext1": 5, "SEG-D gh1": 6, "SEG-D ghN": 7, "SEG-D gh2": 8, "SEG-D Rev 3 gh2": 9, "SEG-D Rev 3 gh3": 10, "SEG-D channel set": 11, "SEG-D Rev 3 channel set": 12, "SEG-D position": 13, "SEG-D source description": 14, "SEG-D additional source info": 15, "SEG-D sensor info": 16, "SEG-D timestamp": 17, "SEG-D sensor calibration": 18, "SEG-D time drift": 19, "SEG-D orientation": 20, "SEG-D trailer description": 21, "raw": 22, "SEG-2 file": 23, "SEG-2 trace": 24, }
+_N_HeaderBlock = {0: "SEG-Y binary", 1: "SEG-Y trace", 2: "SEG-Y ext1", 3: "SEG-D trace", 4: "SEG-D ext1", 5: "SEG-D Rev 3 ext1", 6: "SEG-D gh1", 7: "SEG-D ghN", 8: "SEG-D gh2", 9: "SEG-D Rev 3 gh2", 10: "SEG-D Rev 3 gh3", 11: "SEG-D channel set", 12: "SEG-D Rev 3 channel set", 13: "SEG-D position", 14: "SEG-D source description", 15: "SEG-D additional source info", 16: "SEG-D sensor info", 17: "SEG-D timestamp", 18: "SEG-D sensor calibration", 19: "SEG-D time drift", 20: "SEG-D orientation", 21: "SEG-D trailer description", 22: "raw", 23: "SEG-2 file", 24: "SEG-2 trace", }
 _E_SpsRevision = {"auto": 0, "1.0": 1, "2.1": 2, }
 _N_SpsRevision = {0: "auto", 1: "1.0", 2: "2.1", }
 _E_TextLayout = {"lines": 0, "fixed80": 1, "ebcdic80": 2, }
@@ -489,6 +491,17 @@ class SegSegyRevision(ctypes.Structure):
     _defaults = {}
 
 
+class SegSeg2ConvertOptions(ctypes.Structure):
+    """Target settings of a conversion to SEG-2."""
+    _fields_ = [
+        ("byte_order", ctypes.c_int32),
+        ("format", ctypes.c_int32),
+    ]
+    _out = (("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format", lambda _v: _N_Seg2TargetFormat.get(_v, _v)), )
+    _in = {"byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format": lambda _x, _n: _enum(_E_Seg2TargetFormat, _x, _n), }
+    _defaults = {}
+
+
 class SegConvertOptions(ctypes.Structure):
     """Target settings. The defaults give SEG-Y Rev 2.1, big-endian, EBCDIC text, a lossless sample format and recorded (not descaled) values."""
     _fields_ = [
@@ -498,9 +511,12 @@ class SegConvertOptions(ctypes.Structure):
         ("text_encoding", ctypes.c_int32),
         ("apply_descale", ctypes.c_bool),
         ("station_header", ctypes.c_bool),
+        ("target", ctypes.c_int32),
+        ("segd", SegSegdConvertOptions),
+        ("seg2", SegSeg2ConvertOptions),
     ]
-    _out = (("revision", lambda _v: _struct_dict(_v)), ("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format", lambda _v: _N_SegyTargetFormat.get(_v, _v)), ("text_encoding", lambda _v: _N_TextEncoding.get(_v, _v)), ("apply_descale", lambda _v: _v), ("station_header", lambda _v: _v), )
-    _in = {"revision": lambda _x, _n: _struct_arg(SegSegyRevision, _x, _n), "byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format": lambda _x, _n: _enum(_E_SegyTargetFormat, _x, _n), "text_encoding": lambda _x, _n: _enum(_E_TextEncoding, _x, _n), "apply_descale": lambda _x, _n: bool(_x), "station_header": lambda _x, _n: bool(_x), }
+    _out = (("revision", lambda _v: _struct_dict(_v)), ("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format", lambda _v: _N_SegyTargetFormat.get(_v, _v)), ("text_encoding", lambda _v: _N_TextEncoding.get(_v, _v)), ("apply_descale", lambda _v: _v), ("station_header", lambda _v: _v), ("target", lambda _v: _N_SeismicKind.get(_v, _v)), ("segd", lambda _v: _struct_dict(_v)), ("seg2", lambda _v: _struct_dict(_v)), )
+    _in = {"revision": lambda _x, _n: _struct_arg(SegSegyRevision, _x, _n), "byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format": lambda _x, _n: _enum(_E_SegyTargetFormat, _x, _n), "text_encoding": lambda _x, _n: _enum(_E_TextEncoding, _x, _n), "apply_descale": lambda _x, _n: bool(_x), "station_header": lambda _x, _n: bool(_x), "target": lambda _x, _n: _enum(_E_SeismicKind, _x, _n), "segd": lambda _x, _n: _struct_arg(SegSegdConvertOptions, _x, _n), "seg2": lambda _x, _n: _struct_arg(SegSeg2ConvertOptions, _x, _n), }
     _defaults = {}
 
 
@@ -629,7 +645,8 @@ class SegPrefetchChunk(ctypes.Structure):
 SegSegdRevision._defaults = {"major": 0, "minor": 0}
 SegSegdConvertOptions._defaults = {"revision": {"major": 3, "minor": 0}, "format": "keep", "twos_complement8015": False}
 SegSegyRevision._defaults = {"major": 0, "minor": 0}
-SegConvertOptions._defaults = {"revision": {"major": 2, "minor": 1}, "byte_order": "big", "format": "keep", "text_encoding": "ebcdic", "apply_descale": False, "station_header": True}
+SegSeg2ConvertOptions._defaults = {"byte_order": "little", "format": "keep"}
+SegConvertOptions._defaults = {"revision": {"major": 2, "minor": 1}, "byte_order": "big", "format": "keep", "text_encoding": "ebcdic", "apply_descale": False, "station_header": True, "target": "SEG-Y", "segd": {"revision": {"major": 3, "minor": 0}, "format": "keep", "twos_complement8015": False}, "seg2": {"byte_order": "little", "format": "keep"}}
 SegSpsOptions._defaults = {"revision": "auto", "strict_implied_decimals": False, "layout": "lines", "force_layout": False}
 SegTensorView._defaults = {"data": None, "dtype": None, "rank": 0, "shape": None, "strides": None}
 
@@ -687,12 +704,6 @@ _lib.seg_seismic_file_is_open.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes
 _lib.seg_seismic_file_is_open.restype = ctypes.c_int32
 _lib.seg_seismic_file_copy_bytes.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_seismic_file_copy_bytes.restype = ctypes.c_int32
-_lib.seg_convert_file.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(SegConvertOptions), ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_convert_file.restype = ctypes.c_int32
-_lib.seg_seismic_file_gathers.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegGather), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_seismic_file_gathers.restype = ctypes.c_int32
-_lib.seg_seismic_file_component_group_ids.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_seismic_file_component_group_ids.restype = ctypes.c_int32
 _lib.seg_field_names.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_field_names.restype = ctypes.c_int32
 _lib.seg_seismic_file_trace_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
@@ -701,8 +712,20 @@ _lib.seg_seismic_file_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, 
 _lib.seg_seismic_file_record_field.restype = ctypes.c_int32
 _lib.seg_seismic_file_file_field.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(SegValue)]
 _lib.seg_seismic_file_file_field.restype = ctypes.c_int32
+_lib.seg_seismic_file_seg2_string_count.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_seg2_string_count.restype = ctypes.c_int32
+_lib.seg_seismic_file_seg2_keyword.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_seg2_keyword.restype = ctypes.c_int32
+_lib.seg_seismic_file_seg2_value.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_seg2_value.restype = ctypes.c_int32
 _lib.seg_seismic_file_sample_interval_us.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_double)]
 _lib.seg_seismic_file_sample_interval_us.restype = ctypes.c_int32
+_lib.seg_convert_file.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(SegConvertOptions), ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_convert_file.restype = ctypes.c_int32
+_lib.seg_seismic_file_gathers.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegGather), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_gathers.restype = ctypes.c_int32
+_lib.seg_seismic_file_component_group_ids.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_component_group_ids.restype = ctypes.c_int32
 _lib.seg_rollback_journal.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
 _lib.seg_rollback_journal.restype = ctypes.c_int32
 _lib.seg_apply_journal.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
@@ -1197,27 +1220,10 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         finally:
             self._leave()
 
-    def gathers(self):
-        """The file's gathers: `f.index.gathers`."""
-        _h = self._enter()
-        try:
-            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_gathers, _h, _b, _c, _n), SegGather, _struct_dict)
-        finally:
-            self._leave()
-
-    def component_group_ids(self, traces):
-        """The component group of each trace of `traces` (see `componentGroups`),
-        numbered from 0 in order of first appearance; -1 for a trace in none
-        (an auxiliary trace)."""
-        _h = self._enter()
-        try:
-            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_component_group_ids, _h, *_range_arg(traces, "traces"), _b, _c, _n), ctypes.c_int64, lambda _v: _v)
-        finally:
-            self._leave()
-
     def trace_field(self, trace, name):
         """A trace header field by name, e.g. "trace.sourceX" or
-        "ext1.receiverLine". Raises `ValueError` for an unknown field, a trace
+        "ext1.receiverLine" (SEG-2: "trace.numSamples", "trace.SAMPLE_INTERVAL").
+        Raises `ValueError` for an unknown field, a trace
         out of range or a closed file; the message says which."""
         _h = self._enter()
         try:
@@ -1240,13 +1246,47 @@ class SeismicFile(_Handle, _SeismicFileExtras):
             self._leave()
 
     def file_field(self, name):
-        """A file-level field by name, e.g. "binary.formatCode" (SEG-Y). Raises
+        """A file-level field by name, e.g. "binary.formatCode" (SEG-Y) or
+        "file.UNITS" (SEG-2). Raises
         `ValueError` for an unknown field or a closed file."""
         _h = self._enter()
         try:
             _o = _value_out()
             _call(_lib.seg_seismic_file_file_field, _h, _str(name, "name"), ctypes.byref(_o))
             return _value(_o)
+        finally:
+            self._leave()
+
+    def seg2_string_count(self, trace):
+        """How many keyword strings SEG-2 trace `trace` has (-1: the File
+        Descriptor Block); read them with `seg2Keyword` and `seg2Value`. Raises
+        `ValueError` like `seg2Strings`."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_seismic_file_seg2_string_count, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def seg2_keyword(self, trace, n):
+        """The keyword of string `n` of SEG-2 trace `trace` (-1: the File
+        Descriptor Block), as written. Raises `ValueError` like `seg2Strings`,
+        and for `n` out of range."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_seismic_file_seg2_keyword, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), _int(n, "n", -(1 << 63), (1 << 63) - 1), _b, _c, _n))
+        finally:
+            self._leave()
+
+    def seg2_value(self, trace, n):
+        """The value of string `n` of SEG-2 trace `trace` (-1: the File
+        Descriptor Block), terminators stripped (NOTE lines are separated by
+        the file's Line Terminator). Raises `ValueError` like `seg2Keyword`."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_seismic_file_seg2_value, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), _int(n, "n", -(1 << 63), (1 << 63) - 1), _b, _c, _n))
         finally:
             self._leave()
 
@@ -1267,6 +1307,24 @@ class SeismicFile(_Handle, _SeismicFileExtras):
             if _call(_lib.seg_seismic_file_sample_interval_us, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
             return _o.value
+        finally:
+            self._leave()
+
+    def gathers(self):
+        """The file's gathers: `f.index.gathers`."""
+        _h = self._enter()
+        try:
+            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_gathers, _h, _b, _c, _n), SegGather, _struct_dict)
+        finally:
+            self._leave()
+
+    def component_group_ids(self, traces):
+        """The component group of each trace of `traces` (see `componentGroups`),
+        numbered from 0 in order of first appearance; -1 for a trace in none
+        (an auxiliary trace)."""
+        _h = self._enter()
+        try:
+            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_component_group_ids, _h, *_range_arg(traces, "traces"), _b, _c, _n), ctypes.c_int64, lambda _v: _v)
         finally:
             self._leave()
 
@@ -1339,7 +1397,8 @@ class SeismicFile(_Handle, _SeismicFileExtras):
     def file_headers(self):
         """The file-level header blocks, as rows in file order: SEG-Y tape label,
         textual, binary, extended textual headers and data trailer; SEG-D the
-        storage unit label. Raises `ValueError` for a closed file."""
+        storage unit label; SEG-2 the File Descriptor Block (fixed fields and
+        strings). Raises `ValueError` for a closed file."""
         _h = self._enter()
         try:
             _o = ctypes.c_void_p()
@@ -1966,21 +2025,23 @@ def open_seismic(path, twos_complement8015=False, keys=False):
         return None
     return _wrap(SeismicFile, _o.value)
 
-def convert_file(src_path, dst_path, opts=None):
-    """Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
-    file `dstPath` (see `convertSegy` / `convertSegdToSegy`); SEG-2 input is
-    not supported yet (a fatal diagnostic). Never raises:
-    problems, including I/O failures, are in the result. The output is
-    written to `<dstPath>.tmp` and renamed when complete, so a failed
-    conversion leaves an existing `dstPath` untouched and no partial file."""
-    _o = ctypes.c_void_p()
-    _st = _lib.seg_convert_file(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_o))
-    return _logged(_st, _o)
-
 def field_names(kind):
     """The named fields of block kind `kind`, in layout order (raw byte fields
     excluded; none for `hbRaw`)."""
     return _strings(lambda _b, _c, _n: _call(_lib.seg_field_names, _enum(_E_HeaderBlock, kind, "kind"), _b, _c, _n))
+
+def convert_file(src_path, dst_path, opts=None):
+    """Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
+    `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
+    `convertSegdToSegy`, `convertSeg2ToSegy`), SEG-D (`convertSegdRevision`
+    with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
+    input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
+    raises: problems, including I/O failures, are in the result. The output
+    is written to `<dstPath>.tmp` and renamed when complete, so a failed
+    conversion leaves an existing `dstPath` untouched and no partial file."""
+    _o = ctypes.c_void_p()
+    _st = _lib.seg_convert_file(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_o))
+    return _logged(_st, _o)
 
 def rollback_journal(path, journal_path):
     """Undoes the journal's edits on `path`, newest first. Locations already

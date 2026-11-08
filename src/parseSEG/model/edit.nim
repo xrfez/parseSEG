@@ -521,6 +521,7 @@ func structural(k: HeaderBlock): seq[string] =
   of hbSegdExt1, hbSegdExt1Rev3: @segdExt1Structural
   of hbSegdGh1: @segdGh1Structural
   of hbSegdGhN: @segdGhNStructural
+  of hbSeg2File, hbSeg2Trace: @[] # every SEG-2 edit is refused (`editBlock`)
   else: @[] # not reachable by name (listings only)
 
 proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, field: string,
@@ -535,9 +536,14 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
     ed.log.report(sevError, dcValidation, b.name & "." & field & ": " & msg, at, l)
     return false
   if not ed.file.isOpen: refuse "the file is closed"
-  if not ed.file.index.detected: refuse "the file is neither SEG-Y nor SEG-D"
+  if not ed.file.index.detected: refuse "the file is not SEG-Y, SEG-D or SEG-2"
   if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
+  if b.kind in {hbSeg2File, hbSeg2Trace}:
+    refuse "SEG-2 headers cannot be edited in place: keyword strings are variable length, " &
+      "so a changed value changes the block's size and moves every byte after it (and the " &
+      "fixed fields are those sizes and counts); rewrite the file instead (seg2/writer, or " &
+      "convertFile with target SEG-2)"
   if field in structural(b.kind):
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
   if ed.batch and ed.overlapsPending(at, size) and not ed.flushBatch(): # decode current bytes

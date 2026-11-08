@@ -5,7 +5,7 @@
 ## Exit status: 0 success; 1 the command ran but reported errors (an error or
 ## fatal diagnostic); 2 a usage error.
 
-import std/[os, strutils, sequtils, tables, math, streams]
+import std/[os, strutils, sequtils, tables, math, streams, times]
 import ../parseSEG
 import ./common/niftext
 
@@ -49,13 +49,17 @@ Survey files (SPS 1.0/2.1, SEG P1 1983; docs/spec/sps.md, p1_p2_p3.md)
                                 with -o, write it back (SPS: in revision --rev)
 
 Converting
-  convert <src> <dst> [--to=segy|segd] [--rev=R] [--format=N]
+  convert <src> <dst> [--to=segy|segd|seg2] [--rev=R] [--format=N]
           [--byte-order=big|little|pairSwapped] [--text=ebcdic|ascii]
           [--descale] [--no-station-header]
-                                SEG-Y/SEG-D to SEG-Y (revision 0, 1, 2.0, 2.1;
-                                default 2.1), or SEG-D to SEG-D (--to=segd,
-                                revision 2.0, 2.1, 3.0 or 3.1; default 3.0). The
-                                target is segd when both files end in .sgd/.segd
+                                SEG-Y/SEG-D/SEG-2 to SEG-Y (revision 0, 1, 2.0,
+                                2.1; default 2.1), SEG-D/SEG-2 to SEG-D
+                                (--to=segd, revision 2.0, 2.1, 3.0 or 3.1;
+                                default 3.0), or any to SEG-2 (--to=seg2,
+                                --byte-order=little|big, default little,
+                                --format=1..5). The target is segd when the
+                                input is SEG-D and dst ends in .sgd/.segd,
+                                seg2 when dst ends in .sg2/.seg2/.dat
 
 Editing (in place, size-preserving, journaled; see `journal`)
   edit <file> [--journal=J] <assignment>...
@@ -186,7 +190,7 @@ proc openFile(path: string, keys = false): SeismicFile =
   result = openSeismic(path, keys = keys)
   if not result.index.detected:
     printLog(result.index.log, sevError)
-    cannot(path & " is neither SEG-Y nor SEG-D")
+    cannot(path & " is not SEG-Y, SEG-D or SEG-2")
 
 proc refuseSame(output, input: string) =
   if output == input or (fileExists(output) and fileExists(input) and sameFile(output, input)):
@@ -273,6 +277,21 @@ proc info(a: Args): int =
     for c in ix.codecs:
       fmts.add (if c.seg2Format.isSome: $ord(c.seg2Format.get) else: "undecodable")
     echo "format:      ", fmts.join(", ")
+    func shown(t: string): string =
+      for c in t: result.add "0x" & toHex(ord(c), 2) & " "
+      result.setLen max(result.len - 1, 0)
+    echo "pointers:    ", s.pointers.len, " of ", s.pointerBytes div 4,
+      " slots; string terminator ", shown(s.stringTerm), ", line terminator ", shown(s.lineTerm)
+    let acq = s.acquisitionTime
+    if acq.isSome:
+      echo "acquired:    ", fromUnix(int64(acq.get)).utc.format("yyyy-MM-dd HH:mm:ss"),
+        " (UTC assumed)"
+    for x in s.strings:
+      if cmpIgnoreCase(x.key, "NOTE") == 0:
+        let lines = x.value.split(s.lineTerm)
+        echo "  NOTE: ", lines[0], (if lines.len > 1: " (" & $lines.len & " lines)" else: "")
+      else:
+        echo "  ", x.key, ": ", x.value
   else:
     var revs, fmts: seq[string]
     for r in ix.segdRecords:
@@ -411,6 +430,10 @@ proc diag(a: Args): int =
 proc isSegdName(p: string): bool = p.toLowerAscii.endsWith(".sgd") or
   p.toLowerAscii.endsWith(".segd")
 
+proc isSeg2Name(p: string): bool =
+  let l = p.toLowerAscii
+  l.endsWith(".sg2") or l.endsWith(".seg2") or l.endsWith(".dat")
+
 proc sourceKind(path: string): SeismicKind =
   ## What the file is, from its content.
   var head = newString(8192)
@@ -418,7 +441,7 @@ proc sourceKind(path: string): SeismicKind =
   head.setLen fh.readBuffer(addr head[0], head.len)
   fh.close()
   result = detectKind(head.toOpenArrayByte(0, head.len - 1))
-  if result == skUnknown: cannot(path & " is neither SEG-Y nor SEG-D")
+  if result == skUnknown: cannot(path & " is not SEG-Y, SEG-D or SEG-2")
 
 proc parseRev(s: string, minParts, maxParts: int, what: string): (uint8, uint8) =
   let parts = s.split('.')
@@ -437,12 +460,24 @@ proc convertCmd(a: Args): int =
   checkInput(src)
   refuseSame(dst, src)
   let kind = sourceKind(src)
-  if kind == skSeg2: cannot(src & ": conversion is not supported for SEG-2 yet")
-  let to = a.get("to", if kind == skSegd and isSegdName(dst): "segd" else: "segy")
+  let to = a.get("to", if kind == skSegd and isSegdName(dst): "segd"
+                      elif isSeg2Name(dst): "seg2" else: "segy")
   var log: DiagLog
   case to
+  of "seg2":
+    for k in ["rev", "text", "descale", "no-station-header"]:
+      if a.has(k): usage("--" & k & " does not apply to SEG-2 output")
+    var o = ConvertOptions(target: skSeg2)
+    let code = parseIntOpt(a.get("format", "0"), "format")
+    if code notin 0..5: usage("--format: SEG-2 formats are 1 to 5 (0 keeps an exact one)")
+    o.seg2.format = Seg2TargetFormat(code)
+    case a.get("byte-order", "little")
+    of "little": o.seg2.byteOrder = boLittle
+    of "big": o.seg2.byteOrder = boBig
+    else: usage("--byte-order for SEG-2 is little or big")
+    log = convertFile(src, dst, o)
   of "segd":
-    if kind != skSegd: usage("--to=segd needs a SEG-D input; " & src & " is SEG-Y")
+    if kind == skSegy: usage("--to=segd needs a SEG-D or SEG-2 input; " & src & " is SEG-Y")
     for k in ["byte-order", "text", "descale", "no-station-header"]:
       if a.has(k): usage("--" & k & " applies to SEG-Y output only")
     var o = SegdConvertOptions()
@@ -453,7 +488,7 @@ proc convertCmd(a: Args): int =
       let f = toSegdFormat(code)
       if f.isNone: usage("--format: " & $code & " is not a SEG-D demultiplexed format")
       o.format = targetFormat(f.get)
-    log = convertSegdRevision(src, dst, o)
+    log = convertFile(src, dst, ConvertOptions(target: skSegd, segd: o))
   of "segy":
     var o = ConvertOptions()
     if a.has("rev"):
@@ -472,7 +507,7 @@ proc convertCmd(a: Args): int =
     o.applyDescale = a.has("descale")
     o.stationHeader = not a.has("no-station-header")
     log = convertFile(src, dst, o)
-  else: usage("--to is segy or segd")
+  else: usage("--to is segy, segd or seg2")
   printLog(log, sevWarning)
   if log.failed:
     stderr.writeLine "parseSEG: conversion ", (if log.isFatal: "failed; " & dst &
@@ -677,7 +712,7 @@ proc vendormap(a: Args): int =
       of skSegy:
         ctx = vendorContext(f.index.segy)
         haveCtx = true
-      of skSeg2, skUnknown: discard # no vendor maps for SEG-2 yet
+      of skSeg2, skUnknown: discard # SEG-2 vendor fields are keyword strings: no maps
     if reg.maps.len == 0:
       echo "no vendor maps found in: ", a.mapPaths.join(", ")
     for m in reg.maps:
@@ -694,7 +729,7 @@ proc vendormap(a: Args): int =
     let n = f.len
     let kind = f.kind
     f.close()
-    if kind == skSeg2: cannot(path & ": vendor maps are not supported for SEG-2 yet")
+    if kind == skSeg2: cannot(path & ": vendor maps do not apply to SEG-2 (its vendor fields are keyword strings; see `dump --all`)")
     let sel = parseSelection(a.get("traces"), n)
     var want = newSeq[bool](n)
     for i in sel: want[i] = true

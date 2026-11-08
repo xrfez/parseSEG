@@ -15,9 +15,10 @@
 ## is a 15-bit one's complement *integer* with a sign bit, so a value is
 ## `mantissa * 2^exponent` (at most 32767 * 2^15). No format-3 sample file
 ## exists yet; `twosComplement` reads the mantissas as two's complement, for
-## writers that use it. This module has no Arraymancer dependency.
+## writers that use it. `encodeSeg2Samples` is the inverse. This module has
+## no Arraymancer dependency.
 
-import std/options
+import std/[math, options]
 import ../common/[endians, errors]
 export options
 
@@ -97,4 +98,67 @@ proc decodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
         let e = (getNum[uint16](src, g, o) shr (4 * k)) and 0xF
         dst[i] = T(float20Value(e, getNum[uint16](src, g + 2 + 2 * k, o), twosComplement))
   # SEG-2 files are little- or big-endian only (the block ID tells which).
+  if order == boLittle: loop(boLittle) else: loop(boBig)
+
+proc toInt(x: float64, lo, hi: int64, i: int): int64 =
+  # `x` rounded to the nearest integer; raises when it is NaN or outside lo..hi.
+  if x.isNaN: raiseFormat("sample " & $i & " is NaN, which an integer format cannot hold")
+  let r = round(x)
+  if r < float64(lo) or r > float64(hi):
+    raiseFormat("sample " & $i & " = " & $x & " does not fit " & $lo & ".." & $hi)
+  int64(r)
+
+func float20Word(m: int, twosComplement: bool): uint16 {.inline.} =
+  # A format-3 mantissa word for |m| <= 32767 (negative zero is never written).
+  if m >= 0: uint16(m)
+  elif twosComplement: cast[uint16](int16(m))
+  else: not uint16(-m) # one's complement
+
+proc float20Parts(x: float64, i: int): (int, int) =
+  # (exponent, mantissa) of a format-3 sample: the smallest exponent whose
+  # mantissa, rounded to nearest, fits 15 bits.
+  if x.isNaN: raiseFormat("sample " & $i & " is NaN, which format 3 cannot hold")
+  for e in 0..15:
+    let m = round(x / float64(1 shl e))
+    if abs(m) <= 32767: return (e, int(m))
+  raiseFormat("sample " & $i & " = " & $x & " exceeds format 3's range (32767 * 2^15)")
+
+proc encodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[T],
+    dst: var openArray[byte], order: ByteOrder, twosComplement = false) =
+  ## Encodes `src` as format `f`, stored in `order`, into the start of `dst`
+  ## (at least `dataBytes(f, src.len)` bytes). Integer formats round to
+  ## nearest; format 3 picks per sample the smallest exponent that holds the
+  ## rounded mantissa (so integers up to 32767 are exact), with one's
+  ## complement mantissas unless `twosComplement`, and zero-fills a last
+  ## partial group. Raises `SegFormatError` for a value the format cannot
+  ## hold (NaN or out of range in an integer format or format 3) and
+  ## `ValueError` when `dst` is too short.
+  let n = src.len
+  let need = dataBytes(f, n)
+  if dst.len < need:
+    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " & $need &
+      " needed for " & $n & " samples")
+  template loop(o: static ByteOrder) =
+    case f
+    of s2Int16:
+      for i in 0..<n: putNum(dst, 2*i, int16(toInt(float64(src[i]), -32768, 32767, i)), o)
+    of s2Int32:
+      for i in 0..<n:
+        putNum(dst, 4*i, int32(toInt(float64(src[i]), int64(low(int32)), int64(high(int32)), i)), o)
+    of s2Float32:
+      for i in 0..<n: putNum(dst, 4*i, float32(src[i]), o)
+    of s2Float64:
+      for i in 0..<n: putNum(dst, 8*i, float64(src[i]), o)
+    of s2Float20:
+      for g in 0 ..< (n + 3) div 4:
+        var e = 0'u16
+        for k in 0..3:
+          let i = 4 * g + k
+          var w = 0'u16
+          if i < n:
+            let (ex, m) = float20Parts(float64(src[i]), i)
+            e = e or (uint16(ex) shl (4 * k))
+            w = float20Word(m, twosComplement)
+          putNum(dst, 10 * g + 2 + 2 * k, w, o)
+        putNum(dst, 10 * g, e, o)
   if order == boLittle: loop(boLittle) else: loop(boBig)

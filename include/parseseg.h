@@ -216,6 +216,14 @@ const char *seg_last_error(void);
 #define SEG_BYTE_ORDER_LITTLE 1
 #define SEG_BYTE_ORDER_PAIR_SWAPPED 2
 
+/* Seg2TargetFormat */
+#define SEG_SEG2TARGET_FORMAT_KEEP 0
+#define SEG_SEG2TARGET_FORMAT_1 1
+#define SEG_SEG2TARGET_FORMAT_2 2
+#define SEG_SEG2TARGET_FORMAT_3 3
+#define SEG_SEG2TARGET_FORMAT_4 4
+#define SEG_SEG2TARGET_FORMAT_5 5
+
 /* SegyTargetFormat */
 #define SEG_SEGY_TARGET_FORMAT_KEEP 0
 #define SEG_SEGY_TARGET_FORMAT_1 1
@@ -237,6 +245,12 @@ const char *seg_last_error(void);
 #define SEG_TEXT_ENCODING_EBCDIC 0
 #define SEG_TEXT_ENCODING_ASCII 1
 
+/* SeismicKind */
+#define SEG_SEISMIC_KIND_UNKNOWN 0
+#define SEG_SEISMIC_KIND_SEG_Y 1
+#define SEG_SEISMIC_KIND_SEG_D 2
+#define SEG_SEISMIC_KIND_SEG_2 3
+
 /* GatherKind */
 #define SEG_GATHER_KIND_UNKNOWN 0
 #define SEG_GATHER_KIND_SHOT 1
@@ -244,12 +258,6 @@ const char *seg_last_error(void);
 #define SEG_GATHER_KIND_CMP 3
 #define SEG_GATHER_KIND_OFFSET 4
 #define SEG_GATHER_KIND_OTHER 5
-
-/* SeismicKind */
-#define SEG_SEISMIC_KIND_UNKNOWN 0
-#define SEG_SEISMIC_KIND_SEG_Y 1
-#define SEG_SEISMIC_KIND_SEG_D 2
-#define SEG_SEISMIC_KIND_SEG_2 3
 
 /* CoordinateUnits */
 #define SEG_COORDINATE_UNITS_UNKNOWN 0
@@ -290,6 +298,8 @@ const char *seg_last_error(void);
 #define SEG_HEADER_BLOCK_SEG_D_ORIENTATION 20
 #define SEG_HEADER_BLOCK_SEG_D_TRAILER_DESCRIPTION 21
 #define SEG_HEADER_BLOCK_RAW 22
+#define SEG_HEADER_BLOCK_SEG_2_FILE 23
+#define SEG_HEADER_BLOCK_SEG_2_TRACE 24
 
 /* SpsRevision */
 #define SEG_SPS_REVISION_AUTO 0
@@ -405,6 +415,12 @@ typedef struct SegSegyRevision {
     uint8_t minor;
 } SegSegyRevision;
 
+/* Target settings of a conversion to SEG-2. */
+typedef struct SegSeg2ConvertOptions {
+    int32_t byte_order; /* SEG_BYTE_ORDER_*: Little-endian (PC, the usual) or big-endian. */
+    int32_t format; /* SEG_SEG2TARGET_FORMAT_*: Target sample format ("keep": exact per trace). */
+} SegSeg2ConvertOptions;
+
 /* Target settings. The defaults give SEG-Y Rev 2.1, big-endian, EBCDIC text, a lossless sample format and recorded (not descaled) values. */
 typedef struct SegConvertOptions {
     SegSegyRevision revision;
@@ -413,6 +429,9 @@ typedef struct SegConvertOptions {
     int32_t text_encoding; /* SEG_TEXT_ENCODING_*: SEG-D → SEG-Y: the textual header's encoding. */
     bool apply_descale; /* SEG-D: write millivolts (MP factor / descale multiplier). */
     bool station_header; /* SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza. */
+    int32_t target; /* SEG_SEISMIC_KIND_*: `convertFile`'s output standard: SEG-Y (the fields above), SEG-D (`segd`; from SEG-D or SEG-2 input) or SEG-2 (`seg2`; from any input). */
+    SegSegdConvertOptions segd; /* SEG-D output: revision and sample format. */
+    SegSeg2ConvertOptions seg2; /* SEG-2 output: byte order and sample format. */
 } SegConvertOptions;
 
 /* A run of consecutive traces that form one gather. */
@@ -613,26 +632,6 @@ SegStatus seg_seismic_file_is_open(SegSeismicFile *seismic_file, bool *out);
 SegStatus seg_seismic_file_copy_bytes(SegSeismicFile *seismic_file, int64_t offset, int64_t n, uint8_t *out, int64_t out_cap, int64_t *out_len);
 
 /*
- * Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
- * file `dstPath` (see `convertSegy` / `convertSegdToSegy`); SEG-2 input is
- * not supported yet (a fatal diagnostic). Never raises:
- * problems, including I/O failures, are in the result. The output is
- * written to `<dstPath>.tmp` and renamed when complete, so a failed
- * conversion leaves an existing `dstPath` untouched and no partial file.
- */
-SegStatus seg_convert_file(const char *src_path, const char *dst_path, const SegConvertOptions *opts, SegDiagLog **out);
-
-/* The file's gathers: `f.index.gathers`. */
-SegStatus seg_seismic_file_gathers(SegSeismicFile *seismic_file, SegGather *out, int64_t out_cap, int64_t *out_len);
-
-/*
- * The component group of each trace of `traces` (see `componentGroups`),
- * numbered from 0 in order of first appearance; -1 for a trace in none
- * (an auxiliary trace).
- */
-SegStatus seg_seismic_file_component_group_ids(SegSeismicFile *seismic_file, int64_t traces_first, int64_t traces_last, int64_t *out, int64_t out_cap, int64_t *out_len);
-
-/*
  * The named fields of block kind `kind`, in layout order (raw byte fields
  * excluded; none for `hbRaw`).
  */
@@ -640,7 +639,8 @@ SegStatus seg_field_names(int32_t kind, char *out, int64_t out_cap, int64_t *out
 
 /*
  * A trace header field by name, e.g. "trace.sourceX" or
- * "ext1.receiverLine". Raises `ValueError` for an unknown field, a trace
+ * "ext1.receiverLine" (SEG-2: "trace.numSamples", "trace.SAMPLE_INTERVAL").
+ * Raises `ValueError` for an unknown field, a trace
  * out of range or a closed file; the message says which.
  */
 SegStatus seg_seismic_file_trace_field(SegSeismicFile *seismic_file, int64_t trace, const char *name, SegValue *out);
@@ -653,10 +653,32 @@ SegStatus seg_seismic_file_trace_field(SegSeismicFile *seismic_file, int64_t tra
 SegStatus seg_seismic_file_record_field(SegSeismicFile *seismic_file, int64_t record, const char *name, SegValue *out);
 
 /*
- * A file-level field by name, e.g. "binary.formatCode" (SEG-Y). Raises
+ * A file-level field by name, e.g. "binary.formatCode" (SEG-Y) or
+ * "file.UNITS" (SEG-2). Raises
  * `ValueError` for an unknown field or a closed file.
  */
 SegStatus seg_seismic_file_file_field(SegSeismicFile *seismic_file, const char *name, SegValue *out);
+
+/*
+ * How many keyword strings SEG-2 trace `trace` has (-1: the File
+ * Descriptor Block); read them with `seg2Keyword` and `seg2Value`. Raises
+ * `ValueError` like `seg2Strings`.
+ */
+SegStatus seg_seismic_file_seg2_string_count(SegSeismicFile *seismic_file, int64_t trace, int64_t *out);
+
+/*
+ * The keyword of string `n` of SEG-2 trace `trace` (-1: the File
+ * Descriptor Block), as written. Raises `ValueError` like `seg2Strings`,
+ * and for `n` out of range.
+ */
+SegStatus seg_seismic_file_seg2_keyword(SegSeismicFile *seismic_file, int64_t trace, int64_t n, char *out, int64_t out_cap, int64_t *out_len);
+
+/*
+ * The value of string `n` of SEG-2 trace `trace` (-1: the File
+ * Descriptor Block), terminators stripped (NOTE lines are separated by
+ * the file's Line Terminator). Raises `ValueError` like `seg2Keyword`.
+ */
+SegStatus seg_seismic_file_seg2_value(SegSeismicFile *seismic_file, int64_t trace, int64_t n, char *out, int64_t out_cap, int64_t *out_len);
 
 /*
  * The trace's sample interval in µs (Hz or m/ft for SEG-Y non-time
@@ -671,6 +693,28 @@ SegStatus seg_seismic_file_file_field(SegSeismicFile *seismic_file, const char *
  * file (the headers are read from the map, as `traceField` does).
  */
 SegStatus seg_seismic_file_sample_interval_us(SegSeismicFile *seismic_file, int64_t trace, double *out);
+
+/*
+ * Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
+ * `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
+ * `convertSegdToSegy`, `convertSeg2ToSegy`), SEG-D (`convertSegdRevision`
+ * with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
+ * input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
+ * raises: problems, including I/O failures, are in the result. The output
+ * is written to `<dstPath>.tmp` and renamed when complete, so a failed
+ * conversion leaves an existing `dstPath` untouched and no partial file.
+ */
+SegStatus seg_convert_file(const char *src_path, const char *dst_path, const SegConvertOptions *opts, SegDiagLog **out);
+
+/* The file's gathers: `f.index.gathers`. */
+SegStatus seg_seismic_file_gathers(SegSeismicFile *seismic_file, SegGather *out, int64_t out_cap, int64_t *out_len);
+
+/*
+ * The component group of each trace of `traces` (see `componentGroups`),
+ * numbered from 0 in order of first appearance; -1 for a trace in none
+ * (an auxiliary trace).
+ */
+SegStatus seg_seismic_file_component_group_ids(SegSeismicFile *seismic_file, int64_t traces_first, int64_t traces_last, int64_t *out, int64_t out_cap, int64_t *out_len);
 
 /*
  * Undoes the journal's edits on `path`, newest first. Locations already
@@ -804,7 +848,8 @@ SegStatus seg_seismic_file_record_headers(SegSeismicFile *seismic_file, int64_t 
 /*
  * The file-level header blocks, as rows in file order: SEG-Y tape label,
  * textual, binary, extended textual headers and data trailer; SEG-D the
- * storage unit label. Raises `ValueError` for a closed file.
+ * storage unit label; SEG-2 the File Descriptor Block (fixed fields and
+ * strings). Raises `ValueError` for a closed file.
  */
 SegStatus seg_seismic_file_file_headers(SegSeismicFile *seismic_file, SegHeaderListing **out);
 
@@ -990,6 +1035,9 @@ void seg_init_segd_convert_options(SegSegdConvertOptions *out);
 
 /* Fills a SegSegyRevision with the defaults. */
 void seg_init_segy_revision(SegSegyRevision *out);
+
+/* Fills a SegSeg2ConvertOptions with the defaults. */
+void seg_init_seg2_convert_options(SegSeg2ConvertOptions *out);
 
 /* Fills a SegConvertOptions with the defaults. */
 void seg_init_convert_options(SegConvertOptions *out);
