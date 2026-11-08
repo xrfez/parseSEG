@@ -91,12 +91,20 @@ X records name the stations each channel was recorded from. Spec notes: `docs/sp
 | `writeP1(f, path or stream, P1WriteOptions)`, `p1Text(f)` (a `SurveyText`), `encodeP1(record, opts)` | Header blocks padded to 20 records; unchanged records byte for byte. |
 | `SurveyGeometry` (`initSurveyGeometry()`): `addSps(g, sps or path)`, `addP1(g, p1 or path, ..., elevation)`, `addSource`/`addReceiver`, `relation(g, record, channel)` (an `Option[StationRelation]`), `resolveLine(g, name, numeric)` (an `Option`) | Station coordinates (`table`, `sourceCount`, `receiverCount`) and relation runs (`relationCount`). Text line names go through `mapLine(g, name, line)` (`lineNames`), then `trailingDigits`. `multiComponent`, `tape` refine X records; problems are in `log`. |
 | `applySurvey(f, keys or index, g, overwrite = false)` | Stations from relations (on `TraceKeys.record` and `.channel`), then coordinates, offset, midpoint; in memory only, the file does not change. |
+| `geometryChanges(f, fields, log)` / `previewGeometry(f, fields)` | What writing the joined keys of `f` (opened with keys, `applySurvey` done) would change, as `GeometryChanges` (traces per kind, `unwritable` values) or as diagnostics; nothing is written. |
+| `writeGeometry(editor, ix or f, fields = GeometryFields())` | Writes the joined geometry in place through the journaled `HeaderEditor` (same-size fields, undo with `rollbackJournal`). SEG-Y: through the layout (`sht_x`, `rec_x`, `cdp_x` with a coordinate scalar chosen to keep the precision in 4 bytes; `selev`/`relev`; `offset`; `espnum`/`sp`; Ext1 copies in use; `sht_line`, `rec_point`, ... where a Layout stanza defines them). SEG-D Rev 1/2: THE#1 receiver line/point/index. Rev 3: THE#1 and the Position / Source Description blocks already in the trace header extensions. Values with no slot or too large for theirs are reported in `editor.log`. `GeometryFields` selects source/receiver X/Y, elevations, midpoints, offsets, stations. SEG-2 is refused for now. |
+| `copyWithGeometry(src, dst, g, [changes,] fields, overwrite)`, `convertWithGeometry(src, dst, g, opts, fields, overwrite)` | A copy in the same standard (multiplexed SEG-D demultiplexed), or a `convertFile` SEG-Y output, with `g` joined and written; a `DiagLog` with an info summary. |
 | `GeometryTable`, `addSource`/`addReceiver`, `applyGeometry` | The coordinate table alone (a host's database). Keys are rounded to 1/100; a trace without a point index also matches index 1. |
 
 C: `seg_survey_geometry_new`, `seg_survey_geometry_add_sps`, `..._add_p1`, `..._map_line`,
 `..._set_trailing_digits`, then `seg_seismic_file_apply_survey`. Python:
 `SurveyGeometry()`, `add_sps`, `add_p1`, `map_line`, `trailing_digits = True`, then
-`SeismicFile.apply_survey`.
+`SeismicFile.apply_survey`. Write-back: C `seg_seismic_file_geometry_changes`,
+`seg_seismic_file_preview_geometry`, `seg_header_editor_write_geometry`,
+`seg_copy_with_geometry`, `seg_convert_with_geometry` (`SegGeometryFields`,
+`seg_init_geometry_fields`; `SegGeometryChanges`); Python `f.geometry_changes(fields)`,
+`f.preview_geometry(fields)`, `editor.write_geometry(f, fields)`, `copy_with_geometry`,
+`convert_with_geometry`. CLI: `parseSEG survey-apply <file> --sps=... [-o out | --in-place]`.
 
 ## In-place edits
 `openEditor(path, journalPath)` and `setTraceField(trace, "trace.<f>", v)` /

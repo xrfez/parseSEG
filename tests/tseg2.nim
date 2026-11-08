@@ -8,6 +8,7 @@ import parseSEG/seg2/[reader as seg2reader]
 import parseSEG/model/[traceindex, gathers, headerfields, headernif, prefetch, summary,
   headerlist]
 import parseSEG/convert
+import parseSEG/survey/writeback
 
 let tmp = getTempDir() / "parseseg_tseg2"
 createDir(tmp)
@@ -425,3 +426,15 @@ block format_specific_features_say_so:
   doAssertRaises(ValueError): discard segy.seg2Trace(0) # closed
 
 echo "tseg2: ok"
+
+block geometry_write_back_is_refused:
+  # SEG-2 conversion and editing come later (11.2): survey geometry is
+  # refused, with a fatal diagnostic or a ValueError (10.5).
+  let path = build(allFormats(boLittle)).save("geo.sg2")
+  var f = openSeismic(path, keys = true)
+  doAssertRaises ValueError: discard f.geometryChanges()
+  f.close()
+  let log = copyWithGeometry(path, tmp / "geo2.sg2", initSurveyGeometry())
+  doAssert log.isFatal and "SEG-2" in log.messages
+  doAssert not fileExists(tmp / "geo2.sg2")
+  doAssert convertWithGeometry(path, tmp / "geo.sgy", initSurveyGeometry()).isFatal
