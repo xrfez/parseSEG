@@ -12,7 +12,8 @@
 ## `buildIndex` walks any `RecordSource` (disk, tape image, tape device) with
 ## the readers' `headersOnly` mode: sample bytes are skipped, by seeking where
 ## the source can. Each trace costs one 24-byte `TraceEntry`, so 10 million
-## traces take 240 MB. Header objects are kept per file (SEG-Y, SEG-2) or per
+## traces take 240 MB (room for the entries is reserved from the file size
+## after the first trace), and 144 bytes of `TraceKeys` with `keys`. Header objects are kept per file (SEG-Y, SEG-2) or per
 ## record (SEG-D), never per trace.
 ##
 ## SEG-2 is a random-access disk format (a pointer per trace), so it is
@@ -96,7 +97,7 @@ type
     detected*: bool           ## The stream was identified as `kind` and walked.
     keys*: seq[TraceKeys]
       ## Per-trace geometry, parallel to `entries`; empty unless the index was
-      ## built with `keys = true` (about 100 bytes per trace).
+      ## built with `keys = true` (144 bytes per trace).
     segyIntervalUs*: float64
       ## SEG-Y: the effective sample interval every trace shares (µs for time
       ## data), NaN when traces differ or there are none; 0 for SEG-D (see
@@ -213,6 +214,25 @@ func detectKind*(head: openArray[byte]): SeismicKind =
 
 # ------------------------------------------------------------------ walk --
 
+proc reserveFor(ix: var TraceIndex, src: RecordSource, first: TraceEntry, dataBytes: int,
+    keys: bool) =
+  # After the first trace: room for as many entries (and keys) as the rest of
+  # a memory-mapped file holds at this trace's size, so 10 M traces take
+  # 24 B each and not the up to 1.5x of a growing seq. Capped at one entry per
+  # 64 bytes of file, in case the first trace is unusually short.
+  if src of MemFileSource:
+    let size = MemFileSource(src).size
+    let stride = max(int64(first.headerBytes) + int64(dataBytes), 64)
+    let n = int(min((size - first.offset) div stride + 1, size div 64))
+    if n > ix.entries.len + 1:
+      var e = newSeqOfCap[TraceEntry](n)
+      for x in ix.entries: e.add x
+      ix.entries = move e
+      if keys:
+        var k = newSeqOfCap[TraceKeys](n)
+        for x in ix.keys: k.add x
+        ix.keys = move k
+
 proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
   var r = openSegy(src, headersOnly = true)
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
@@ -229,6 +249,8 @@ proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
       numSamples: uint32(t.numSamples), channelSet: NoChannelSet, scanType: -1)
     result.maxSamples = max(result.maxSamples, t.numSamples)
     if keys: result.keys.add gr.traceKeys(t)
+    if result.entries.len == 1:
+      result.reserveFor(src, result.entries[0], result.codecs[0].dataBytes(t.numSamples), keys)
   result.segy = r.file
   result.log = r.log
 
@@ -247,6 +269,10 @@ proc indexSegd(src: RecordSource, twosComplement8015, keys: bool): TraceIndex =
         scanType: int8(t.scanType), channelType: uint8(r.record.channelType(t)))
       result.maxSamples = max(result.maxSamples, t.numSamples)
       if keys: result.keys.add traceKeys(r.record, t)
+      if result.entries.len == 1:
+        let fmt = r.record.format
+        result.reserveFor(src, result.entries[0],
+          if fmt.isSome: dataBytes(fmt.get, t.numSamples) else: 0, keys)
     result.codecs.add TraceCodec(kind: skSegd, segdFormat: r.record.format,
       twosComplement8015: twosComplement8015)
     # A multiplexed record's traces have no bytes of their own to read.
@@ -679,14 +705,16 @@ proc readTraces*(f: SeismicFile, traces: Slice[int], log: var DiagLog,
   ## zero-padded). A trace that cannot be decoded stays zero and is logged in
   ## `log`. Raises `ValueError` for traces outside the file (an empty range
   ## must still start in `0 .. f.len`) or a closed file.
-  result = newTraceTensor[T](traces.spanLen, f.maxSamples(traces))
+  # Uninitialized: the decode writes every element (samples, zero padding,
+  # or a zero row for a trace that cannot be decoded).
+  result = newTensorUninit[T](traces.spanLen, f.maxSamples(traces))
   discard f.readTracesInto(traces, result, 0, log)
 
 proc readTraces*(f: SeismicFile, traces: openArray[int], log: var DiagLog,
     T: typedesc[SampleType] = float32): Tensor[T] =
   ## The selected traces, in list order, as a new `[traces.len, maxSamples]`
   ## tensor; otherwise as the `Slice` form.
-  result = newTraceTensor[T](traces.len, f.maxSamples(traces))
+  result = newTensorUninit[T](traces.len, f.maxSamples(traces)) # every element is written
   discard f.readTracesInto(traces, result, 0, log)
 
 proc raiseUndecodable(log: DiagLog) {.noinline, noreturn.} =
