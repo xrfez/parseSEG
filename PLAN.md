@@ -1311,7 +1311,7 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
   - Untested:
     - Windows: the file is mapped twice in `writeInPlace`.
     - A Rev 1 target that skips traces with more than 65535 samples.
-- 2026-11-08: Task 11.2 done (agent, worktree `wt-seg2w`, merged). Full suite green on `seg-library` (38 test files).
+- 2026-11-08: Task 11.2 done (agent, worktree `wt-seg2w`, merged). Full suite green on `seg-library` (40 test files).
   - Writer and header access:
     - `openSeg2Writer` / `writeTrace` / `close`. `close` patches N and the pointers. Non-standard output raises `SegFormatError` unless `lenient`.
     - Named fields `file.<field|KEYWORD>` / `trace.<...>` (`hbSeg2File`/`hbSeg2Trace`).
