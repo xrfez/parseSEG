@@ -8,6 +8,7 @@
 ## are not padded (`padOdd = false`). The top 4 bits of `len` are a record
 ## class; class 0 is good data, anything else is reported as an error.
 
+from std/strutils import toHex
 import ../common/errors
 import records
 
@@ -48,7 +49,8 @@ proc readWord(s: TapeImageSource; what: string; atEofOk: bool): (bool, uint32) =
   s.offset += 4
   (true, le32(w))
 
-method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): RecordKind =
+method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): RecordKind {.
+    raises: [CatchableError].} =
   result = rkEndOfData
   var done = false
   while not done:
@@ -62,7 +64,7 @@ method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): Rec
     elif word == TapMark:
       result = rkTapeMark
     elif (word and TapClassMask) != 0:
-      raiseFormat("tape image record class 0x" & $(word shr 28) &
+      raiseFormat("tape image record class 0x" & toHex(word shr 28, 1) &
         " (bad or private record) is not supported", start)
     else:
       let n = int(word)
@@ -82,7 +84,7 @@ method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): Rec
           $word, s.offset - 4)
       result = rkData
 
-method close*(s: TapeImageSource) =
+method close*(s: TapeImageSource) {.raises: [CatchableError].} =
   if s.f != nil:
     close(s.f)
     s.f = nil
@@ -103,7 +105,7 @@ proc writeWord(s: TapeImageSink; w: uint32) =
   var b = [byte(w and 0xFF), byte((w shr 8) and 0xFF), byte((w shr 16) and 0xFF), byte(w shr 24)]
   s.writeBytes(addr b[0], 4)
 
-method writeRecordImpl*(s: TapeImageSink; data: openArray[byte]) =
+method writeRecordImpl*(s: TapeImageSink; data: openArray[byte]) {.raises: [CatchableError].} =
   if data.len == 0 or uint64(data.len) >= uint64(TapClassMask):
     raiseFormat("tape image records must hold 1..268435455 bytes, got " & $data.len, s.offset)
   s.writeWord uint32(data.len)
@@ -113,10 +115,10 @@ method writeRecordImpl*(s: TapeImageSink; data: openArray[byte]) =
     s.writeBytes(addr pad, 1)
   s.writeWord uint32(data.len)
 
-method writeTapeMarkImpl*(s: TapeImageSink) =
+method writeTapeMarkImpl*(s: TapeImageSink) {.raises: [CatchableError].} =
   s.writeWord TapMark
 
-method close*(s: TapeImageSink) =
+method close*(s: TapeImageSink) {.raises: [CatchableError].} =
   if s.f != nil:
     close(s.f)
     s.f = nil

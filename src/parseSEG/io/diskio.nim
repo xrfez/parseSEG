@@ -41,7 +41,8 @@ proc refreshSize(s: DiskSource) =
   except IOError:
     discard
 
-method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKind =
+method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKind {.
+    raises: [CatchableError].} =
   # Never size the buffer beyond the bytes left: a 4 KB file must not cost a
   # zeroed 1 MB buffer per open.
   if s.size >= 0 and s.offset >= s.size: s.refreshSize()
@@ -53,16 +54,16 @@ method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKi
   s.offset += n
   if n > 0: rkData else: rkEndOfData
 
-method hasRecordBoundaries*(s: DiskSource): bool = false
+method hasRecordBoundaries*(s: DiskSource): bool {.raises: [].} = false
 
-method seekForward*(s: DiskSource; n: int64): int64 =
+method seekForward*(s: DiskSource; n: int64): int64 {.raises: [CatchableError].} =
   if s.size < 0: return -1
   if n > s.size - s.offset: s.refreshSize()
   result = max(0'i64, min(n, s.size - s.offset))
   setFilePos(s.f, s.offset + result)
   s.offset += result
 
-method close*(s: DiskSource) =
+method close*(s: DiskSource) {.raises: [CatchableError].} =
   if s.f != nil:
     close(s.f)
     s.f = nil
@@ -74,15 +75,15 @@ proc openDiskSink*(path: string): DiskSink =
     raise newException(IOError, "cannot open for writing: " & path)
   DiskSink(f: f, name: path)
 
-method writeRecordImpl*(s: DiskSink; data: openArray[byte]) =
+method writeRecordImpl*(s: DiskSink; data: openArray[byte]) {.raises: [CatchableError].} =
   if data.len > 0 and writeBuffer(s.f, unsafeAddr data[0], data.len) != data.len:
     raise newException(IOError, "write failed: " & s.name)
   s.offset += data.len
 
-method writeTapeMarkImpl*(s: DiskSink) =
+method writeTapeMarkImpl*(s: DiskSink) {.raises: [CatchableError].} =
   discard "disk files store no tape marks"
 
-method close*(s: DiskSink) =
+method close*(s: DiskSink) {.raises: [CatchableError].} =
   if s.f != nil:
     close(s.f)
     s.f = nil

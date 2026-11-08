@@ -54,7 +54,7 @@ proc openWindowsTape*(path = r"\\.\TAPE0"; write = false): WindowsTape =
     raiseOSError(osLastError(), "cannot open tape device " & path)
   WindowsTape(h: h, name: path)
 
-method readBlock*(t: WindowsTape; buf: var openArray[byte]): int =
+method readBlock*(t: WindowsTape; buf: var openArray[byte]): int {.raises: [CatchableError].} =
   var n = 0'i32
   let ok = readFile(t.h, if buf.len > 0: addr buf[0] else: nil, int32(buf.len), addr n, nil)
   t.lastError = if ok != 0: 0'i32 else: getLastError()
@@ -68,7 +68,7 @@ method readBlock*(t: WindowsTape; buf: var openArray[byte]): int =
   else:
     raiseOSError(OSErrorCode(t.lastError), t.name & ": read")
 
-method writeBlock*(t: WindowsTape; data: openArray[byte]) =
+method writeBlock*(t: WindowsTape; data: openArray[byte]) {.raises: [CatchableError].} =
   var n = 0'i32
   if writeFile(t.h, if data.len > 0: unsafeAddr data[0] else: nil, int32(data.len),
       addr n, nil) == 0:
@@ -77,20 +77,20 @@ method writeBlock*(t: WindowsTape; data: openArray[byte]) =
     raise newException(IOError, t.name & ": short write (" & $n & " of " & $data.len &
       " bytes), end of medium?")
 
-method writeTapeMarks*(t: WindowsTape; count: Positive) =
+method writeTapeMarks*(t: WindowsTape; count: Positive) {.raises: [CatchableError].} =
   t.check(writeTapemark(t.h, TapeFilemarks, DWORD(count), 0), "WriteTapemark")
 
-method rewind*(t: WindowsTape) =
+method rewind*(t: WindowsTape) {.raises: [CatchableError].} =
   t.check(setTapePosition(t.h, TapeRewind, 0, 0, 0, 0), "rewind")
   t.lastError = ErrorBeginningOfMedia
 
-method spaceFiles*(t: WindowsTape; count: int) =
+method spaceFiles*(t: WindowsTape; count: int) {.raises: [CatchableError].} =
   if count != 0:
     let c = int64(count)
     t.check(setTapePosition(t.h, TapeSpaceFilemarks, 0, DWORD(c and 0xFFFF_FFFF),
       DWORD(c shr 32), 0), "space filemarks")
 
-method status*(t: WindowsTape): TapeStatus =
+method status*(t: WindowsTape): TapeStatus {.raises: [CatchableError].} =
   let s = getTapeStatus(t.h)
   var info = TapeGetMediaParameters()
   var size = DWORD(sizeof(info))
@@ -102,7 +102,7 @@ method status*(t: WindowsTape): TapeStatus =
     atEndOfData: t.lastError == ErrorNoDataDetected,
     atEndOfMedium: t.lastError == ErrorEndOfMedia)
 
-method close*(t: WindowsTape) =
+method close*(t: WindowsTape) {.raises: [CatchableError].} =
   if t.h != INVALID_HANDLE_VALUE:
     discard closeHandle(t.h)
     t.h = INVALID_HANDLE_VALUE

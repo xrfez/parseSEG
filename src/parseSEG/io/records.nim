@@ -54,7 +54,7 @@ method readRecordImpl*(s: RecordSource; buf: var seq[byte]; maxLen: int): Record
   ## data start and advance `s.offset` past the item.
   raiseAssert "readRecordImpl not implemented for this source"
 
-method hasRecordBoundaries*(s: RecordSource): bool {.base.} =
+method hasRecordBoundaries*(s: RecordSource): bool {.base, raises: [].} =
   ## True if records are physical tape blocks; false for byte streams.
   true
 

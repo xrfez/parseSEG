@@ -43,7 +43,8 @@ proc flush*(s: MemFileSource) =
   ## Writes modified pages of a writable mapping back to the file.
   if s.mapped: s.mf.flush()
 
-method readRecordImpl*(s: MemFileSource; buf: var seq[byte]; maxLen: int): RecordKind =
+method readRecordImpl*(s: MemFileSource; buf: var seq[byte]; maxLen: int): RecordKind {.
+    raises: [CatchableError].} =
   let n = int(max(0'i64, min(int64(min(maxLen, s.chunk)), s.size - s.offset)))
   buf.setLen n
   if n > 0: copyMem(addr buf[0], addr s.memory[s.offset], n)
@@ -51,13 +52,13 @@ method readRecordImpl*(s: MemFileSource; buf: var seq[byte]; maxLen: int): Recor
   s.offset += n
   if n > 0: rkData else: rkEndOfData
 
-method hasRecordBoundaries*(s: MemFileSource): bool = false
+method hasRecordBoundaries*(s: MemFileSource): bool {.raises: [].} = false
 
-method seekForward*(s: MemFileSource; n: int64): int64 =
+method seekForward*(s: MemFileSource; n: int64): int64 {.raises: [CatchableError].} =
   result = max(0'i64, min(n, s.size - s.offset))
   s.offset += result
 
-method close*(s: MemFileSource) =
+method close*(s: MemFileSource) {.raises: [CatchableError].} =
   if s.mapped:
     s.mf.close()
     s.mapped = false

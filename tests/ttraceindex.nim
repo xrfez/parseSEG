@@ -238,15 +238,16 @@ type CountingSource = ref object of RecordSource
   inner: RecordSource
   copied, seeked: int64
 
-method readRecordImpl(s: CountingSource; buf: var seq[byte]; maxLen: int): RecordKind =
+method readRecordImpl(s: CountingSource; buf: var seq[byte]; maxLen: int): RecordKind {.
+    raises: [CatchableError].} =
   result = s.inner.readRecord(buf, maxLen)
   s.copied += buf.len
   s.dataOffset = s.inner.dataOffset
   s.offset = s.inner.offset
 
-method hasRecordBoundaries(s: CountingSource): bool = s.inner.hasRecordBoundaries
+method hasRecordBoundaries(s: CountingSource): bool {.raises: [].} = s.inner.hasRecordBoundaries
 
-method seekForward(s: CountingSource; n: int64): int64 =
+method seekForward(s: CountingSource; n: int64): int64 {.raises: [CatchableError].} =
   result = s.inner.seekForward(n)
   if result > 0: s.seeked += result
   s.offset = s.inner.offset

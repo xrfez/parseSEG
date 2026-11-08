@@ -24,7 +24,6 @@ export segapi
 
 const
   AbiVersion* = 3'i32 ## `SEG_ABI_VERSION`; bump on any incompatible C change.
-  PackageVersion* = "0.3.0"
   MaxBufferBytes* = 1'i64 shl 40 ## Largest tensor or prefetch ring the library allocates.
   MaxChunkTraces* = 1 shl 24 ## Largest prefetch chunk.
   MaxDepth* = 1024 ## Most prefetch ring slots.
@@ -141,12 +140,10 @@ proc dataPointer(to: TensorObj): pointer =
   withTensor(to, t):
     result = if t.size > 0: cast[pointer](t.unsafe_raw_offset()) else: nil
 
-proc dlpackDeleter(self: ptr DLManagedTensor) {.cdecl.} =
-  try:
-    if self != nil:
-      if self.managerCtx != nil: GC_unref(cast[TensorObj](self.managerCtx))
-      dealloc(self)
-  except Exception: discard
+proc dlpackDeleter(self: ptr DLManagedTensor) {.cdecl, raises: [].} =
+  if self != nil:
+    if self.managerCtx != nil: GC_unref(cast[TensorObj](self.managerCtx))
+    dealloc(self)
 
 # ------------------------------------------------------------ the library --
 

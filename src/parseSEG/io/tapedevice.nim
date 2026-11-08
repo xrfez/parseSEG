@@ -76,7 +76,8 @@ proc newDeviceSource*(dev: TapeDevice; maxBlockSize = DefaultMaxBlockSize): Devi
 
 proc device*(s: DeviceSource): TapeDevice {.inline.} = s.dev
 
-method readRecordImpl*(s: DeviceSource; buf: var seq[byte]; maxLen: int): RecordKind =
+method readRecordImpl*(s: DeviceSource; buf: var seq[byte]; maxLen: int): RecordKind {.
+    raises: [CatchableError].} =
   buf.setLen max(s.maxBlock, maxLen)
   let n = s.dev.readBlock(buf)
   buf.setLen max(n, 0)
@@ -87,7 +88,7 @@ method readRecordImpl*(s: DeviceSource; buf: var seq[byte]; maxLen: int): Record
   elif n == 0: rkTapeMark
   else: rkEndOfData
 
-method close*(s: DeviceSource) = s.dev.close()
+method close*(s: DeviceSource) {.raises: [CatchableError].} = s.dev.close()
 
 proc newDeviceSink*(dev: TapeDevice): DeviceSink =
   ## Writes records to `dev`, one block per record.
@@ -95,13 +96,13 @@ proc newDeviceSink*(dev: TapeDevice): DeviceSink =
 
 proc device*(s: DeviceSink): TapeDevice {.inline.} = s.dev
 
-method writeRecordImpl*(s: DeviceSink; data: openArray[byte]) =
+method writeRecordImpl*(s: DeviceSink; data: openArray[byte]) {.raises: [CatchableError].} =
   s.dev.writeBlock(data)
   s.offset += data.len
 
-method writeTapeMarkImpl*(s: DeviceSink) = s.dev.writeTapeMarks(1)
+method writeTapeMarkImpl*(s: DeviceSink) {.raises: [CatchableError].} = s.dev.writeTapeMarks(1)
 
-method close*(s: DeviceSink) = s.dev.close()
+method close*(s: DeviceSink) {.raises: [CatchableError].} = s.dev.close()
 
 # ------------------------------------------------------------ memory tape --
 
@@ -135,7 +136,7 @@ proc usedBytes(t: MemoryTape): int =
   for it in t.items:
     if it.kind == tiBlock: result += it.data.len
 
-method readBlock*(t: MemoryTape; buf: var openArray[byte]): int =
+method readBlock*(t: MemoryTape; buf: var openArray[byte]): int {.raises: [CatchableError].} =
   if t.pos >= t.items.len:
     return -1
   let it = t.items[t.pos]
@@ -154,22 +155,22 @@ proc truncateAtHead(t: MemoryTape) =
     raise newException(IOError, t.name & ": tape is write protected")
   t.items.setLen t.pos
 
-method writeBlock*(t: MemoryTape; data: openArray[byte]) =
+method writeBlock*(t: MemoryTape; data: openArray[byte]) {.raises: [CatchableError].} =
   t.truncateAtHead()
   if t.capacity >= 0 and t.usedBytes + data.len > t.capacity:
     raise newException(IOError, t.name & ": end of medium")
   t.items.add dataBlock(data)
   inc t.pos
 
-method writeTapeMarks*(t: MemoryTape; count: Positive) =
+method writeTapeMarks*(t: MemoryTape; count: Positive) {.raises: [CatchableError].} =
   t.truncateAtHead()
   for _ in 1..count:
     t.items.add tapeMark()
     inc t.pos
 
-method rewind*(t: MemoryTape) = t.pos = 0
+method rewind*(t: MemoryTape) {.raises: [CatchableError].} = t.pos = 0
 
-method spaceFiles*(t: MemoryTape; count: int) =
+method spaceFiles*(t: MemoryTape; count: int) {.raises: [CatchableError].} =
   if count > 0:
     var left = count
     while left > 0:
@@ -185,7 +186,7 @@ method spaceFiles*(t: MemoryTape; count: int) =
       dec t.pos
       if t.items[t.pos].kind == tiMark: dec left
 
-method status*(t: MemoryTape): TapeStatus =
+method status*(t: MemoryTape): TapeStatus {.raises: [CatchableError].} =
   result = TapeStatus(atBeginning: t.pos == 0, atEndOfData: t.pos >= t.items.len,
     writeProtected: t.writeProtected, fileNumber: 0, blockNumber: 0)
   for i in 0 ..< t.pos:

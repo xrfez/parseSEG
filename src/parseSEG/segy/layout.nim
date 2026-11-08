@@ -229,10 +229,11 @@ proc parseLayout*(xml: string): TraceLayout =
   checkCharRefs(xml)
   var root: XmlNode
   try:
-    root = parseXml(xml.strip)
-  except XmlError as e:
-    raise newException(ValueError, "Layout XML: " & e.msg)
-  except CatchableError as e:
+    # `parseXml` reads through `std/streams` closures, which the effect system
+    # takes to raise `Exception`; on a string they raise only catchable errors.
+    {.cast(raises: [CatchableError]).}:
+      root = parseXml(xml.strip)
+  except CatchableError as e: # XmlError and the stream's errors alike
     raise newException(ValueError, "Layout XML: " & e.msg)
   if root.tag != "segy-layout":
     raise newException(ValueError, "Layout XML: root element is <" & root.tag &

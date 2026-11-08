@@ -119,8 +119,6 @@ func len*(log: DiagLog): int {.inline, segApi.} =
 
 func `[]`*(log: DiagLog; i: int): lent Diagnostic {.inline, segApi.} =
   ## Diagnostic `i`, oldest first.
-  if i notin 0 ..< log.entries.len:
-    raise newException(IndexDefect, "no diagnostic " & $i & " in a log of " & $log.entries.len)
   log.entries[i]
 
 iterator items*(log: DiagLog): lent Diagnostic =

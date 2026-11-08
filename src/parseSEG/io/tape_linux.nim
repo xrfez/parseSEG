@@ -69,9 +69,9 @@ proc linuxStatus(t: LinuxTape): TapeStatus =
     atEndOfData: (s and GmtEod) != 0, atEndOfMedium: (s and GmtEot) != 0,
     writeProtected: (s and GmtWrProt) != 0, online: (s and GmtOnline) != 0)
 
-method status*(t: LinuxTape): TapeStatus = t.linuxStatus()
+method status*(t: LinuxTape): TapeStatus {.raises: [CatchableError].} = t.linuxStatus()
 
-method readBlock*(t: LinuxTape; buf: var openArray[byte]): int =
+method readBlock*(t: LinuxTape; buf: var openArray[byte]): int {.raises: [CatchableError].} =
   let n = posix.read(t.fd, if buf.len > 0: addr buf[0] else: nil, buf.len)
   if n > 0:
     result = n
@@ -88,22 +88,23 @@ method readBlock*(t: LinuxTape; buf: var openArray[byte]): int =
     else:
       t.fail("read")
 
-method writeBlock*(t: LinuxTape; data: openArray[byte]) =
+method writeBlock*(t: LinuxTape; data: openArray[byte]) {.raises: [CatchableError].} =
   let n = posix.write(t.fd, if data.len > 0: unsafeAddr data[0] else: nil, data.len)
   if n < 0: t.fail("write")
   if n != data.len:
     raise newException(IOError, t.name & ": short write (" & $n & " of " & $data.len &
       " bytes), end of medium?")
 
-method writeTapeMarks*(t: LinuxTape; count: Positive) = t.op(MTWEOF, count, "MTWEOF")
+method writeTapeMarks*(t: LinuxTape; count: Positive) {.
+    raises: [CatchableError].} = t.op(MTWEOF, count, "MTWEOF")
 
-method rewind*(t: LinuxTape) = t.op(MTREW, 1, "MTREW")
+method rewind*(t: LinuxTape) {.raises: [CatchableError].} = t.op(MTREW, 1, "MTREW")
 
-method spaceFiles*(t: LinuxTape; count: int) =
+method spaceFiles*(t: LinuxTape; count: int) {.raises: [CatchableError].} =
   if count > 0: t.op(MTFSF, count, "MTFSF")
   elif count < 0: t.op(MTBSF, -count, "MTBSF")
 
-method close*(t: LinuxTape) =
+method close*(t: LinuxTape) {.raises: [CatchableError].} =
   if t.fd >= 0:
     discard posix.close(t.fd)
     t.fd = -1

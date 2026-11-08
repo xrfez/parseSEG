@@ -193,9 +193,8 @@ template segGuard*(logOut: untyped, body: untyped): SegStatus =
   except IOError as e: st = fail(SEG_ERR_IO, e.msg)
   except OSError as e: st = fail(SEG_ERR_IO, e.msg)
   except ValueError as e: st = fail(SEG_ERR_ARGUMENT, e.msg)
-  except IndexDefect as e: st = fail(SEG_ERR_ARGUMENT, e.msg) # an explicit `[]` check
   except AbiMemoryError as e: st = fail(SEG_ERR_MEMORY, e.msg)
-  except Exception as e: st = fail(SEG_ERR_INTERNAL, $e.name & ": " & e.msg)
+  except CatchableError as e: st = fail(SEG_ERR_INTERNAL, $e.name & ": " & e.msg)
   st
 
 template withHandle*(h: AbiHandle, body: untyped) =
@@ -499,8 +498,7 @@ proc handleIndex(t: NimNode): int =
   pyDecls.add "_lib." & rel & ".argtypes = [ctypes.c_void_p]\n_lib." & rel &
     ".restype = None\n"
   mirrorCode.add "proc segRelease_" & h.short & "(h: pointer) {.exportc: \"" & rel &
-    "\", dynlib, cdecl, raises: [].} =\n  try:\n    if h != nil: GC_unref(cast[" & h.refType &
-    "](h))\n  except Exception: discard\n"
+    "\", dynlib, cdecl, raises: [].} =\n  if h != nil: GC_unref(cast[" & h.refType & "](h))\n"
 
 proc intInfo(k: NimTypeKind, r: var TInfo): bool =
   result = true
@@ -1124,6 +1122,12 @@ proc genRoutine(r: Rec): string =
   let call = (if r.name == "[]": g.callArgs[0] & "[" & g.callArgs[1 .. ^1].join(", ") & "]"
               else: "`" & r.name & "`(" & g.callArgs.join(", ") & ")")
   g.genResult(r.ret, call, r.kind == "proc", r.ctor)
+  if r.name == "[]":
+    # A bad index from the host is an argument error, checked here: Nim's
+    # `[]` treats it as a bug (IndexDefect), which a C boundary must not hit.
+    let (recv, i) = (g.callArgs[0], g.callArgs[1])
+    g.write = "if " & i & " notin 0 ..< len(" & recv & "): argError(\"index \" & $" & i &
+      " & \" is out of range 0 ..< \" & $len(" & recv & "))\n" & g.write
   var body = ""
   if g.outNil: body.add "    if o != nil: o[] = nil\n"
   body.add g.convs
