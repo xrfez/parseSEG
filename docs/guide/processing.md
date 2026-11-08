@@ -1,0 +1,238 @@
+# Recipes for signal processing
+
+A processing library wants every trace of a file as dense arrays, as fast as the disk allows,
+on as many cores as it has, and then a way to write its results. This page shows how. Read
+[getting-started.md](getting-started.md) first for the model.
+
+Two facts shape everything here:
+
+- **Nothing loads a whole file.** `openSeismic` maps the file and indexes it (24 bytes per
+  trace, plus about 100 with `keys`); samples are decoded only for the traces you ask for,
+  straight from the mapped bytes into your tensor. Files larger than RAM work: the OS pages
+  them in and out. (`readSegy`/`readSegd` do load everything; they are for small files and
+  tests.)
+- **Samples are the recorded values**, decoded to `float32` or `float64`: integer and SEG-D
+  formats are not descaled to physical units. `convertFile` with `applyDescale` writes
+  millivolts if you need them ([conversion.md](conversion.md)).
+
+## Stream a whole file in chunks
+
+The simplest loop reuses one buffer: decode a chunk, process it, go on. Each chunk costs no
+allocation.
+
+```nim
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+const Chunk = 64
+var buf = newTraceTensor[float64](Chunk, f.maxSamples)   # float64: room for any format
+var log: DiagLog
+var energy = 0.0
+var first = 0
+while first < f.len:
+  let last = min(first + Chunk, f.len) - 1
+  let rows = last - first + 1
+  discard f.readTracesInto(first .. last, buf, 0, log)
+  # Only rows 0 ..< rows hold this chunk: the last chunk may be short.
+  energy += sum(buf[0 ..< rows, _] *. buf[0 ..< rows, _])
+  first = last + 1
+echo "total energy ", energy, ", ", log.len, " traces could not be decoded"
+doAssert log.len == 0 and energy > 0
+```
+
+`readTracesInto` returns how many traces it left as zero rows because they could not be
+decoded, and logs each one (trace index, byte offset, reason) in `log`. Without a `log`
+argument it only counts them; `readTraces` without a log raises `SegFormatError` instead.
+Pick the form that matches your policy for damaged data.
+
+### Overlap decoding with computing
+
+A `Prefetcher` decodes the next chunks on a worker thread while you process the current one.
+`next` waits for a chunk; each chunk's tensor is yours to keep.
+
+```nim
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 3)
+var c: PrefetchChunk[float32]
+var peak = 0'f32
+var traces = 0
+while p.next(c):
+  peak = max(peak, max(abs(c.samples)))
+  traces += c.count - c.failed
+p.close()                     # stops and joins the worker; do it before closing the file
+echo traces, " traces, peak amplitude ", peak
+doAssert traces == f.len and peak > 0
+```
+
+Memory: a prefetcher holds `depth` chunks of `chunkTraces × cols` samples.
+
+### Skip auxiliary traces, respect each trace's interval
+
+SEG-D records mix seismic and auxiliary channel sets (time break, pilot, ...), possibly at
+different sample intervals. Select the seismic traces with `isSeismic`, and take intervals
+per trace or per channel set rather than per file.
+
+```nim
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd")
+var seismic: seq[int]
+for i in 0 ..< f.len:
+  if isSeismic(f.index, i): seismic.add i
+let data = f.readTraces(seismic, float64)
+for k, i in seismic:
+  echo "trace ", i, ": ", f.sampleIntervalUs(i), " us, ", f.traceEntry(i).numSamples,
+    " samples, rms ", sqrt(mean(data[k, _] *. data[k, _]))
+doAssert seismic == @[3, 4] and data.shape == [2, 4001]
+```
+
+## Read in parallel
+
+`readTraces` and `readTracesInto` on one open `SeismicFile` may run on many threads at once:
+they only read the map and the index. Share the file by pointer, give each thread its own
+tensor and log, and do not close the file or change its index (`applySurvey`) until every
+thread has finished. Compile with `--threads:on` (Nim 2's default).
+
+```nim
+import std/typedthreads
+import parseSEG
+
+type Job = object
+  file: ptr SeismicFile
+  traces: Slice[int]
+  sumAbs: float64
+  failed: int
+
+proc work(job: ptr Job) {.thread.} =
+  # Each thread decodes its own share into its own buffer.
+  var buf = newTraceTensor[float32](32, job.file[].maxSamples)
+  var log: DiagLog
+  var first = job.traces.a
+  while first <= job.traces.b:
+    let last = min(first + 31, job.traces.b)
+    job.failed += job.file[].readTracesInto(first .. last, buf, 0, log)
+    job.sumAbs += sum(abs(buf[0 .. last - first, _].astype(float64)))
+    first = last + 1
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+const Workers = 4
+var jobs: array[Workers, Job]
+var threads: array[Workers, Thread[ptr Job]]
+let share = (f.len + Workers - 1) div Workers
+for k in 0 ..< Workers:
+  jobs[k] = Job(file: addr f, traces: k * share .. min(f.len, (k + 1) * share) - 1)
+  createThread(threads[k], work, addr jobs[k])
+joinThreads(threads)
+
+var total = 0.0
+for j in jobs: total += j.sumAbs
+let serial = sum(abs(f.readTraces(0 ..< f.len).astype(float64)))
+echo "parallel ", total, " = serial ", serial
+doAssert abs(total - serial) <= 1e-9 * serial
+```
+
+Splitting by trace ranges keeps each thread's reads sequential on disk, which is what the OS
+read-ahead likes. Splitting by gather (`f.gathers`, with `keys = true`) works the same way.
+
+## Write results
+
+### SEG-Y in, SEG-Y out
+
+The streaming SEG-Y reader and writer pass every header through unchanged. Decode a trace's
+samples, process them, encode them back in the file's format, and write the trace. The
+output is a valid SEG-Y file with the input's headers (the writer validates before it
+writes and refuses spec-invalid output unless `lenient`).
+
+```nim
+import std/options
+import parseSEG
+
+var src = openDiskSource("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var r = openSegy(src)
+let fmt = r.file.format.get                  # format 1 (IBM float) in this file
+var sink = openDiskSink("inglewood_gain.sgy")
+var w = openSegyWriter(sink, r.file, initSegyWriteOptions(r.file))
+var t: SegyTrace
+var x: seq[float32]
+while r.readTrace(t):
+  x.setLen t.numSamples
+  decodeSamples(fmt, t.samples, x, r.file.byteOrder)
+  for v in x.mitems: v *= 2                  # the "processing": a gain of 2
+  encodeSamples(fmt, x, t.samples, r.file.byteOrder)
+  w.writeTrace(t)
+w.close()
+sink.close()
+src.close()
+for d in r.log: echo d
+for d in w.log: echo d
+
+var a = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var b = openSeismic("inglewood_gain.sgy")
+let (before, after) = (a.readTraces(100..100), b.readTraces(100..100))
+echo "largest change from an exact gain of 2: ", max(abs(after - 2'f32 * before))
+doAssert b.len == a.len and max(abs(after - 2'f32 * before)) <= 1e-6 * max(abs(after))
+```
+
+To write another sample format, give the writer a copy of the file headers with the new
+format code, and encode each trace in that format:
+
+```nim
+import std/options
+import parseSEG
+
+var src = openDiskSource("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var r = openSegy(src)
+let inFormat = r.file.format.get
+var outFile = r.file                       # the headers, with IEEE float samples
+outFile.binary.formatCode = 5
+outFile.format = some(sfFloat32)
+var sink = openDiskSink("inglewood_f32.sgy")
+var w = openSegyWriter(sink, outFile, initSegyWriteOptions(outFile))
+var t: SegyTrace
+var x: seq[float32]
+while r.readTrace(t):
+  x.setLen t.numSamples
+  decodeSamples(inFormat, t.samples, x, r.file.byteOrder)
+  t.samples.setLen t.numSamples * sampleSize(sfFloat32)
+  encodeSamples(sfFloat32, x, t.samples, outFile.byteOrder)
+  w.writeTrace(t)
+w.close()
+sink.close()
+src.close()
+
+var a = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var b = openSeismic("inglewood_f32.sgy")
+doAssert b.summary.formatCode == 5 and b.readTraces(0 ..< b.len) == a.readTraces(0 ..< a.len)
+```
+
+`encodeSamples` raises `SegFormatError` when a value does not fit an integer format (and
+for NaN in one).
+
+### SEG-D or SEG-2 in
+
+Convert to SEG-Y first (`convertFile`, lossless by default), then process the SEG-Y as
+above; or process in memory and keep the results in your own format. Writing processed
+samples back into SEG-D needs the full SEG-D writer (`openSegdWriter`, `writeSegd`), which
+works on whole decoded records.
+
+### Results that belong in the headers
+
+Picks, statics, or computed coordinates that fit existing header fields can be written in
+place, journaled and undoable, without rewriting the file: see [editing.md](editing.md).
+
+## Geometry for processing
+
+`openSeismic(path, keys = true)` gives each trace's source and receiver positions, offset
+and midpoint (`traceKeys`). SEG-D 2.x headers often lack coordinates; join them from SPS or
+SEG P1 survey files in memory with `applySurvey` ([conversion.md](conversion.md)), then read
+the keys as usual. `gathers` and `componentGroupIds` group the traces by what the keys say.
+
+## Sizes and limits
+
+- All offsets are 64-bit; files over 4 GB are tested (sparse synthetic files).
+- Index memory: 24 B per trace, plus about 100 B with keys (10 M traces: 240 MB / 1.2 GB).
+- A tensor holds only what you asked for; size your chunks to your cache and core count.
+- Tape: `buildIndex` and the streaming readers work on tape images and devices, but range
+  reads and the prefetcher need a plain disk file (`ValueError` otherwise).

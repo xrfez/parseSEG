@@ -8,10 +8,14 @@ stopping a read.
 
 | Use it from | How | Docs |
 |---|---|---|
-| Nim | `import parseSEG` | `docs/api.md` |
+| Nim | `import parseSEG` | [`docs/guide/`](docs/guide/README.md), `docs/api.md` |
 | The shell | `nim cli`, then `bin/parseSEG help` | below |
-| C, C++, any FFI | `nim lib` → `libparseseg.so` + `include/parseseg.h` | `docs/design/c_abi.md` |
-| Python | `nim pylib` → `import parseseg` (zero-copy numpy) | `docs/design/python.md` |
+| C, C++, any FFI | `nim lib` → `libparseseg.so` + `include/parseseg.h` | [`docs/guide/c.md`](docs/guide/c.md), `docs/design/c_abi.md` |
+| Python | `nim pylib` → `import parseseg` (zero-copy numpy) | [`docs/guide/python.md`](docs/guide/python.md), `docs/design/python.md` |
+
+New here? Start with the usage guides in [`docs/guide/`](docs/guide/README.md): getting
+started, recipes for viewers and for signal processing, editing, conversion and
+diagnostics, each with examples that the test suite compiles and runs.
 
 ## Command line
 
@@ -49,9 +53,10 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
   `abi/runtime.nim` holds what the generated exports call at run time.
 - `include/parseseg.h`, `python/parseseg/__init__.py`: the generated C header and Python
   (ctypes) module, rewritten by `nim lib` and committed.
-- `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI and build targets
-  included).
-- `docs/`: `api.md`, design notes (`design/`), distilled spec notes (`spec/`).
+- `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI, build targets and
+  the guides' examples included).
+- `docs/`: usage guides (`guide/`), `api.md`, design notes (`design/`), distilled spec notes
+  (`spec/`).
 - `vendormaps/`: built-in vendor maps (NIF), searched with `PARSESEG_VENDOR_PATH`.
 - `tools/`: zig wrappers, macOS link stubs, Python oracles for the samples.
 - `bin/`: build outputs.
