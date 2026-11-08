@@ -81,7 +81,7 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 | Python | Nim |
 |---|---|
 | `open_seismic(path, twos_complement8015=False, keys=False)` → `SeismicFile` | `openSeismic` |
-| `len(f)`, `f.kind`, `f.record_count`, `f.max_samples`, `f.has_keys`, `f.is_open`, `f.path`, `f.log` | `len`, `kind`, ... |
+| `len(f)`, `f.kind`, `f.record_count`, `f.max_samples`, `f.has_keys`, `f.is_open`, `f.path`, `f.demux_path`, `f.log` | `len`, `kind`, ... |
 | `f.trace_entry(i)`, `f.trace_keys(i)` → dict; `f.copy_bytes(offset, n)` → bytes; `f.sample_interval_us(trace=0)` | `traceEntry`, `traceKeys`, `copyBytes`, `sampleIntervalUs` |
 | `f.trace_field(i, name)`, `record_field(r, name)`, `file_field(name)` → int/float/str | `traceField`, ... |
 | `f.read_traces(traces, dtype="float32")` → `Tensor` (ArgumentError for traces out of range; FormatError when a trace cannot be decoded) | `readTraces` |

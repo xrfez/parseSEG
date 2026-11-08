@@ -37,10 +37,10 @@ Conventions that hold throughout:
 ## Opening and indexing (any size, disk)
 | Proc | What |
 |---|---|
-| `openSeismic(path, twosComplement8015 = false, keys = false, writable = false): SeismicFile` | Memory-maps the file, detects SEG-Y, SEG-D or SEG-2, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (about 100 B per trace). |
+| `openSeismic(path, twosComplement8015 = false, keys = false, writable = false, demuxDir = ""): SeismicFile` | Memory-maps the file, detects SEG-Y, SEG-D or SEG-2, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (about 100 B per trace). Multiplexed SEG-D (formats 0015 ... 0058) is demultiplexed once into a temporary copy in `demuxDir` (default: the OS temp dir; `f.demuxPath`, a warning in `f.log`), which is indexed instead and deleted on `close`; `writable` refuses such a file (`ValueError`). |
 | `detectKind(bytes): SeismicKind` | Detection only (`skUnknown` when nothing fits). |
 | `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). SEG-2 needs a `MemFileSource` (`ValueError` otherwise). |
-| `f.len`, `f.kind` (`skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path` | File facts. |
+| `f.len`, `f.kind` (`skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path`, `f.demuxPath` | File facts. |
 | `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval (`ValueError` for a trace out of range; `sampleIntervalUs` and `copyBytes` also for a closed file). |
 | `f.index.segy`, `f.index.segdRecords`, `f.index.seg2`, `f.seg2Trace(i)`, `f.close()` | The format's own headers (`seg2Trace` re-reads a SEG-2 Trace Descriptor Block from the map). A `SeismicFile` that goes out of scope unmaps itself; `close` does it early. |
 
@@ -146,6 +146,11 @@ fatal diagnostic.
   `traceSort`, `units`, `acquisitionTime` (UTC seconds), all `Option`s. Named header fields,
   header export, conversion, vendor maps, the writer, C ABI and Python names for SEG-2 are
   not supported yet (`ValueError` / fatal diagnostic saying so).
+- Multiplexed SEG-D (Rev 0/1 formats 0015, 0022, 0024, 0036, 0038, 0042, 0044, 0048, 0058):
+  the reader walks each record's scans and gives demultiplexed traces in the twin format
+  (8015 for 0015, ...); the record says `multiplexed`. `demultiplexSegd(src, dst)` writes a
+  demultiplexed copy. `segd/mux` has the scan codecs (`muxLayout`, `isStartOfScan`,
+  `scanHeader`, `demuxChannel`, `decodeMux0015`).
 - Vendor maps: `loadVendorMaps`, `registerVendorDecoder`, `decode` (an
   `Option[VendorBlock]`; `blk["field"]` reads a value), `applies`, `vendorContext(rec or
   file)`, `decodeVendorAreas`; `scaffoldVendorMap(path, reg)` / `toNif` write a skeleton map

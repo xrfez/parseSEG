@@ -181,6 +181,7 @@ const char *seg_last_error(void);
 #define SEG_DIAG_CODE_VENDOR_MAP 11
 #define SEG_DIAG_CODE_TAPE_LAYOUT 12
 #define SEG_DIAG_CODE_VALIDATION 13
+#define SEG_DIAG_CODE_MULTIPLEXED 14
 
 /* SegdTargetFormat */
 #define SEG_SEGD_TARGET_FORMAT_KEEP 0
@@ -445,6 +446,12 @@ SegStatus seg_convert_segd_revision(const char *src_path, const char *dst_path, 
  * index. Raises `IOError`/`OSError` if the file cannot be opened or
  * mapped. `writable` maps it read-write, for in-place header edits
  * (`model/edit`).
+ * 
+ * A SEG-D file with multiplexed records is demultiplexed once into a
+ * temporary copy in `demuxDir` (default: the OS temp directory), which is
+ * mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
+ * on `close`; the file itself is never changed. With `writable`, such a
+ * file raises `ValueError`: edits would change only the copy.
  */
 SegStatus seg_open_seismic(const char *path, bool twos_complement8015, bool keys, SegSeismicFile **out);
 
@@ -561,9 +568,10 @@ SegStatus seg_apply_journal(const char *path, const char *journal_path, SegDiagL
  * Maps `path` read-write, builds its trace index and opens the journal
  * (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
  * if either cannot be opened, and `ValueError` if the journal is the file
- * itself. Problems reading the file are in `file.index.log`; a file whose
- * index has a fatal problem can still be edited where its headers were
- * located.
+ * itself or the file holds multiplexed SEG-D (convert it to a
+ * demultiplexed file first; see `openSeismic`). Problems reading the file
+ * are in `file.index.log`; a file whose index has a fatal problem can
+ * still be edited where its headers were located.
  */
 SegStatus seg_open_editor(const char *path, const char *journal_path, SegHeaderEditor **out);
 
@@ -742,6 +750,9 @@ SegStatus seg_prefetcher_close(SegPrefetcher *prefetcher);
 
 /* The file's path, as opened. */
 SegStatus seg_seismic_file_path(SegSeismicFile *seismic_file, char *out, int64_t out_cap, int64_t *out_len);
+
+/* The temporary demultiplexed copy that is mapped and indexed instead of a multiplexed SEG-D file ("" for any other file); deleted on `close`. Index offsets and `copyBytes` refer to it. */
+SegStatus seg_seismic_file_demux_path(SegSeismicFile *seismic_file, char *out, int64_t out_cap, int64_t *out_len);
 
 /* Refused edits and journal problems. */
 SegStatus seg_header_editor_log(SegHeaderEditor *header_editor, SegDiagLog **out);
