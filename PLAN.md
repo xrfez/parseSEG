@@ -313,7 +313,7 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       undo journal (apply/rollback), refuse size-changing edits; tests on synthetic SEG-Y/SEG-D
 - [x] 6.7 Large-file test: a sparse synthetic file larger than 4 GB (index build, a range read
       near the end, an in-place edit near the end) to prove 64-bit offsets work
-- [ ] 6.8 Format-independent file summary (owner, 2026-11-07), so that a viewer or processing
+- [x] 6.8 Format-independent file summary (owner, 2026-11-07), so that a viewer or processing
       job never branches on `f.kind` or the revision for common metadata. `FileSummary`
       (`f.summary`):
       - standard and revision;
@@ -324,14 +324,14 @@ indexed access, never whole-file loading; diagnostics instead of aborts; writers
       - byte order and sample format(s).
 
       Exposed through the C ABI (`seg_file_summary`), Python (`summary()`) and `info`.
-- [ ] 6.9 Trace time in `TraceKeys` (`time`: UTC seconds as float64, NaN if unknown):
+- [x] 6.9 Trace time in `TraceKeys` (`time`: UTC seconds as float64, NaN if unknown):
       - SEG-Y: trace bytes 157-170 (year/day/h/m/s, time basis code);
       - SEG-D Rev 1/2: GH1 date/time;
       - SEG-D Rev 3: the GH UTC time stamp and per-trace THE time when present.
 
       Update `SegTraceKeys` in the C ABI (append the field, keeping the ABI version rules) and
       `trace_keys` in Python.
-- [ ] 6.10 Header listing for a viewer's headers tab (owner, 2026-11-07). One call per scope
+- [x] 6.10 Header listing for a viewer's headers tab (owner, 2026-11-07). One call per scope
       returns every header of trace `i` / record `r` / the file as ordered rows:
       - API: `traceHeaders(f, i)`, `recordHeaders(f, r)`, `fileHeaders(f)`.
       - Row contents: (block, field, value, byte offset, size), with a block's raw bytes
@@ -1273,3 +1273,22 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
     - No real file, so the string-offset base and the format-3 bit layout are inferred (`seg2.md` §8).
     - Mixed sample intervals are not resampled.
   - Refused for SEG-2 until 11.2: named header fields and edits, header export, convert, vendor maps, CLI convert and vendormap.
+- 2026-11-08: Tasks 6.8-6.10 done (agent, worktree), merged with 4.7 and 11.1. SEG-2 was then added to the merged summary, time and listing by the lead.
+  - 6.8 `f.summary` (`FileSummary`), plus `channelSets` and `crsText`:
+    - C names follow the 12.5 derivation: `seg_seismic_file_summary`, not `seg_file_summary`. CRS text is a separate call.
+    - NaN or -1 mean not uniform.
+    - Units come from SEG-Y trace 89-90, then binary 3255, then the CRS. The CRS units rule is a heuristic (the P1/11 HC,1,6,1 axis unit).
+    - SEG-2 summary: UNITS, SAMPLE_INTERVAL and SHOT_SEQUENCE_NUMBER.
+  - 6.9 `TraceKeys.time` (UTC POSIX seconds):
+    - SEG-Y time basis 0 is read as UTC, GPS is converted with leap seconds, and local/other are NaN.
+    - SEG-D Rev 3 uses the 0x42 Timestamp, then GH#3, then GH#1.
+    - SEG-2 uses ACQUISITION_DATE/TIME.
+  - 6.10 listing and patches:
+    - `traceHeaders`/`recordHeaders`/`fileHeaders` return a `HeaderListing` of `HeaderRow`; C `seg_header_listing_len`/`_get`; `fieldNames` on the boundary.
+    - `HeaderPatch` and `writeHeaderPatch`; CLI `dump --all` and `--records`/`--file`.
+    - 14 new `HeaderBlock` kinds (listing only: import refuses patches to them) and `hbRaw`.
+    - The generator gained borrowed `SegValueRef` fields and NUL-separated `seq[string]`. The `upperSnake` fix changes no existing constant.
+    - SEG-2 blocks are listed raw for now (11.2 adds the keyword rows).
+  - Follow-ups:
+    - `importHeaders` is not on the C/Python boundary (its closure parameter), so hosts apply patches with the CLI.
+    - `theadernif` `failed_journal_syncs` fails when TMPDIR is long (the session line exceeds its 100-byte RLIMIT).
