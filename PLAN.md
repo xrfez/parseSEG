@@ -486,7 +486,7 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
 ### Phase 11: SEG-2 (queued after Phase 10)
 - [x] 11.1 `Seg2File` reader (descriptor blocks, keyword strings, formats 1-5, byte order),
       trace index and keys, `openSeismic` detection.
-- [ ] 11.2 Writer, conversion to and from SEG-Y / SEG-D, C ABI and Python, CLI.
+- [x] 11.2 Writer, conversion to and from SEG-Y / SEG-D, C ABI and Python, CLI.
 - [ ] 11.3 Validate against a Geospace SEG-2 sample *(owner: please provide one)*.
 
 ### Phase 12: Idiomatic Nim pass (owner, 2026-11-07)
@@ -1311,3 +1311,20 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
   - Untested:
     - Windows: the file is mapped twice in `writeInPlace`.
     - A Rev 1 target that skips traces with more than 65535 samples.
+- 2026-11-08: Task 11.2 done (agent, worktree `wt-seg2w`, merged). Full suite green on `seg-library` (38 test files).
+  - Writer and header access:
+    - `openSeg2Writer` / `writeTrace` / `close`. `close` patches N and the pointers. Non-standard output raises `SegFormatError` unless `lenient`.
+    - Named fields `file.<field|KEYWORD>` / `trace.<...>` (`hbSeg2File`/`hbSeg2Trace`).
+    - Listing rows per fixed field and per keyword string (with byte spans).
+    - `exportHeaders`. In-place edits are refused, because strings are variable length.
+  - Conversion: `ConvertOptions.target` (`skSegy`/`skSegd`/`skSeg2`) plus `segd`/`seg2` options.
+    - Any input → SEG-Y; SEG-2 → SEG-D (one Rev 3 record, Rev 2.x via `convertSegdRevision`); any input → SEG-2.
+    - SEG-Y → SEG-D stays refused.
+    - CLI `convert --to=seg2`; `info` shows SEG-2 strings.
+  - C `seg_seismic_file_seg2_string_count`/`_keyword`/`_value`, Python `seg2_*`.
+  - SEG-2 → SEG-D mapping: a channel set per distinct trace setup, with an info when traces are reordered; receivers in Position blocks; file strings in the external header; DESCALING_FACTOR becomes the DSM.
+  - `writeback.nim` now refuses SEG-2 input and non-SEG-Y targets explicitly.
+  - Open:
+    - survey write-back to SEG-2;
+    - patch import of SEG-2 strings (refused by design);
+    - the 11.1 inference risks also apply to the writer, so 11.3 (a real file) is needed.
