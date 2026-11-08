@@ -804,6 +804,38 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
 - [x] 12.3 Apply the approved 12.1 findings, one module per commit, tests green after each.
 - [x] 12.4 Review by an agent; fix its findings.
 
+### Phase 13: Release readiness: usage docs, benchmarks, review, merge to main (owner, 2026-11-08)
+Goal: the library is ready to carry a high-performance signal-processing library and a
+high-performance viewer. Then `seg-library` is merged into `main`.
+- [ ] 13.1 Usage docs for the public API: task-oriented guides in `docs/guide/` (getting
+      started; viewer recipes: open, index, gathers, random access, prefetch, header tab,
+      patches; processing recipes: streaming whole files into tensors, threads, writing results,
+      conversion, geometry; C and Python quick starts). Every code example is compiled or run
+      by a test so the docs cannot go stale. `docs/api.md` stays the reference and links to them.
+- [ ] 13.2 Benchmark suite (`bench/`), on synthetic files up to tens of GB plus the samples:
+      - cold and warm cache;
+      - index build and keys at 10 M traces;
+      - sequential decode throughput per format, against a memcpy / memory-bandwidth baseline;
+      - viewer latency for random trace, gather and window fetches (p50/p99);
+      - multi-thread scaling;
+      - prefetch;
+      - C ABI and Python/numpy overhead;
+      - conversion, header edits and geometry write-back.
+
+      Results go in `docs/benchmarks.md`, with the machine described. Bottlenecks get fixed
+      (each with a test), or listed with a proposed fix.
+- [ ] 13.3 Multi-agent review of `seg-library` (read-only, fresh reviewers), along these
+      dimensions:
+      - correctness of the Phase 4.7/6.8-6.10/10.5/11 code;
+      - performance and concurrency for HPC and the viewer;
+      - public API, and C/Python boundary safety (lifetimes, ownership, zero-copy);
+      - robustness against malformed or hostile input in release (`-d:danger`) builds.
+
+      Output: a ranked findings list in this file. Public API changes need owner approval.
+- [ ] 13.4 Apply the 13.3 findings (and 13.2 fixes not yet applied); full suite green.
+- [ ] 13.5 Merge `seg-library` into `main` (owner asked, 2026-11-08), after 13.1-13.4. Do not
+      push unless the owner asks.
+
 ### Future (noted, not scheduled)
 - Sorting traces by header fields (offset, receiver, CMP, ...), decided 2026-11-07: a sort
   returns a **permutation** (a trace index list, 4 B/trace) over the index and never moves data.
