@@ -1,8 +1,8 @@
 ## Per-trace geometry keys: who shot a trace and where it was recorded.
 ##
 ## Gather detection and component grouping (`gathers`) work on these keys
-## instead of on format-specific headers, so they treat SEG-Y and every SEG-D
-## revision alike. Unknown values are NaN (floats) or 0 (codes).
+## instead of on format-specific headers, so they treat SEG-Y, every SEG-D
+## revision and SEG-2 alike. Unknown values are NaN (floats) or 0 (codes).
 ##
 ## Where the values come from:
 ## - SEG-Y: the layout-aware `geometry` (source/group coordinates, energy
@@ -16,10 +16,12 @@
 ##   0x1F) in the trace's extensions, else in the record's general header
 ##   blocks; the receiver from THE#1, plus depth and reshoot indices; the
 ##   component is THE#1 byte 9 (group index), else the sensor type.
+## - SEG-2: the trace strings (see `traceKeys(Seg2File, Seg2Trace)`).
 
-import std/[math, tables, hashes]
+import std/[math, tables, hashes, strutils]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
+import ../seg2/headers as seg2headers
 
 type
   TraceKeys* = object
@@ -191,6 +193,57 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
       result.rcvIndex = int16(e.receiverPointIndex)
       result.sensorType = e.sensorType
       result.component = e.sensorType
+
+proc traceKeys*(f: Seg2File, t: Seg2Trace): TraceKeys =
+  ## The keys of a SEG-2 trace, from its keyword strings (`seg2.md` §7.2):
+  ## - `record`: SHOT_SEQUENCE_NUMBER (the trace's, else the file's);
+  ## - `ensemble`: CDP_NUMBER; `channel`: CHANNEL_NUMBER;
+  ## - `srcPoint` / `rcvPoint`: SOURCE_ / RECEIVER_STATION_NUMBER;
+  ## - `srcLine` = `rcvLine`: LINE_ID when it is a number;
+  ## - source and receiver x, y, z: SOURCE_ / RECEIVER_LOCATION, in the
+  ##   file's UNITS (a one-value location is x along the line, y = 0, so
+  ##   offsets still follow); z plus DATUM when DATUM is given;
+  ## - `component`: RECEIVER's type as a SEG-Y trace identification code:
+  ##   VERTICAL_GEOPHONE 12 (vertical), SH_HORIZONTAL_GEOPHONE 13
+  ##   (crossline), SV_HORIZONTAL_GEOPHONE 14 (inline), else 0;
+  ## - `offset` and the midpoint: derived from the locations.
+  result = initTraceKeys()
+  template num(key: string): Option[float64] =
+    (let v = t.number(key); if v.isSome: v else: f.number(key))
+  let shot = num("SHOT_SEQUENCE_NUMBER")
+  if shot.isSome: result.record = shot.get
+  let cdp = t.number("CDP_NUMBER")
+  if cdp.isSome: result.ensemble = cdp.get
+  let ch = t.number("CHANNEL_NUMBER")
+  if ch.isSome: result.channel = ch.get
+  let sp = t.number("SOURCE_STATION_NUMBER")
+  if sp.isSome: result.srcPoint = sp.get
+  let rp = t.number("RECEIVER_STATION_NUMBER")
+  if rp.isSome: result.rcvPoint = rp.get
+  let line = t.value("LINE_ID")
+  if line.isSome:
+    try:
+      let x = parseFloat(line.get.strip)
+      (result.srcLine, result.rcvLine) = (x, x)
+    except ValueError: discard # a line name, not a number
+  let datum = num("DATUM")
+  let dz = if datum.isSome: datum.get else: 0.0
+  let src = t.sourceLocation
+  if src.isSome:
+    (result.srcX, result.srcY, result.srcZ) = (src.get.x, src.get.y, src.get.z + dz)
+  let rcv = t.receiverLocation
+  if rcv.isSome:
+    (result.rcvX, result.rcvY, result.rcvZ) = (rcv.get.x, rcv.get.y, rcv.get.z + dz)
+  let r = t.value("RECEIVER")
+  if r.isSome:
+    let w = r.get.splitWhitespace
+    if w.len > 0:
+      result.component = case w[0].toUpperAscii
+        of "VERTICAL_GEOPHONE": 12
+        of "SH_HORIZONTAL_GEOPHONE": 13
+        of "SV_HORIZONTAL_GEOPHONE": 14
+        else: 0
+  result.deriveGeometry()
 
 proc traceKeys*(f: SegyFile, t: SegyTrace): TraceKeys =
   ## The keys of a SEG-Y trace (resolves the layout on every call).

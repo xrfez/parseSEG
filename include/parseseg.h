@@ -251,6 +251,7 @@ const char *seg_last_error(void);
 #define SEG_SEISMIC_KIND_UNKNOWN 0
 #define SEG_SEISMIC_KIND_SEG_Y 1
 #define SEG_SEISMIC_KIND_SEG_D 2
+#define SEG_SEISMIC_KIND_SEG_2 3
 
 /* ---------------------------------------------------------- handles */
 
@@ -306,10 +307,10 @@ typedef struct SegTraceEntry {
     int64_t offset; /* Medium offset of the trace header. */
     uint32_t header_bytes; /* Header bytes before the samples (incl. extensions). */
     uint32_t num_samples;
-    uint32_t record; /* SEG-D record index (0 for SEG-Y); indexes `codecs`. */
+    uint32_t record; /* Indexes `codecs`: the SEG-D record index, 0 for SEG-Y, the codec of the trace's sample format for SEG-2 (a SEG-2 file is one record). */
     uint16_t channel_set; /* 0-based SEG-D channel set index, `NoChannelSet` if unknown (and for SEG-Y); see `channelSetIndex`. */
     int8_t scan_type; /* 0-based SEG-D scan type index (BCD, < 100), -1 if unknown (SEG-Y). */
-    uint8_t channel_type; /* SEG-D channel type of the trace's channel set (Rev 1/2 nibble, 1 = seismic; Rev 3 byte, 0x10 = seismic); 0 for SEG-Y and unknown sets. */
+    uint8_t channel_type; /* SEG-D channel type of the trace's channel set (Rev 1/2 nibble, 1 = seismic; Rev 3 byte, 0x10 = seismic); 0 for SEG-Y and unknown sets. SEG-2: 1 + the `Seg2TraceType` ordinal of TRACE_TYPE, 0 if none. */
 } SegTraceEntry;
 
 /* Geometry of one trace (NaN / 0 where unknown). */
@@ -437,8 +438,9 @@ SegStatus seg_diag_log_to_nif(SegDiagLog *diag_log, char *out, int64_t out_cap, 
 SegStatus seg_convert_segd_revision(const char *src_path, const char *dst_path, const SegSegdConvertOptions *opts, SegDiagLog **out);
 
 /*
- * Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
- * index (with per-trace geometry when `keys`). Format problems are in
+ * Maps the disk file `path`, detects SEG-Y, SEG-D or SEG-2, and builds the trace
+ * index (with per-trace geometry when `keys`; `twosComplement8015` also
+ * reads SEG-2 format-3 mantissas as two's complement). Format problems are in
  * `index.log`; an undetectable file gives a fatal diagnostic and an empty
  * index. Raises `IOError`/`OSError` if the file cannot be opened or
  * mapped. `writable` maps it read-write, for in-place header edits
@@ -449,13 +451,13 @@ SegStatus seg_open_seismic(const char *path, bool twos_complement8015, bool keys
 /* The number of traces. */
 SegStatus seg_seismic_file_len(SegSeismicFile *seismic_file, int64_t *out);
 
-/* SEG-Y or SEG-D; `skUnknown` when the file was not recognized. */
+/* SEG-Y, SEG-D or SEG-2; `skUnknown` when the file was not recognized. */
 SegStatus seg_seismic_file_kind(SegSeismicFile *seismic_file, int32_t *out);
 
 /* Every problem found while indexing. */
 SegStatus seg_seismic_file_log(SegSeismicFile *seismic_file, SegDiagLog **out);
 
-/* SEG-D records; 1 for SEG-Y; 0 for an unrecognized file. */
+/* SEG-D records; 1 for SEG-Y and SEG-2; 0 for an unrecognized file. */
 SegStatus seg_seismic_file_record_count(SegSeismicFile *seismic_file, int64_t *out);
 
 /* Samples in the longest trace. */
@@ -489,7 +491,8 @@ SegStatus seg_seismic_file_copy_bytes(SegSeismicFile *seismic_file, int64_t offs
 
 /*
  * Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
- * file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
+ * file `dstPath` (see `convertSegy` / `convertSegdToSegy`); SEG-2 input is
+ * not supported yet (a fatal diagnostic). Never raises:
  * problems, including I/O failures, are in the result. The output is
  * written to `<dstPath>.tmp` and renamed when complete, so a failed
  * conversion leaves an existing `dstPath` untouched and no partial file.
@@ -532,10 +535,11 @@ SegStatus seg_seismic_file_file_field(SegSeismicFile *seismic_file, const char *
  * non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
  * binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
  * interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
- * interval. NaN when the headers cannot give it (a SEG-Y trace header cut
- * off by the end of the file): unknown data, not a caller error. Raises
- * `ValueError` for a trace out of range or a closed file (the headers are
- * read from the map, as `traceField` does).
+ * interval. SEG-2: the trace's SAMPLE_INTERVAL (seconds) in µs. NaN when
+ * the headers cannot give it (a SEG-Y trace header cut off by the end of
+ * the file, a SEG-2 trace without SAMPLE_INTERVAL): unknown data, not a
+ * caller error. Raises `ValueError` for a trace out of range or a closed
+ * file (the headers are read from the map, as `traceField` does).
  */
 SegStatus seg_seismic_file_sample_interval_us(SegSeismicFile *seismic_file, int64_t trace, double *out);
 

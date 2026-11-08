@@ -24,6 +24,7 @@ import std/[macros, options, strutils]
 import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
+from ../seg2/headers import sampleInterval
 import ./traceindex
 import ../abi/pragmas
 
@@ -169,10 +170,16 @@ proc fieldNames*(k: HeaderBlock): seq[string] =
 
 # ----------------------------------------------------------------- lookup --
 
+const Seg2NoFields = "SEG-2 headers are keyword strings, which named fields do not " &
+  "cover yet (not supported for SEG-2 yet; use seg2Trace or index.seg2)"
+
 proc traceBlock(ix: TraceIndex, trace: int, blockName: string, b: var FieldRef) =
   # Block `trace` or `ext1` of trace `trace`.
   if trace notin 0 ..< ix.len:
     b.error = "no trace " & $trace
+    return
+  if ix.kind == skSeg2:
+    b.error = Seg2NoFields
     return
   let e = ix.entries[trace]
   case blockName
@@ -201,7 +208,9 @@ proc traceBlock(ix: TraceIndex, trace: int, blockName: string, b: var FieldRef) 
 
 proc fileBlock(ix: TraceIndex, blockName: string, b: var FieldRef) =
   # The SEG-Y `binary` header.
-  if ix.kind != skSegy or blockName != "binary":
+  if ix.kind == skSeg2:
+    b.error = Seg2NoFields
+  elif ix.kind != skSegy or blockName != "binary":
     b.error = "the file-level block is the SEG-Y binary header (binary.<field>)"
   else:
     b.blk = BlockRef(kind: hbSegyBinary, offset: int64(ix.segy.tapeLabel.len + TextHeaderSize),
@@ -372,16 +381,21 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
   ## non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
   ## binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
   ## interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
-  ## interval. NaN when the headers cannot give it (a SEG-Y trace header cut
-  ## off by the end of the file): unknown data, not a caller error. Raises
-  ## `ValueError` for a trace out of range or a closed file (the headers are
-  ## read from the map, as `traceField` does).
+  ## interval. SEG-2: the trace's SAMPLE_INTERVAL (seconds) in µs. NaN when
+  ## the headers cannot give it (a SEG-Y trace header cut off by the end of
+  ## the file, a SEG-2 trace without SAMPLE_INTERVAL): unknown data, not a
+  ## caller error. Raises `ValueError` for a trace out of range or a closed
+  ## file (the headers are read from the map, as `traceField` does).
   template ix: untyped = f.index
   if trace notin 0 ..< ix.len:
     raise newException(ValueError, "no trace " & $trace & " (the file has " & $ix.len & ")")
   if not f.isOpen: raise newException(ValueError, "the file is closed")
   let e = ix.entries[trace]
-  if ix.kind == skSegy:
+  case ix.kind
+  of skSeg2:
+    let si = f.seg2Trace(trace).sampleInterval
+    if si.isSome: si.get * 1e6 else: NaN
+  of skSegy:
     template b: untyped = ix.segy.binary
     if ix.segy.revision.major >= 1 and b.fixedLengthTraces == 1:
       return b.effectiveSampleInterval
@@ -390,6 +404,6 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
       if x.isSome and x.get.toFloat != 0: return x.get.toFloat
     let v = f.findTraceField(trace, "trace.sampleInterval")
     if v.isSome: v.get.toFloat else: NaN
-  else:
+  of skSegd, skUnknown: # an unknown file has no traces: checked above
     let cs = if int(e.scanType) >= 0: e.channelSetIndex else: -1
     ix.segdRecords[e.record].sampleIntervalUs(int(e.scanType), cs)

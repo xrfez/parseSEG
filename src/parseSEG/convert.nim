@@ -741,7 +741,8 @@ proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
 proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.segApi,
     raises: [].} =
   ## Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
-  ## file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
+  ## file `dstPath` (see `convertSegy` / `convertSegdToSegy`); SEG-2 input is
+  ## not supported yet (a fatal diagnostic). Never raises:
   ## problems, including I/O failures, are in the result. The output is
   ## written to `<dstPath>.tmp` and renamed when complete, so a failed
   ## conversion leaves an existing `dstPath` untouched and no partial file.
@@ -754,10 +755,16 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.
     result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
     return
   let kind = detectKind(head)
-  if kind == skUnknown:
+  case kind
+  of skUnknown:
     result.report(sevFatal, dcUnsupportedFormat, "neither a SEG-Y nor a SEG-D file",
       loc = Location(file: srcPath))
     return
+  of skSeg2:
+    result.report(sevFatal, dcUnsupportedFormat,
+      "conversion is not supported for SEG-2 yet", loc = Location(file: srcPath))
+    return
+  of skSegy, skSegd: discard
   if sameAsInput(srcPath, dstPath, result):
     return
   # SEG-D: one target format must hold every record.

@@ -3,12 +3,13 @@
 ## A gather or trace range is a `Tensor[float32]` (or `float64`) shaped
 ## `[traces, samples]`, row-major. The sample codecs write straight into a
 ## row's storage; no intermediate `seq` is built. This is the only place the
-## format layers meet Arraymancer. SEG-Y and SEG-D formats are separate enums,
+## format layers meet Arraymancer. SEG-Y, SEG-D and SEG-2 formats are separate enums,
 ## so `decodeTrace` overloads on the format type.
 
 import arraymancer/tensor
 import ../segy/samples
 import ../segd/samples as segdsamples
+import ../seg2/samples as seg2samples
 import ../common/endians
 
 export tensor
@@ -50,6 +51,13 @@ proc decodeTrace*[T: SampleType](t: var Tensor[T], row: int, f: SegdSampleFormat
   ## of row `row`. Raises like `decodeSegdSamples`.
   let p = checkedRow(t, row, samples)
   decodeSegdSamples(f, src, p.toOpenArray(0, samples - 1), twosComplement8015)
+
+proc decodeTrace*[T: SampleType](t: var Tensor[T], row: int, f: Seg2Format,
+    src: openArray[byte], samples: int, order: ByteOrder, twosComplement = false) =
+  ## Decodes `samples` SEG-2 samples of format `f`, stored in `order`, from
+  ## `src` into the start of row `row`. Raises like `decodeSeg2Samples`.
+  let p = checkedRow(t, row, samples)
+  decodeSeg2Samples(f, src, p.toOpenArray(0, samples - 1), order, twosComplement)
 
 proc encodeTrace*[T: SampleType](t: Tensor[T], row: int, f: SegdSampleFormat,
     dst: var openArray[byte], samples: int) =

@@ -1,8 +1,8 @@
 # parseSEG
 
 Read, write, index, edit and convert SEG-Y (Rev 0, 1, 2.0, 2.1) and SEG-D (Rev 0 demultiplexed,
-1, 2.0, 2.1, 3.0, 3.1) seismic data, on disk and tape, for viewers and HPC processing, and the SPS and SEG P1
-survey files that give traces their geometry. Files of any size are
+1, 2.0, 2.1, 3.0, 3.1) seismic data, on disk and tape, for viewers and HPC processing, read and
+index SEG-2, and the SPS and SEG P1 survey files that give traces their geometry. Files of any size are
 memory-mapped and indexed, never loaded whole. Problems are reported as diagnostics instead of
 stopping a read.
 

@@ -37,12 +37,12 @@ Conventions that hold throughout:
 ## Opening and indexing (any size, disk)
 | Proc | What |
 |---|---|
-| `openSeismic(path, twosComplement8015 = false, keys = false, writable = false): SeismicFile` | Memory-maps the file, detects SEG-Y or SEG-D, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (about 100 B per trace). |
+| `openSeismic(path, twosComplement8015 = false, keys = false, writable = false): SeismicFile` | Memory-maps the file, detects SEG-Y, SEG-D or SEG-2, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (about 100 B per trace). |
 | `detectKind(bytes): SeismicKind` | Detection only (`skUnknown` when nothing fits). |
-| `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). |
-| `f.len`, `f.kind` (`skSegy`, `skSegd`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path` | File facts. |
+| `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). SEG-2 needs a `MemFileSource` (`ValueError` otherwise). |
+| `f.len`, `f.kind` (`skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path` | File facts. |
 | `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval (`ValueError` for a trace out of range; `sampleIntervalUs` and `copyBytes` also for a closed file). |
-| `f.index.segy`, `f.index.segdRecords`, `f.close()` | The format's own headers. A `SeismicFile` that goes out of scope unmaps itself; `close` does it early. |
+| `f.index.segy`, `f.index.segdRecords`, `f.index.seg2`, `f.seg2Trace(i)`, `f.close()` | The format's own headers (`seg2Trace` re-reads a SEG-2 Trace Descriptor Block from the map). A `SeismicFile` that goes out of scope unmaps itself; `close` does it early. |
 
 ## Reading samples
 | Proc | What |
@@ -134,6 +134,18 @@ fatal diagnostic.
   `headerBytes`, `findChannelSet` (an `Option[SegdChannelSetRef]`), and per trace
   `channelType`, `sampleIntervalUs`, `startTimeMs`, `descaleFactor`. The reader's `record`,
   `label`, `log` and `toc` are read-only.
+- SEG-2 (read only; random access, so it works on the whole file as an `openArray[byte]`,
+  normally the map): `readSeg2(bytes, log, name): Seg2File` (File Descriptor Block: `order`,
+  `revision`, `stringTerm`, `lineTerm`, `pointers`, `strings`), `traces(bytes, file, log)` /
+  `readSeg2Trace(bytes, file, i, log): Seg2Trace` (`valid`, `blockSize`, `dataSize`,
+  `numSamples`, `formatCode`, `strings`, `sampleCount`), `readSamples(bytes, file, trace,
+  dst)`, `decodeSeg2Samples` (formats 1-5 as `Seg2Format`). Strings are kept verbatim as
+  `Seg2String(key, value)`; lookups are case-insensitive: `value`, `contains`, `number`,
+  `numbers`, `integer`, `noteLines`, and typed getters `sampleInterval`, `delay`,
+  `channelNumber`, `receiverLocation`/`sourceLocation` (`Seg2Location`), `traceType`,
+  `traceSort`, `units`, `acquisitionTime` (UTC seconds), all `Option`s. Named header fields,
+  header export, conversion, vendor maps, the writer, C ABI and Python names for SEG-2 are
+  not supported yet (`ValueError` / fatal diagnostic saying so).
 - Vendor maps: `loadVendorMaps`, `registerVendorDecoder`, `decode` (an
   `Option[VendorBlock]`; `blk["field"]` reads a value), `applies`, `vendorContext(rec or
   file)`, `decodeVendorAreas`; `scaffoldVendorMap(path, reg)` / `toNif` write a skeleton map

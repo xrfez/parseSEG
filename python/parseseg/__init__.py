@@ -339,8 +339,8 @@ _E_TextLayout = {"lines": 0, "fixed80": 1, "ebcdic80": 2, }
 _N_TextLayout = {0: "lines", 1: "fixed80", 2: "ebcdic80", }
 _E_Dtype = {"float32": 1, "float64": 2, }
 _N_Dtype = {1: "float32", 2: "float64", }
-_E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, }
-_N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", }
+_E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, "SEG-2": 3, }
+_N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", 3: "SEG-2", }
 
 # ---------------------------------------------------------- structs
 
@@ -962,7 +962,7 @@ class SeismicFile(_Handle, _SeismicFileExtras):
 
     @property
     def kind(self):
-        """SEG-Y or SEG-D; `skUnknown` when the file was not recognized."""
+        """SEG-Y, SEG-D or SEG-2; `skUnknown` when the file was not recognized."""
         _h = self._enter()
         try:
             _o = ctypes.c_int32()
@@ -986,7 +986,7 @@ class SeismicFile(_Handle, _SeismicFileExtras):
 
     @property
     def record_count(self):
-        """SEG-D records; 1 for SEG-Y; 0 for an unrecognized file."""
+        """SEG-D records; 1 for SEG-Y and SEG-2; 0 for an unrecognized file."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
@@ -1126,10 +1126,11 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
         binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
         interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
-        interval. NaN when the headers cannot give it (a SEG-Y trace header cut
-        off by the end of the file): unknown data, not a caller error. Raises
-        `ValueError` for a trace out of range or a closed file (the headers are
-        read from the map, as `traceField` does)."""
+        interval. SEG-2: the trace's SAMPLE_INTERVAL (seconds) in µs. NaN when
+        the headers cannot give it (a SEG-Y trace header cut off by the end of
+        the file, a SEG-2 trace without SAMPLE_INTERVAL): unknown data, not a
+        caller error. Raises `ValueError` for a trace out of range or a closed
+        file (the headers are read from the map, as `traceField` does)."""
         _h = self._enter()
         try:
             _o = ctypes.c_double()
@@ -1645,8 +1646,9 @@ def convert_segd_revision(src_path, dst_path, opts=None):
     return _logged(_st, _o)
 
 def open_seismic(path, twos_complement8015=False, keys=False):
-    """Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
-    index (with per-trace geometry when `keys`). Format problems are in
+    """Maps the disk file `path`, detects SEG-Y, SEG-D or SEG-2, and builds the trace
+    index (with per-trace geometry when `keys`; `twosComplement8015` also
+    reads SEG-2 format-3 mantissas as two's complement). Format problems are in
     `index.log`; an undetectable file gives a fatal diagnostic and an empty
     index. Raises `IOError`/`OSError` if the file cannot be opened or
     mapped. `writable` maps it read-write, for in-place header edits
@@ -1658,7 +1660,8 @@ def open_seismic(path, twos_complement8015=False, keys=False):
 
 def convert_file(src_path, dst_path, opts=None):
     """Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
-    file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
+    file `dstPath` (see `convertSegy` / `convertSegdToSegy`); SEG-2 input is
+    not supported yet (a fatal diagnostic). Never raises:
     problems, including I/O failures, are in the result. The output is
     written to `<dstPath>.tmp` and renamed when complete, so a failed
     conversion leaves an existing `dstPath` untouched and no partial file."""

@@ -173,16 +173,19 @@ proc scanSegy(s: var VendorScaffold, path: string, reg: VendorRegistry) =
 proc scaffoldVendorMap*(path: string, reg: VendorRegistry): VendorScaffold =
   ## The unmapped vendor areas of the SEG-D or SEG-Y file `path` (areas that
   ## `reg` already decodes are left out). Raises `IOError` if `path` cannot
-  ## be read and `ValueError` if it is neither standard.
+  ## be read and `ValueError` if it is neither standard (SEG-2 has no vendor
+  ## maps yet).
   var head = newString(8192)
   let fh = open(path, fmRead)
   try: head.setLen fh.readBuffer(addr head[0], head.len)
   finally: fh.close()
   let kind = detectKind(head.toOpenArrayByte(0, head.len - 1))
-  if kind == skUnknown:
-    raise newException(ValueError, path & " is neither SEG-Y nor SEG-D")
   result = VendorScaffold(source: path, format: kind)
-  if kind == skSegd: result.scanSegd(path, reg) else: result.scanSegy(path, reg)
+  case kind
+  of skSegd: result.scanSegd(path, reg)
+  of skSegy: result.scanSegy(path, reg)
+  of skSeg2: raise newException(ValueError, "vendor maps are not supported for SEG-2 yet")
+  of skUnknown: raise newException(ValueError, path & " is neither SEG-Y nor SEG-D")
 
 func len*(s: VendorScaffold): int =
   ## Unmapped areas found.

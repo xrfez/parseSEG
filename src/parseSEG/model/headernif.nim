@@ -117,6 +117,14 @@ proc putBlock(o: var NifOut, f: SeismicFile, blk: BlockRef, raw: bool, indent: s
       hexOf(f.unsafeMemory.toOpenArray(int(blk.offset), int(blk.offset) + blk.size - 1)) & "\")"
   o.put ")"
 
+func standardName(k: SeismicKind): string =
+  # The `(standard)` atom of a document.
+  case k
+  of skSegy: "segy"
+  of skSegd: "segd"
+  of skSeg2: "seg2"
+  of skUnknown: "unknown"
+
 proc recordBlocks(f: SeismicFile, record: int): seq[BlockRef] =
   var b = f.index.locateBlock(hsRecord, record, "gh1")
   if b.error.len == 0: result.add b.blk
@@ -132,8 +140,11 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   ## through a buffer (memory does not grow with the file). `raw` adds each
   ## block's bytes, and each trace's whole header, as hex. The document is
   ## written to `path.tmp` and renamed when complete. Raises `IOError` if it
-  ## cannot be written, and `ValueError` if `f` is closed or `path` is the
-  ## seismic file itself.
+  ## cannot be written, and `ValueError` if `f` is closed, is SEG-2 (its
+  ## keyword strings have no named fields yet), or `path` is the seismic
+  ## file itself.
+  if f.kind == skSeg2:
+    raise newException(ValueError, "header export is not supported for SEG-2 yet")
   if not f.isOpen and f.len > 0: raise newException(ValueError, "the file is closed")
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
@@ -143,7 +154,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   if not open(o.f, tmp, fmWrite): raise newException(IOError, "cannot write " & tmp)
   try:
     o.put "(.nif27)\n(.vendor \"parseSEG\")\n(headers\n (standard " &
-      (if f.kind == skSegy: "segy" else: "segd") & ")\n (traces " & $f.len & ")\n"
+      standardName(f.kind) & ")\n (traces " & $f.len & ")\n"
     let records = if f.kind == skSegd: f.index.segdRecords.len else: 0
     o.put " (records " & $records & ")"
     let bin = f.index.locateBlock(hsFile, 0, "binary")
@@ -331,7 +342,7 @@ iterator entries(n: var NifIn, facts: var DocFacts): (HeaderScope, int64, string
       case t.s
       of "standard":
         let x = n.next
-        if x.kind != tkIdent: n.docError("expected segy or segd")
+        if x.kind != tkIdent: n.docError("expected segy, segd or seg2")
         facts.standard = x.s
         n.expectClose("(standard")
       of "traces":
@@ -383,7 +394,7 @@ proc checkFacts(facts: DocFacts, f: SeismicFile, force: bool, nifPath: string,
     log: var DiagLog): bool =
   ## False (with a fatal diagnostic) when the document describes another file.
   var problems: seq[string]
-  let std = if f.kind == skSegy: "segy" else: "segd"
+  let std = standardName(f.kind)
   if facts.standard.len > 0 and facts.standard != std:
     problems.add "the document is " & facts.standard & ", the file " & std
   if facts.traces >= 0 and facts.traces != f.len:

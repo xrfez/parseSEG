@@ -4,6 +4,7 @@
 type
   SeismicKind* = enum
     ## The standard of a file or stream.
-    skUnknown = "unknown" ## Neither format was recognized (see the log).
+    skUnknown = "unknown" ## No standard was recognized (see the log).
     skSegy = "SEG-Y"
     skSegd = "SEG-D"
+    skSeg2 = "SEG-2"
