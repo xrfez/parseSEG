@@ -801,7 +801,7 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
         - `DiagLog` gains `[]`.
       - ABI version 3. `abi_test.c`, `test_pyapi.py`, the `ttargets` host and the docs
         follow the new names.
-- [ ] 12.3 Apply the approved 12.1 findings, one module per commit, tests green after each.
+- [x] 12.3 Apply the approved 12.1 findings, one module per commit, tests green after each.
 - [ ] 12.4 Review by an agent; fix its findings.
 
 ### Future (noted, not scheduled)
@@ -1202,3 +1202,25 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
   - Found by the new tests: `componentGroupIds` allocated before checking its range, and hostile C ranges (`INT64_MAX`) overflowed `Slice.len`. Both are fixed.
   - Tests: new `tcoreapi`; `abi_test.c`, `test_pyapi.py` and the `ttargets` host were rewritten for v3. Docs `c_abi.md`, `python.md` and `api.md` were updated.
 - 2026-11-08: Task 12.1 done: an idiomatic-Nim audit by 4 read-only agents. The findings are in the 12.1 entry: A, 8 bugs to fix first (an index deep copy per `sampleIntervalUs` call, stale Source Description accessors, stale version strings, a vendormap last-root bug, handle leaks, a writer `doAssert`, a hex message, Defect catching at the C boundary); B, 12 internal groups; C, 12 public API groups awaiting owner approval. Next: the owner approves or rejects C1-C12, then 12.3 (A, then B, then the approved C, one module per commit).
+- 2026-11-08: **Task 12.3 done.** All A, B and C findings applied in 20 commits, with the full suite green before each. Four agents worked sequentially, by module group. **ABI v4, package 0.4.0.**
+  - Bugs (A): the per-call `TraceIndex` copy; stale Source Description accessors; one `PackageVersion` (`version.nim`, read from the nimble file); a second `(vendormap)` root is an error; handle leaks; the tape-label `doAssert`. Override methods declare `raises: [CatchableError]`, so the C boundary no longer catches Defects or bare `Exception`.
+  - Data model: `SegdRecord`/`SegdScanType`/`SegdTrace` are case objects on `SegdLayout` (`slRev2` covers Rev 0-2, `slRev3`). Optional parts are `Option` (`gh2`, `ext1`, `format`, `label`; `SegyFile.format` too).
+  - Lookups: raising forms plus `find*`/`Option` (`findTraceField`, `findChannelSet`, `fieldByName`, `toSampleFormat`, `toSegdFormat`, `maps.decode`, `resolveLine`, `relation`); `detectKind` returns `SeismicKind`.
+  - New internal modules:
+    - `common/outputfile.nim`, `common/niftext.nim`, `common/diagcodes.nim`, `common/seismickind.nim`;
+    - `segd/blocks.nim` (one `decodeBlock`);
+    - `survey/cards.nim` (the card helpers, no longer re-exported);
+    - `abi/runtime.nim` (split from the generator, which now keeps one `Bindings` state).
+  - Behaviour:
+    - bad caller input raises `ValueError` everywhere;
+    - a journal sync failure refuses the edit, and the map is not written;
+    - a log-less `readTraces` raises on an undecodable trace, and `readTraces(..., log)` records it;
+    - `PrefetchChunk.log` holds one error per failed row.
+  - C/Python (v4):
+    - `seg_prefetcher_positions` → `seg_prefetcher_len` (Python `len(p)`);
+    - `trace_at` and `sample_interval_us` give `SEG_ERR_ARGUMENT` for bad input;
+    - `read_traces` gives `SEG_ERR_FORMAT` on an undecodable trace;
+    - `open_editor` with the journal equal to the file gives `SEG_ERR_ARGUMENT`;
+    - `SegConvertOptions.format` / `SegSegdConvertOptions.format` are enums (`SEG_SEGY_TARGET_FORMAT_*`, `SEG_SEGD_TARGET_FORMAT_*`; Python `"keep"`, `"5"`, ...).
+  - Renames: the full old → new list is in the commit messages and `docs/api.md`, e.g. `decodeEbcdic`, `entriesFor`, `bytePos`, `text=`, `gh2Rev3`/`descriptorsRev3`/`ext1Rev3`, `scaffoldVendorMap`, `vendorContext`, `encodeSps`/`encodeP1`, `FieldValue.intVal/floatVal/text`, `SegyData.log`/`SegdData.log`.
+  - Left (minor): a few `31`/`95` byte offsets in vendor apply/scaffold; markdown table rows over 100 columns in two module docs; the lowercase and uppercase hex helpers in edit/headernif; nested capturing procs in `writeSps`. Next: 12.4 (review by an agent).
