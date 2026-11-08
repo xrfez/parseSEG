@@ -351,6 +351,7 @@ typedef struct SegTraceKeys {
     uint8_t sensor_type; /* SEG-D THE#1 byte 21. */
     uint8_t component; /* Distinguishes the components of one station (see module doc). */
     double channel; /* Channel (trace) number in the field record: SEG-Y bytes 13-16, SEG-D the demux trace number (Rev 3: extended when `FFFF`). Survey relation records (SPS X) map (record, channel) to stations. */
+    double time; /* When the trace was recorded, in UTC POSIX seconds (fractional); NaN if unknown. SEG-Y: trace bytes 157-168 in their time basis; SEG-D: GH#1, for Rev 3 the trace's Timestamp block or the GH#3 time zero (see the module documentation). */
 } SegTraceKeys;
 
 /* SEG-Y revision from bytes 3501 (major) and 3502 (minor). 0.0 is the traditional 1975 format. */

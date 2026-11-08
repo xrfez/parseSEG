@@ -85,6 +85,7 @@ type
     ## trace's geometry then does no name lookups and no allocation.
     order: ByteOrder
     plans: array[GeometryField, seq[Resolved]]
+    timeBasis: int16 ## Binary 3511-3512 (Rev 2 and later; else 0).
 
 func scalarName(k: LayoutType): string =
   case k
@@ -141,6 +142,13 @@ func initGeometryReader*(f: SegyFile): GeometryReader =
   result.order = f.byteOrder
   for g in GeometryField:
     result.plans[g] = resolve(f.layoutOf, $g)
+  if f.revision.major >= 2: result.timeBasis = f.binary.timeBasisCode
+
+func timeBasis*(g: GeometryReader): int16 {.inline.} =
+  ## The file's time basis code (binary 3511-3512; 0 before Rev 2, where
+  ## those bytes are unassigned). A trace's own code (bytes 167-168)
+  ## overrides it when non-zero.
+  g.timeBasis
 
 proc geometry*(g: GeometryReader, t: SegyTrace): TraceGeometry =
   ## The common values of trace `t` of the file `g` was made for.

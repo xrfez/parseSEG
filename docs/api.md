@@ -68,7 +68,7 @@ Sorting is a selection: a sort produces a list of trace indices, and no data is 
 | `findTraceField`, `findRecordField`, `findFileField` | The same, as an `Option[FieldValue]` (none when the field cannot be read). |
 | `fieldNames(HeaderBlock)`, `f.blockKind(scope, index, "ext1")`, `h.fieldByName("sourceX")` | The fields of a block kind; the kind of a file's block (`hsFile`, `hsRecord`, `hsTrace`); a field of a decoded header object (`Option`). |
 | `readSegyHeaders(path)`, `readSegdHeaders(path)`; `openSegy`/`openSegd(src, headersOnly = true)` | Every header object, samples skipped (also on tape). |
-| `traceKeys(...)`, `TraceKeys` | Per-trace geometry (record, source and receiver line/point/index/coordinates, component). |
+| `traceKeys(...)`, `TraceKeys` | Per-trace geometry (record, source and receiver line/point/index/coordinates, component) and the trace's UTC time (`time`, POSIX seconds, NaN if unknown; task 6.9: SEG-Y bytes 157-168 with the time basis, SEG-D GH#1, Rev 3 GH#3 time zero or the trace's Timestamp block). |
 
 ## Gathers and components
 `gathers(f or index)`: a split into `Gather` (`kind`: shot, receiver, cmp, offset, other or

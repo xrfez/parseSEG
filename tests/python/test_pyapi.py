@@ -78,7 +78,7 @@ assert e["num_samples"] == 2001 and e["header_bytes"] == 240 and e["offset"] > 3
 assert set(e) == {"offset", "header_bytes", "num_samples", "record", "channel_set",
                   "scan_type", "channel_type"}
 k = f.trace_keys(5)
-assert "src_x" in k and "rcv_line" in k and "cmp_x" in k
+assert "src_x" in k and "rcv_line" in k and "cmp_x" in k and math.isnan(k["time"])
 assert f.trace_field(5, "trace.sourceX") == 1704188
 assert isinstance(f.file_field("binary.formatCode"), int)
 err = raises(parseseg.ArgumentError, f.trace_field, 5, "trace.bogus")
@@ -114,6 +114,7 @@ assert s["sample_interval_us"] == 2000.0 and s["record_length_ms"] == 4000.0
 assert s["coordinate_units"] == "meters" and s["crs_format"] == "P1/11"
 assert f.crs_text().startswith("IOGP,IOGP P1") and f.channel_sets() == []
 with parseseg.open_seismic(INOVA) as d3:
+    assert abs(parseseg.open_seismic(INOVA, keys=True).trace_keys(4)["time"] - 1790959547.504) < 1e-6
     s3 = d3.summary()
     assert set(s3) == set(s) and s3["standard"] == "SEG-D" and s3["first_field_record"] == 151
     assert s3["crs_format"] == "stanza" and "CRS code=32050" in d3.crs_text()

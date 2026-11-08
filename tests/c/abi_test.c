@@ -79,7 +79,7 @@ static void test_layout(void) {
     OFF(SegTraceKeys, rcv_z); OFF(SegTraceKeys, cmp_x); OFF(SegTraceKeys, cmp_y);
     OFF(SegTraceKeys, src_index); OFF(SegTraceKeys, rcv_index); OFF(SegTraceKeys, depth_index);
     OFF(SegTraceKeys, reshoot_index); OFF(SegTraceKeys, sensor_type); OFF(SegTraceKeys, component);
-    OFF(SegTraceKeys, channel);
+    OFF(SegTraceKeys, channel); OFF(SegTraceKeys, time);
     OFF(SegTensorView, data); OFF(SegTensorView, dtype); OFF(SegTensorView, rank);
     OFF(SegTensorView, shape); OFF(SegTensorView, strides);
     OFF(SegValue, kind); OFF(SegValue, i); OFF(SegValue, f); OFF(SegValue, text);
@@ -138,7 +138,10 @@ static void test_summary(void) {
     OK(seg_seismic_file_channel_sets(f, cs, 8, &len));
     CHECK(len == 0);
     seg_seismic_file_release(f);
-    f = open_file("inova_rev30_5traces.sgd", false);
+    f = open_file("inova_rev30_5traces.sgd", true);
+    SegTraceKeys k;
+    OK(seg_seismic_file_trace_keys(f, 4, &k)); /* task 6.9: the GH#3 time zero, UTC */
+    CHECK(fabs(k.time - 1790959547.504) < 1e-6);
     OK(seg_seismic_file_summary(f, &s));
     CHECK(s.standard == SEG_SEISMIC_KIND_SEG_D && s.revision.major == 3 && !s.mixed_revisions);
     CHECK(s.format_code == 8058 && s.first_field_record == 151 && s.sample_interval_us == 1000.0);
@@ -180,7 +183,7 @@ static void test_files(void) {
           strlen(seg_last_error()) > 0);
     SegTraceKeys k;
     OK(seg_seismic_file_trace_keys(f, 0, &k));
-    CHECK(k.ensemble == 1001001.0);
+    CHECK(k.ensemble == 1001001.0 && isnan(k.time)); /* trace bytes 157-158: year 0 */
     uint8_t head[8];
     OK(seg_seismic_file_copy_bytes(f, 0, 4, head, sizeof head, &n));
     CHECK(n == 4 && head[0] == 0xC3);
