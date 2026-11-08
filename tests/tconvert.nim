@@ -146,3 +146,23 @@ block invalid_targets_and_inputs:
   doAssert convertFile(tmp / "missing", tmp / "x.sgy").isFatal
   writeFile(tmp / "junk", repeat('\0', 5000))
   doAssert convertFile(tmp / "junk", tmp / "x.sgy").isFatal
+
+block converted_samples_equal_the_input_with_reused_buffers:
+  # Task 13.2: the conversion buffers are sized uninitialized; every sample
+  # of every trace must still be the input's (multi-trace files, so buffers
+  # are reused from trace to trace).
+  for name in ["inova_rev30_5traces.sgd", "00000151_12900_11300.sgd"]:
+    let src = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles" / name
+    if fileExists(src):
+      let dst = getTempDir() / ("parseseg_reuse_" & name & ".sgy")
+      let log = convertFile(src, dst, ConvertOptions())
+      doAssert not log.hasErrors, $log
+      var a = openSeismic(src)
+      var b = openSeismic(dst)
+      doAssert a.len == b.len
+      let ta = a.readTraces(0 ..< a.len, float64)
+      let tb = b.readTraces(0 ..< b.len, float64)
+      doAssert ta == tb, name
+      a.close()
+      b.close()
+      removeFile(dst)
