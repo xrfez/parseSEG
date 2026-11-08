@@ -524,6 +524,33 @@ func structural(k: HeaderBlock): seq[string] =
   of hbSeg2File, hbSeg2Trace: @[] # every SEG-2 edit is refused (`editBlock`)
   else: @[] # not reachable by name (listings only)
 
+proc commitSpan(ed: var HeaderEditor, at: int64, buf: openArray[byte], label: string): string =
+  # Journals and writes the bytes of `buf` (meant for `at ..< at + buf.len`,
+  # inside the map) that differ from the map, as one span from the first to
+  # the last changed byte. "" when done (also when nothing differs), else
+  # why nothing changed.
+  let mem = ed.file.unsafeMemory
+  let a = int(at)
+  let size = buf.len
+  var first = 0
+  while first < size and buf[first] == mem[a + first]: inc first
+  if first == size: return "" # no change
+  var last = size - 1
+  while buf[last] == mem[a + last]: dec last
+  try:
+    ed.journalEdit(at + first, mem.toOpenArray(a + first, a + last),
+      buf.toOpenArray(first, last), label)
+  except IOError as e:
+    return "the journal cannot be written (" & e.msg & "); nothing changed"
+  inc ed.edits
+  if ed.batch:
+    ed.pending.add PendingWrite(at: at + first, bytes: @(buf.toOpenArray(first, last)))
+    if ed.pending.len >= MaxPending and not ed.flushBatch():
+      return "the journal cannot be synced; this batch's pending edits were not written"
+  else:
+    copyMem(addr mem[a + first], addr buf[first], last - first + 1)
+  ""
+
 proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, field: string,
     v: FieldValue, loc: Location): bool =
   # Decodes the block, sets the field, re-encodes only what changed, journals
@@ -560,32 +587,51 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
     encodeChanged(h, buf, firstByte, b.order)
   except SegFormatError as e:
     refuse e.msg
-  var first = 0
-  while first < size and buf[first] == mem[a + first]: inc first
-  if first == size: return true # no change
-  var last = size - 1
-  while buf[last] == mem[a + last]: dec last
   let label = (if loc.trace >= 0: "trace " & $loc.trace & " "
                elif loc.record >= 0: "record " & $loc.record & " " else: "") &
     b.name & "." & field
-  try:
-    ed.journalEdit(at + first, mem.toOpenArray(a + first, a + last),
-      buf.toOpenArray(first, last), label)
-  except IOError as e:
-    refuse "the journal cannot be written (" & e.msg & "); nothing changed"
-  inc ed.edits
-  if ed.batch:
-    ed.pending.add PendingWrite(at: at + first, bytes: buf[first .. last])
-    if ed.pending.len >= MaxPending and not ed.flushBatch():
-      refuse "the journal cannot be synced; this batch's pending edits were not written"
-  else:
-    copyMem(addr mem[a + first], addr buf[first], last - first + 1)
+  let failure = ed.commitSpan(at, buf, label)
+  if failure.len > 0: refuse failure
   true
 
 proc editLocated(ed: var HeaderEditor, b: BlockRef, field: string, v: FieldValue,
     loc: Location): bool =
   withBlockType(b.kind):
     result = ed.editBlock[:BlockT](b, firstByte, field, v, loc)
+
+proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label: string,
+    loc: Location): bool =
+  ## **Internal.** Journals and writes the bytes of `bytes` (for the file's
+  ## bytes `at ..< at + bytes.len`) that differ from the file, as one span:
+  ## for edits that named fields do not cover, such as geometry written
+  ## through a SEG-Y Layout stanza (`survey/writeback`). The caller encodes
+  ## and checks the values and keeps clear of structural fields. A no-op
+  ## writes nothing. False, with an error in `log` labelled `label`, when
+  ## refused.
+  template refuse(msg: string) =
+    var l = loc
+    l.field = label
+    ed.log.report(sevError, dcValidation, label & ": " & msg, at, l)
+    return false
+  if not ed.file.isOpen: refuse "the file is closed"
+  if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
+  if bytes.len == 0: return true
+  if at < 0 or at + bytes.len > ed.file.mappedSize: refuse "the bytes lie outside the file"
+  if ed.batch and ed.overlapsPending(at, bytes.len) and not ed.flushBatch():
+    refuse "the journal cannot be synced; nothing changed"
+  let failure = ed.commitSpan(at, bytes, label)
+  if failure.len > 0: refuse failure
+  true
+
+func batching*(ed: HeaderEditor): bool {.inline.} =
+  ## **Internal.** Inside `beginBatch` / `endBatch`.
+  ed.batch
+
+proc flushPending*(ed: var HeaderEditor): bool =
+  ## **Internal.** Writes the batch's pending edits now (the batch goes on),
+  ## so the map holds every edit made so far. False, like `endBatch`, when
+  ## the journal cannot be synced.
+  ed.flushBatch()
 
 proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
   var l = loc

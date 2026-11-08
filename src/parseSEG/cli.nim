@@ -34,7 +34,7 @@ Inspecting
                                 and receiver stations and coordinates, offset
 
 Survey files (SPS 1.0/2.1, SEG P1 1983; docs/spec/sps.md, p1_p2_p3.md)
-  SURVEY options join survey geometry to the traces (info, keys):
+  SURVEY options join survey geometry to the traces (info, keys, survey-apply):
     --sps=F[,F...]              SPS R/S/X files: stations, and X relations
                                 (field record + channel -> stations)
     --p1=F[,F...]               SEG P1 shotpoints (sources)
@@ -44,6 +44,14 @@ Survey files (SPS 1.0/2.1, SEG P1 1983; docs/spec/sps.md, p1_p2_p3.md)
     --trailing-digits           unmapped names use their trailing digits
     --multi-component           SPS channel increment k: k components/station
     --overwrite                 replace stations and coordinates already known
+  survey-apply <file> SURVEY [-o out | --in-place [--journal=J]] [--values=LIST]
+                                write the joined geometry into the headers:
+                                into a copy (-o; multiplexed SEG-D is written
+                                demultiplexed) or in place (journaled, undo
+                                with `journal rollback`); without either, only
+                                report what would change. LIST picks from
+                                source-xy,receiver-xy,elevations,midpoints,
+                                offsets,stations (default: all)
   survey <file> [-o out] [--rev=1.0|2.1] [--decimals=G,D]
                                 summary and diagnostics of an SPS or P1 file;
                                 with -o, write it back (SPS: in revision --rev)
@@ -106,10 +114,12 @@ type Args = object
   opts: seq[(string, string)]
 
 const ValueOptions = ["o", "out", "journal", "traces", "fields", "rev", "format", "to",
-  "byte-order", "text", "min", "map", "name", "sps", "p1", "decimals", "line-map", "records"]
+  "byte-order", "text", "min", "map", "name", "sps", "p1", "decimals", "line-map", "records",
+  "values"]
 
 const Flags = ["force", "keys", "all", "nif", "descale", "no-station-header", "fields-only",
-  "dry-run", "help", "h", "elevation", "trailing-digits", "multi-component", "overwrite", "file"]
+  "dry-run", "help", "h", "elevation", "trailing-digits", "multi-component", "overwrite", "file",
+  "in-place"]
 
 const SurveyOptions = ["sps", "p1", "decimals", "line-map", "elevation", "trailing-digits",
   "multi-component", "overwrite"]
@@ -867,6 +877,73 @@ proc surveyCmd(a: Args): int =
   printLog(log, sevWarning)
   if log.failed: 1 else: 0
 
+proc parseValues(a: Args): GeometryFields =
+  if not a.has("values"): return GeometryFields()
+  result = GeometryFields(sourceXy: false, receiverXy: false, elevations: false,
+    midpoints: false, offsets: false, stations: false)
+  for v in a.get("values").split(','):
+    case v.strip
+    of "source-xy": result.sourceXy = true
+    of "receiver-xy": result.receiverXy = true
+    of "elevations": result.elevations = true
+    of "midpoints": result.midpoints = true
+    of "offsets": result.offsets = true
+    of "stations": result.stations = true
+    else: usage("--values: unknown value '" & v & "' (source-xy, receiver-xy, elevations, " &
+      "midpoints, offsets, stations)")
+
+proc printChanges(c: GeometryChanges, verb: string) =
+  echo "traces:      ", c.traces, " ", verb
+  for (name, n) in [("source X/Y", c.sourceXy), ("receiver X/Y", c.receiverXy),
+      ("source z", c.sourceZ), ("receiver z", c.receiverZ), ("midpoints", c.midpoints),
+      ("offsets", c.offsets), ("src station", c.sourceStations),
+      ("rcv station", c.receiverStations)]:
+    echo alignLeft(name & ":", 13), n, " traces"
+  echo "unwritable:  ", c.unwritable, " values (no field in the file, or too large)"
+
+proc surveyApply(a: Args): int =
+  a.onlyOptions(@["o", "out", "in-place", "journal", "values"] & @SurveyOptions)
+  a.needArgs(1, "survey-apply <file> --sps=... [-o out | --in-place]")
+  if not a.wantsSurvey: usage("survey-apply needs --sps or --p1")
+  let path = a.pos[0]
+  let output = a.get("o", a.get("out"))
+  let inPlace = a.has("in-place")
+  if output.len > 0 and inPlace: usage("-o and --in-place exclude each other")
+  if a.has("journal") and not inPlace: usage("--journal needs --in-place")
+  if output.len > 0: refuseSame(output, path)
+  let fields = parseValues(a)
+  var f = openFile(path, keys = true)
+  defer: f.close()
+  if f.kind == skSeg2: cannot("survey-apply does not support SEG-2 files yet")
+  if inPlace and f.demuxPath.len > 0:
+    cannot(path & " holds multiplexed SEG-D, which cannot be edited in place; use -o " &
+      "(the copy is written demultiplexed)")
+  var log: DiagLog
+  let g = loadSurvey(a, log)
+  let overwrite = a.has("overwrite")
+  let n = f.index.applySurvey(g, overwrite)
+  echo "survey:      ", g.sourceCount, " sources, ", g.receiverCount, " receivers, ",
+    g.relationCount, " relation runs; ", n, " traces joined"
+  var c: GeometryChanges
+  if output.len > 0:
+    f.close()
+    log.add copyWithGeometry(path, output, g, c, fields, overwrite)
+    printChanges(c, "changed in " & output)
+  elif inPlace:
+    var ed = openEditor(path, a.get("journal"))
+    try:
+      c = ed.writeGeometry(f.index, fields)
+    finally:
+      ed.close()
+    log.add ed.log
+    printChanges(c, "changed in place")
+    echo "journal:     ", ed.journalPath, " (undo: parseSEG journal rollback)"
+  else:
+    c = f.geometryChanges(fields, log)
+    printChanges(c, "would change (nothing written; use -o or --in-place)")
+  printLog(log, sevWarning)
+  if log.failed: 1 else: 0
+
 # ------------------------------------------------------------------- main --
 
 proc run*(args: seq[string]): int =
@@ -891,6 +968,7 @@ proc run*(args: seq[string]): int =
     of "diag": diag(a)
     of "keys": keysCmd(a)
     of "survey": surveyCmd(a)
+    of "survey-apply": surveyApply(a)
     of "convert": convertCmd(a)
     of "edit": edit(a)
     of "headers": headers(a)

@@ -254,6 +254,29 @@ block survey:
   discard fails(2, "survey", sps, "--decimals=1,1")   # P1 only
   discard fails(2, "keys", s63, "--overwrite")        # needs --sps or --p1
 
+block survey_apply:
+  let sps = tmp / "t.sps" # from the survey block: record 63 -> stations 20/205, 10/101
+  let path = fresh(s63)
+  let original = readFile(path)
+  let dry = ok("survey-apply", path, "--sps=" & sps, "--overwrite")
+  doAssert "would change" in dry and "rcv station: 1 traces" in dry, dry
+  doAssert "receiver X/Y: SEG-D Rev 1/2 trace headers have no coordinate fields" in dry
+  doAssert readFile(path) == original, "a dry run writes nothing"
+  let inPlace = ok("survey-apply", path, "--sps=" & sps, "--overwrite", "--in-place")
+  doAssert "changed in place" in inPlace and "journal:" in inPlace
+  doAssert "\t10\t101\t" in ok("keys", path)
+  discard ok("journal", "rollback", path, path & ".edits.nif")
+  doAssert readFile(path) == original
+  let copy = tmp / "63geo.sgd"
+  doAssert "changed in " & copy in ok("survey-apply", s63, "--sps=" & sps, "--overwrite",
+    "-o", copy, "--values=stations")
+  doAssert "\t10\t101\t" in ok("keys", copy)
+  discard fails(2, "survey-apply", s63)                       # needs --sps
+  discard fails(2, "survey-apply", s63, "--sps=" & sps, "-o", copy, "--in-place")
+  discard fails(2, "survey-apply", s63, "--sps=" & sps, "--journal=j")
+  discard fails(2, "survey-apply", s63, "--sps=" & sps, "--values=nope")
+  discard fails(2, "survey-apply", s63, "--sps=" & sps, "-o", s63)
+
 block review_outputs_never_clobber_inputs:
   let f = fresh(inglewood)
   doAssert "is the input file" in fails(2, "headers", "export", f, "-o", f)

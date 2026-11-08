@@ -39,10 +39,11 @@ export traceindex except unsafeMemory, decodeEntry, readTracesRaw, mappedSize, f
   requireKeys, checkSpan, spanLen
 export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
   isLayoutField, isNamedField, fieldValueOf
-export keys, gathers, prefetch, edit, headernif, summary, headerlist
+export keys, gathers, prefetch, headernif, summary, headerlist
+export edit except writeBytes, flushPending, batching
 
-import parseSEG/survey/[textrec, sps, p1, join]
-export textrec, sps, p1, join
+import parseSEG/survey/[textrec, sps, p1, join, writeback]
+export textrec, sps, p1, join, writeback
 
 import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
 export records, diskio, memsource, tapeimage, tapedevice

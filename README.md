@@ -33,6 +33,8 @@ parseSEG vendormap apply shot.sgd --map=vendor.nif
 parseSEG survey line.s01                       # an SPS or SEG P1 file: summary, diagnostics
 parseSEG survey line.s01 -o line10.s01 --rev=1.0                   # SPS revisions
 parseSEG keys shot.sgd --sps=line.r01,line.s01,line.x01            # geometry joined to traces
+parseSEG survey-apply shot.sgd --sps=line.r01,line.s01,line.x01    # what writing it would change
+parseSEG survey-apply shot.sgd --sps=... -o shot_geo.sgd           # ... or --in-place (journaled)
 ```
 
 Exit status: 0 success, 1 the command reported errors, 2 a usage error.

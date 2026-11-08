@@ -211,6 +211,16 @@ const char *seg_last_error(void);
 #define SEG_SEGD_TARGET_FORMAT_9058 13
 #define SEG_SEGD_TARGET_FORMAT_9080 14
 
+/* SpsRevision */
+#define SEG_SPS_REVISION_AUTO 0
+#define SEG_SPS_REVISION_1_0 1
+#define SEG_SPS_REVISION_2_1 2
+
+/* TextLayout */
+#define SEG_TEXT_LAYOUT_LINES 0
+#define SEG_TEXT_LAYOUT_FIXED80 1
+#define SEG_TEXT_LAYOUT_EBCDIC80 2
+
 /* ByteOrder */
 #define SEG_BYTE_ORDER_BIG 0
 #define SEG_BYTE_ORDER_LITTLE 1
@@ -301,16 +311,6 @@ const char *seg_last_error(void);
 #define SEG_HEADER_BLOCK_SEG_2_FILE 23
 #define SEG_HEADER_BLOCK_SEG_2_TRACE 24
 
-/* SpsRevision */
-#define SEG_SPS_REVISION_AUTO 0
-#define SEG_SPS_REVISION_1_0 1
-#define SEG_SPS_REVISION_2_1 2
-
-/* TextLayout */
-#define SEG_TEXT_LAYOUT_LINES 0
-#define SEG_TEXT_LAYOUT_FIXED80 1
-#define SEG_TEXT_LAYOUT_EBCDIC80 2
-
 /* Dtype */
 #define SEG_DTYPE_FLOAT32 1
 #define SEG_DTYPE_FLOAT64 2
@@ -324,10 +324,10 @@ const char *seg_last_error(void);
 
 typedef struct SegDiagLog SegDiagLog;
 typedef struct SegSeismicFile SegSeismicFile;
+typedef struct SegSurveyGeometry SegSurveyGeometry;
 typedef struct SegHeaderEditor SegHeaderEditor;
 typedef struct SegHeaderPatch SegHeaderPatch;
 typedef struct SegHeaderListing SegHeaderListing;
-typedef struct SegSurveyGeometry SegSurveyGeometry;
 typedef struct SegTensor SegTensor;
 typedef struct SegPrefetcher SegPrefetcher;
 
@@ -408,6 +408,14 @@ typedef struct SegTraceKeys {
     double channel; /* Channel (trace) number in the field record: SEG-Y bytes 13-16, SEG-D the demux trace number (Rev 3: extended when `FFFF`). Survey relation records (SPS X) map (record, channel) to stations. */
     double time; /* When the trace was recorded, in UTC POSIX seconds (fractional); NaN if unknown. SEG-Y: trace bytes 157-168 in their time basis; SEG-D: GH#1, for Rev 3 the trace's Timestamp block or the GH#3 time zero (see the module documentation). */
 } SegTraceKeys;
+
+/* How `readSps` reads a file. */
+typedef struct SegSpsOptions {
+    int32_t revision; /* SEG_SPS_REVISION_*: Force a revision. */
+    bool strict_implied_decimals; /* F10.2 without `.`: FORTRAN-implied decimals. */
+    int32_t layout; /* SEG_TEXT_LAYOUT_*: Used only with `forceLayout`. */
+    bool force_layout; /* Don't detect the layout. */
+} SegSpsOptions;
 
 /* SEG-Y revision from bytes 3501 (major) and 3502 (minor). 0.0 is the traditional 1975 format. */
 typedef struct SegSegyRevision {
@@ -493,13 +501,29 @@ typedef struct SegHeaderRow {
     int64_t block_size; /* Bytes in the block. */
 } SegHeaderRow;
 
-/* How `readSps` reads a file. */
-typedef struct SegSpsOptions {
-    int32_t revision; /* SEG_SPS_REVISION_*: Force a revision. */
-    bool strict_implied_decimals; /* F10.2 without `.`: FORTRAN-implied decimals. */
-    int32_t layout; /* SEG_TEXT_LAYOUT_*: Used only with `forceLayout`. */
-    bool force_layout; /* Don't detect the layout. */
-} SegSpsOptions;
+/* Which joined values are written to a file (`writeGeometry`, `copyWithGeometry`, `convertWithGeometry`); all by default. */
+typedef struct SegGeometryFields {
+    bool source_xy;
+    bool receiver_xy;
+    bool elevations;
+    bool midpoints;
+    bool offsets;
+    bool stations;
+} SegGeometryFields;
+
+/* What `writeGeometry` changed (or `geometryChanges` would change), in traces per kind of value. */
+typedef struct SegGeometryChanges {
+    int64_t traces; /* Traces with at least one changed value. */
+    int64_t source_xy; /* Traces whose source / receiver X/Y change. */
+    int64_t receiver_xy; /* Traces whose source / receiver X/Y change. */
+    int64_t source_z; /* Traces whose source / receiver elevation changes. */
+    int64_t receiver_z; /* Traces whose source / receiver elevation changes. */
+    int64_t midpoints; /* Traces whose midpoint / offset changes. */
+    int64_t offsets; /* Traces whose midpoint / offset changes. */
+    int64_t source_stations; /* Traces whose source / receiver line, point or index change. */
+    int64_t receiver_stations; /* Traces whose source / receiver line, point or index change. */
+    int64_t unwritable; /* Values (one per kind and trace) the file has no slot for, or that do not fit theirs; the log says which. */
+} SegGeometryChanges;
 
 /* Samples in memory: `data[r * strides[0] + c * strides[1]]` is row r, sample c. As a destination, rows must be contiguous (`strides[1] == 1`). */
 typedef struct SegTensorView {
@@ -526,6 +550,9 @@ void seg_diag_log_release(SegDiagLog *handle);
 /* Releases a SegSeismicFile (NULL is a no-op). */
 void seg_seismic_file_release(SegSeismicFile *handle);
 
+/* Releases a SegSurveyGeometry (NULL is a no-op). */
+void seg_survey_geometry_release(SegSurveyGeometry *handle);
+
 /* Releases a SegHeaderEditor (NULL is a no-op). */
 void seg_header_editor_release(SegHeaderEditor *handle);
 
@@ -534,9 +561,6 @@ void seg_header_patch_release(SegHeaderPatch *handle);
 
 /* Releases a SegHeaderListing (NULL is a no-op). */
 void seg_header_listing_release(SegHeaderListing *handle);
-
-/* Releases a SegSurveyGeometry (NULL is a no-op). */
-void seg_survey_geometry_release(SegSurveyGeometry *handle);
 
 /* Releases a SegTensor (NULL is a no-op). */
 void seg_tensor_release(SegTensor *handle);
@@ -694,6 +718,51 @@ SegStatus seg_seismic_file_seg2_value(SegSeismicFile *seismic_file, int64_t trac
  */
 SegStatus seg_seismic_file_sample_interval_us(SegSeismicFile *seismic_file, int64_t trace, double *out);
 
+/* The number of X runs loaded. */
+SegStatus seg_survey_geometry_relation_count(SegSurveyGeometry *survey_geometry, int64_t *out);
+
+/* An empty geometry: no stations, no relations. */
+SegStatus seg_survey_geometry_new(SegSurveyGeometry **out);
+
+/* Source stations held. */
+SegStatus seg_survey_geometry_source_count(SegSurveyGeometry *survey_geometry, int64_t *out);
+
+/* Receiver stations held. */
+SegStatus seg_survey_geometry_receiver_count(SegSurveyGeometry *survey_geometry, int64_t *out);
+
+/* Adds or replaces a source station; index 0 matches any point index. */
+SegStatus seg_survey_geometry_add_source(SegSurveyGeometry *survey_geometry, double line, double point, int16_t index, double x, double y, double z);
+
+/* Adds or replaces a receiver station; index 0 matches any point index. */
+SegStatus seg_survey_geometry_add_receiver(SegSurveyGeometry *survey_geometry, double line, double point, int16_t index, double x, double y, double z);
+
+/*
+ * Maps a text line name (SPS 1.0, P1) to a line number, for the files
+ * added later. Raises `ValueError` for an empty name or a NaN line.
+ */
+SegStatus seg_survey_geometry_map_line(SegSurveyGeometry *survey_geometry, const char *name, double line);
+
+/*
+ * Reads the SPS file (Rev 1.0 or 2.1) at `path` and adds it; its
+ * diagnostics go to `g.log`. Raises `IOError` if it cannot be read.
+ */
+SegStatus seg_survey_geometry_add_sps(SegSurveyGeometry *survey_geometry, const char *path, const SegSpsOptions *opts);
+
+/*
+ * Reads the SEG P1 file at `path` and adds its shotpoints. The decimals are
+ * the implicit decimals of the grid and depth/elevation fields (the file's
+ * header says); with `elevation`, columns 62-66 are z. Raises `IOError` if
+ * the file cannot be read, `ValueError` for decimals outside 0..8.
+ */
+SegStatus seg_survey_geometry_add_p1(SegSurveyGeometry *survey_geometry, const char *path, int64_t grid_decimals, int64_t depth_decimals, bool elevation);
+
+/*
+ * Fills the trace keys from the survey, in memory only: the file does not
+ * change. Returns the traces changed. Raises `ValueError` for a file opened
+ * without `keys = true`.
+ */
+SegStatus seg_seismic_file_apply_survey(SegSeismicFile *seismic_file, SegSurveyGeometry *g, bool overwrite, int64_t *out);
+
 /*
  * Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
  * `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
@@ -703,6 +772,9 @@ SegStatus seg_seismic_file_sample_interval_us(SegSeismicFile *seismic_file, int6
  * raises: problems, including I/O failures, are in the result. The output
  * is written to `<dstPath>.tmp` and renamed when complete, so a failed
  * conversion leaves an existing `dstPath` untouched and no partial file.
+ * `join` (internal) joins survey geometry to SEG-D keys (SEG-Y target
+ * only); for survey
+ * geometry in the output use `convertWithGeometry`.
  */
 SegStatus seg_convert_file(const char *src_path, const char *dst_path, const SegConvertOptions *opts, SegDiagLog **out);
 
@@ -853,50 +925,43 @@ SegStatus seg_seismic_file_record_headers(SegSeismicFile *seismic_file, int64_t 
  */
 SegStatus seg_seismic_file_file_headers(SegSeismicFile *seismic_file, SegHeaderListing **out);
 
-/* The number of X runs loaded. */
-SegStatus seg_survey_geometry_relation_count(SegSurveyGeometry *survey_geometry, int64_t *out);
-
-/* An empty geometry: no stations, no relations. */
-SegStatus seg_survey_geometry_new(SegSurveyGeometry **out);
-
-/* Source stations held. */
-SegStatus seg_survey_geometry_source_count(SegSurveyGeometry *survey_geometry, int64_t *out);
-
-/* Receiver stations held. */
-SegStatus seg_survey_geometry_receiver_count(SegSurveyGeometry *survey_geometry, int64_t *out);
-
-/* Adds or replaces a source station; index 0 matches any point index. */
-SegStatus seg_survey_geometry_add_source(SegSurveyGeometry *survey_geometry, double line, double point, int16_t index, double x, double y, double z);
-
-/* Adds or replaces a receiver station; index 0 matches any point index. */
-SegStatus seg_survey_geometry_add_receiver(SegSurveyGeometry *survey_geometry, double line, double point, int16_t index, double x, double y, double z);
+/*
+ * What `writeGeometry` would change in `f` (opened with `keys = true`, its
+ * keys joined by `applySurvey`); nothing is written. `previewGeometry`
+ * gives the reports. Raises `ValueError` for a file without keys, a closed
+ * file, SEG-2 (not supported yet) or an unrecognized file.
+ */
+SegStatus seg_seismic_file_geometry_changes(SegSeismicFile *seismic_file, const SegGeometryFields *fields, SegGeometryChanges *out);
 
 /*
- * Maps a text line name (SPS 1.0, P1) to a line number, for the files
- * added later. Raises `ValueError` for an empty name or a NaN line.
+ * The reports `writeGeometry` would make on `f` (values without a slot,
+ * values that do not fit), plus an info summary of what would change;
+ * nothing is written. Raises like `geometryChanges`.
  */
-SegStatus seg_survey_geometry_map_line(SegSurveyGeometry *survey_geometry, const char *name, double line);
+SegStatus seg_seismic_file_preview_geometry(SegSeismicFile *seismic_file, const SegGeometryFields *fields, SegDiagLog **out);
 
 /*
- * Reads the SPS file (Rev 1.0 or 2.1) at `path` and adds it; its
- * diagnostics go to `g.log`. Raises `IOError` if it cannot be read.
+ * `writeGeometry` with the joined keys of `f`: the editor's file, opened
+ * again with `keys = true` and joined by `applySurvey`.
  */
-SegStatus seg_survey_geometry_add_sps(SegSurveyGeometry *survey_geometry, const char *path, const SegSpsOptions *opts);
+SegStatus seg_header_editor_write_geometry(SegHeaderEditor *header_editor, SegSeismicFile *f, const SegGeometryFields *fields, SegGeometryChanges *out);
 
 /*
- * Reads the SEG P1 file at `path` and adds its shotpoints. The decimals are
- * the implicit decimals of the grid and depth/elevation fields (the file's
- * header says); with `elevation`, columns 62-66 are z. Raises `IOError` if
- * the file cannot be read, `ValueError` for decimals outside 0..8.
+ * Writes a copy of `srcPath` to `dstPath` (same standard and layout;
+ * multiplexed SEG-D demultiplexed) with the survey geometry `g` joined and
+ * written (see `writeGeometry`). Never raises: problems are in the result,
+ * with an info summary of what changed.
  */
-SegStatus seg_survey_geometry_add_p1(SegSurveyGeometry *survey_geometry, const char *path, int64_t grid_decimals, int64_t depth_decimals, bool elevation);
+SegStatus seg_copy_with_geometry(const char *src_path, const char *dst_path, SegSurveyGeometry *g, const SegGeometryFields *fields, bool overwrite, SegDiagLog **out);
 
 /*
- * Fills the trace keys from the survey, in memory only: the file does not
- * change. Returns the traces changed. Raises `ValueError` for a file opened
- * without `keys = true`.
+ * `convertFile` with the survey geometry `g` joined (`applySurvey`,
+ * `overwrite` as there) and written into the SEG-Y output: SEG-D keys are
+ * joined before they become SEG-Y headers; SEG-Y output is written with
+ * `writeGeometry` before it is moved into place. Never raises: problems
+ * are in the result.
  */
-SegStatus seg_seismic_file_apply_survey(SegSeismicFile *seismic_file, SegSurveyGeometry *g, bool overwrite, int64_t *out);
+SegStatus seg_convert_with_geometry(const char *src_path, const char *dst_path, SegSurveyGeometry *g, const SegConvertOptions *opts, const SegGeometryFields *fields, bool overwrite, SegDiagLog **out);
 
 /* The library's ABI version (SEG_ABI_VERSION). */
 SegStatus seg_abi_version(int32_t *out);
@@ -1000,12 +1065,6 @@ SegStatus seg_seismic_file_path(SegSeismicFile *seismic_file, char *out, int64_t
 /* The temporary demultiplexed copy that is mapped and indexed instead of a multiplexed SEG-D file ("" for any other file); deleted on `close`. Index offsets and `copyBytes` refer to it. */
 SegStatus seg_seismic_file_demux_path(SegSeismicFile *seismic_file, char *out, int64_t out_cap, int64_t *out_len);
 
-/* Refused edits and journal problems. */
-SegStatus seg_header_editor_log(SegHeaderEditor *header_editor, SegDiagLog **out);
-
-/* Where the edits are journaled. */
-SegStatus seg_header_editor_journal_path(SegHeaderEditor *header_editor, char *out, int64_t out_cap, int64_t *out_len);
-
 /* X records with a channel increment k > 1 cover k consecutive channels per station (components 1..k, SPS 1.0 §"X" note); else only every k-th channel is in the run. */
 SegStatus seg_survey_geometry_multi_component(SegSurveyGeometry *survey_geometry, bool *out);
 
@@ -1027,11 +1086,20 @@ SegStatus seg_survey_geometry_set_trailing_digits(SegSurveyGeometry *survey_geom
 /* Problems met while adding survey files. */
 SegStatus seg_survey_geometry_log(SegSurveyGeometry *survey_geometry, SegDiagLog **out);
 
+/* Refused edits and journal problems. */
+SegStatus seg_header_editor_log(SegHeaderEditor *header_editor, SegDiagLog **out);
+
+/* Where the edits are journaled. */
+SegStatus seg_header_editor_journal_path(SegHeaderEditor *header_editor, char *out, int64_t out_cap, int64_t *out_len);
+
 /* Fills a SegSegdRevision with the defaults. */
 void seg_init_segd_revision(SegSegdRevision *out);
 
 /* Fills a SegSegdConvertOptions with the defaults. */
 void seg_init_segd_convert_options(SegSegdConvertOptions *out);
+
+/* Fills a SegSpsOptions with the defaults. */
+void seg_init_sps_options(SegSpsOptions *out);
 
 /* Fills a SegSegyRevision with the defaults. */
 void seg_init_segy_revision(SegSegyRevision *out);
@@ -1042,8 +1110,8 @@ void seg_init_seg2_convert_options(SegSeg2ConvertOptions *out);
 /* Fills a SegConvertOptions with the defaults. */
 void seg_init_convert_options(SegConvertOptions *out);
 
-/* Fills a SegSpsOptions with the defaults. */
-void seg_init_sps_options(SegSpsOptions *out);
+/* Fills a SegGeometryFields with the defaults. */
+void seg_init_geometry_fields(SegGeometryFields *out);
 
 /* Fills a SegTensorView with the defaults. */
 void seg_init_tensor_view(SegTensorView *out);

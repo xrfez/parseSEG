@@ -68,6 +68,7 @@ static void test_layout(void) {
     SIZE(SegGather); SIZE(SegDiagnostic); SIZE(SegLocation); SIZE(SegPrefetchChunk);
     SIZE(SegSlice); SIZE(SegConvertOptions); SIZE(SegSegyRevision); SIZE(SegSegdConvertOptions);
     SIZE(SegSegdRevision); SIZE(SegSpsOptions); SIZE(SegFileSummary);
+    SIZE(SegGeometryFields); SIZE(SegGeometryChanges);
     SIZE(SegStandardRevision); SIZE(SegChannelSetSummary);
     SIZE(SegHeaderRow); SIZE(SegValueRef);
     OFF(SegHeaderRow, block_name); OFF(SegHeaderRow, kind); OFF(SegHeaderRow, field);
@@ -477,6 +478,62 @@ static void test_gathers_and_prefetch(void) {
     OK(seg_seismic_file_trace_keys(f, 0, &k));
     CHECK(k.src_point == 205 && k.rcv_point == 101 && k.rcv_x == 500100 && k.offset > 412.3 &&
           k.offset < 412.4);
+
+    /* Writing the joined geometry back (10.5): a dry run, a copy, in place. */
+    SegGeometryChanges gc;
+    OK(seg_seismic_file_geometry_changes(f, NULL, &gc));
+    CHECK(gc.traces == 1 && gc.receiver_stations == 1 && gc.receiver_xy == 0 && gc.unwritable > 0);
+    SegGeometryFields gf;
+    seg_init_geometry_fields(&gf);
+    CHECK(gf.source_xy && gf.stations);
+    gf.stations = false;
+    OK(seg_seismic_file_geometry_changes(f, &gf, &gc));
+    CHECK(gc.traces == 0);
+    SegDiagLog *plog = NULL;
+    OK(seg_seismic_file_preview_geometry(f, NULL, &plog));
+    CHECK(log_count(plog, SEG_SEVERITY_WARNING) > 0 && log_count(plog, SEG_SEVERITY_INFO) == 1);
+    seg_diag_log_release(plog);
+    const char *geo_copy = path(tmp, "63geo.sgd");
+    OK(seg_copy_with_geometry(path(dir, "63.sgd"), geo_copy, geo, NULL, true, &plog));
+    CHECK(log_count(plog, SEG_SEVERITY_ERROR) == 0);
+    seg_diag_log_release(plog);
+    SegSeismicFile *gcf = NULL;
+    OK(seg_open_seismic(geo_copy, false, true, &gcf));
+    OK(seg_seismic_file_trace_keys(gcf, 0, &k));
+    CHECK(k.rcv_line == 10 && k.rcv_point == 101);
+    seg_seismic_file_release(gcf);
+    /* In place on a plain copy: the editor's file and its joined keys. */
+    const char *plain = path(tmp, "63plain.sgd");
+    SegConvertOptions co;
+    seg_init_convert_options(&co);
+    OK(seg_copy_with_geometry(path(dir, "63.sgd"), plain, geo, &gf, false, &plog)); /* nothing */
+    seg_diag_log_release(plog);
+    SegHeaderEditor *ged = NULL;
+    OK(seg_open_editor(plain, path(tmp, "63plain.nif"), &ged));
+    OK(seg_open_seismic(plain, false, true, &gcf));
+    OK(seg_seismic_file_apply_survey(gcf, geo, true, &updated));
+    OK(seg_header_editor_write_geometry(ged, gcf, NULL, &gc));
+    CHECK(gc.receiver_stations == 1);
+    OK(seg_header_editor_close(ged));
+    seg_header_editor_release(ged);
+    seg_seismic_file_release(gcf);
+    OK(seg_open_seismic(plain, false, true, &gcf));
+    OK(seg_seismic_file_trace_keys(gcf, 0, &k));
+    CHECK(k.rcv_point == 101);
+    seg_seismic_file_release(gcf);
+    OK(seg_rollback_journal(plain, path(tmp, "63plain.nif"), &plog));
+    seg_diag_log_release(plog);
+    OK(seg_open_seismic(plain, false, true, &gcf));
+    OK(seg_seismic_file_trace_keys(gcf, 0, &k));
+    CHECK(k.rcv_point == 104);
+    seg_seismic_file_release(gcf);
+    OK(seg_convert_with_geometry(path(dir, "63.sgd"), path(tmp, "63geo.sgy"), geo, &co, NULL,
+                                 true, &plog));
+    seg_diag_log_release(plog);
+    OK(seg_open_seismic(path(tmp, "63geo.sgy"), false, true, &gcf));
+    OK(seg_seismic_file_trace_keys(gcf, 0, &k));
+    CHECK(k.rcv_x == 500100);
+    seg_seismic_file_release(gcf);
     seg_survey_geometry_release(geo);
     seg_seismic_file_release(f);
 
