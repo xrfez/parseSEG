@@ -327,8 +327,8 @@ _E_SegdTargetFormat = {"keep": 0, "8015": 1, "8022": 2, "8024": 3, "8036": 4, "8
 _N_SegdTargetFormat = {0: "keep", 1: "8015", 2: "8022", 3: "8024", 4: "8036", 5: "8038", 6: "8042", 7: "8044", 8: "8048", 9: "8058", 10: "8080", 11: "9036", 12: "9038", 13: "9058", 14: "9080", }
 _E_ByteOrder = {"big": 0, "little": 1, "pairSwapped": 2, }
 _N_ByteOrder = {0: "big", 1: "little", 2: "pairSwapped", }
-_E_SegyTargetFormat = {"keep": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12, "15": 13, "16": 14, }
-_N_SegyTargetFormat = {0: "keep", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "11", 12: "12", 13: "15", 14: "16", }
+_E_SegyTargetFormat = {"keep": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12, "15": 15, "16": 16, }
+_N_SegyTargetFormat = {0: "keep", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "11", 12: "12", 15: "15", 16: "16", }
 _E_TextEncoding = {"ebcdic": 0, "ascii": 1, }
 _N_TextEncoding = {0: "ebcdic", 1: "ascii", }
 _E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
@@ -533,7 +533,7 @@ SegSegdConvertOptions._defaults = {"revision": {"major": 3, "minor": 0}, "format
 SegSegyRevision._defaults = {"major": 0, "minor": 0}
 SegConvertOptions._defaults = {"revision": {"major": 2, "minor": 1}, "byte_order": "big", "format": "keep", "text_encoding": "ebcdic", "apply_descale": False, "station_header": True}
 SegSpsOptions._defaults = {"revision": "auto", "strict_implied_decimals": False, "layout": "lines", "force_layout": False}
-SegTensorView._defaults = {"data": None, "dtype": "Dtype 0", "rank": 0, "shape": None, "strides": None}
+SegTensorView._defaults = {"data": None, "dtype": None, "rank": 0, "shape": None, "strides": None}
 
 # ----------------------------------------------------- declarations
 
@@ -878,7 +878,8 @@ class DiagLog(_Handle):
             self._leave()
 
     def _getitem(self, i):
-        """Diagnostic `i`, oldest first."""
+        """Diagnostic `i`, oldest first. As for a `seq`, an `i` outside
+        `0 ..< len` is a bug (`IndexDefect`; unchecked under `-d:danger`)."""
         _h = self._enter()
         try:
             _o = SegDiagnostic()

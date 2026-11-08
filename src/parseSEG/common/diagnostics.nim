@@ -95,7 +95,8 @@ func len*(log: DiagLog): int {.inline, segApi.} =
   log.entries.len
 
 func `[]`*(log: DiagLog; i: int): lent Diagnostic {.inline, segApi.} =
-  ## Diagnostic `i`, oldest first.
+  ## Diagnostic `i`, oldest first. As for a `seq`, an `i` outside
+  ## `0 ..< len` is a bug (`IndexDefect`; unchecked under `-d:danger`).
   log.entries[i]
 
 iterator items*(log: DiagLog): lent Diagnostic =

@@ -544,6 +544,21 @@ static void test_convert(void) {
     o.format = 99; /* not a SEG_SEGY_TARGET_FORMAT_* value */
     CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) ==
           SEG_ERR_ARGUMENT);
+    o.format = 13; /* format codes 13 and 14 are undefined: holes, not 15 and 16 */
+    CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) ==
+          SEG_ERR_ARGUMENT);
+    o.format = 14;
+    CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) ==
+          SEG_ERR_ARGUMENT);
+    /* The values are the format codes. */
+    CHECK(SEG_SEGY_TARGET_FORMAT_5 == 5 && SEG_SEGY_TARGET_FORMAT_15 == 15 &&
+          SEG_SEGY_TARGET_FORMAT_16 == 16);
+    o.format = 16;
+    OK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "sw16.sgy"), &o, NULL));
+    OK(seg_open_seismic(path(tmp, "sw16.sgy"), false, false, &f));
+    OK(seg_seismic_file_file_field(f, "binary.formatCode", &v));
+    CHECK(v.kind == SEG_VALUE_INT && v.i == 16);
+    seg_seismic_file_release(f);
     o.format = SEG_SEGY_TARGET_FORMAT_5;
     OK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "sw5.sgy"), &o, NULL));
     OK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "sw.sgy"), NULL, NULL)); /* defaults */

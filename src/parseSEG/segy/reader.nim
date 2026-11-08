@@ -33,16 +33,13 @@
 
 import std/[hashes, os]
 import ../common/[endians, errors, diagnostics, ebcdic]
-import ../io/[records, diskio]
+import ../io/[records, diskio, pushback]
 import ../model/tensors
 import ./[textheader, binheader, traceheader, samples, exttext, layout]
 export textheader, binheader, traceheader, samples, exttext, layout
 
 const
   TapeLabelSize* = 128 ## Bytes in a SEG-Y tape label.
-  ReadChunk = 4 shl 20
-    ## Large blocks are read in chunks of this size, so a corrupt length in a
-    ## header costs memory only for the bytes actually present.
   MaxExtendedRecords = 1_000_000
     ## Bound on extended records implied by a Rev 2 first-trace offset (3.2 GB).
   MaxLayoutBytes* = 1 shl 20 ## Larger Layout stanzas are ignored (with a warning).
@@ -97,9 +94,7 @@ type
     ## Streaming reader state. `file` is filled by `openSegy`.
     file*: SegyFile
     log*: DiagLog
-    cursor: RecordCursor
-    pending: seq[byte]   ## Bytes read ahead and pushed back (`unread`).
-    pendingPos: int
+    input: PushbackInput
     lookahead: seq[byte] ## Reused buffer of `trailerStartsHere`.
     name: string
     tracesRead: int
@@ -125,68 +120,28 @@ func loc(r: SegyReader, trace = -1, field = ""): Location {.inline.} =
   Location(file: r.name, record: 0, trace: trace, field: field)
 
 # -------------------------------------------------------------- byte input --
-# The cursor plus a push-back buffer: the reader may read a block ahead,
-# decide it is not what it hoped for (a trailer, an extended record), and
-# un-read it. This works on tape, where seeking back is not possible.
+# A `PushbackInput`: the reader may read a block ahead, decide it is not
+# what it hoped for (a trailer, an extended record), and un-read it. This
+# works on tape, where seeking back is not possible.
 
 func offset(r: SegyReader): int64 {.inline.} =
   ## Medium offset of the next byte the reader will return.
-  r.cursor.offset - int64(r.pending.len - r.pendingPos)
+  r.input.offset
 
-proc readAvail(r: var SegyReader, dst: var openArray[byte]): int =
-  # Reads up to dst.len bytes; fewer only at a tape mark or end of data.
-  while result < dst.len and r.pendingPos < r.pending.len:
-    dst[result] = r.pending[r.pendingPos]
-    inc result
-    inc r.pendingPos
-  if result < dst.len:
-    result += r.cursor.read(dst.toOpenArray(result, dst.len - 1))
+proc readAvail(r: var SegyReader, dst: var openArray[byte]): int {.inline.} =
+  r.input.readAvail(dst)
 
-proc unread(r: var SegyReader, data: openArray[byte]) =
-  # Pushes `data` (just read) back in front of the unread bytes. The bytes
-  # before `pendingPos` are consumed, so `data` usually fits there (it was
-  # read from the push-back buffer) or the buffer is empty and is reused.
-  if data.len <= r.pendingPos:
-    r.pendingPos -= data.len
-    for i, b in data: r.pending[r.pendingPos + i] = b
-  elif r.pendingPos == r.pending.len:
-    r.pending.setLen data.len
-    for i, b in data: r.pending[i] = b
-    r.pendingPos = 0
-  else:
-    var rest = r.pending[r.pendingPos..^1]
-    r.pending.setLen data.len
-    for i, b in data: r.pending[i] = b
-    r.pending.add rest
-    r.pendingPos = 0
+proc unread(r: var SegyReader, data: openArray[byte]) {.inline.} =
+  r.input.unread(data)
 
-proc atData(r: var SegyReader): bool =
-  r.pendingPos < r.pending.len or r.cursor.stoppedAt == rkData
+proc atData(r: var SegyReader): bool {.inline.} =
+  r.input.atData
 
-proc readInto(r: var SegyReader, buf: var seq[byte], n: int64) =
-  # Reads exactly n bytes into buf (reusing its storage), growing it chunk by
-  # chunk as data arrives. Raises SegTruncatedError if the data ends first.
-  if n < 0 or n > int64(high(int) div 2):
-    raiseFormat("block length " & $n & " is not representable", r.offset)
-  buf.setLen 0
-  var got = 0
-  while got < n:
-    let step = int(min(n - got, ReadChunk))
-    buf.setLen got + step
-    let k = r.readAvail(buf.toOpenArray(got, got + step - 1))
-    got += k
-    if k < step:
-      buf.setLen got
-      raiseTruncated("expected " & $n & " bytes, got " & $got, r.offset)
+proc readInto(r: var SegyReader, buf: var seq[byte], n: int64) {.inline.} =
+  r.input.readInto(buf, n)
 
-proc skipExactly(r: var SegyReader, n: int64) =
-  # Passes n bytes without keeping them (seeking where the source can).
-  # Raises SegTruncatedError if the data ends first.
-  var got = min(n, int64(r.pending.len - r.pendingPos))
-  r.pendingPos += int(got)
-  if got < n: got += r.cursor.skip(n - got)
-  if got < n:
-    raiseTruncated("expected " & $n & " bytes, got " & $got, r.offset)
+proc skipExactly(r: var SegyReader, n: int64) {.inline.} =
+  r.input.skipExactly(n)
 
 proc readBlock(r: var SegyReader, n: int): seq[byte] =
   r.readInto(result, n)
@@ -368,9 +323,9 @@ proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
   ## With `headersOnly`, `readTrace` skips the sample bytes (seeking on disk,
   ## reading and discarding on tape): `samples` stays empty, `numSamples` and
   ## the offsets are set, and a trace cut short still ends the read.
-  result = SegyReader(cursor: initRecordCursor(src), name: src.name, maxRetained: maxRetained,
+  result = SegyReader(input: initPushbackInput(src), name: src.name, maxRetained: maxRetained,
     byteStream: not src.hasRecordBoundaries, mediumSize: -1, headersOnly: headersOnly)
-  if headersOnly: result.cursor.preferSmallReads()
+  if headersOnly: result.input.cursor.preferSmallReads()
   if result.byteStream:
     try:
       result.mediumSize = getFileSize(src.name)

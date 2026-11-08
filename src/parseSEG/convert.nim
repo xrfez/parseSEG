@@ -73,19 +73,21 @@ const
 
 type
   SegyTargetFormat* = enum
-    ## The SEG-Y sample format `convertFile` writes: a format code, or `stKeep`.
-    stKeep = "keep"
+    ## The SEG-Y sample format `convertFile` writes: "keep", or a format
+    ## code (each value's ordinal is its code; 13 and 14 are undefined).
+    stKeep = (0, "keep")
       ## SEG-Y input: its own format. SEG-D input: one that holds every
       ## record's samples exactly (see the module doc).
-    st1 = "1", st2 = "2", st3 = "3", st4 = "4", st5 = "5", st6 = "6", st7 = "7", st8 = "8",
-    st9 = "9", st10 = "10", st11 = "11", st12 = "12", st15 = "15", st16 = "16"
+    st1 = (1, "1"), st2 = (2, "2"), st3 = (3, "3"), st4 = (4, "4"), st5 = (5, "5"),
+    st6 = (6, "6"), st7 = (7, "7"), st8 = (8, "8"), st9 = (9, "9"), st10 = (10, "10"),
+    st11 = (11, "11"), st12 = (12, "12"), st15 = (15, "15"), st16 = (16, "16")
 
   ConvertOptions* = object
     ## Target settings. The defaults give SEG-Y Rev 2.1, big-endian, EBCDIC
     ## text, a lossless sample format and recorded (not descaled) values.
     revision*: SegyRevision = SegyRevision(major: 2, minor: 1)
     byteOrder*: ByteOrder = boBig
-    format*: SegyTargetFormat = stKeep ## Target sample format (`stKeep`: keep or choose).
+    format*: SegyTargetFormat = stKeep ## Target sample format ("keep": keep or choose).
     textEncoding*: TextEncoding = teEbcdic ## SEG-D → SEG-Y: the textual header's encoding.
     applyDescale*: bool = false ## SEG-D: write millivolts (MP factor / descale multiplier).
     stationHeader*: bool = true ## SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza.
@@ -117,19 +119,19 @@ proc note(log: var DiagLog, seen: var set[LossNote], kind: LossNote, msg: string
     seen.incl kind
     log.report(sevInfo, dcValidation, msg, loc = loc)
 
+{.push warning[HoleEnumConv]: off.}
 static:
-  # `SegyTargetFormat` lists `definedSampleFormats` in order, after `stKeep`.
-  for i, f in definedSampleFormats: doAssert $SegyTargetFormat(i + 1) == $ord(f)
+  # `SegyTargetFormat` has a value for each format code, with that ordinal.
+  for f in definedSampleFormats: doAssert $SegyTargetFormat(ord(f)) == $ord(f)
 
 func sampleFormat(t: SegyTargetFormat): SampleFormat =
-  # The sample format of a target other than `stKeep`.
-  definedSampleFormats[ord(t) - 1]
+  # The sample format of a target other than `stKeep` (same ordinal).
+  SampleFormat(ord(t))
 
 func targetFormat*(f: SampleFormat): SegyTargetFormat =
   ## The target format that writes `f`.
-  for i, x in definedSampleFormats:
-    if x == f: return SegyTargetFormat(i + 1)
-  stKeep # not reached: every format has a target
+  SegyTargetFormat(ord(f))
+{.pop.}
 
 func checkTarget(opts: ConvertOptions, err: var string): bool =
   let r = opts.revision

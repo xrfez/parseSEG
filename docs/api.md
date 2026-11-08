@@ -149,7 +149,8 @@ fatal diagnostic.
 - `convertFile(src, dst, ConvertOptions(...))` detects the input and writes SEG-Y.
   `ConvertOptions.format` is a `SegyTargetFormat`: `stKeep` (the default: keep a SEG-Y
   input's format, or choose a lossless one for SEG-D) or `st1` .. `st16` (a format code;
-  `targetFormat(sfFloat32)` gives `st5`).
+  `targetFormat(sfFloat32)` gives `st5`). Each value's ordinal is its format code (C:
+  `SEG_SEGY_TARGET_FORMAT_15` is 15; 13 and 14 are refused).
 - `convertSegy(src, sink, opts)` converts SEG-Y to SEG-Y: a new revision (0, 1, 2.0, 2.1),
   byte order or sample format. It drops what the target cannot hold and reports each kind of
   loss once.
@@ -163,7 +164,8 @@ fatal diagnostic.
 - `convertSegdRevision(src, dst, SegdConvertOptions(revision, format))` converts SEG-D
   between revisions (Rev 1/2 → 3.0, Rev 3 → 2.0/2.1, within a layout), streaming, with
   samples copied byte for byte; the mapping and what is dropped are in `segd/revconvert.nim`.
-  `format` is a `SegdTargetFormat` (`tfKeep`, or `tf8058` ...; `targetFormat(sd8058)`).
+  `format` is a `SegdTargetFormat` (`tfKeep`, or `tf8058` ...; `targetFormat(sd8058)`);
+  its ordinals are not format codes (C: use the `SEG_SEGD_TARGET_FORMAT_*` names).
   The stream form takes `scanSegdRecords` (a headers-only pass) for exact sample counts.
 
 ## Diagnostics

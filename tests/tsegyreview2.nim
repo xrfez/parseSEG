@@ -243,3 +243,21 @@ block writer_reuses_its_record_buffer:
       if order == boLittle:
         for i in countup(0, want.len - 2, 2): swap(want[i], want[i + 1])
       doAssert e.traces[k].samples == want
+
+block partial_last_sample_is_zero:
+  # 12.4: a lenient trace whose sample bytes end in a partial sample, written
+  # in another byte order, gets zeros there, not the previous trace's bytes.
+  var d = makeFile(initExtendedTextHeader(), initExtendedTextHeader(), 0, 0)
+  d.file.binary.fixedLengthTraces = 0
+  d.traces.setLen 2
+  for i in 0..7: d.traces[0].samples[i] = 0xEE
+  d.traces[1].samples = newSeq[byte](7)
+  for i in 0..6: d.traces[1].samples[i] = 0x11
+  var opts = d.lenient
+  opts.byteOrder = boLittle
+  let path = tmp / "partial.sgy"
+  discard d.write(path, opts)
+  let b = readFile(path)
+  let at = 3600 + 240 + 8 + 240 # trace 1's samples
+  doAssert b.len == at + 7
+  doAssert b[at .. at + 5] == "\x11\x11\x11\x11\x11\x11" and b[at + 6] == '\0'

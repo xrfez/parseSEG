@@ -269,8 +269,13 @@ proc writeTrace*(w: var SegyWriter, t: SegyTrace) =
     raiseFormat("samples of an undefined format cannot be converted to " & $w.order &
       " byte order")
   else:
-    reorderSamples(t.samples, sampleSize(w.file.format.get), w.file.byteOrder, w.order,
+    let width = sampleSize(w.file.format.get)
+    reorderSamples(t.samples, width, w.file.byteOrder, w.order,
       w.rec.toOpenArray(headers, w.rec.high))
+    # A lenient trace's partial last sample is written as zeros (`w.rec` is
+    # reused: it would hold the previous trace's bytes).
+    let tail = t.samples.len mod width
+    if tail > 0: zeroMem(addr w.rec[w.rec.len - tail], tail)
   w.sink.writeRecord(w.rec)
   inc w.tracesWritten
 

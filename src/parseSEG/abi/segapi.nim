@@ -178,7 +178,7 @@ proc registerEnum*[E: enum](t: typedesc[E]) {.compileTime.} =
   generated.hEnums.add "\n/* " & name & " */\n"
   var fwd = "_E_" & name & " = {"
   var back = "_N_" & name & " = {"
-  for e in E:
+  for e in enumValues(E):
     generated.hEnums.add "#define SEG_" & upperSnake(name) & "_" & upperSnake($e) & " " &
       $ord(e) & "\n"
     fwd.add "\"" & $e & "\": " & $ord(e) & ", "
@@ -194,7 +194,12 @@ proc pyLit*(v: SomeFloat): string {.compileTime.} =
   else: $v
 proc pyLit*(v: string): string {.compileTime.} =
   "\"" & v.replace("\\", "\\\\").replace("\"", "\\\"") & "\""
-proc pyLit*[E: enum](v: E): string {.compileTime.} = "\"" & $v & "\""
+proc pyLit*[E: enum](v: E): string {.compileTime.} =
+  # None for a default that is no value of `E` (an enum not starting at 0,
+  # zero-filled): the field must then be given.
+  result = "None"
+  for e in enumValues(E):
+    if e == v: result = "\"" & $v & "\""
 proc pyLit*(v: Slice[int]): string {.compileTime.} = "range(" & $v.a & ", " & $(v.b + 1) & ")"
 proc pyLit*[T: object](v: T): string {.compileTime.} = "None"
 

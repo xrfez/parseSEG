@@ -8,7 +8,7 @@
 ## `writeValue` fill the caller's out-buffers; `keep` hands a counted
 ## reference to the host.
 
-import std/locks
+import std/[enumutils, locks, typetraits]
 import ../common/[errors, diagnostics]
 import ../model/headerfields
 
@@ -165,9 +165,17 @@ proc optStringArg*(p: cstring, default: string): string =
   ## An optional text argument: NULL means `default`.
   if p == nil: default else: $p
 
+iterator enumValues*[E: enum](t: typedesc[E]): E =
+  ## The values of `E`, also for an enum with holes (ordinals that are no value).
+  when E is HoleyEnum:
+    for e in enumutils.items(E): yield e
+  else:
+    for e in E: yield e
+
 proc enumArg*[E: enum](v: int32, name: string): E =
-  ## The `E` value with ordinal `v`; any other number is an argument error.
-  for e in E:
+  ## The `E` value with ordinal `v`; any other number (holes included) is an
+  ## argument error.
+  for e in enumValues(E):
     if ord(e) == int(v): return e
   argError(name & ": no such value " & $v)
 

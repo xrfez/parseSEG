@@ -61,7 +61,9 @@ import ../abi/pragmas
 
 type
   SegdTargetFormat* = enum
-    ## The sample format `convertSegdRevision` writes.
+    ## The sample format `convertSegdRevision` writes: "keep", or a format
+    ## code. The values' ordinals are not the format codes (they are 0, 1,
+    ## 2, ...); use the names.
     tfKeep = "keep" ## Each record's own (8080 becomes 8058 before Rev 3, 90xx its 80xx twin
                     ## before Rev 3.1).
     tf8015 = "8015", tf8022 = "8022", tf8024 = "8024", tf8036 = "8036", tf8038 = "8038",
@@ -73,7 +75,7 @@ type
     revision*: SegdRevision = SegdRevision(major: 3, minor: 0)
       ## Target revision: 2.0, 2.1, 3.0 or 3.1.
     format*: SegdTargetFormat = tfKeep
-      ## Target sample format; `tfKeep` keeps each record's (8080 becomes 8058
+      ## Target sample format; "keep" keeps each record's (8080 becomes 8058
       ## before Rev 3, a 90xx format its 80xx twin before Rev 3.1).
     twosComplement8015*: bool = false ## Decode 8015 as two's complement when re-encoding.
 

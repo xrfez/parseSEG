@@ -359,6 +359,13 @@ with parseseg.open_seismic(dst2) as c2:
 raises(parseseg.Error, parseseg.convert_file, INGLEWOOD, dst, {"revision": {"major": 3}})
 raises(TypeError, parseseg.convert_file, INGLEWOOD, dst, {"revision": "x"})
 raises(parseseg.ArgumentError, parseseg.convert_file, INGLEWOOD, dst, {"byte_order": "middle"})
+raises(parseseg.ArgumentError, parseseg.convert_file, INGLEWOOD, dst, {"format": "13"})  # a hole
+raises(parseseg.ArgumentError, parseseg.convert_file, INGLEWOOD, dst, {"format": 15})  # a name
+dst16 = os.path.join(scratch, "f16.sgy")
+log = parseseg.convert_file(INGLEWOOD, dst16, {"format": "16", "revision": (2, 1)})
+with parseseg.open_seismic(dst16) as c16:
+    assert c16.file_field("binary.formatCode") == 16
+assert parseseg._E_SegyTargetFormat["15"] == 15 and parseseg.SegTensorView._defaults["dtype"] is None
 raises(parseseg.ArgumentError, parseseg.convert_file, INGLEWOOD, dst,
        {"revision": {"major": 300}})                                   # uint8
 err = raises(parseseg.Error, parseseg.convert_file, os.path.join(scratch, "missing.sgy"), dst)

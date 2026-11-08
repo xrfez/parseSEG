@@ -16,7 +16,7 @@ per-function documentation.
 | `Tensor[T]` layout | 128 bytes: `shape`, `strides` (`array[6, int]` plus a length each), `offset`, then a `ref` to the storage holding `raw_buffer`. The data is a plain C-contiguous buffer, like numpy's. |
 | Host threads calling in, default allocator | **Segfault**: the thread-local allocator is not set up on threads Nim did not create. |
 | Host threads calling in, `-d:useMalloc` | Works: 4 pthreads × 2000 allocate/release cycles. |
-| Defects inside an export (`--panics:off`, the default) | Caught by `except Exception` and turned into an error code. |
+| Defects inside an export (`--panics:off`, the default) | Caught by `except Exception` and turned into an error code. The library does not rely on this: `segGuard` maps `CatchableError`s only (see decision 8). |
 | `GC_ref`/`GC_unref` on a `ref` cast to `pointer` | Keeps the object alive across the boundary; releases it correctly. |
 
 ## Decisions
@@ -118,10 +118,13 @@ per-function documentation.
      buffer the caller owns, described by a `SegTensorView` (`strides[1]` = 1, any row
      stride), from row `row` on.
 8. **Errors never cross as exceptions.**
-   - Every export runs inside `try`/`except Exception` and is `raises: []`, so no Nim
-     exception or Defect unwinds into C. The core's public procs raise `ValueError` for bad
+   - Every export runs inside `segGuard`, which maps each `CatchableError` to a status and
+     the thread's last error. Defects are bugs and are not mapped, so no export may be able
+     to hit one on caller input: the core's public procs raise `ValueError` for bad
      arguments (out-of-range traces and ranges, missing keys) rather than asserting, so
-     `-d:danger` builds, which drop bound checks, still refuse them.
+     `-d:danger` builds, which drop bound checks, still refuse them. The exception is `[]`
+     indexing (`DiagLog[i]`), which keeps Nim's convention (`IndexDefect`, unchecked under
+     `-d:danger`, like a `seq`): the generated `_get` wrapper checks the index itself.
    - Nim's allocator terminates the process when the system refuses memory. An
      out-of-memory hook cannot raise through the C backend's goto-based exceptions, so the
      adapters probe large buffers (64 MiB and up) with `malloc`/`free`, and a refusal is

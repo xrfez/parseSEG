@@ -218,8 +218,8 @@ const char *seg_last_error(void);
 #define SEG_SEGY_TARGET_FORMAT_10 10
 #define SEG_SEGY_TARGET_FORMAT_11 11
 #define SEG_SEGY_TARGET_FORMAT_12 12
-#define SEG_SEGY_TARGET_FORMAT_15 13
-#define SEG_SEGY_TARGET_FORMAT_16 14
+#define SEG_SEGY_TARGET_FORMAT_15 15
+#define SEG_SEGY_TARGET_FORMAT_16 16
 
 /* TextEncoding */
 #define SEG_TEXT_ENCODING_EBCDIC 0
@@ -297,7 +297,7 @@ typedef struct SegSegdRevision {
 /* Options of `convertSegdRevision`. */
 typedef struct SegSegdConvertOptions {
     SegSegdRevision revision; /* Target revision: 2.0, 2.1, 3.0 or 3.1. */
-    int32_t format; /* SEG_SEGD_TARGET_FORMAT_*: Target sample format; `tfKeep` keeps each record's (8080 becomes 8058 before Rev 3, a 90xx format its 80xx twin before Rev 3.1). */
+    int32_t format; /* SEG_SEGD_TARGET_FORMAT_*: Target sample format; "keep" keeps each record's (8080 becomes 8058 before Rev 3, a 90xx format its 80xx twin before Rev 3.1). */
     bool twos_complement8015; /* Decode 8015 as two's complement when re-encoding. */
 } SegSegdConvertOptions;
 
@@ -348,7 +348,7 @@ typedef struct SegSegyRevision {
 typedef struct SegConvertOptions {
     SegSegyRevision revision;
     int32_t byte_order; /* SEG_BYTE_ORDER_* */
-    int32_t format; /* SEG_SEGY_TARGET_FORMAT_*: Target sample format (`stKeep`: keep or choose). */
+    int32_t format; /* SEG_SEGY_TARGET_FORMAT_*: Target sample format ("keep": keep or choose). */
     int32_t text_encoding; /* SEG_TEXT_ENCODING_*: SEG-D → SEG-Y: the textual header's encoding. */
     bool apply_descale; /* SEG-D: write millivolts (MP factor / descale multiplier). */
     bool station_header; /* SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza. */
@@ -410,7 +410,10 @@ void seg_prefetcher_release(SegPrefetcher *handle);
 /* The number of diagnostics. */
 SegStatus seg_diag_log_len(SegDiagLog *diag_log, int64_t *out);
 
-/* Diagnostic `i`, oldest first. */
+/*
+ * Diagnostic `i`, oldest first. As for a `seq`, an `i` outside
+ * `0 ..< len` is a bug (`IndexDefect`; unchecked under `-d:danger`).
+ */
 SegStatus seg_diag_log_get(SegDiagLog *diag_log, int64_t i, SegDiagnostic *out);
 
 /* Number of entries with exactly `severity`. */

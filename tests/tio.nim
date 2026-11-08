@@ -239,3 +239,19 @@ block cursor_on_disk_with_diagnostics_boundary:
   c.source.close
 
 removeDir tmp
+
+block memory_tape_head_is_clamped:
+  # 12.4: `pos` is writable; a head past the end means end of data.
+  let tape = newMemoryTape(@[dataBlock(bytes(4)), tapeMark(), dataBlock(bytes(2))])
+  tape.pos = 99
+  doAssert tape.status.atEndOfData and tape.status.fileNumber == 1
+  tape.pos = 99
+  tape.writeBlock(bytes(3)) # appends at the end
+  doAssert tape.items.len == 4 and tape.pos == 4
+  tape.pos = -5
+  var buf = newSeq[byte](16)
+  var n = 0
+  doAssert tape.readBlock(buf, n) == rkData and n == 4
+  tape.pos = 99
+  tape.spaceFiles(-1)
+  doAssert tape.pos == 1

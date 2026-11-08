@@ -129,7 +129,9 @@ type
     ## data, and `writeProtected`/`capacity` simulate media limits.
     items: seq[TapeItem]
     used: int              ## Data bytes in `items`, kept current by every change.
-    pos*: int              ## Index of the next item under the head.
+    pos*: int
+      ## Index of the next item under the head; a value outside `0 .. items.len`
+      ## is clamped into it (past the end: at end of data).
     writeProtected*: bool
     capacity*: int = -1    ## Maximum stored data bytes; -1 for unlimited.
 
@@ -148,6 +150,10 @@ func items*(t: MemoryTape): lent seq[TapeItem] {.inline.} =
   ## through the device methods.
   t.items
 
+proc clampHead(t: MemoryTape) {.inline.} =
+  # `pos` is writable: keep it a valid head position.
+  t.pos = clamp(t.pos, 0, t.items.len)
+
 func dataBlock*(data: openArray[byte]): TapeItem =
   ## A tape item holding a copy of `data` as one block.
   TapeItem(kind: tiBlock, data: @data)
@@ -159,6 +165,7 @@ func tapeMark*(): TapeItem =
 method readBlock*(t: MemoryTape; buf: var openArray[byte]; n: var int): RecordKind {.
     raises: [CatchableError].} =
   n = 0
+  t.clampHead()
   if t.pos >= t.items.len:
     result = rkEndOfData
   elif t.items[t.pos].kind == tiMark:
@@ -177,6 +184,7 @@ method readBlock*(t: MemoryTape; buf: var openArray[byte]; n: var int): RecordKi
 proc truncateAtHead(t: MemoryTape) =
   if t.writeProtected:
     raise newException(IOError, t.name & ": tape is write protected")
+  t.clampHead()
   t.used -= blockBytes(t.items.toOpenArray(t.pos, t.items.high))
   t.items.setLen t.pos
 
@@ -197,6 +205,7 @@ method writeTapeMarks*(t: MemoryTape; count: Positive) {.raises: [CatchableError
 method rewind*(t: MemoryTape) {.raises: [CatchableError].} = t.pos = 0
 
 method spaceFiles*(t: MemoryTape; count: int) {.raises: [CatchableError].} =
+  t.clampHead()
   if count > 0:
     var left = count
     while left > 0:
@@ -213,6 +222,7 @@ method spaceFiles*(t: MemoryTape; count: int) {.raises: [CatchableError].} =
       if t.items[t.pos].kind == tiMark: dec left
 
 method status*(t: MemoryTape): TapeStatus {.raises: [CatchableError].} =
+  t.clampHead()
   result = TapeStatus(atBeginning: t.pos == 0, atEndOfData: t.pos >= t.items.len,
     writeProtected: t.writeProtected, fileNumber: 0, blockNumber: 0)
   for i in 0 ..< t.pos:
