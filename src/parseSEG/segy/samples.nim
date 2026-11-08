@@ -72,12 +72,6 @@ func checkOrder(f: SampleFormat, order: ByteOrder) =
   if order == boPairSwapped and f in {sfInt24, sfUInt24}:
     raiseFormat("pair-swapped byte order is undefined for 3-byte sample format " & $ord(f))
 
-func get24(b: openArray[byte], pos: int, order: ByteOrder): uint32 {.inline.} =
-  if order == boLittle:
-    (uint32(b[pos+2]) shl 16) or (uint32(b[pos+1]) shl 8) or uint32(b[pos])
-  else:
-    beU24(b, pos)
-
 func put24(b: var openArray[byte], pos: int, v: uint32, order: ByteOrder) {.inline.} =
   if order == boLittle:
     b[pos] = uint8(v and 0xFF)
@@ -100,6 +94,11 @@ template forEachOrder(order: ByteOrder, body: untyped) =
     const o {.inject.} = boPairSwapped
     body
 
+{.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+# The decoders check the buffer lengths once, up front, then load through
+# unchecked pointers: no per-sample check in any build (the shipped library
+# is -d:release).
+
 proc decodeSamples*[T: SampleType](f: SampleFormat, src: openArray[byte],
     dst: var openArray[T], order = boBig) =
   ## Decodes `dst.len` samples of format `f` from the start of `src`.
@@ -110,45 +109,58 @@ proc decodeSamples*[T: SampleType](f: SampleFormat, src: openArray[byte],
   if src.len < n * sampleSize(f):
     raiseTruncated("trace data has " & $src.len & " bytes, " & $(n * sampleSize(f)) &
       " needed for " & $n & " samples")
+  if n == 0: return
+  let s = byteBuf(src)
+  let d = cast[ptr UncheckedArray[T]](addr dst[0])
   forEachOrder(order):
     case f
     of sfIbm32:
       when T is float64:
-        for i in 0..<n: dst[i] = ibmToFloat64(getNum[uint32](src, 4*i, o))
+        for i in 0..<n: d[i] = ibmToFloat64(loadNum[uint32](s, 4*i, o))
       else:
-        for i in 0..<n: dst[i] = ibmToFloat32(getNum[uint32](src, 4*i, o))
+        for i in 0..<n: d[i] = ibmToFloat32(loadNum[uint32](s, 4*i, o))
     of sfInt32:
-      for i in 0..<n: dst[i] = T(getNum[int32](src, 4*i, o))
+      for i in 0..<n: d[i] = T(loadNum[int32](s, 4*i, o))
     of sfInt16:
-      for i in 0..<n: dst[i] = T(getNum[int16](src, 2*i, o))
+      for i in 0..<n: d[i] = T(loadNum[int16](s, 2*i, o))
     of sfFixedGain:
       # Byte 1 zero, byte 2 gain exponent G, bytes 3-4 an i16 mantissa;
       # value = mantissa * 2^-G (Rev 2.1 reading). Reordering applies to the
       # whole 4-byte word.
       for i in 0..<n:
-        let w = getNum[uint32](src, 4*i, o)
-        dst[i] = T(float64(cast[int16](uint16(w and 0xFFFF))) *
+        let w = loadNum[uint32](s, 4*i, o)
+        d[i] = T(float64(cast[int16](uint16(w and 0xFFFF))) *
           pow(2.0, -float64((w shr 16) and 0xFF)))
     of sfFloat32:
-      for i in 0..<n: dst[i] = T(getNum[float32](src, 4*i, o))
+      when T is float32 and o == hostOrder:
+        copyMem(d, s, 4 * n)
+      else:
+        for i in 0..<n: d[i] = T(loadNum[float32](s, 4*i, o))
     of sfFloat64:
-      for i in 0..<n: dst[i] = T(getNum[float64](src, 8*i, o))
+      when T is float64 and o == hostOrder:
+        copyMem(d, s, 8 * n)
+      else:
+        for i in 0..<n: d[i] = T(loadNum[float64](s, 8*i, o))
     of sfInt24:
-      for i in 0..<n: dst[i] = T(cast[int32](get24(src, 3*i, o) shl 8) shr 8)
+      when o != boPairSwapped: # rejected by checkOrder
+        for i in 0..<n: d[i] = T(cast[int32](loadU24(s, 3*i, o) shl 8) shr 8)
     of sfInt8:
-      for i in 0..<n: dst[i] = T(cast[int8](src[i]))
+      for i in 0..<n: d[i] = T(cast[int8](s[i]))
     of sfInt64:
-      for i in 0..<n: dst[i] = T(getNum[int64](src, 8*i, o))
+      for i in 0..<n: d[i] = T(loadNum[int64](s, 8*i, o))
     of sfUInt32:
-      for i in 0..<n: dst[i] = T(getNum[uint32](src, 4*i, o))
+      for i in 0..<n: d[i] = T(loadNum[uint32](s, 4*i, o))
     of sfUInt16:
-      for i in 0..<n: dst[i] = T(getNum[uint16](src, 2*i, o))
+      for i in 0..<n: d[i] = T(loadNum[uint16](s, 2*i, o))
     of sfUInt64:
-      for i in 0..<n: dst[i] = T(getNum[uint64](src, 8*i, o))
+      for i in 0..<n: d[i] = T(loadNum[uint64](s, 8*i, o))
     of sfUInt24:
-      for i in 0..<n: dst[i] = T(get24(src, 3*i, o))
+      when o != boPairSwapped:
+        for i in 0..<n: d[i] = T(loadU24(s, 3*i, o))
     of sfUInt8:
-      for i in 0..<n: dst[i] = T(src[i])
+      for i in 0..<n: d[i] = T(s[i])
+
+{.pop.}
 
 proc toInt[I: SomeInteger](x: float64, i: int): I {.inline.} =
   # Rounds to nearest; refuses NaN and values outside I.

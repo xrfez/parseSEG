@@ -133,3 +133,49 @@ func putNum*[T: SomeNumber](b: var openArray[byte], pos: int, v: T, order: ByteO
     putBeU64(b, pos, reorder(cast[uint64](v), order))
   else:
     {.error: "putNum supports 1, 2, 4 and 8 byte numbers".}
+
+# ---------------------------------------------------------------------------
+# Unchecked loads for the sample decoders' hot loops. The caller checks the
+# buffer's length once, up front; each load is then one machine load (and a
+# byte swap when the stored order is not the host's), with no bounds check
+# in any build.
+
+const hostOrder* = when cpuEndian == littleEndian: boLittle else: boBig
+  ## The byte order of this machine.
+
+type ByteBuf* = ptr UncheckedArray[byte] ## Raw bytes whose length the caller has checked.
+
+func byteBuf*(b: openArray[byte]): ByteBuf {.inline.} =
+  ## The bytes of `b` as a `ByteBuf`; nil when `b` is empty.
+  if b.len == 0: nil else: cast[ByteBuf](unsafeAddr b[0])
+
+{.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+
+func fromStored[T: uint16 | uint32 | uint64](x: T, order: static ByteOrder): T {.inline.} =
+  # `x` loaded in host order from bytes stored in `order`, as a native value.
+  when order == hostOrder: x
+  elif hostOrder == boLittle:
+    when order == boBig: swapBytes(x)
+    else: reorder(swapBytes(x), boPairSwapped)
+  else:
+    reorder(x, order)
+
+func loadNum*[T: SomeNumber](p: ByteBuf, pos: int, order: static ByteOrder): T {.inline.} =
+  ## Reads a 1, 2, 4 or 8 byte number stored in `order` at byte offset `pos`
+  ## of `p`, unchecked: the caller guarantees `pos + sizeof(T)` bytes.
+  when sizeof(T) == 1:
+    cast[T](p[pos])
+  else:
+    type U = (when sizeof(T) == 2: uint16 elif sizeof(T) == 4: uint32 else: uint64)
+    var u: U
+    copyMem(addr u, addr p[pos], sizeof(U))
+    cast[T](fromStored(u, order))
+
+func loadU24*(p: ByteBuf, pos: int, order: static ByteOrder): uint32 {.inline.} =
+  ## Reads an unsigned 24-bit number stored big- or little-endian, unchecked.
+  when order == boLittle:
+    uint32(p[pos]) or (uint32(p[pos + 1]) shl 8) or (uint32(p[pos + 2]) shl 16)
+  else:
+    (uint32(p[pos]) shl 16) or (uint32(p[pos + 1]) shl 8) or uint32(p[pos + 2])
+
+{.pop.}

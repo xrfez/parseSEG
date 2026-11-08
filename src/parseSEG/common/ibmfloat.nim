@@ -9,26 +9,33 @@ import ./endians
 
 func ldexp(x: float64, e: cint): float64 {.importc: "ldexp", header: "<math.h>".}
 
-func ibmToFloat32*(bits: uint32): float32 =
+func ibmScales(): array[256, float64] =
+  # The value of fraction 1 for each sign-and-exponent byte:
+  # (-1)^sign * 16^(exponent - 64) * 2^-24, a power of two that float64 holds
+  # exactly (2^-280 .. 2^228).
+  # Built by halving and doubling (exact), so it also runs at compile time.
+  for b in 0..255:
+    let e = 4 * ((b and 0x7F) - 64) - 24
+    var m = 1.0
+    for _ in 1..abs(e): m = if e < 0: m * 0.5 else: m * 2
+    result[b] = if (b and 0x80) != 0: -m else: m
+
+const ibmScale = ibmScales()
+
+func ibmToFloat64*(bits: uint32): float64 {.inline.} =
+  ## Converts IBM float bits to IEEE double, exactly (every IBM single fits).
+  ## A zero fraction (any sign or exponent) gives +0.
+  let frac = bits and 0x00FF_FFFF'u32
+  # The fraction (24 bits) converts exactly; scaling by a power of two is
+  # exact in float64's range. One table load and one multiply: no branch on
+  # the data except for zero, which keeps +0 for a negative zero.
+  if frac == 0: 0.0 else: float64(frac) * ibmScale[bits shr 24]
+
+func ibmToFloat32*(bits: uint32): float32 {.inline.} =
   ## Converts IBM float bits to the nearest IEEE single. Magnitudes beyond
   ## float32 range become +/-Inf; tiny values round to subnormals or zero.
-  let frac = bits and 0x00FF_FFFF'u32
-  if frac == 0:
-    result = 0'f32
-  else:
-    let expo = int((bits shr 24) and 0x7F) - 64
-    let mag = ldexp(float64(frac), cint(4 * expo - 24))
-    result = float32(if (bits and 0x8000_0000'u32) != 0: -mag else: mag)
-
-func ibmToFloat64*(bits: uint32): float64 =
-  ## Converts IBM float bits to IEEE double, exactly (every IBM single fits).
-  let frac = bits and 0x00FF_FFFF'u32
-  if frac == 0:
-    result = 0.0
-  else:
-    let expo = int((bits shr 24) and 0x7F) - 64
-    let mag = ldexp(float64(frac), cint(4 * expo - 24))
-    result = if (bits and 0x8000_0000'u32) != 0: -mag else: mag
+  # The exact float64 value, rounded once to float32.
+  float32(ibmToFloat64(bits))
 
 func float32ToIbm*(x: float32): uint32 =
   ## Converts an IEEE single to IBM float bits with round-to-nearest.

@@ -81,23 +81,32 @@ proc decodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
   if src.len < need:
     raiseTruncated("trace data has " & $src.len & " bytes, " & $need & " needed for " & $n &
       " samples")
+  if n == 0: return
+  let s = byteBuf(src)
+  let d = cast[ptr UncheckedArray[T]](addr dst[0])
   template loop(o: static ByteOrder) =
+    {.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+    # Lengths are checked above; the loops load through unchecked pointers.
     case f
     of s2Int16:
-      for i in 0..<n: dst[i] = T(getNum[int16](src, 2*i, o))
+      for i in 0..<n: d[i] = T(loadNum[int16](s, 2*i, o))
     of s2Int32:
-      for i in 0..<n: dst[i] = T(getNum[int32](src, 4*i, o))
+      for i in 0..<n: d[i] = T(loadNum[int32](s, 4*i, o))
     of s2Float32:
-      for i in 0..<n: dst[i] = T(getNum[float32](src, 4*i, o))
+      when T is float32 and o == hostOrder: copyMem(d, s, 4 * n)
+      else:
+        for i in 0..<n: d[i] = T(loadNum[float32](s, 4*i, o))
     of s2Float64:
-      for i in 0..<n: dst[i] = T(getNum[float64](src, 8*i, o))
+      when T is float64 and o == hostOrder: copyMem(d, s, 8 * n)
+      else:
+        for i in 0..<n: d[i] = T(loadNum[float64](s, 8*i, o))
     of s2Float20:
       for i in 0..<n:
         let g = 10 * (i div 4)
         let k = i mod 4
-        let e = (getNum[uint16](src, g, o) shr (4 * k)) and 0xF
-        dst[i] = T(float20Value(e, getNum[uint16](src, g + 2 + 2 * k, o), twosComplement))
-  # SEG-2 files are little- or big-endian only (the block ID tells which).
+        let e = (loadNum[uint16](s, g, o) shr (4 * k)) and 0xF
+        d[i] = T(float20Value(e, loadNum[uint16](s, g + 2 + 2 * k, o), twosComplement))
+    {.pop.}
   if order == boLittle: loop(boLittle) else: loop(boBig)
 
 proc toInt(x: float64, lo, hi: int64, i: int): int64 =
