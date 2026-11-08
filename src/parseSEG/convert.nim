@@ -48,6 +48,7 @@ import ./segy/[reader as segyreader, writer as segywriter, textheader, binheader
   samples as segysamples, exttext, layout]
 import ./segd/[reader as segdreader]
 import ./model/[traceindex, keys]
+import ./survey/join
 import ./abi/pragmas
 import ./version
 
@@ -107,6 +108,14 @@ type
     lnSegdTimeRange ## A SEG-D record time outside years 1-9999.
     lnSurveyType ## Rev 2.0 target: survey type dropped.
     lnLayoutStanza ## Rev 2.0 target: the Layout stanza is not read.
+
+  GeometryJoin* = object
+    ## **Internal.** Survey geometry joined to the SEG-D keys before they go
+    ## into the SEG-Y headers (`convertWithGeometry`); none when `survey`
+    ## is nil.
+    survey*: ptr SurveyGeometry
+    fields*: GeometryFields
+    overwrite*: bool
 
   Losses = object
     ## Traces whose samples could not be written exactly.
@@ -360,6 +369,7 @@ type
     outFmt: SampleFormat
     losses: Losses
     nOut: int ## Traces written so far.
+    join: GeometryJoin ## Survey geometry for the keys (none: `survey` is nil).
     vals, scratch: seq[float64]
 
 func losslessFormat(f: SegdSampleFormat, rev: SegyRevision, descale: bool,
@@ -642,7 +652,9 @@ proc toSegySamples(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, twosComplem
 proc toSegyTrace(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, inRecord: int,
     twosComplement8015: bool): SegyTrace =
   # SEG-Y trace `c.nOut` for SEG-D trace `t`, the `inRecord`-th of `rec`.
-  let k = traceKeys(rec, t)
+  var k = traceKeys(rec, t)
+  if c.join.survey != nil:
+    discard k.applySurvey(c.join.survey[], c.join.fields, c.join.overwrite)
   let dt = rec.sampleIntervalUs(t)
   result = SegyTrace(index: c.nOut, numSamples: t.numSamples, sampleInterval: dt,
     header: c.toSegyHeader(rec, t, k, inRecord))
@@ -657,7 +669,7 @@ proc toSegyTrace(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, inRecord: int
   c.toSegySamples(rec, t, twosComplement8015, result.samples)
 
 proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
-    recordFormats: set[SegdSampleFormat] = {}): DiagLog =
+    recordFormats: set[SegdSampleFormat] = {}, join = GeometryJoin()): DiagLog =
   ## Converts the SEG-D stream at `src` to one SEG-Y file (see the module
   ## doc for the mapping). `recordFormats`, the formats of all records (from
   ## a header scan; `convertFile` does one), lets the default format choice
@@ -665,8 +677,9 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
   ## way every trace is checked after encoding, and traces not written
   ## exactly are counted in a warning. The reader's, the writer's and the
   ## conversion's diagnostics are all in the result; a fatal one means the
-  ## output is incomplete.
-  var c = SegdToSegy(opts: opts, loc: Location(file: sink.name))
+  ## output is incomplete. `join` (internal) joins survey geometry to the
+  ## keys first.
+  var c = SegdToSegy(opts: opts, loc: Location(file: sink.name), join: join)
   var err: string
   if not checkTarget(opts, err):
     result.report(sevFatal, dcValidation, err, loc = c.loc)
@@ -738,14 +751,16 @@ proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
   except CatchableError:
     result = {}
 
-proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.segApi,
-    raises: [].} =
+proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
+    join = GeometryJoin()): DiagLog {.segApi(hide = join), raises: [].} =
   ## Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
   ## file `dstPath` (see `convertSegy` / `convertSegdToSegy`); SEG-2 input is
   ## not supported yet (a fatal diagnostic). Never raises:
   ## problems, including I/O failures, are in the result. The output is
   ## written to `<dstPath>.tmp` and renamed when complete, so a failed
   ## conversion leaves an existing `dstPath` untouched and no partial file.
+  ## `join` (internal) joins survey geometry to SEG-D keys; for survey
+  ## geometry in the output use `convertWithGeometry`.
   var head = newSeq[byte](8192)
   try:
     let f = open(srcPath, fmRead)
@@ -777,7 +792,7 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.
       src = openDiskSource(srcPath)
       sink = openDiskSink(tmp)
       result = if kind == skSegy: convertSegy(src, sink, opts)
-               else: convertSegdToSegy(src, sink, opts, formats)
+               else: convertSegdToSegy(src, sink, opts, formats, join)
     finally:
       if src != nil: src.close()
       if sink != nil: sink.close()

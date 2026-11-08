@@ -49,6 +49,16 @@ type
     trailingDigits* {.segField.}: bool ## Unmapped line names use their trailing digits.
     log* {.segField(readonly = true).}: DiagLog ## Problems met while adding survey files.
 
+  GeometryFields* = object
+    ## Which joined values are written to a file (`writeGeometry`,
+    ## `copyWithGeometry`, `convertWithGeometry`); all by default.
+    sourceXy* = true   ## Source X/Y.
+    receiverXy* = true ## Receiver (group) X/Y.
+    elevations* = true ## Source and receiver elevation.
+    midpoints* = true  ## Midpoint (SEG-Y CDP X/Y), with the coordinates.
+    offsets* = true    ## Source-receiver offset (SEG-Y), with the coordinates.
+    stations* = true   ## Source and receiver line, point and point index.
+
   StationRelation* = object
     ## The stations one channel of a field record was recorded from.
     source*, receiver*: StationKey
@@ -262,3 +272,29 @@ proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, overwrite = false): int
   ## change. Returns the traces changed. Raises `ValueError` for a file opened
   ## without `keys = true`.
   f.index.applySurvey(g, overwrite)
+
+proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, fields: GeometryFields,
+    overwrite = false): bool =
+  ## `applySurvey`, keeping only the joined values `fields` selects (the
+  ## others stay as they were). True if anything changed.
+  var j = k
+  if not j.applySurvey(g, overwrite): return false
+  let before = k
+  if fields.sourceXy: (k.srcX, k.srcY) = (j.srcX, j.srcY)
+  if fields.receiverXy: (k.rcvX, k.rcvY) = (j.rcvX, j.rcvY)
+  if fields.elevations: (k.srcZ, k.rcvZ) = (j.srcZ, j.rcvZ)
+  if fields.midpoints: (k.cmpX, k.cmpY) = (j.cmpX, j.cmpY)
+  if fields.offsets: k.offset = j.offset
+  if fields.stations:
+    (k.srcLine, k.srcPoint, k.srcIndex) = (j.srcLine, j.srcPoint, j.srcIndex)
+    (k.rcvLine, k.rcvPoint, k.rcvIndex) = (j.rcvLine, j.rcvPoint, j.rcvIndex)
+    k.component = j.component
+  func same(a, b: float64): bool = a == b or (a.isNaN and b.isNaN)
+  not (same(k.srcX, before.srcX) and same(k.srcY, before.srcY) and
+    same(k.rcvX, before.rcvX) and same(k.rcvY, before.rcvY) and
+    same(k.srcZ, before.srcZ) and same(k.rcvZ, before.rcvZ) and
+    same(k.cmpX, before.cmpX) and same(k.cmpY, before.cmpY) and
+    same(k.offset, before.offset) and same(k.srcLine, before.srcLine) and
+    same(k.srcPoint, before.srcPoint) and same(k.rcvLine, before.rcvLine) and
+    same(k.rcvPoint, before.rcvPoint) and k.srcIndex == before.srcIndex and
+    k.rcvIndex == before.rcvIndex and k.component == before.component)

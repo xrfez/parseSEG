@@ -9,6 +9,7 @@ import parseSEG/common/[diagnostics, endians, errors]
 import parseSEG/io/[records, tapeimage]
 import parseSEG/segd/[reader, writer, headers, samples, mux, demux, revconvert]
 import parseSEG/model/[traceindex, edit]
+import parseSEG/survey/writeback
 
 
 let tmp = getTempDir() / "parseseg_tsegdmux"
@@ -457,6 +458,13 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   doAssertRaises ValueError: discard openSeismic(tmp / "m15.sgd", writable = true)
   doAssertRaises ValueError: discard openEditor(tmp / "m15.sgd", tmp / "j.nif")
   doAssert not fileExists(tmp / "j.nif")
+  # Survey geometry: in place is refused like any edit; a copy is written
+  # demultiplexed (10.5).
+  let geo = copyWithGeometry(tmp / "m15.sgd", tmp / "m15geo.sgd", initSurveyGeometry())
+  doAssert not geo.isFatal and geo.has("geometry written: 0 traces")
+  var gf = openSeismic(tmp / "m15geo.sgd")
+  doAssert gf.demuxPath.len == 0 and gf.len == 12 and not gf.index.segdRecords[0].multiplexed
+  gf.close()
 
 block conversions_read_demultiplexed_traces:
   # Revision conversion and SEG-Y conversion go through the reader.

@@ -358,6 +358,32 @@ with parseseg.open_seismic(S63, keys=True) as d:
     k = d.trace_keys(0)
     assert (k["src_point"], k["rcv_point"], k["rcv_x"]) == (205, 101, 500100)
     raises(parseseg.ArgumentError, g.add_p1, sps_path, 9)
+    # Writing the joined geometry back (10.5): a dry run, then in place.
+    c = d.geometry_changes()
+    assert c["traces"] == 1 and c["receiver_stations"] == 1 and c["unwritable"] > 0
+    assert d.geometry_changes({"stations": False})["traces"] == 0
+    assert any("no coordinate fields" in x["msg"] for x in d.preview_geometry())
+    raises(parseseg.ArgumentError, d.geometry_changes, {"bogus": True})
+
+geo_path = fresh(S63)
+geo_original = open(geo_path, "rb").read()
+with parseseg.open_seismic(geo_path, keys=True) as d:
+    d.apply_survey(g, True)
+    with parseseg.open_editor(geo_path) as ed:
+        assert ed.write_geometry(d)["receiver_stations"] == 1
+with parseseg.open_seismic(geo_path, keys=True) as d:
+    assert d.trace_keys(0)["rcv_point"] == 101
+parseseg.rollback_journal(geo_path, geo_path + ".edits.nif")
+assert open(geo_path, "rb").read() == geo_original
+geo_copy = os.path.join(scratch, "63geo.sgd")
+log = parseseg.copy_with_geometry(S63, geo_copy, g, overwrite=True)
+assert not log.has_errors
+with parseseg.open_seismic(geo_copy, keys=True) as d:
+    assert d.trace_keys(0)["rcv_point"] == 101
+geo_sgy = os.path.join(scratch, "63geo.sgy")
+parseseg.convert_with_geometry(S63, geo_sgy, g, None, {"receiver_xy": True}, True)
+with parseseg.open_seismic(geo_sgy, keys=True) as d:
+    assert d.trace_keys(0)["rcv_x"] == 500100
 
 # ---------------------------------------------------------------- editing --
 path = fresh(INGLEWOOD)
