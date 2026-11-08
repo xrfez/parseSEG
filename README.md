@@ -38,10 +38,10 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 
 - `src/parseSEG.nim`: the public API (umbrella module); `src/parseSEG/`: the library, by
   area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `survey`, `abi`), plus `cli.nim`
-  and `bindings.nim` (the shared library). Every C and Python function is one
-  `{.segApi.}` proc in `abi/api.nim`; the pragma (`abi/segapi.nim`) generates the C
-  exports, the header and the Python module, and `abi/runtime.nim` holds what the
-  generated exports call at run time.
+  and `bindings.nim` (the shared library). Every C and Python function comes from a
+  `{.segApi.}` core proc (or one of the few adapters in `abi/api.nim`); the generator
+  (`abi/segapi.nim`) writes the C exports, the header and the Python module, and
+  `abi/runtime.nim` holds what the generated exports call at run time.
 - `include/parseseg.h`, `python/parseseg/__init__.py`: the generated C header and Python
   (ctypes) module, rewritten by `nim lib` and committed.
 - `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI and build targets
