@@ -467,7 +467,7 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
       midpoints, especially for SEG-D 2.x, which has no coordinates in its headers. Exposed in
       the public API, C ABI, Python and the CLI (`info --sps`/`--p1`).
 - [x] 10.4 Review by an agent; fix its findings.
-- [ ] 10.5 Explicit write-back of joined geometry (owner rule: files change only on an explicit
+- [x] 10.5 Explicit write-back of joined geometry (owner rule: files change only on an explicit
       write). `applySurvey` stays in memory. A separate, named call persists it:
       - `writeGeometry(editor, ix, fields)` through the journaled `HeaderEditor` (in place,
         same-size fields only, undoable);
@@ -1292,3 +1292,22 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
   - Follow-ups:
     - `importHeaders` is not on the C/Python boundary (its closure parameter), so hosts apply patches with the CLI.
     - `theadernif` `failed_journal_syncs` fails when TMPDIR is long (the session line exceeds its 100-byte RLIMIT).
+- 2026-11-08: Task 10.5 done (agent, worktree `wt-geom`, merged).
+  - API (`survey/writeback.nim`):
+    - `GeometryFields`: sourceXy, receiverXy, elevations, midpoints, offsets, stations.
+    - `writeGeometry(editor, ix|f, fields)`, journaled.
+    - `geometryChanges` and `previewGeometry`: dry runs.
+    - `copyWithGeometry` and `convertWithGeometry`, into a new file.
+    - C `seg_header_editor_write_geometry` and the others, Python `write_geometry`.
+    - CLI `survey-apply <file> SURVEY [-o out | --in-place] [--values=...]`. It reports only, unless given `-o` or `--in-place`.
+  - Rules:
+    - Only values that differ from the headers are written; NaN never is. A second run writes nothing.
+    - SEG-Y slots come through the layout (coor4 share `co_scal`, elevations `ed_scal`). Station names are written only where a Layout stanza defines them.
+    - The scalar: the file's own if exact, else the coarsest exact, else the finest that fits (warning). Overflow is refused.
+    - SEG-D Rev 1/2: THE#1 receiver line, point and index.
+    - SEG-D Rev 3: THE#1, plus existing Position and Source Description blocks only.
+    - Values with no slot (record-level sources) are reported once per kind.
+    - SEG-2 is refused. `--in-place` refuses multiplexed SEG-D; `-o` writes a demux copy.
+  - Untested:
+    - Windows: the file is mapped twice in `writeInPlace`.
+    - A Rev 1 target that skips traces with more than 65535 samples.
