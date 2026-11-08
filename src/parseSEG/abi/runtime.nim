@@ -128,8 +128,9 @@ proc keep*[T: AbiHandle](h: T): pointer =
   cast[pointer](h)
 
 template segGuard*(logOut: untyped, body: untyped): SegStatus =
-  ## Runs `body` with every exception mapped to a status and `lastError`.
-  ## A `LoggedError` also hands its log out through `logOut` (`nil`: none).
+  ## Runs `body` with every exception mapped to a status and `lastError`,
+  ## Defects included (`SEG_ERR_INTERNAL`). A `LoggedError` also hands its
+  ## log out through `logOut` (`nil`: none).
   var st = SEG_OK
   lastErrorBuf[0] = '\0'
   try:
@@ -147,6 +148,11 @@ template segGuard*(logOut: untyped, body: untyped): SegStatus =
   except ValueError as e: st = fail(SEG_ERR_ARGUMENT, e.msg)
   except AbiMemoryError as e: st = fail(SEG_ERR_MEMORY, e.msg)
   except CatchableError as e: st = fail(SEG_ERR_INTERNAL, $e.name & ": " & e.msg)
+  except Defect as e:
+    # A library bug (an overflow, a bad index): reported, never let through.
+    # An escaped exception would leave the thread's pending-error state set,
+    # and every later call on the thread would return early and do nothing.
+    st = fail(SEG_ERR_INTERNAL, $e.name & ": " & e.msg)
   st
 
 template withHandle*(h: AbiHandle, body: untyped) =

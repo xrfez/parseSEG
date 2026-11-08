@@ -16,7 +16,7 @@ per-function documentation.
 | `Tensor[T]` layout | 128 bytes: `shape`, `strides` (`array[6, int]` plus a length each), `offset`, then a `ref` to the storage holding `raw_buffer`. The data is a plain C-contiguous buffer, like numpy's. |
 | Host threads calling in, default allocator | **Segfault**: the thread-local allocator is not set up on threads Nim did not create. |
 | Host threads calling in, `-d:useMalloc` | Works: 4 pthreads × 2000 allocate/release cycles. |
-| Defects inside an export (`--panics:off`, the default) | Caught by `except Exception` and turned into an error code. The library does not rely on this: `segGuard` maps `CatchableError`s only (see decision 8). |
+| Defects inside an export (`--panics:off`, the default) | Catchable. One that escapes an export leaves the thread's pending-error flag set (goto exceptions), and every later call on that thread returns early, as if successful, doing nothing (13.3 review). So `segGuard` catches Defects too (see decision 8). |
 | `GC_ref`/`GC_unref` on a `ref` cast to `pointer` | Keeps the object alive across the boundary; releases it correctly. |
 
 ## Decisions
@@ -125,8 +125,12 @@ per-function documentation.
      stride), from row `row` on.
 8. **Errors never cross as exceptions.**
    - Every export runs inside `segGuard`, which maps each `CatchableError` to a status and
-     the thread's last error. Defects are bugs and are not mapped, so no export may be able
-     to hit one on caller input: the core's public procs raise `ValueError` for bad
+     the thread's last error. A Defect (a library bug) is `SEG_ERR_INTERNAL`, with its name
+     and message as the last error. Catching it also clears the thread's pending-exception
+     state: a Defect let through would poison the thread, and every later call on it would
+     return `SEG_OK` without doing anything (`tests/c/guard_test.c` proves the opposite).
+     Builds with `--panics:on` would abort instead. Still, no export may be able to hit a
+     Defect on caller input: the core's public procs raise `ValueError` for bad
      arguments (out-of-range traces and ranges, missing keys) rather than asserting, so
      `-d:danger` builds, which drop bound checks, still refuse them. The exception is `[]`
      indexing (`DiagLog[i]`), which keeps Nim's convention (`IndexDefect`, unchecked under

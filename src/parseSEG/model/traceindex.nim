@@ -528,7 +528,8 @@ proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] {.segApi.}
   ## hex view). Raises `ValueError` if the file is closed or the range lies
   ## outside it. Changing the copy never changes the file.
   if f.map.src == nil: raise newException(ValueError, "the file is closed")
-  if offset < 0 or offset + int64(n) > f.map.src.size:
+  # `n > size - offset`, not `offset + n > size`: the sum can overflow.
+  if offset < 0 or offset > f.map.src.size or int64(n) > f.map.src.size - offset:
     raise newException(ValueError, "bytes " & $offset & "+" & $n & " lie outside the file (" &
       $f.map.src.size & " bytes)")
   result = newSeq[byte](n)

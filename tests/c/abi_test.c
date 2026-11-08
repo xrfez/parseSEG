@@ -248,6 +248,14 @@ static void test_files(void) {
     OK(seg_seismic_file_copy_bytes(f, 0, 4, head, sizeof head, &n));
     CHECK(n == 4 && head[0] == 0xC3);
     CHECK(seg_seismic_file_copy_bytes(f, 0, -1, head, 8, &n) == SEG_ERR_ARGUMENT); /* Natural */
+    /* offset + n overflowed into a Defect, which poisoned the thread (13.3 R3-1). */
+    n = -5;
+    CHECK(seg_seismic_file_copy_bytes(f, 1, INT64_MAX, NULL, 0, &n) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_copy_bytes(f, INT64_MAX, 1, NULL, 0, &n) == SEG_ERR_ARGUMENT);
+    CHECK(strstr(seg_last_error(), "outside the file") != NULL);
+    CHECK(file_len(f) == 200);
+    OK(seg_seismic_file_copy_bytes(f, 0, 4, head, sizeof head, &n));
+    CHECK(n == 4 && head[0] == 0xC3);
     SegValue v;
     OK(seg_seismic_file_trace_field(f, 5, "trace.sourceX", &v));
     CHECK(v.kind == SEG_VALUE_INT && v.i == 1704188);
