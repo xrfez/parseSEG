@@ -173,8 +173,8 @@ proc gathers*(ix: TraceIndex): seq[Gather] =
 proc componentGroups*(ix: TraceIndex, traces: Slice[int]): seq[ComponentGroup] =
   ## Groups the seismic traces of `traces` by (source, receiver station,
   ## depth index, reshoot index), in order of first appearance. Raises
-  ## `ValueError` for traces outside the index or an index built without
-  ## `keys = true`.
+  ## `ValueError` for traces outside the index (an empty range must still
+  ## start in `0 .. ix.len`) or an index built without `keys = true`.
   ix.requireKeys()
   checkSpan(traces, ix.len)
   var at: Table[(StationId, StationId, uint8, uint8), int]

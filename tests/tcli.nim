@@ -96,6 +96,9 @@ block convert:
   doAssert "SEG-D rev 2.1" in ok("info", tmp / "63_r21.sgd")
   discard ok("convert", inglewood, tmp / "le.sgy", "--byte-order=little", "--format=5")
   doAssert "little-endian" in ok("info", tmp / "le.sgy")
+  # --format=0 keeps the format, for SEG-Y as for SEG-D (12.4).
+  discard ok("convert", tmp / "le.sgy", tmp / "le0.sgy", "--byte-order=little", "--format=0")
+  doAssert "IEEE float32" in ok("info", tmp / "le0.sgy") and "little-endian" in ok("info", tmp / "le0.sgy")
   doAssert "applies to SEG-Y output only" in
     fails(2, "convert", s63, tmp / "x.sgd", "--to=segd", "--descale")
   doAssert "--to is segy or segd" in fails(2, "convert", s63, tmp / "x.sgy", "--to=segx")

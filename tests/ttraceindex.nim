@@ -291,3 +291,13 @@ block skip_guards:
   src.close()
   var p = initPushbackInput(openMemFileSource(exampleDir / "63.sgd"))
   doAssert p.skip(-5) == 0 and p.offset == 0
+
+block empty_ranges_must_start_in_the_file:
+  # 12.4: an empty range is valid only when it starts in `0 .. len`.
+  var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd")
+  doAssert f.len == 5
+  doAssert f.readTraces(5..4).shape[0] == 0 and f.readTraces(0 .. -1).shape[0] == 0
+  doAssert f.maxSamples(5..4) == 0
+  doAssertRaises(ValueError): discard f.readTraces(7..6)
+  doAssertRaises(ValueError): discard f.maxSamples(-1 .. -2)
+  f.close()

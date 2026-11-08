@@ -719,7 +719,8 @@ SegStatus seg_prefetcher_len(SegPrefetcher *prefetcher, int64_t *out);
  * Restarts read-ahead over the positions `span` (traces in range mode).
  * Chunks decoded for the old positions are dropped; one being decoded
  * finishes in the background and is discarded. A no-op after `close`.
- * Raises `ValueError` for positions out of range.
+ * Raises `ValueError` for positions out of range (an empty span must
+ * still start in `0 .. len`).
  */
 SegStatus seg_prefetcher_seek(SegPrefetcher *prefetcher, int64_t span_first, int64_t span_last);
 

@@ -25,7 +25,9 @@ Conventions that hold throughout:
   The same pattern holds across the library (`findChannelSet`, `fieldValue`,
   `parseFortranFloat`, `resolveLine`, `relation`, ...); no lookup fills `var` results.
 - **Trace ranges are `Slice[int]`** (`0 ..< f.len`, both ends included as in Nim) and
-  selections are `openArray[int]`; both parameters are named `traces`.
+  selections are `openArray[int]`; both parameters are named `traces`. An empty range
+  (`a > b`) must still start in `0 .. f.len` (`f.len .. f.len - 1` is valid, `7..6` on five
+  traces raises `ValueError`).
 - **Samples are Arraymancer tensors** `[traces, samples]` (`float32`, or `float64` where it
   matters). Headers are plain objects that keep their raw bytes, so a write → read round
   trip is byte-identical.

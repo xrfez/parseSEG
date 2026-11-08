@@ -166,8 +166,9 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   ## Starts decoding `traces` on a worker thread, `chunkTraces` at a time, at
   ## most `depth` chunks ahead. Rows have `cols` samples (-1: the range's
   ## largest trace). `f` must stay open, its index unchanged, until `close`.
-  ## Raises `ValueError` for traces outside the file, a closed or tape file,
-  ## or a non-positive chunk size or depth.
+  ## Raises `ValueError` for traces outside the file (an empty range must
+  ## still start in `0 .. f.len`), a closed or tape file, or a non-positive
+  ## chunk size or depth.
   if not f.isOpen and f.len > 0: raiseArg("the file is closed")
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
   if chunkTraces <= 0 or depth <= 0 or cols < -1:
@@ -303,7 +304,8 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   ## Restarts read-ahead over the positions `span` (traces in range mode).
   ## Chunks decoded for the old positions are dropped; one being decoded
   ## finishes in the background and is discarded. A no-op after `close`.
-  ## Raises `ValueError` for positions out of range.
+  ## Raises `ValueError` for positions out of range (an empty span must
+  ## still start in `0 .. len`).
   if p.sh == nil: return
   checkSpan(span, p.last, "positions")
   let first = span.a

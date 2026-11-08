@@ -385,7 +385,8 @@ proc requireKeys*(ix: TraceIndex) =
 
 proc checkSpan*(span: Slice[int], len: int, what = "traces") =
   ## **Internal.** Raises `ValueError` unless `span` lies in `0 ..< len`; an
-  ## empty span must start in `0 .. len`.
+  ## empty span must start in `0 .. len` (so `len .. len - 1` is allowed,
+  ## `len + 2 .. len + 1` is not).
   if span.a < 0 or span.a > len or span.b >= len:
     raise newException(ValueError, what & " " & $span & " lie outside 0.." & $(len - 1))
 
@@ -437,7 +438,8 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   ## row-major `[rows, samples]` tensor), each truncated or zero-padded to
   ## `dst.shape[1]`. A trace that cannot be decoded is left zero, logged in
   ## `log`, and counted in the result. Raises `ValueError` for traces outside
-  ## the file, a closed file or a tensor without room.
+  ## the file (an empty range must still start in `0 .. f.len`), a closed
+  ## file or a tensor without room.
   let count = traces.spanLen
   f.checkReadable(count)
   f.checkSelection(traces)
@@ -489,8 +491,9 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   f.readTracesInto(traces, dst, row, log)
 
 func maxSamples*(f: SeismicFile, traces: Slice[int]): int =
-  ## Largest sample count in the trace range. Raises `ValueError` for traces
-  ## outside the file.
+  ## Largest sample count in the trace range (0 when empty). Raises
+  ## `ValueError` for traces outside the file (an empty range must still
+  ## start in `0 .. f.len`).
   f.checkSelection(traces)
   for i in traces: result = max(result, int(f.index.entries[i].numSamples))
 
@@ -504,7 +507,8 @@ proc readTraces*(f: SeismicFile, traces: Slice[int], log: var DiagLog,
     T: typedesc[SampleType] = float32): Tensor[T] =
   ## `traces` as a new `[traces.len, maxSamples]` tensor (shorter traces are
   ## zero-padded). A trace that cannot be decoded stays zero and is logged in
-  ## `log`. Raises `ValueError` for traces outside the file or a closed file.
+  ## `log`. Raises `ValueError` for traces outside the file (an empty range
+  ## must still start in `0 .. f.len`) or a closed file.
   result = newTraceTensor[T](traces.spanLen, f.maxSamples(traces))
   discard f.readTracesInto(traces, result, 0, log)
 
@@ -526,8 +530,8 @@ proc raiseUndecodable(log: DiagLog) {.noinline, noreturn.} =
 proc readTraces*(f: SeismicFile, traces: Slice[int],
     T: typedesc[SampleType] = float32): Tensor[T] =
   ## `traces` as a new `[traces.len, maxSamples]` tensor (shorter traces are
-  ## zero-padded). Raises `ValueError` for traces outside the file or a
-  ## closed file, and `SegFormatError` (`SegTruncatedError` for samples past
+  ## zero-padded). Raises `ValueError` for traces outside the file (an empty
+  ## range must still start in `0 .. f.len`) or a closed file, and `SegFormatError` (`SegTruncatedError` for samples past
   ## the end of the file) when a trace cannot be decoded: pass a `log` to
   ## get zero rows and diagnostics instead.
   var log: DiagLog
