@@ -97,6 +97,10 @@ type
     keys*: seq[TraceKeys]
       ## Per-trace geometry, parallel to `entries`; empty unless the index was
       ## built with `keys = true` (about 100 bytes per trace).
+    segyIntervalUs*: float64
+      ## SEG-Y: the effective sample interval every trace shares (µs for time
+      ## data), NaN when traces differ or there are none; 0 for SEG-D (see
+      ## `summary`).
 
 const NoChannelSet* = 0xFFFF'u16
   ## `TraceEntry.channelSet` of a trace without a known channel set. The
@@ -215,8 +219,11 @@ proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
   result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
     order: r.file.byteOrder)
   let gr = if keys: initGeometryReader(r.file) else: GeometryReader()
+  result.segyIntervalUs = NaN
   var t: SegyTrace
   while r.readTrace(t):
+    if result.entries.len == 0: result.segyIntervalUs = t.sampleInterval
+    elif t.sampleInterval != result.segyIntervalUs: result.segyIntervalUs = NaN
     let hb = TraceHeaderSize + (if t.hasExt1: TraceHeaderSize + t.proprietary.len else: 0)
     result.entries.add TraceEntry(offset: t.offset, headerBytes: uint32(hb),
       numSamples: uint32(t.numSamples), channelSet: NoChannelSet, scanType: -1)

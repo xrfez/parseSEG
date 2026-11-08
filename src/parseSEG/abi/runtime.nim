@@ -68,6 +68,16 @@ type
     textCap*: int64
     textLen*: int64
 
+  SegValueRef* {.bycopy.} = object
+    ## A header field value in a struct (`HeaderRow.value`): text is borrowed
+    ## from the receiver, like the struct's other strings.
+    kind*: int32
+    pad: int32
+    i*: int64
+    f*: float64
+    text*: cstring
+    textLen*: int64
+
   MSegSlice* {.bycopy.} = object
     ## C mirror of `Slice[int]` (`SegSlice`): `a..b`, both included.
     a*, b*: int64
@@ -236,6 +246,23 @@ template writeSeqWith*(s: untyped, buf: untyped, cap: int64, outLen: ptr int64,
   if buf != nil:
     for i in 0 ..< min(n, cap): buf[i] = conv(s[i])
   if outLen != nil: outLen[] = n
+
+func toValueRef*(v: FieldValue): SegValueRef =
+  ## The borrowed C form of `v` (its text stays owned by `v`).
+  case v.kind
+  of fvInt: SegValueRef(kind: SEG_VALUE_INT, i: v.intVal, f: float64(v.intVal))
+  of fvFloat: SegValueRef(kind: SEG_VALUE_FLOAT, f: v.floatVal)
+  of fvText: SegValueRef(kind: SEG_VALUE_TEXT, text: cstring(v.text), textLen: int64(v.text.len))
+
+proc writeStrings*(s: openArray[string], buf: ptr UncheckedArray[char], cap: int64,
+    outLen: ptr int64) =
+  ## Copies the strings into the caller's buffer, each followed by a NUL (at
+  ## most `cap - 1` bytes, then a NUL), and sets `outLen` to the full length.
+  var all = ""
+  for x in s:
+    all.add x
+    all.add '\0'
+  writeText(all, buf, cap, outLen)
 
 proc writeValue*(dst: ptr SegValue, v: FieldValue) =
   ## Stores `v` in the caller's `SegValue` (text into its own buffer).

@@ -5,7 +5,8 @@ import std/[assertions, os, math, strutils, options]
 import parseSEG/common/errors
 import parseSEG/io/[diskio, memsource]
 import parseSEG/seg2/[reader as seg2reader]
-import parseSEG/model/[traceindex, gathers, headerfields, headernif, prefetch]
+import parseSEG/model/[traceindex, gathers, headerfields, headernif, prefetch, summary,
+  headerlist]
 import parseSEG/convert
 
 let tmp = getTempDir() / "parseseg_tseg2"
@@ -203,6 +204,19 @@ block all_formats_both_orders:
     doAssert t[1, 0] == 1 and t[1, 1] == -1 and t[1, 2] == 2147483647.0 and
       t[1, 3] == -2147483648.0 and t[1, 4] == 0
     for k, x in f20Values: doAssert t[2, k] == x, $k & ": " & $t[2, k]
+    # the summary and the (raw) header listing
+    let sm = f.summary
+    doAssert sm.standard == skSeg2 and sm.revision.major == 1 and sm.byteOrder == o
+    doAssert sm.formatCode == -1 and sm.decodable and sm.traceCount == 5 # five formats
+    doAssert sm.sampleIntervalUs.isNaN and sm.samplesPerTrace == -1 and sm.recordLengthMs.isNaN # mixed
+    doAssert sm.firstFieldRecord == 7 and sm.lastFieldRecord == 7 and sm.coordinateUnits == cuMeters
+    let fh = f.fileHeaders
+    doAssert fh.len == 1 and fh[0].blockName == "file" and fh[0].offset == 0 and
+      fh[0].size == int(f.index.entries[0].offset)
+    let th = f.traceHeaders(1)
+    doAssert th.len == 1 and th[0].blockName == "trace" and th[0].kind == hbRaw and
+      th[0].offset == f.index.entries[1].offset
+    doAssert f.recordHeaders(0).len == 0
     doAssert t[3, 0] == 0.5 and t[3, 1] == -1.25 and t[3, 2] == float64(float32(1e10))
     doAssert t[4, 0] == 0.1 and t[4, 1] == -1e-300 and t[4, 2] == 1e300 and t[4, 3] == 2.0
     # float32 and an index list read the same samples
@@ -217,6 +231,7 @@ block all_formats_both_orders:
     let k2 = f.traceKeys(2)
     doAssert k2.rcvX == 30 and k2.rcvY == 4 and k2.rcvZ == -1 and k2.srcZ == 0
     doAssert k2.offset == hypot(30.0, 4.0) and k2.record == 7 # the file's
+    doAssert k0.time == 575_911_800.0 and k2.time == k0.time # ACQUISITION_DATE/TIME
     let g = f.gathers
     doAssert g.len == 1 and g[0].kind == gkShot and g[0].traces == 0..4
     # the descriptor blocks, re-read from the map
@@ -298,6 +313,7 @@ block odd_keyword_strings:
   doAssert t.traceType == some(ttTestData) and t.sourceLocation.isNone
   let k = f.traceKeys(0)
   doAssert k.rcvX == 12.5 and k.rcvZ == 102 and k.srcX.isNaN and k.rcvLine.isNaN
+  doAssert k.time == 825_638_370.5
   doAssert not f.index.isSeismic(0) # TEST_DATA is auxiliary
   # style problems are info only, once each per file
   let infos = f.index.log.codes(sevInfo)

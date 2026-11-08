@@ -130,6 +130,17 @@ typedef struct SegValue {
     int64_t  text_len;
 } SegValue;
 
+/* A header value inside a struct (SegHeaderRow.value): `text` is borrowed
+   from the struct's owner, like the struct's other strings. */
+typedef struct SegValueRef {
+    int32_t     kind;     /* SEG_VALUE_INT, SEG_VALUE_FLOAT or SEG_VALUE_TEXT */
+    int32_t     reserved;
+    int64_t     i;        /* SEG_VALUE_INT */
+    double      f;        /* SEG_VALUE_FLOAT (also set, as a double, for ints) */
+    const char *text;     /* SEG_VALUE_TEXT: NUL-terminated, `text_len` bytes */
+    int64_t     text_len;
+} SegValueRef;
+
 /* ---- DLPack v0.8 (https://github.com/dmlc/dlpack) -------------------- */
 #ifndef DLPACK_VERSION
 typedef struct { int32_t device_type; int32_t device_id; } DLDevice; /* CPU = 1 */
@@ -234,6 +245,52 @@ const char *seg_last_error(void);
 #define SEG_GATHER_KIND_OFFSET 4
 #define SEG_GATHER_KIND_OTHER 5
 
+/* SeismicKind */
+#define SEG_SEISMIC_KIND_UNKNOWN 0
+#define SEG_SEISMIC_KIND_SEG_Y 1
+#define SEG_SEISMIC_KIND_SEG_D 2
+#define SEG_SEISMIC_KIND_SEG_2 3
+
+/* CoordinateUnits */
+#define SEG_COORDINATE_UNITS_UNKNOWN 0
+#define SEG_COORDINATE_UNITS_METERS 1
+#define SEG_COORDINATE_UNITS_FEET 2
+#define SEG_COORDINATE_UNITS_LENGTH 3
+#define SEG_COORDINATE_UNITS_ARC_SECONDS 4
+#define SEG_COORDINATE_UNITS_DEGREES 5
+#define SEG_COORDINATE_UNITS_DMS 6
+
+/* CrsTextFormat */
+#define SEG_CRS_TEXT_FORMAT_NONE 0
+#define SEG_CRS_TEXT_FORMAT_STANZA 1
+#define SEG_CRS_TEXT_FORMAT_P1_11 2
+#define SEG_CRS_TEXT_FORMAT_UNKNOWN 3
+
+/* HeaderBlock */
+#define SEG_HEADER_BLOCK_SEG_Y_BINARY 0
+#define SEG_HEADER_BLOCK_SEG_Y_TRACE 1
+#define SEG_HEADER_BLOCK_SEG_Y_EXT1 2
+#define SEG_HEADER_BLOCK_SEG_D_TRACE 3
+#define SEG_HEADER_BLOCK_SEG_D_EXT1 4
+#define SEG_HEADER_BLOCK_SEG_D_REV_3_EXT1 5
+#define SEG_HEADER_BLOCK_SEG_D_GH1 6
+#define SEG_HEADER_BLOCK_SEG_D_GH_N 7
+#define SEG_HEADER_BLOCK_SEG_D_GH2 8
+#define SEG_HEADER_BLOCK_SEG_D_REV_3_GH2 9
+#define SEG_HEADER_BLOCK_SEG_D_REV_3_GH3 10
+#define SEG_HEADER_BLOCK_SEG_D_CHANNEL_SET 11
+#define SEG_HEADER_BLOCK_SEG_D_REV_3_CHANNEL_SET 12
+#define SEG_HEADER_BLOCK_SEG_D_POSITION 13
+#define SEG_HEADER_BLOCK_SEG_D_SOURCE_DESCRIPTION 14
+#define SEG_HEADER_BLOCK_SEG_D_ADDITIONAL_SOURCE_INFO 15
+#define SEG_HEADER_BLOCK_SEG_D_SENSOR_INFO 16
+#define SEG_HEADER_BLOCK_SEG_D_TIMESTAMP 17
+#define SEG_HEADER_BLOCK_SEG_D_SENSOR_CALIBRATION 18
+#define SEG_HEADER_BLOCK_SEG_D_TIME_DRIFT 19
+#define SEG_HEADER_BLOCK_SEG_D_ORIENTATION 20
+#define SEG_HEADER_BLOCK_SEG_D_TRAILER_DESCRIPTION 21
+#define SEG_HEADER_BLOCK_RAW 22
+
 /* SpsRevision */
 #define SEG_SPS_REVISION_AUTO 0
 #define SEG_SPS_REVISION_1_0 1
@@ -248,17 +305,18 @@ const char *seg_last_error(void);
 #define SEG_DTYPE_FLOAT32 1
 #define SEG_DTYPE_FLOAT64 2
 
-/* SeismicKind */
-#define SEG_SEISMIC_KIND_UNKNOWN 0
-#define SEG_SEISMIC_KIND_SEG_Y 1
-#define SEG_SEISMIC_KIND_SEG_D 2
-#define SEG_SEISMIC_KIND_SEG_2 3
+/* HeaderScope */
+#define SEG_HEADER_SCOPE_FILE 0
+#define SEG_HEADER_SCOPE_RECORD 1
+#define SEG_HEADER_SCOPE_TRACE 2
 
 /* ---------------------------------------------------------- handles */
 
 typedef struct SegDiagLog SegDiagLog;
 typedef struct SegSeismicFile SegSeismicFile;
 typedef struct SegHeaderEditor SegHeaderEditor;
+typedef struct SegHeaderPatch SegHeaderPatch;
+typedef struct SegHeaderListing SegHeaderListing;
 typedef struct SegSurveyGeometry SegSurveyGeometry;
 typedef struct SegTensor SegTensor;
 typedef struct SegPrefetcher SegPrefetcher;
@@ -338,6 +396,7 @@ typedef struct SegTraceKeys {
     uint8_t sensor_type; /* SEG-D THE#1 byte 21. */
     uint8_t component; /* Distinguishes the components of one station (see module doc). */
     double channel; /* Channel (trace) number in the field record: SEG-Y bytes 13-16, SEG-D the demux trace number (Rev 3: extended when `FFFF`). Survey relation records (SPS X) map (record, channel) to stations. */
+    double time; /* When the trace was recorded, in UTC POSIX seconds (fractional); NaN if unknown. SEG-Y: trace bytes 157-168 in their time basis; SEG-D: GH#1, for Rev 3 the trace's Timestamp block or the GH#3 time zero (see the module documentation). */
 } SegTraceKeys;
 
 /* SEG-Y revision from bytes 3501 (major) and 3502 (minor). 0.0 is the traditional 1975 format. */
@@ -363,6 +422,57 @@ typedef struct SegGather {
     int64_t sources; /* Distinct known sources among its seismic traces. */
     int64_t receivers; /* Distinct known receiver stations among its seismic traces. */
 } SegGather;
+
+/* A revision of the standard, e.g. 2.1. */
+typedef struct SegStandardRevision {
+    int64_t major;
+    int64_t minor;
+} SegStandardRevision;
+
+/* A file's common metadata, the same for every standard and revision. Unknown or non-uniform numbers are NaN (floats) or -1 (integers). */
+typedef struct SegFileSummary {
+    int32_t standard; /* SEG_SEISMIC_KIND_* */
+    SegStandardRevision revision; /* SEG-Y: the revision whose rules were applied. SEG-D: the first record's (0.0 for Rev 0); see `mixedRevisions`. */
+    bool mixed_revisions; /* SEG-D records of more than one revision. */
+    int32_t byte_order; /* SEG_BYTE_ORDER_*: Of binary fields and samples (SEG-D: always big). */
+    int64_t format_code; /* The sample format code (SEG-Y 1-16, SEG-D 8058, ...); -1 when SEG-D records differ or there are none. */
+    bool decodable; /* Every trace's sample format can be decoded. */
+    int64_t trace_count;
+    int64_t record_count;
+    int64_t first_field_record; /* SEG-Y: field record numbers of the first and last trace; SEG-D: file numbers of the first and last record; -1 when there are none. */
+    int64_t last_field_record; /* SEG-Y: field record numbers of the first and last trace; SEG-D: file numbers of the first and last record; -1 when there are none. */
+    double sample_interval_us; /* The interval every trace shares (µs; SEG-Y non-time data: Hz or m/ft); NaN when they differ (SEG-D: see `channelSets`). */
+    int64_t samples_per_trace; /* Samples every trace has; -1 when they differ. */
+    double record_length_ms; /* SEG-Y: (samples - 1) × interval when both are uniform. SEG-D: the general header's record length when every record has the same (NaN for 0, "indeterminate"). */
+    int32_t coordinate_units; /* SEG_COORDINATE_UNITS_* */
+    int32_t crs_format; /* SEG_CRS_TEXT_FORMAT_*: Format of `crsText`; `ctNone` when there is none. */
+} SegFileSummary;
+
+/* One SEG-D channel set of one record. */
+typedef struct SegChannelSetSummary {
+    int64_t record; /* 0-based record index. */
+    int64_t scan_type; /* 0-based scan type index. */
+    int64_t channel_set; /* 0-based index within the scan type. */
+    int64_t number; /* The channel set number in the headers. */
+    int64_t channel_type; /* Rev 1/2 nibble (1 = seismic) or Rev 3 byte (0x10 = seismic). */
+    int64_t trace_count; /* Traces of this set in the index. */
+    int64_t samples_per_trace; /* Samples of its longest trace; 0 when it has none. */
+    double sample_interval_us;
+    double start_time_ms;
+    double end_time_ms;
+} SegChannelSetSummary;
+
+/* One field of a header listing. */
+typedef struct SegHeaderRow {
+    const char *block_name; /* The block's name in field names: `trace`, `ext1`, `gh1`, `binary`, ... */
+    int32_t kind; /* SEG_HEADER_BLOCK_*: The block's type (`fieldNames(kind)` lists its fields); `hbRaw` if none. */
+    const char *field; /* The field name; empty for a block without named fields. */
+    SegValueRef value; /* The value as decoded (a raw block: text naming what it is). */
+    int64_t offset; /* File offset of the field's first byte. */
+    int64_t size; /* Bytes holding the field (a BCD or nibble field: the bytes its nibbles touch). */
+    int64_t block_offset; /* File offset of the block (`copyBytes(blockOffset, blockSize)`). */
+    int64_t block_size; /* Bytes in the block. */
+} SegHeaderRow;
 
 /* How `readSps` reads a file. */
 typedef struct SegSpsOptions {
@@ -399,6 +509,12 @@ void seg_seismic_file_release(SegSeismicFile *handle);
 
 /* Releases a SegHeaderEditor (NULL is a no-op). */
 void seg_header_editor_release(SegHeaderEditor *handle);
+
+/* Releases a SegHeaderPatch (NULL is a no-op). */
+void seg_header_patch_release(SegHeaderPatch *handle);
+
+/* Releases a SegHeaderListing (NULL is a no-op). */
+void seg_header_listing_release(SegHeaderListing *handle);
 
 /* Releases a SegSurveyGeometry (NULL is a no-op). */
 void seg_survey_geometry_release(SegSurveyGeometry *handle);
@@ -517,6 +633,12 @@ SegStatus seg_seismic_file_gathers(SegSeismicFile *seismic_file, SegGather *out,
 SegStatus seg_seismic_file_component_group_ids(SegSeismicFile *seismic_file, int64_t traces_first, int64_t traces_last, int64_t *out, int64_t out_cap, int64_t *out_len);
 
 /*
+ * The named fields of block kind `kind`, in layout order (raw byte fields
+ * excluded; none for `hbRaw`).
+ */
+SegStatus seg_field_names(int32_t kind, char *out, int64_t out_cap, int64_t *out_len);
+
+/*
  * A trace header field by name, e.g. "trace.sourceX" or
  * "ext1.receiverLine". Raises `ValueError` for an unknown field, a trace
  * out of range or a closed file; the message says which.
@@ -606,6 +728,85 @@ SegStatus seg_header_editor_set_file_field(SegHeaderEditor *header_editor, const
  * `log`, if the edit is refused.
  */
 SegStatus seg_header_editor_set_record_field(SegHeaderEditor *header_editor, int64_t record, const char *name, const SegValue *value, bool *out);
+
+/* An empty change set. */
+SegStatus seg_header_patch_new(SegHeaderPatch **out);
+
+/*
+ * Adds a change of field `name` (`<block>.<field>`, as in the listings)
+ * of the file (`hsFile`, index 0), record `index` or trace `index` to
+ * `value`. A later change of the same field wins when the patch is
+ * imported. Raises `ValueError` for a malformed name or index.
+ */
+SegStatus seg_header_patch_add(SegHeaderPatch *header_patch, int32_t scope, int64_t index, const char *name, const SegValue *value);
+
+/* The number of changes. */
+SegStatus seg_header_patch_len(SegHeaderPatch *header_patch, int64_t *out);
+
+/*
+ * Writes the change set as a NIF patch (`writeHeaderPatch`): the
+ * `exportHeaders` layout, for an explicit `importHeaders`. Raises
+ * `IOError` if `path` cannot be written.
+ */
+SegStatus seg_header_patch_write(SegHeaderPatch *header_patch, const char *path);
+
+/*
+ * The coordinate reference system text, as stored: SEG-Y, the first P1/11
+ * or Location Data stanza of the extended textual header (its data);
+ * SEG-D Rev 3, the 0x55 blocks of the first record that has them (from
+ * `((SEG:` or `((OGP:`). Empty when the file has none; `summary` says
+ * which format it is in.
+ */
+SegStatus seg_seismic_file_crs_text(SegSeismicFile *seismic_file, char *out, int64_t out_cap, int64_t *out_len);
+
+/*
+ * The file's common metadata: standard, revision, byte order, sample
+ * format, trace and record counts, first and last field record, sample
+ * interval, samples per trace, record length, coordinate units and the
+ * CRS text's format. Reads the index and at most two trace headers. An unrecognized file gives
+ * `standard == skUnknown` and zero counts. Raises `ValueError` for a SEG-Y
+ * file that has been closed (its trace headers are read from the map).
+ */
+SegStatus seg_seismic_file_summary(SegSeismicFile *seismic_file, SegFileSummary *out);
+
+/*
+ * Every channel set of every SEG-D record, in record, scan type and
+ * channel set order, with its sample interval, timing and the traces the
+ * index holds for it. Empty for SEG-Y.
+ */
+SegStatus seg_seismic_file_channel_sets(SegSeismicFile *seismic_file, SegChannelSetSummary *out, int64_t out_cap, int64_t *out_len);
+
+/* The number of rows. */
+SegStatus seg_header_listing_len(SegHeaderListing *header_listing, int64_t *out);
+
+/*
+ * Row `i`, in file order. As for a `seq`, an `i` outside `0 ..< len` is a
+ * bug (`IndexDefect`).
+ */
+SegStatus seg_header_listing_get(SegHeaderListing *header_listing, int64_t i, SegHeaderRow *out);
+
+/*
+ * Every header block of trace `trace`, as rows in file order: `trace`,
+ * `ext1` and any further extensions (see the module documentation).
+ * Raises `ValueError` for a trace out of range or a closed file.
+ */
+SegStatus seg_seismic_file_trace_headers(SegSeismicFile *seismic_file, int64_t trace, SegHeaderListing **out);
+
+/*
+ * Every header block of SEG-D record `record`, as rows in file order:
+ * general headers, channel set descriptors, skew, extended and external
+ * headers, and the trailer (see the module documentation). Empty for
+ * record 0 of a SEG-Y file, which has no record headers. Raises
+ * `ValueError` for a record out of range or a closed file.
+ */
+SegStatus seg_seismic_file_record_headers(SegSeismicFile *seismic_file, int64_t record, SegHeaderListing **out);
+
+/*
+ * The file-level header blocks, as rows in file order: SEG-Y tape label,
+ * textual, binary, extended textual headers and data trailer; SEG-D the
+ * storage unit label. Raises `ValueError` for a closed file.
+ */
+SegStatus seg_seismic_file_file_headers(SegSeismicFile *seismic_file, SegHeaderListing **out);
 
 /* The number of X runs loaded. */
 SegStatus seg_survey_geometry_relation_count(SegSurveyGeometry *survey_geometry, int64_t *out);

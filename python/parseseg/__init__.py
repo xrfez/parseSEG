@@ -197,6 +197,24 @@ class SegValue(ctypes.Structure):
                 ("text_len", ctypes.c_int64)]
 
 
+class SegValueRef(ctypes.Structure):
+    _fields_ = [("kind", ctypes.c_int32), ("reserved", ctypes.c_int32),
+                ("i", ctypes.c_int64), ("f", ctypes.c_double),
+                ("text", ctypes.c_void_p), ("text_len", ctypes.c_int64)]
+
+
+def _value_ref(v):
+    if v.kind == 1:
+        return v.i
+    if v.kind == 2:
+        return v.f
+    return ctypes.string_at(v.text, v.text_len).decode("utf-8", "replace") if v.text else ""
+
+
+def _strings(fn):
+    return _text(fn).split("\0")[:-1]
+
+
 def _value_in(x, name):
     v = SegValue()
     if isinstance(x, str):
@@ -333,14 +351,22 @@ _E_TextEncoding = {"ebcdic": 0, "ascii": 1, }
 _N_TextEncoding = {0: "ebcdic", 1: "ascii", }
 _E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
 _N_GatherKind = {0: "unknown", 1: "shot", 2: "receiver", 3: "cmp", 4: "offset", 5: "other", }
+_E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, "SEG-2": 3, }
+_N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", 3: "SEG-2", }
+_E_CoordinateUnits = {"unknown": 0, "meters": 1, "feet": 2, "length": 3, "arcSeconds": 4, "degrees": 5, "dms": 6, }
+_N_CoordinateUnits = {0: "unknown", 1: "meters", 2: "feet", 3: "length", 4: "arcSeconds", 5: "degrees", 6: "dms", }
+_E_CrsTextFormat = {"none": 0, "stanza": 1, "P1/11": 2, "unknown": 3, }
+_N_CrsTextFormat = {0: "none", 1: "stanza", 2: "P1/11", 3: "unknown", }
+_E_HeaderBlock = {"SEG-Y binary": 0, "SEG-Y trace": 1, "SEG-Y ext1": 2, "SEG-D trace": 3, "SEG-D ext1": 4, "SEG-D Rev 3 ext1": 5, "SEG-D gh1": 6, "SEG-D ghN": 7, "SEG-D gh2": 8, "SEG-D Rev 3 gh2": 9, "SEG-D Rev 3 gh3": 10, "SEG-D channel set": 11, "SEG-D Rev 3 channel set": 12, "SEG-D position": 13, "SEG-D source description": 14, "SEG-D additional source info": 15, "SEG-D sensor info": 16, "SEG-D timestamp": 17, "SEG-D sensor calibration": 18, "SEG-D time drift": 19, "SEG-D orientation": 20, "SEG-D trailer description": 21, "raw": 22, }
+_N_HeaderBlock = {0: "SEG-Y binary", 1: "SEG-Y trace", 2: "SEG-Y ext1", 3: "SEG-D trace", 4: "SEG-D ext1", 5: "SEG-D Rev 3 ext1", 6: "SEG-D gh1", 7: "SEG-D ghN", 8: "SEG-D gh2", 9: "SEG-D Rev 3 gh2", 10: "SEG-D Rev 3 gh3", 11: "SEG-D channel set", 12: "SEG-D Rev 3 channel set", 13: "SEG-D position", 14: "SEG-D source description", 15: "SEG-D additional source info", 16: "SEG-D sensor info", 17: "SEG-D timestamp", 18: "SEG-D sensor calibration", 19: "SEG-D time drift", 20: "SEG-D orientation", 21: "SEG-D trailer description", 22: "raw", }
 _E_SpsRevision = {"auto": 0, "1.0": 1, "2.1": 2, }
 _N_SpsRevision = {0: "auto", 1: "1.0", 2: "2.1", }
 _E_TextLayout = {"lines": 0, "fixed80": 1, "ebcdic80": 2, }
 _N_TextLayout = {0: "lines", 1: "fixed80", 2: "ebcdic80", }
 _E_Dtype = {"float32": 1, "float64": 2, }
 _N_Dtype = {1: "float32", 2: "float64", }
-_E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, "SEG-2": 3, }
-_N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", 3: "SEG-2", }
+_E_HeaderScope = {"file": 0, "record": 1, "trace": 2, }
+_N_HeaderScope = {0: "file", 1: "record", 2: "trace", }
 
 # ---------------------------------------------------------- structs
 
@@ -445,9 +471,10 @@ class SegTraceKeys(ctypes.Structure):
         ("sensor_type", ctypes.c_uint8),
         ("component", ctypes.c_uint8),
         ("channel", ctypes.c_double),
+        ("time", ctypes.c_double),
     ]
-    _out = (("record", lambda _v: _v), ("ensemble", lambda _v: _v), ("offset", lambda _v: _v), ("src_line", lambda _v: _v), ("src_point", lambda _v: _v), ("src_x", lambda _v: _v), ("src_y", lambda _v: _v), ("rcv_line", lambda _v: _v), ("rcv_point", lambda _v: _v), ("rcv_x", lambda _v: _v), ("rcv_y", lambda _v: _v), ("src_z", lambda _v: _v), ("rcv_z", lambda _v: _v), ("cmp_x", lambda _v: _v), ("cmp_y", lambda _v: _v), ("src_index", lambda _v: _v), ("rcv_index", lambda _v: _v), ("depth_index", lambda _v: _v), ("reshoot_index", lambda _v: _v), ("sensor_type", lambda _v: _v), ("component", lambda _v: _v), ("channel", lambda _v: _v), )
-    _in = {"record": lambda _x, _n: _f64(_x, _n), "ensemble": lambda _x, _n: _f64(_x, _n), "offset": lambda _x, _n: _f64(_x, _n), "src_line": lambda _x, _n: _f64(_x, _n), "src_point": lambda _x, _n: _f64(_x, _n), "src_x": lambda _x, _n: _f64(_x, _n), "src_y": lambda _x, _n: _f64(_x, _n), "rcv_line": lambda _x, _n: _f64(_x, _n), "rcv_point": lambda _x, _n: _f64(_x, _n), "rcv_x": lambda _x, _n: _f64(_x, _n), "rcv_y": lambda _x, _n: _f64(_x, _n), "src_z": lambda _x, _n: _f64(_x, _n), "rcv_z": lambda _x, _n: _f64(_x, _n), "cmp_x": lambda _x, _n: _f64(_x, _n), "cmp_y": lambda _x, _n: _f64(_x, _n), "src_index": lambda _x, _n: _int(_x, _n, -32768, 32767), "rcv_index": lambda _x, _n: _int(_x, _n, -32768, 32767), "depth_index": lambda _x, _n: _int(_x, _n, 0, 255), "reshoot_index": lambda _x, _n: _int(_x, _n, 0, 255), "sensor_type": lambda _x, _n: _int(_x, _n, 0, 255), "component": lambda _x, _n: _int(_x, _n, 0, 255), "channel": lambda _x, _n: _f64(_x, _n), }
+    _out = (("record", lambda _v: _v), ("ensemble", lambda _v: _v), ("offset", lambda _v: _v), ("src_line", lambda _v: _v), ("src_point", lambda _v: _v), ("src_x", lambda _v: _v), ("src_y", lambda _v: _v), ("rcv_line", lambda _v: _v), ("rcv_point", lambda _v: _v), ("rcv_x", lambda _v: _v), ("rcv_y", lambda _v: _v), ("src_z", lambda _v: _v), ("rcv_z", lambda _v: _v), ("cmp_x", lambda _v: _v), ("cmp_y", lambda _v: _v), ("src_index", lambda _v: _v), ("rcv_index", lambda _v: _v), ("depth_index", lambda _v: _v), ("reshoot_index", lambda _v: _v), ("sensor_type", lambda _v: _v), ("component", lambda _v: _v), ("channel", lambda _v: _v), ("time", lambda _v: _v), )
+    _in = {"record": lambda _x, _n: _f64(_x, _n), "ensemble": lambda _x, _n: _f64(_x, _n), "offset": lambda _x, _n: _f64(_x, _n), "src_line": lambda _x, _n: _f64(_x, _n), "src_point": lambda _x, _n: _f64(_x, _n), "src_x": lambda _x, _n: _f64(_x, _n), "src_y": lambda _x, _n: _f64(_x, _n), "rcv_line": lambda _x, _n: _f64(_x, _n), "rcv_point": lambda _x, _n: _f64(_x, _n), "rcv_x": lambda _x, _n: _f64(_x, _n), "rcv_y": lambda _x, _n: _f64(_x, _n), "src_z": lambda _x, _n: _f64(_x, _n), "rcv_z": lambda _x, _n: _f64(_x, _n), "cmp_x": lambda _x, _n: _f64(_x, _n), "cmp_y": lambda _x, _n: _f64(_x, _n), "src_index": lambda _x, _n: _int(_x, _n, -32768, 32767), "rcv_index": lambda _x, _n: _int(_x, _n, -32768, 32767), "depth_index": lambda _x, _n: _int(_x, _n, 0, 255), "reshoot_index": lambda _x, _n: _int(_x, _n, 0, 255), "sensor_type": lambda _x, _n: _int(_x, _n, 0, 255), "component": lambda _x, _n: _int(_x, _n, 0, 255), "channel": lambda _x, _n: _f64(_x, _n), "time": lambda _x, _n: _f64(_x, _n), }
     _defaults = {}
 
 
@@ -487,6 +514,77 @@ class SegGather(ctypes.Structure):
     ]
     _out = (("kind", lambda _v: _N_GatherKind.get(_v, _v)), ("traces", lambda _v: range(_v.a, _v.b + 1)), ("sources", lambda _v: _v), ("receivers", lambda _v: _v), )
     _in = {"kind": lambda _x, _n: _enum(_E_GatherKind, _x, _n), "traces": lambda _x, _n: SegSlice(*_range_arg(_x, _n)), "sources": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "receivers": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), }
+    _defaults = {}
+
+
+class SegStandardRevision(ctypes.Structure):
+    """A revision of the standard, e.g. 2.1."""
+    _fields_ = [
+        ("major", ctypes.c_int64),
+        ("minor", ctypes.c_int64),
+    ]
+    _out = (("major", lambda _v: _v), ("minor", lambda _v: _v), )
+    _in = {"major": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "minor": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), }
+    _defaults = {}
+
+
+class SegFileSummary(ctypes.Structure):
+    """A file's common metadata, the same for every standard and revision. Unknown or non-uniform numbers are NaN (floats) or -1 (integers)."""
+    _fields_ = [
+        ("standard", ctypes.c_int32),
+        ("revision", SegStandardRevision),
+        ("mixed_revisions", ctypes.c_bool),
+        ("byte_order", ctypes.c_int32),
+        ("format_code", ctypes.c_int64),
+        ("decodable", ctypes.c_bool),
+        ("trace_count", ctypes.c_int64),
+        ("record_count", ctypes.c_int64),
+        ("first_field_record", ctypes.c_int64),
+        ("last_field_record", ctypes.c_int64),
+        ("sample_interval_us", ctypes.c_double),
+        ("samples_per_trace", ctypes.c_int64),
+        ("record_length_ms", ctypes.c_double),
+        ("coordinate_units", ctypes.c_int32),
+        ("crs_format", ctypes.c_int32),
+    ]
+    _out = (("standard", lambda _v: _N_SeismicKind.get(_v, _v)), ("revision", lambda _v: _struct_dict(_v)), ("mixed_revisions", lambda _v: _v), ("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format_code", lambda _v: _v), ("decodable", lambda _v: _v), ("trace_count", lambda _v: _v), ("record_count", lambda _v: _v), ("first_field_record", lambda _v: _v), ("last_field_record", lambda _v: _v), ("sample_interval_us", lambda _v: _v), ("samples_per_trace", lambda _v: _v), ("record_length_ms", lambda _v: _v), ("coordinate_units", lambda _v: _N_CoordinateUnits.get(_v, _v)), ("crs_format", lambda _v: _N_CrsTextFormat.get(_v, _v)), )
+    _in = {"standard": lambda _x, _n: _enum(_E_SeismicKind, _x, _n), "revision": lambda _x, _n: _struct_arg(SegStandardRevision, _x, _n), "mixed_revisions": lambda _x, _n: bool(_x), "byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format_code": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "decodable": lambda _x, _n: bool(_x), "trace_count": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "record_count": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "first_field_record": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "last_field_record": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "sample_interval_us": lambda _x, _n: _f64(_x, _n), "samples_per_trace": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "record_length_ms": lambda _x, _n: _f64(_x, _n), "coordinate_units": lambda _x, _n: _enum(_E_CoordinateUnits, _x, _n), "crs_format": lambda _x, _n: _enum(_E_CrsTextFormat, _x, _n), }
+    _defaults = {}
+
+
+class SegChannelSetSummary(ctypes.Structure):
+    """One SEG-D channel set of one record."""
+    _fields_ = [
+        ("record", ctypes.c_int64),
+        ("scan_type", ctypes.c_int64),
+        ("channel_set", ctypes.c_int64),
+        ("number", ctypes.c_int64),
+        ("channel_type", ctypes.c_int64),
+        ("trace_count", ctypes.c_int64),
+        ("samples_per_trace", ctypes.c_int64),
+        ("sample_interval_us", ctypes.c_double),
+        ("start_time_ms", ctypes.c_double),
+        ("end_time_ms", ctypes.c_double),
+    ]
+    _out = (("record", lambda _v: _v), ("scan_type", lambda _v: _v), ("channel_set", lambda _v: _v), ("number", lambda _v: _v), ("channel_type", lambda _v: _v), ("trace_count", lambda _v: _v), ("samples_per_trace", lambda _v: _v), ("sample_interval_us", lambda _v: _v), ("start_time_ms", lambda _v: _v), ("end_time_ms", lambda _v: _v), )
+    _in = {"record": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "scan_type": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "channel_set": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "number": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "channel_type": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "trace_count": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "samples_per_trace": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "sample_interval_us": lambda _x, _n: _f64(_x, _n), "start_time_ms": lambda _x, _n: _f64(_x, _n), "end_time_ms": lambda _x, _n: _f64(_x, _n), }
+    _defaults = {}
+
+
+class SegHeaderRow(ctypes.Structure):
+    """One field of a header listing."""
+    _fields_ = [
+        ("block_name", ctypes.c_char_p),
+        ("kind", ctypes.c_int32),
+        ("field", ctypes.c_char_p),
+        ("value", SegValueRef),
+        ("offset", ctypes.c_int64),
+        ("size", ctypes.c_int64),
+        ("block_offset", ctypes.c_int64),
+        ("block_size", ctypes.c_int64),
+    ]
+    _out = (("block_name", lambda _v: _dec(_v)), ("kind", lambda _v: _N_HeaderBlock.get(_v, _v)), ("field", lambda _v: _dec(_v)), ("value", lambda _v: _value_ref(_v)), ("offset", lambda _v: _v), ("size", lambda _v: _v), ("block_offset", lambda _v: _v), ("block_size", lambda _v: _v), )
+    _in = {}
     _defaults = {}
 
 
@@ -543,6 +641,10 @@ _lib.seg_seismic_file_release.argtypes = [ctypes.c_void_p]
 _lib.seg_seismic_file_release.restype = None
 _lib.seg_header_editor_release.argtypes = [ctypes.c_void_p]
 _lib.seg_header_editor_release.restype = None
+_lib.seg_header_patch_release.argtypes = [ctypes.c_void_p]
+_lib.seg_header_patch_release.restype = None
+_lib.seg_header_listing_release.argtypes = [ctypes.c_void_p]
+_lib.seg_header_listing_release.restype = None
 _lib.seg_survey_geometry_release.argtypes = [ctypes.c_void_p]
 _lib.seg_survey_geometry_release.restype = None
 _lib.seg_tensor_release.argtypes = [ctypes.c_void_p]
@@ -591,6 +693,8 @@ _lib.seg_seismic_file_gathers.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegGat
 _lib.seg_seismic_file_gathers.restype = ctypes.c_int32
 _lib.seg_seismic_file_component_group_ids.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_seismic_file_component_group_ids.restype = ctypes.c_int32
+_lib.seg_field_names.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_field_names.restype = ctypes.c_int32
 _lib.seg_seismic_file_trace_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
 _lib.seg_seismic_file_trace_field.restype = ctypes.c_int32
 _lib.seg_seismic_file_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
@@ -615,6 +719,30 @@ _lib.seg_header_editor_set_file_field.argtypes = [ctypes.c_void_p, ctypes.c_char
 _lib.seg_header_editor_set_file_field.restype = ctypes.c_int32
 _lib.seg_header_editor_set_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue), ctypes.POINTER(ctypes.c_bool)]
 _lib.seg_header_editor_set_record_field.restype = ctypes.c_int32
+_lib.seg_header_patch_new.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_header_patch_new.restype = ctypes.c_int32
+_lib.seg_header_patch_add.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
+_lib.seg_header_patch_add.restype = ctypes.c_int32
+_lib.seg_header_patch_len.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_header_patch_len.restype = ctypes.c_int32
+_lib.seg_header_patch_write.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.seg_header_patch_write.restype = ctypes.c_int32
+_lib.seg_seismic_file_crs_text.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_crs_text.restype = ctypes.c_int32
+_lib.seg_seismic_file_summary.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegFileSummary)]
+_lib.seg_seismic_file_summary.restype = ctypes.c_int32
+_lib.seg_seismic_file_channel_sets.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegChannelSetSummary), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_channel_sets.restype = ctypes.c_int32
+_lib.seg_header_listing_len.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_header_listing_len.restype = ctypes.c_int32
+_lib.seg_header_listing_get.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegHeaderRow)]
+_lib.seg_header_listing_get.restype = ctypes.c_int32
+_lib.seg_seismic_file_trace_headers.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_trace_headers.restype = ctypes.c_int32
+_lib.seg_seismic_file_record_headers.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_record_headers.restype = ctypes.c_int32
+_lib.seg_seismic_file_file_headers.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_file_headers.restype = ctypes.c_int32
 _lib.seg_survey_geometry_relation_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_survey_geometry_relation_count.restype = ctypes.c_int32
 _lib.seg_survey_geometry_new.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
@@ -1142,6 +1270,85 @@ class SeismicFile(_Handle, _SeismicFileExtras):
         finally:
             self._leave()
 
+    def crs_text(self):
+        """The coordinate reference system text, as stored: SEG-Y, the first P1/11
+        or Location Data stanza of the extended textual header (its data);
+        SEG-D Rev 3, the 0x55 blocks of the first record that has them (from
+        `((SEG:` or `((OGP:`). Empty when the file has none; `summary` says
+        which format it is in."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_seismic_file_crs_text, _h, _b, _c, _n))
+        finally:
+            self._leave()
+
+    def summary(self):
+        """The file's common metadata: standard, revision, byte order, sample
+        format, trace and record counts, first and last field record, sample
+        interval, samples per trace, record length, coordinate units and the
+        CRS text's format. Reads the index and at most two trace headers. An unrecognized file gives
+        `standard == skUnknown` and zero counts. Raises `ValueError` for a SEG-Y
+        file that has been closed (its trace headers are read from the map)."""
+        _h = self._enter()
+        try:
+            _o = SegFileSummary()
+            if _call(_lib.seg_seismic_file_summary, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _struct_dict(_o)
+        finally:
+            self._leave()
+
+    def channel_sets(self):
+        """Every channel set of every SEG-D record, in record, scan type and
+        channel set order, with its sample interval, timing and the traces the
+        index holds for it. Empty for SEG-Y."""
+        _h = self._enter()
+        try:
+            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_channel_sets, _h, _b, _c, _n), SegChannelSetSummary, _struct_dict)
+        finally:
+            self._leave()
+
+    def trace_headers(self, trace):
+        """Every header block of trace `trace`, as rows in file order: `trace`,
+        `ext1` and any further extensions (see the module documentation).
+        Raises `ValueError` for a trace out of range or a closed file."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_trace_headers, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _wrap(HeaderListing, _o.value)
+        finally:
+            self._leave()
+
+    def record_headers(self, record):
+        """Every header block of SEG-D record `record`, as rows in file order:
+        general headers, channel set descriptors, skew, extended and external
+        headers, and the trailer (see the module documentation). Empty for
+        record 0 of a SEG-Y file, which has no record headers. Raises
+        `ValueError` for a record out of range or a closed file."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_record_headers, _h, _int(record, "record", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _wrap(HeaderListing, _o.value)
+        finally:
+            self._leave()
+
+    def file_headers(self):
+        """The file-level header blocks, as rows in file order: SEG-Y tape label,
+        textual, binary, extended textual headers and data trailer; SEG-D the
+        storage unit label. Raises `ValueError` for a closed file."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_file_headers, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _wrap(HeaderListing, _o.value)
+        finally:
+            self._leave()
+
     def apply_survey(self, g, overwrite=False):
         """Fills the trace keys from the survey, in memory only: the file does not
         change. Returns the traces changed. Raises `ValueError` for a file opened
@@ -1321,6 +1528,90 @@ class HeaderEditor(_Handle):
             return _text(lambda _b, _c, _n: _call(_lib.seg_header_editor_journal_path, _h, _b, _c, _n))
         finally:
             self._leave()
+
+
+class HeaderPatch(_Handle):
+    """A pending change set (a viewer's edits), saved with `writeHeaderPatch`."""
+    _release = _lib.seg_header_patch_release
+
+    def __init__(self):
+        """An empty change set."""
+        _o = ctypes.c_void_p()
+        _call(_lib.seg_header_patch_new, ctypes.byref(_o))
+        self._h = _o.value
+        self._mu = threading.Lock()
+
+    def add(self, scope, index, name, value):
+        """Adds a change of field `name` (`<block>.<field>`, as in the listings)
+        of the file (`hsFile`, index 0), record `index` or trace `index` to
+        `value`. A later change of the same field wins when the patch is
+        imported. Raises `ValueError` for a malformed name or index."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_header_patch_add, _h, _enum(_E_HeaderScope, scope, "scope"), _int(index, "index", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_value_in(value, "value")))
+        finally:
+            self._leave()
+
+    def __len__(self):
+        """The number of changes."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_header_patch_len, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def write(self, path):
+        """Writes the change set as a NIF patch (`writeHeaderPatch`): the
+        `exportHeaders` layout, for an explicit `importHeaders`. Raises
+        `IOError` if `path` cannot be written."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_header_patch_write, _h, _str(path, "path"))
+        finally:
+            self._leave()
+
+
+class HeaderListing(_Handle):
+    """The ordered header rows of one trace, record or file."""
+    _release = _lib.seg_header_listing_release
+
+    def __len__(self):
+        """The number of rows."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_header_listing_len, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def _getitem(self, i):
+        """Row `i`, in file order. As for a `seq`, an `i` outside `0 ..< len` is a
+        bug (`IndexDefect`)."""
+        _h = self._enter()
+        try:
+            _o = SegHeaderRow()
+            if _call(_lib.seg_header_listing_get, _h, _int(i, "i", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _struct_dict(_o)
+        finally:
+            self._leave()
+    def __getitem__(self, index):
+        i = operator.index(index)
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(f"{type(self).__name__} index out of range")
+        return self._getitem(i)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self._getitem(i)
 
 
 class SurveyGeometry(_Handle):
@@ -1685,6 +1976,11 @@ def convert_file(src_path, dst_path, opts=None):
     _o = ctypes.c_void_p()
     _st = _lib.seg_convert_file(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_o))
     return _logged(_st, _o)
+
+def field_names(kind):
+    """The named fields of block kind `kind`, in layout order (raw byte fields
+    excluded; none for `hbRaw`)."""
+    return _strings(lambda _b, _c, _n: _call(_lib.seg_field_names, _enum(_E_HeaderBlock, kind, "kind"), _b, _c, _n))
 
 def rollback_journal(path, journal_path):
     """Undoes the journal's edits on `path`, newest first. Locations already

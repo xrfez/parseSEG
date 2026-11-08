@@ -78,7 +78,7 @@ assert e["num_samples"] == 2001 and e["header_bytes"] == 240 and e["offset"] > 3
 assert set(e) == {"offset", "header_bytes", "num_samples", "record", "channel_set",
                   "scan_type", "channel_type"}
 k = f.trace_keys(5)
-assert "src_x" in k and "rcv_line" in k and "cmp_x" in k
+assert "src_x" in k and "rcv_line" in k and "cmp_x" in k and math.isnan(k["time"])
 assert f.trace_field(5, "trace.sourceX") == 1704188
 assert isinstance(f.file_field("binary.formatCode"), int)
 err = raises(parseseg.ArgumentError, f.trace_field, 5, "trace.bogus")
@@ -104,6 +104,57 @@ with open(junk, "wb") as fh:
 with parseseg.open_seismic(junk) as j:
     assert j.kind == "unknown" and len(j) == 0 and j.log.is_fatal   # a log, not a failure
     assert j.log[-1]["severity"] == "fatal" and j.log[0]["loc"]["file"] == junk
+
+# File summary (task 6.8): a dict, the same keys for every standard.
+s = f.summary()
+assert s["standard"] == "SEG-Y" and s["revision"] == {"major": 2, "minor": 1}
+assert s["byte_order"] == "big" and s["format_code"] == 1 and s["decodable"]
+assert s["trace_count"] == 200 and s["samples_per_trace"] == 2001
+assert s["sample_interval_us"] == 2000.0 and s["record_length_ms"] == 4000.0
+assert s["coordinate_units"] == "meters" and s["crs_format"] == "P1/11"
+assert f.crs_text().startswith("IOGP,IOGP P1") and f.channel_sets() == []
+with parseseg.open_seismic(INOVA) as d3:
+    assert abs(parseseg.open_seismic(INOVA, keys=True).trace_keys(4)["time"] - 1790959547.504) < 1e-6
+    s3 = d3.summary()
+    assert set(s3) == set(s) and s3["standard"] == "SEG-D" and s3["first_field_record"] == 151
+    assert s3["crs_format"] == "stanza" and "CRS code=32050" in d3.crs_text()
+    cs = d3.channel_sets()
+    assert [c["channel_type"] for c in cs] == [0x20, 0x30, 0x70, 0x10]
+    assert cs[3]["trace_count"] == 2 and cs[0]["sample_interval_us"] == 1000.0
+with parseseg.open_seismic(junk) as j:
+    sj = j.summary()
+    assert sj["standard"] == "unknown" and math.isnan(sj["sample_interval_us"])
+
+# Header listing (task 6.10): sequences of row dicts, read-only.
+rows = list(f.trace_headers(5))
+sx = [r for r in rows if r["block_name"] == "trace" and r["field"] == "sourceX"][0]
+assert sx["value"] == 1704188 and sx["kind"] == "SEG-Y trace" and sx["size"] == 4
+assert sx["offset"] == f.trace_entry(5)["offset"] + 72 and sx["block_size"] == 240
+assert set(sx) == {"block_name", "kind", "field", "value", "offset", "size", "block_offset",
+                   "block_size"}
+assert len(rows) == len(parseseg.field_names("SEG-Y trace"))
+assert parseseg.field_names("SEG-Y trace")[0] == "traceSeqLine" and parseseg.field_names("raw") == []
+raises(parseseg.ArgumentError, parseseg.field_names, "bogus")
+fh = f.file_headers()
+assert fh[0]["block_name"] == "text" and fh[0]["value"] == "textual header" and fh[0]["field"] == ""
+assert fh[-1]["block_name"] == "extended" and len(f.record_headers(0)) == 0
+raises(parseseg.ArgumentError, f.record_headers, 1)
+raises(parseseg.ArgumentError, f.trace_headers, 200)
+with parseseg.open_seismic(S63) as d2:
+    rec = d2.record_headers(0)
+    gh3 = [r for r in rec if r["block_name"] == "gh3" and r["field"] == "sourcePointNumber"][0]
+    assert gh3["value"] == 99.5 and gh3["kind"] == "SEG-D ghN"
+    assert d2.copy_bytes(gh3["block_offset"], gh3["block_size"])[:4] == bytes(d2.copy_bytes(gh3["block_offset"], 4))
+p = parseseg.HeaderPatch()
+p.add("trace", 5, "trace.sourceX", 1700000)
+p.add("file", 0, "binary.jobId", 7)
+assert len(p) == 2
+raises(parseseg.ArgumentError, p.add, "trace", 0, "nodot", 1)
+patch = os.path.join(scratch, "viewer.nif")
+p.write(patch)
+with open(patch) as fh_:
+    assert "(trace 5 (block trace (f sourceX 1700000)))" in fh_.read()
+p.close()
 
 # Text fields come back as str.
 assert isinstance(f.trace_field(0, "trace.headerName"), str)

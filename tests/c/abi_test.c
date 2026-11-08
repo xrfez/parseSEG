@@ -67,7 +67,14 @@ static void test_layout(void) {
     SIZE(SegTraceEntry); SIZE(SegTraceKeys); SIZE(SegTensorView); SIZE(SegValue);
     SIZE(SegGather); SIZE(SegDiagnostic); SIZE(SegLocation); SIZE(SegPrefetchChunk);
     SIZE(SegSlice); SIZE(SegConvertOptions); SIZE(SegSegyRevision); SIZE(SegSegdConvertOptions);
-    SIZE(SegSegdRevision); SIZE(SegSpsOptions);
+    SIZE(SegSegdRevision); SIZE(SegSpsOptions); SIZE(SegFileSummary);
+    SIZE(SegStandardRevision); SIZE(SegChannelSetSummary);
+    SIZE(SegHeaderRow); SIZE(SegValueRef);
+    OFF(SegHeaderRow, block_name); OFF(SegHeaderRow, kind); OFF(SegHeaderRow, field);
+    OFF(SegHeaderRow, value); OFF(SegHeaderRow, offset); OFF(SegHeaderRow, size);
+    OFF(SegHeaderRow, block_offset); OFF(SegHeaderRow, block_size);
+    OFF(SegValueRef, kind); OFF(SegValueRef, i); OFF(SegValueRef, f); OFF(SegValueRef, text);
+    OFF(SegValueRef, text_len);
     OFF(SegTraceEntry, offset); OFF(SegTraceEntry, header_bytes); OFF(SegTraceEntry, num_samples);
     OFF(SegTraceEntry, record); OFF(SegTraceEntry, channel_set); OFF(SegTraceEntry, scan_type);
     OFF(SegTraceEntry, channel_type);
@@ -78,7 +85,7 @@ static void test_layout(void) {
     OFF(SegTraceKeys, rcv_z); OFF(SegTraceKeys, cmp_x); OFF(SegTraceKeys, cmp_y);
     OFF(SegTraceKeys, src_index); OFF(SegTraceKeys, rcv_index); OFF(SegTraceKeys, depth_index);
     OFF(SegTraceKeys, reshoot_index); OFF(SegTraceKeys, sensor_type); OFF(SegTraceKeys, component);
-    OFF(SegTraceKeys, channel);
+    OFF(SegTraceKeys, channel); OFF(SegTraceKeys, time);
     OFF(SegTensorView, data); OFF(SegTensorView, dtype); OFF(SegTensorView, rank);
     OFF(SegTensorView, shape); OFF(SegTensorView, strides);
     OFF(SegValue, kind); OFF(SegValue, i); OFF(SegValue, f); OFF(SegValue, text);
@@ -99,7 +106,109 @@ static void test_layout(void) {
     OFF(SegSegdConvertOptions, twos_complement8015);
     OFF(SegSpsOptions, revision); OFF(SegSpsOptions, strict_implied_decimals);
     OFF(SegSpsOptions, layout); OFF(SegSpsOptions, force_layout);
+    OFF(SegFileSummary, standard); OFF(SegFileSummary, revision);
+    OFF(SegFileSummary, mixed_revisions); OFF(SegFileSummary, byte_order);
+    OFF(SegFileSummary, format_code); OFF(SegFileSummary, decodable);
+    OFF(SegFileSummary, trace_count); OFF(SegFileSummary, record_count);
+    OFF(SegFileSummary, first_field_record); OFF(SegFileSummary, last_field_record);
+    OFF(SegFileSummary, sample_interval_us); OFF(SegFileSummary, samples_per_trace);
+    OFF(SegFileSummary, record_length_ms); OFF(SegFileSummary, coordinate_units);
+    OFF(SegFileSummary, crs_format);
+    OFF(SegStandardRevision, major); OFF(SegStandardRevision, minor);
+    OFF(SegChannelSetSummary, record); OFF(SegChannelSetSummary, scan_type);
+    OFF(SegChannelSetSummary, channel_set); OFF(SegChannelSetSummary, number);
+    OFF(SegChannelSetSummary, channel_type); OFF(SegChannelSetSummary, trace_count);
+    OFF(SegChannelSetSummary, samples_per_trace); OFF(SegChannelSetSummary, sample_interval_us);
+    OFF(SegChannelSetSummary, start_time_ms); OFF(SegChannelSetSummary, end_time_ms);
     CHECK(seg_sizeof("NoSuchType") == -1 && seg_offsetof("SegValue", "nope") == -1);
+}
+
+/* ---- summary (task 6.8) ----------------------------------------------- */
+static void test_summary(void) {
+    SegSeismicFile *f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
+    SegFileSummary s;
+    OK(seg_seismic_file_summary(f, &s));
+    CHECK(s.standard == SEG_SEISMIC_KIND_SEG_Y && s.revision.major == 2 && s.revision.minor == 1);
+    CHECK(s.byte_order == SEG_BYTE_ORDER_BIG && s.format_code == 1 && s.decodable);
+    CHECK(s.trace_count == 200 && s.record_count == 1 && s.samples_per_trace == 2001);
+    CHECK(s.sample_interval_us == 2000.0 && s.record_length_ms == 4000.0);
+    CHECK(s.coordinate_units == SEG_COORDINATE_UNITS_METERS);
+    CHECK(s.crs_format == SEG_CRS_TEXT_FORMAT_P1_11);
+    int64_t len = -1;
+    OK(seg_seismic_file_crs_text(f, NULL, 0, &len));
+    CHECK(len > 1000);
+    char head[16];
+    OK(seg_seismic_file_crs_text(f, head, sizeof head, &len));
+    CHECK(strncmp(head, "IOGP,IOGP P1", 12) == 0);
+    SegChannelSetSummary cs[8];
+    OK(seg_seismic_file_channel_sets(f, cs, 8, &len));
+    CHECK(len == 0);
+    seg_seismic_file_release(f);
+    f = open_file("inova_rev30_5traces.sgd", true);
+    SegTraceKeys k;
+    OK(seg_seismic_file_trace_keys(f, 4, &k)); /* task 6.9: the GH#3 time zero, UTC */
+    CHECK(fabs(k.time - 1790959547.504) < 1e-6);
+    OK(seg_seismic_file_summary(f, &s));
+    CHECK(s.standard == SEG_SEISMIC_KIND_SEG_D && s.revision.major == 3 && !s.mixed_revisions);
+    CHECK(s.format_code == 8058 && s.first_field_record == 151 && s.sample_interval_us == 1000.0);
+    CHECK(s.crs_format == SEG_CRS_TEXT_FORMAT_STANZA);
+    OK(seg_seismic_file_channel_sets(f, cs, 8, &len));
+    CHECK(len == 4 && cs[3].channel_type == 0x10 && cs[3].trace_count == 2);
+    CHECK(cs[0].samples_per_trace == 4001 && cs[0].end_time_ms == 4000.0);
+    OK(seg_seismic_file_channel_sets(f, cs, 2, &len)); /* too small: the full length */
+    CHECK(len == 4);
+    seg_seismic_file_release(f);
+}
+
+/* ---- header listing and patches (task 6.10) --------------------------- */
+static void test_listing(void) {
+    SegSeismicFile *f = open_file("63.sgd", false);
+    SegHeaderListing *l = NULL;
+    OK(seg_seismic_file_record_headers(f, 0, &l));
+    int64_t n = -1;
+    OK(seg_header_listing_len(l, &n));
+    CHECK(n > 20);
+    bool found = false;
+    for (int64_t i = 0; i < n; i++) { /* the C iterator: len + get */
+        SegHeaderRow r;
+        OK(seg_header_listing_get(l, i, &r));
+        if (strcmp(r.block_name, "gh3") == 0 && strcmp(r.field, "sourcePointNumber") == 0) {
+            CHECK(r.kind == SEG_HEADER_BLOCK_SEG_D_GH_N && r.value.kind == SEG_VALUE_FLOAT);
+            CHECK(r.value.f == 99.5 && r.block_offset == 64 && r.block_size == 32);
+            found = true;
+        }
+    }
+    CHECK(found);
+    SegHeaderRow r;
+    CHECK(seg_header_listing_get(l, n, &r) == SEG_ERR_ARGUMENT);
+    seg_header_listing_release(l);
+    CHECK(seg_seismic_file_trace_headers(f, 1, &l) == SEG_ERR_ARGUMENT && l == NULL);
+    seg_seismic_file_release(f);
+    f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
+    OK(seg_seismic_file_file_headers(f, &l));
+    OK(seg_header_listing_get(l, 0, &r)); /* a raw block: its value names it */
+    CHECK(strcmp(r.block_name, "text") == 0 && r.field[0] == '\0' && r.kind == SEG_HEADER_BLOCK_RAW);
+    CHECK(r.value.kind == SEG_VALUE_TEXT && strcmp(r.value.text, "textual header") == 0 &&
+          r.value.text_len == 14 && r.block_size == 3200);
+    seg_header_listing_release(l);
+    seg_seismic_file_release(f);
+    char names[4096];
+    int64_t len = -1;
+    OK(seg_field_names(SEG_HEADER_BLOCK_SEG_Y_TRACE, names, sizeof names, &len));
+    CHECK(len < (int64_t)sizeof names && strcmp(names, "traceSeqLine") == 0);
+    CHECK(seg_field_names(99, names, sizeof names, &len) == SEG_ERR_ARGUMENT);
+    SegHeaderPatch *p = NULL;
+    OK(seg_header_patch_new(&p));
+    SegValue v = {0};
+    v.kind = SEG_VALUE_INT;
+    v.i = 1700000;
+    OK(seg_header_patch_add(p, SEG_HEADER_SCOPE_TRACE, 5, "trace.sourceX", &v));
+    CHECK(seg_header_patch_add(p, SEG_HEADER_SCOPE_TRACE, 5, "sourceX", &v) == SEG_ERR_ARGUMENT);
+    OK(seg_header_patch_len(p, &n));
+    CHECK(n == 1);
+    OK(seg_header_patch_write(p, path(tmp, "c_patch.nif")));
+    CHECK(seg_header_patch_write(p, path(tmp, "no-dir/x.nif")) == SEG_ERR_IO);
+    seg_header_patch_release(p);
 }
 
 /* ---- files, fields, logs --------------------------------------------- */
@@ -133,7 +242,7 @@ static void test_files(void) {
           strlen(seg_last_error()) > 0);
     SegTraceKeys k;
     OK(seg_seismic_file_trace_keys(f, 0, &k));
-    CHECK(k.ensemble == 1001001.0);
+    CHECK(k.ensemble == 1001001.0 && isnan(k.time)); /* trace bytes 157-158: year 0 */
     uint8_t head[8];
     OK(seg_seismic_file_copy_bytes(f, 0, 4, head, sizeof head, &n));
     CHECK(n == 4 && head[0] == 0xC3);
@@ -757,6 +866,8 @@ int main(int argc, char **argv) {
     CHECK(strcmp(ver, "0.4.0") == 0 && len == 5);
     test_layout();
     test_files();
+    test_summary();
+    test_listing();
     test_reads();
     test_gathers_and_prefetch();
     test_edits();

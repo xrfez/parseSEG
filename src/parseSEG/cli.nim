@@ -8,7 +8,6 @@
 import std/[os, strutils, sequtils, tables, math, streams]
 import ../parseSEG
 import ./common/niftext
-from ./model/headerfields import locateBlock, readFields
 
 const
   Usage = """
@@ -18,12 +17,16 @@ Usage: parseSEG <command> [options] <arguments>
 
 Inspecting
   info <file> [--keys] [SURVEY] what the file is: standard, revision, format,
-                                records, traces, samples, gathers, diagnostics
-  dump <file> [--traces=SEL] [--fields=a,b,...] [--all]
+                                records, traces, samples, record length, field
+                                records, coordinate units and CRS, gathers,
+                                diagnostics
+  dump <file> [--traces=SEL] [--fields=a,b,...] [--all] [--records=SEL] [--file]
                                 trace headers as a table (SEL: 5 | 0..9 | 1,4,7);
                                 --fields picks header fields (trace.sourceX,
-                                ext1.receiverLineNumber, ...); --all prints
-                                every field of every block
+                                ext1.receiverLineNumber, ...); --all lists
+                                every field of every block of the traces, with
+                                its byte offset and size; --records and --file
+                                list the SEG-D record and the file headers
   diag <file> [--nif] [--min=info|warning|error|fatal]
                                 the diagnostics of indexing the file
   keys <file> [--traces=SEL] [SURVEY]
@@ -99,10 +102,10 @@ type Args = object
   opts: seq[(string, string)]
 
 const ValueOptions = ["o", "out", "journal", "traces", "fields", "rev", "format", "to",
-  "byte-order", "text", "min", "map", "name", "sps", "p1", "decimals", "line-map"]
+  "byte-order", "text", "min", "map", "name", "sps", "p1", "decimals", "line-map", "records"]
 
 const Flags = ["force", "keys", "all", "nif", "descale", "no-station-header", "fields-only",
-  "dry-run", "help", "h", "elevation", "trailing-digits", "multi-component", "overwrite"]
+  "dry-run", "help", "h", "elevation", "trailing-digits", "multi-component", "overwrite", "file"]
 
 const SurveyOptions = ["sps", "p1", "decimals", "line-map", "elevation", "trailing-digits",
   "multi-component", "overwrite"]
@@ -291,6 +294,13 @@ proc info(a: Args): int =
     if intervals.len > 4: break
   echo "traces:      ", f.len, " (up to ", ix.maxSamples, " samples, interval ",
     intervals.mapIt($it & " µs").join(", "), ")"
+  let s = f.summary
+  echo "length:      ", (if s.recordLengthMs.isNaN: "varies" else: $s.recordLengthMs & " ms")
+  if s.firstFieldRecord >= 0:
+    echo "field rec:   ", s.firstFieldRecord, " .. ", s.lastFieldRecord
+  echo "coordinates: ", s.coordinateUnits,
+    (if s.crsFormat != ctNone: ", CRS " & $s.crsFormat & " (" & $f.crsText.len & " chars)"
+     else: "")
   if a.has("keys"):
     var kinds: CountTable[GatherKind]
     for g in ix.gathers: kinds.inc g.kind
@@ -333,34 +343,31 @@ proc parseSelection(s: string, n: int, unit = "trace", all = true): seq[int] =
     check(b)
     for i in a..b: result.add i
 
+proc printListing(title: string, l: HeaderListing) =
+  echo title
+  for r in l:
+    let where = "  (@" & $r.offset & ", " & $r.size & " B)"
+    if r.field.len > 0: echo "  ", r.blockName, ".", r.field, " = ", r.value, where
+    else: echo "  ", r.blockName, ": ", r.value.text, where
+
 proc dump(a: Args): int =
   ## Exit 1 when the index has errors or a requested field is unknown.
-  a.onlyOptions(["traces", "fields", "all"])
+  a.onlyOptions(["traces", "fields", "all", "records", "file"])
   a.needArgs(1, "dump <file>")
   var f = openFile(a.pos[0])
   defer: f.close()
   printLog(f.index.log, sevError)
   result = if f.index.log.failed: 1 else: 0
   let sel = parseSelection(a.get("traces"), f.len)
+  let listings = a.has("file") or a.has("records")
+  if a.has("file"): printListing("file", f.fileHeaders)
+  if a.has("records"):
+    for r in parseSelection(a.get("records"), f.recordCount, "record"):
+      printListing("record " & $r, f.recordHeaders(r))
   if a.has("all"):
-    var names: array[HeaderBlock, seq[string]]
-    for k in HeaderBlock: names[k] = fieldNames(k)
-    var values: seq[Option[FieldValue]]
-    for t in sel:
-      echo "trace ", t
-      for blockName in ["trace", "ext1"]:
-        let b = f.index.locateBlock(hsTrace, t, blockName)
-        if b.error.len == 0:
-          let err = f.readFields(b.blk, values) # the block is decoded once
-          for i, n in names[b.blk.kind]:
-            let name = blockName & "." & n
-            if err.len == 0 and values[i].isSome:
-              echo "  ", name, " = ", values[i].get
-            else:
-              echo "  ", name, " = ? (", name, ": ",
-                (if err.len > 0: err else: "is not a field of " & $b.blk.kind), ")"
-              result = 1
+    for t in sel: printListing("trace " & $t, f.traceHeaders(t))
     return
+  if listings and not (a.has("traces") or a.has("fields")): return
   let fields = if a.has("fields"): a.get("fields").split(',').mapIt(it.strip)
                else: @[]
   var header = @["trace", "offset", "samples", "record", "chset"]

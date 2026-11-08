@@ -521,6 +521,7 @@ func structural(k: HeaderBlock): seq[string] =
   of hbSegdExt1, hbSegdExt1Rev3: @segdExt1Structural
   of hbSegdGh1: @segdGh1Structural
   of hbSegdGhN: @segdGhNStructural
+  else: @[] # not reachable by name (listings only)
 
 proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, field: string,
     v: FieldValue, loc: Location): bool =

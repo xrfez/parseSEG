@@ -82,8 +82,11 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 |---|---|
 | `open_seismic(path, twos_complement8015=False, keys=False)` → `SeismicFile` | `openSeismic` |
 | `len(f)`, `f.kind`, `f.record_count`, `f.max_samples`, `f.has_keys`, `f.is_open`, `f.path`, `f.demux_path`, `f.log` | `len`, `kind`, ... |
-| `f.trace_entry(i)`, `f.trace_keys(i)` → dict; `f.copy_bytes(offset, n)` → bytes; `f.sample_interval_us(trace=0)` | `traceEntry`, `traceKeys`, `copyBytes`, `sampleIntervalUs` |
+| `f.trace_entry(i)`, `f.trace_keys(i)` → dict (`time`: UTC POSIX seconds, NaN if unknown); `f.copy_bytes(offset, n)` → bytes; `f.sample_interval_us(trace=0)` | `traceEntry`, `traceKeys`, `copyBytes`, `sampleIntervalUs` |
 | `f.trace_field(i, name)`, `record_field(r, name)`, `file_field(name)` → int/float/str | `traceField`, ... |
+| `f.trace_headers(i)`, `f.record_headers(r)`, `f.file_headers()` → `HeaderListing`, a sequence of row dicts (`block_name`, `kind`, `field`, `value`, `offset`, `size`, `block_offset`, `block_size`; `list(...)` gives a list); `field_names(kind)` → list of str (`kind` a `HeaderBlock` string such as `"SEG-Y trace"`) | `traceHeaders`, ..., `fieldNames` |
+| `HeaderPatch()`: `add(scope, index, name, value)` (`scope` `"file"`, `"record"` or `"trace"`), `len(p)`, `write(path)` (a NIF patch; apply it with `parseSEG headers import`, dry run first, or Nim `importHeaders`) | `HeaderPatch`, `writeHeaderPatch` |
+| `f.summary()` → dict (standard, revision, byte order, format code, counts, field records, sample interval, record length, coordinate units, CRS format); `f.channel_sets()` → list of dicts; `f.crs_text()` → str | `summary`, `channelSets`, `crsText` |
 | `f.read_traces(traces, dtype="float32")` → `Tensor` (ArgumentError for traces out of range; FormatError when a trace cannot be decoded) | `readTraces` |
 | `f.read_traces_into(traces, dst, row=0)` → failed count | `readTracesInto` |
 | `f.gathers()` → list of dicts, `f.component_group_ids(traces)` → list | `gathers`, `componentGroupIds` |

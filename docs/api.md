@@ -42,6 +42,7 @@ Conventions that hold throughout:
 | `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). SEG-2 needs a `MemFileSource` (`ValueError` otherwise). |
 | `f.len`, `f.kind` (`skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path`, `f.demuxPath` | File facts. |
 | `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval (`ValueError` for a trace out of range; `sampleIntervalUs` and `copyBytes` also for a closed file). |
+| `f.summary` (`FileSummary`), `f.channelSets` (`seq[ChannelSetSummary]`), `f.crsText` | Common metadata with no branch on the standard (task 6.8): standard and revision, byte order, format code, trace/record counts, first/last field record, sample interval, samples per trace and record length (NaN / -1 when not uniform), coordinate units (`CoordinateUnits`) and the CRS text's format (`CrsTextFormat`). `channelSets` gives each SEG-D channel set's interval, timing and trace count; `crsText` the CRS text (P1/11 or Location Data). |
 | `f.index.segy`, `f.index.segdRecords`, `f.index.seg2`, `f.seg2Trace(i)`, `f.close()` | The format's own headers (`seg2Trace` re-reads a SEG-2 Trace Descriptor Block from the map). A `SeismicFile` that goes out of scope unmaps itself; `close` does it early. |
 
 ## Reading samples
@@ -66,8 +67,9 @@ Sorting is a selection: a sort produces a list of trace indices, and no data is 
 | `traceField(f, trace, "trace.sourceX")`, `recordField(f, record, "gh1.year")`, `fileField(f, "binary.sampleInterval")` | Any named header field, read from the map, as a `FieldValue` (`intVal`, `floatVal` or `text` by `kind`). Raises `ValueError` for an unknown name, trace or record. |
 | `findTraceField`, `findRecordField`, `findFileField` | The same, as an `Option[FieldValue]` (none when the field cannot be read). |
 | `fieldNames(HeaderBlock)`, `f.blockKind(scope, index, "ext1")`, `h.fieldByName("sourceX")` | The fields of a block kind; the kind of a file's block (`hsFile`, `hsRecord`, `hsTrace`); a field of a decoded header object (`Option`). |
+| `f.traceHeaders(i)`, `f.recordHeaders(r)`, `f.fileHeaders` (`HeaderListing`: `len`, `[]`, `items` of `HeaderRow`) | A viewer's headers tab (task 6.10, `model/headerlist`): every header block of a trace, SEG-D record or the file as ordered rows of `blockName`, `kind` (`HeaderBlock`, `hbRaw` for blocks without named fields), `field`, `value`, `offset`, `size`, `blockOffset`, `blockSize` (raw bytes for a hex pane: `copyBytes(blockOffset, blockSize)`). It covers the blocks the trace or record has: SEG-Y `trace`/`ext1`/`ext2..`, SEG-D `trace`/`ext1`/`ext2..` (Rev 3 blocks typed by byte 32), `gh1`, `gh2`, ..., `st<s>cs<c>`, `extended`, `external`, `trailer`; SEG-Y `label`, `text`, `binary`, `extended`, `trailer`. Read-only; names as in `traceField` and the editor. |
 | `readSegyHeaders(path)`, `readSegdHeaders(path)`; `openSegy`/`openSegd(src, headersOnly = true)` | Every header object, samples skipped (also on tape). |
-| `traceKeys(...)`, `TraceKeys` | Per-trace geometry (record, source and receiver line/point/index/coordinates, component). |
+| `traceKeys(...)`, `TraceKeys` | Per-trace geometry (record, source and receiver line/point/index/coordinates, component) and the trace's UTC time (`time`, POSIX seconds, NaN if unknown; task 6.9: SEG-Y bytes 157-168 with the time basis, SEG-D GH#1, Rev 3 GH#3 time zero or the trace's Timestamp block). |
 
 ## Gathers and components
 `gathers(f or index)`: a split into `Gather` (`kind`: shot, receiver, cmp, offset, other or
@@ -113,7 +115,11 @@ raises `ValueError` when the journal is the file itself.
 Header documents (`model/headernif`): `exportHeaders(f, path, raw = true)` streams every named
 field (and raw bytes) as NIF; `importHeaders(path, nifPath, ImportOptions(outPath, journal,
 dryRun, force, onChange))` applies an edited document as a patch through the editor, in
-place or into a copy (`dryRun` only lists the changes). `onChange` reports each accepted
+place or into a copy (`dryRun` only lists the changes). A viewer saves its pending edits with
+`writeHeaderPatch(changes: openArray[HeaderChange], path)` or a `HeaderPatch`
+(`initHeaderPatch`, `add(scope, index, "<block>.<field>", value)`, `len`, `write(path)`), in
+the same format; applying it stays an explicit `importHeaders`. Only the blocks the editor
+names (`trace`, `ext1`, `gh1`, Rev 1/2 `gh3..`, `binary`) can be patched. `onChange` reports each accepted
 edit; edits a later failed journal sync drops are moved from `applied` to `refused`, with a
 fatal diagnostic.
 
