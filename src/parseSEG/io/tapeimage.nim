@@ -37,17 +37,19 @@ proc openTapeImageSource*(path: string; padOdd = true): TapeImageSource =
     raise newException(IOError, "cannot open for reading: " & path)
   TapeImageSource(f: f, name: path, padOdd: padOdd)
 
-proc readWord(s: TapeImageSource; what: string; atEofOk: bool): (bool, uint32) =
-  ## Reads a length word. Returns (false, 0) at a clean end of file when
-  ## `atEofOk`; raises `SegTruncatedError` on a partial word.
+proc readWord(s: TapeImageSource; what: string; atEofOk: bool; word: var uint32): bool =
+  ## Reads a length word into `word`. Returns false at a clean end of file
+  ## when `atEofOk`; raises `SegTruncatedError` on a partial word.
   var w: array[4, byte]
   let n = readBuffer(s.f, addr w[0], 4)
   if n == 0 and atEofOk:
-    return (false, 0'u32)
-  if n < 4:
+    result = false
+  elif n < 4:
     raiseTruncated("tape image ends inside " & what, s.offset)
-  s.offset += 4
-  (true, le32(w))
+  else:
+    s.offset += 4
+    word = le32(w)
+    result = true
 
 method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): RecordKind {.
     raises: [CatchableError].} =
@@ -55,7 +57,8 @@ method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): Rec
   var done = false
   while not done:
     let start = s.offset
-    let (ok, word) = s.readWord("a record header", atEofOk = true)
+    var word = 0'u32
+    let ok = s.readWord("a record header", atEofOk = true, word)
     done = true
     if not ok or word == TapEndOfMedium:
       result = rkEndOfData
@@ -78,7 +81,8 @@ method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): Rec
         if readBuffer(s.f, addr pad, 1) < 1:
           raiseTruncated("tape image ends inside record padding", s.offset)
         s.offset += 1
-      let (_, trailer) = s.readWord("a record trailer", atEofOk = false)
+      var trailer = 0'u32
+      discard s.readWord("a record trailer", atEofOk = false, trailer)
       if trailer != word:
         raiseFormat("tape image record trailer " & $trailer & " does not match header " &
           $word, s.offset - 4)
@@ -102,14 +106,15 @@ proc writeBytes(s: TapeImageSink; p: pointer; n: int) =
   s.offset += n
 
 proc writeWord(s: TapeImageSink; w: uint32) =
-  var b = [byte(w and 0xFF), byte((w shr 8) and 0xFF), byte((w shr 16) and 0xFF), byte(w shr 24)]
+  var b = [byte(w and 0xFF), byte((w shr 8) and 0xFF), byte((w shr 16) and 0xFF),
+    byte(w shr 24)]
   s.writeBytes(addr b[0], 4)
 
 method writeRecordImpl*(s: TapeImageSink; data: openArray[byte]) {.raises: [CatchableError].} =
   if data.len == 0 or uint64(data.len) >= uint64(TapClassMask):
     raiseFormat("tape image records must hold 1..268435455 bytes, got " & $data.len, s.offset)
   s.writeWord uint32(data.len)
-  s.writeBytes(unsafeAddr data[0], data.len)
+  s.writeBytes(addr data[0], data.len)
   if s.padOdd and (data.len and 1) == 1:
     var pad = 0'u8
     s.writeBytes(addr pad, 1)

@@ -22,7 +22,8 @@ import ../common/errors
 const
   DefaultChunkSize* = 1 shl 20
     ## Chunk size used by byte-stream sources when the caller does not ask for one.
-  SkipRefill = 512 ## Smallest refill after a seek: most trace headers fit (see `RecordCursor.sized`).
+  SkipRefill = 512
+    ## Smallest refill after a seek: most trace headers fit (see `RecordCursor.sized`).
 
 type
   RecordKind* = enum
@@ -35,16 +36,32 @@ type
     name*: string           ## File path or device name, for diagnostics.
     offset*: int64          ## Medium offset of the next record (bytes read so far for devices).
     dataOffset*: int64      ## Medium offset of the first data byte of the last record read.
-    recordIndex*: int       ## Data records returned so far.
-    fileIndex*: int         ## Tape marks passed so far.
+    recordIndex: int        ## Data records returned so far.
+    fileIndex: int          ## Tape marks passed so far.
     lastWasMark, ended: bool
 
   RecordSink* = ref object of RootObj
     ## Base type of all record writers.
     name*: string     ## File path or device name, for diagnostics.
     offset*: int64    ## Medium offset where the next record will be written.
-    recordIndex*: int ## Data records written so far.
-    fileIndex*: int   ## Tape marks written so far.
+    recordIndex: int ## Data records written so far.
+    fileIndex: int   ## Tape marks written so far.
+
+func recordIndex*(s: RecordSource): int {.inline.} =
+  ## Data records returned so far.
+  s.recordIndex
+
+func fileIndex*(s: RecordSource): int {.inline.} =
+  ## Tape marks passed so far (end-of-data's second mark not included).
+  s.fileIndex
+
+func recordIndex*(s: RecordSink): int {.inline.} =
+  ## Data records written so far.
+  s.recordIndex
+
+func fileIndex*(s: RecordSink): int {.inline.} =
+  ## Tape marks written so far.
+  s.fileIndex
 
 method readRecordImpl*(s: RecordSource; buf: var seq[byte]; maxLen: int): RecordKind {.
     base, raises: [CatchableError].} =
@@ -142,7 +159,9 @@ proc initRecordCursor*(src: RecordSource; chunkSize = DefaultChunkSize): RecordC
   ## Creates a cursor reading from `src`.
   RecordCursor(src: src, chunk: chunkSize, pending: rkData)
 
-proc source*(c: RecordCursor): RecordSource {.inline.} = c.src
+proc source*(c: RecordCursor): RecordSource {.inline.} =
+  ## The record source this cursor reads from.
+  c.src
 
 proc preferSmallReads*(c: var RecordCursor) {.inline.} =
   ## Refill with what each read needs instead of whole chunks, as after a

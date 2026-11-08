@@ -106,7 +106,10 @@ patch through the editor, in place or into a copy.
   map decodes.
 - Media: `openDiskSource`/`openDiskSink`, `openMemFileSource`,
   `openTapeImageSource`/`openTapeImageSink`, `newDeviceSource`/`newDeviceSink` over a
-  `TapeDevice` (Linux `st`, Windows tape, `MemoryTape`).
+  `TapeDevice` (Linux `st`, Windows tape, `MemoryTape`). A custom drive overrides
+  `readBlock(buf, n): RecordKind` (the block length goes to `n`), `writeBlock`,
+  `writeTapeMarks`, `rewind`, `spaceFiles`, `status` and `close`. Sources and sinks count
+  through the read-only `recordIndex` and `fileIndex`.
 
 ## Conversion
 - `convertFile(src, dst, ConvertOptions(...))` detects the input and writes SEG-Y.

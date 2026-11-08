@@ -148,7 +148,7 @@ proc flushBatch(ed: var HeaderEditor) =
   ed.syncJournal()
   let mem = ed.file.unsafeMemory
   for p in ed.pending:
-    copyMem(addr mem[p.at], unsafeAddr p.bytes[0], p.bytes.len)
+    copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
   ed.pending.setLen 0
 
 proc overlapsPending(ed: HeaderEditor, at: int64, size: int): bool =

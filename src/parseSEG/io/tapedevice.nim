@@ -28,10 +28,12 @@ type
     ## Base type of tape drives.
     name*: string ## Device path (e.g. `/dev/nst0`, `\\.\TAPE0`), for diagnostics.
 
-method readBlock*(d: TapeDevice; buf: var openArray[byte]): int {.base, raises: [CatchableError].} =
-  ## Reads one block into `buf`. Returns its length, 0 for a tape mark, or -1
-  ## at end of data (blank tape). Raises `IOError` if the block is larger
-  ## than `buf` or the drive fails.
+method readBlock*(d: TapeDevice; buf: var openArray[byte]; n: var int): RecordKind {.
+    base, raises: [CatchableError].} =
+  ## Reads the next item. For a block, copies it into `buf`, sets `n` to its
+  ## length and returns `rkData`; a tape mark returns `rkTapeMark` and the end
+  ## of recorded data (blank tape) `rkEndOfData`, both with `n` = 0. Raises
+  ## `IOError` if the block is larger than `buf` or the drive fails.
   raiseAssert "readBlock not implemented for this device"
 
 method writeBlock*(d: TapeDevice; data: openArray[byte]) {.base, raises: [CatchableError].} =
@@ -63,10 +65,12 @@ method close*(d: TapeDevice) {.base, raises: [CatchableError].} =
 
 type
   DeviceSource* = ref object of RecordSource
+    ## Adapts a `TapeDevice` to the record layer for reading: one block per record.
     dev: TapeDevice
     maxBlock: int
 
   DeviceSink* = ref object of RecordSink
+    ## Adapts a `TapeDevice` to the record layer for writing: one block per record.
     dev: TapeDevice
 
 proc newDeviceSource*(dev: TapeDevice; maxBlockSize = DefaultMaxBlockSize): DeviceSource =
@@ -74,19 +78,18 @@ proc newDeviceSource*(dev: TapeDevice; maxBlockSize = DefaultMaxBlockSize): Devi
   ## `maxBlockSize` bytes.
   DeviceSource(dev: dev, name: dev.name, maxBlock: maxBlockSize)
 
-proc device*(s: DeviceSource): TapeDevice {.inline.} = s.dev
+proc device*(s: DeviceSource): TapeDevice {.inline.} =
+  ## The drive this source reads from.
+  s.dev
 
 method readRecordImpl*(s: DeviceSource; buf: var seq[byte]; maxLen: int): RecordKind {.
     raises: [CatchableError].} =
   buf.setLen max(s.maxBlock, maxLen)
-  let n = s.dev.readBlock(buf)
-  buf.setLen max(n, 0)
+  var n = 0
+  result = s.dev.readBlock(buf, n)
+  buf.setLen n
   s.dataOffset = s.offset
-  if n > 0:
-    s.offset += n
-    rkData
-  elif n == 0: rkTapeMark
-  else: rkEndOfData
+  s.offset += n
 
 method close*(s: DeviceSource) {.raises: [CatchableError].} = s.dev.close()
 
@@ -94,7 +97,9 @@ proc newDeviceSink*(dev: TapeDevice): DeviceSink =
   ## Writes records to `dev`, one block per record.
   DeviceSink(dev: dev, name: dev.name)
 
-proc device*(s: DeviceSink): TapeDevice {.inline.} = s.dev
+proc device*(s: DeviceSink): TapeDevice {.inline.} =
+  ## The drive this sink writes to.
+  s.dev
 
 method writeRecordImpl*(s: DeviceSink; data: openArray[byte]) {.raises: [CatchableError].} =
   s.dev.writeBlock(data)
@@ -108,7 +113,9 @@ method close*(s: DeviceSink) {.raises: [CatchableError].} = s.dev.close()
 
 type
   TapeItemKind* = enum
-    tiBlock, tiMark
+    ## What a `TapeItem` is.
+    tiBlock ## A data block.
+    tiMark  ## A tape mark.
 
   TapeItem* = object
     ## One item on a `MemoryTape`.
@@ -120,46 +127,65 @@ type
     ## In-memory tape drive. Behaves like a real drive: writing truncates
     ## everything after the head, reading past the last item reports end of
     ## data, and `writeProtected`/`capacity` simulate media limits.
-    items*: seq[TapeItem]
+    items: seq[TapeItem]
+    used: int              ## Data bytes in `items`, kept current by every change.
     pos*: int              ## Index of the next item under the head.
     writeProtected*: bool
     capacity*: int = -1    ## Maximum stored data bytes; -1 for unlimited.
 
-proc newMemoryTape*(items: sink seq[TapeItem] = @[]; name = "memory"): MemoryTape =
-  ## Creates an in-memory tape holding `items`, positioned at BOT.
-  MemoryTape(items: items, name: name)
-
-proc dataBlock*(data: openArray[byte]): TapeItem = TapeItem(kind: tiBlock, data: @data)
-proc tapeMark*(): TapeItem = TapeItem(kind: tiMark)
-
-proc usedBytes(t: MemoryTape): int =
-  for it in t.items:
+func blockBytes(items: openArray[TapeItem]): int =
+  result = 0
+  for it in items:
     if it.kind == tiBlock: result += it.data.len
 
-method readBlock*(t: MemoryTape; buf: var openArray[byte]): int {.raises: [CatchableError].} =
+proc newMemoryTape*(items: sink seq[TapeItem] = @[]; name = "memory"): MemoryTape =
+  ## Creates an in-memory tape holding `items`, positioned at BOT.
+  let used = blockBytes(items)
+  MemoryTape(items: items, used: used, name: name)
+
+func items*(t: MemoryTape): lent seq[TapeItem] {.inline.} =
+  ## The blocks and tape marks on the tape, from BOT. Change them only
+  ## through the device methods.
+  t.items
+
+func dataBlock*(data: openArray[byte]): TapeItem =
+  ## A tape item holding a copy of `data` as one block.
+  TapeItem(kind: tiBlock, data: @data)
+
+func tapeMark*(): TapeItem =
+  ## A tape item for one tape mark.
+  TapeItem(kind: tiMark)
+
+method readBlock*(t: MemoryTape; buf: var openArray[byte]; n: var int): RecordKind {.
+    raises: [CatchableError].} =
+  n = 0
   if t.pos >= t.items.len:
-    return -1
-  let it = t.items[t.pos]
-  if it.kind == tiMark:
+    result = rkEndOfData
+  elif t.items[t.pos].kind == tiMark:
     inc t.pos
-    return 0
-  if it.data.len > buf.len:
-    raise newException(IOError, t.name & ": block of " & $it.data.len &
-      " bytes exceeds the " & $buf.len & "-byte read buffer")
-  inc t.pos
-  if it.data.len > 0: copyMem(addr buf[0], unsafeAddr it.data[0], it.data.len)
-  it.data.len
+    result = rkTapeMark
+  else:
+    template data: untyped = t.items[t.pos].data
+    if data.len > buf.len:
+      raise newException(IOError, t.name & ": block of " & $data.len &
+        " bytes exceeds the " & $buf.len & "-byte read buffer")
+    n = data.len
+    if n > 0: copyMem(addr buf[0], addr data[0], n)
+    inc t.pos
+    result = rkData
 
 proc truncateAtHead(t: MemoryTape) =
   if t.writeProtected:
     raise newException(IOError, t.name & ": tape is write protected")
+  t.used -= blockBytes(t.items.toOpenArray(t.pos, t.items.high))
   t.items.setLen t.pos
 
 method writeBlock*(t: MemoryTape; data: openArray[byte]) {.raises: [CatchableError].} =
   t.truncateAtHead()
-  if t.capacity >= 0 and t.usedBytes + data.len > t.capacity:
+  if t.capacity >= 0 and t.used + data.len > t.capacity:
     raise newException(IOError, t.name & ": end of medium")
   t.items.add dataBlock(data)
+  t.used += data.len
   inc t.pos
 
 method writeTapeMarks*(t: MemoryTape; count: Positive) {.raises: [CatchableError].} =
@@ -196,4 +222,4 @@ method status*(t: MemoryTape): TapeStatus {.raises: [CatchableError].} =
     else:
       inc result.blockNumber
   result.atTapeMark = t.pos > 0 and t.items[t.pos - 1].kind == tiMark
-  result.atEndOfMedium = t.capacity >= 0 and t.usedBytes >= t.capacity
+  result.atEndOfMedium = t.capacity >= 0 and t.used >= t.capacity

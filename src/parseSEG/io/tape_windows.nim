@@ -8,7 +8,7 @@ when not defined(windows):
   {.error: "tape_windows is only available on Windows".}
 
 import std/[os, winlean]
-import tapedevice
+import tapedevice, records
 
 const
   ErrorMoreData = 234'i32
@@ -54,14 +54,19 @@ proc openWindowsTape*(path = r"\\.\TAPE0"; write = false): WindowsTape =
     raiseOSError(osLastError(), "cannot open tape device " & path)
   WindowsTape(h: h, name: path)
 
-method readBlock*(t: WindowsTape; buf: var openArray[byte]): int {.raises: [CatchableError].} =
-  var n = 0'i32
-  let ok = readFile(t.h, if buf.len > 0: addr buf[0] else: nil, int32(buf.len), addr n, nil)
+method readBlock*(t: WindowsTape; buf: var openArray[byte]; n: var int): RecordKind {.
+    raises: [CatchableError].} =
+  var got = 0'i32
+  let ok = readFile(t.h, if buf.len > 0: addr buf[0] else: nil, int32(buf.len), addr got, nil)
   t.lastError = if ok != 0: 0'i32 else: getLastError()
+  n = 0
   case t.lastError
-  of 0: result = (if n > 0: int(n) else: 0)
-  of ErrorFilemarkDetected, ErrorSetmarkDetected: result = 0
-  of ErrorNoDataDetected, ErrorEndOfMedia: result = -1
+  of 0:
+    # A successful zero-byte read is a tape mark too.
+    n = int(max(got, 0))
+    result = if n > 0: rkData else: rkTapeMark
+  of ErrorFilemarkDetected, ErrorSetmarkDetected: result = rkTapeMark
+  of ErrorNoDataDetected, ErrorEndOfMedia: result = rkEndOfData
   of ErrorMoreData:
     raise newException(IOError, t.name & ": block exceeds the " & $buf.len &
       "-byte read buffer")
@@ -70,7 +75,7 @@ method readBlock*(t: WindowsTape; buf: var openArray[byte]): int {.raises: [Catc
 
 method writeBlock*(t: WindowsTape; data: openArray[byte]) {.raises: [CatchableError].} =
   var n = 0'i32
-  if writeFile(t.h, if data.len > 0: unsafeAddr data[0] else: nil, int32(data.len),
+  if writeFile(t.h, if data.len > 0: addr data[0] else: nil, int32(data.len),
       addr n, nil) == 0:
     raiseOSError(osLastError(), t.name & ": write")
   if n != data.len:

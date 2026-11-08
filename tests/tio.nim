@@ -3,7 +3,7 @@
 
 import std/[assertions, os]
 import parseSEG/common/[errors, diagnostics]
-import parseSEG/io/[records, diskio, tapeimage, tapedevice]
+import parseSEG/io/[records, diskio, tapeimage, tapedevice, pushback]
 
 let tmp = getTempDir() / "parseseg_tio"
 createDir tmp
@@ -59,11 +59,12 @@ block memory_tape_positioning:
   doAssert tape.status.atBeginning and tape.status.fileNumber == 0
   tape.spaceFiles 2
   var buf = newSeq[byte](64)
-  doAssert tape.readBlock(buf) == 7
+  var n = -1
+  doAssert tape.readBlock(buf, n) == rkData and n == 7
   doAssert tape.status.fileNumber == 2 and tape.status.blockNumber == 1
   tape.spaceFiles -1
   doAssert tape.items[tape.pos].kind == tiMark, "BSF stops on the BOT side of the mark"
-  doAssert tape.readBlock(buf) == 0
+  doAssert tape.readBlock(buf, n) == rkTapeMark and n == 0
   doAssert tape.status.atTapeMark
   doAssertRaises IOError:
     tape.spaceFiles 5
@@ -91,8 +92,15 @@ block memory_tape_media_limits:
     small.writeBlock bytes(8)
   small.rewind
   var tiny = newSeq[byte](4)
+  var n = 0
   doAssertRaises IOError:
-    discard small.readBlock(tiny)
+    discard small.readBlock(tiny, n)
+  # Overwriting from BOT frees the truncated blocks' capacity.
+  small.writeBlock bytes(8)
+  doAssert not small.status.atEndOfMedium
+  small.writeBlock bytes(2)
+  doAssert small.status.atEndOfMedium
+  doAssert small.readBlock(tiny, n) == rkEndOfData and n == 0
 
 block tape_image_round_trip:
   let path = tmp / "sample.tap"
@@ -194,6 +202,24 @@ block cursor_spans_blocks_and_stops_at_marks:
   doAssert c.stoppedAt == rkTapeMark
   c.skipTapeMark
   doAssert c.stoppedAt == rkEndOfData
+
+block pushback_unread:
+  # Unread in front of buffered bytes, into consumed room and growing the buffer.
+  var p = initPushbackInput(newDeviceSource(newMemoryTape(@[dataBlock(bytes(10))])))
+  var six: array[6, byte]
+  p.readExactly six
+  p.unread six.toOpenArray(2, 5)
+  var two: array[2, byte]
+  p.readExactly two
+  doAssert two == [2'u8, 3]
+  p.unread two
+  p.readExactly two
+  p.unread [0'u8, 1, 2, 3]
+  doAssert p.offset == 0
+  var all: array[12, byte]
+  doAssert p.readAvail(all) == 10
+  doAssert all[0 .. 9] == bytes(10)
+  doAssert p.stoppedAt == rkEndOfData
 
 block cursor_on_disk_with_diagnostics_boundary:
   let path = tmp / "short.bin"

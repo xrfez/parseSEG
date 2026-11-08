@@ -144,7 +144,7 @@ proc samplesFor(c: var Conv, src: seq[byte], nIn, nOut: int, fIn, fOut: SegdSamp
   if fIn == fOut and (fIn != sd8015 or nIn == nOut):
     let keep = min(dataBytes(fIn, min(nIn, nOut)), src.len)
     result = newSeq[byte](dataBytes(fOut, nOut))
-    if keep > 0: copyMem(addr result[0], unsafeAddr src[0], keep)
+    if keep > 0: copyMem(addr result[0], addr src[0], keep)
   else:
     var v = newSeq[float64](nIn)
     decodeSegdSamples(fIn, src, v, c.opts.twosComplement8015)

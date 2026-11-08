@@ -32,7 +32,7 @@ proc writeSparse(path: string, size: int64, pieces: openArray[(int64, seq[byte])
   var f = open(path, fmWrite)
   for (at, b) in pieces:
     f.setFilePos(at)
-    doAssert f.writeBuffer(unsafeAddr b[0], b.len) == b.len
+    doAssert f.writeBuffer(addr b[0], b.len) == b.len
   f.setFilePos(size - 1)
   f.write('\0')
   f.close()

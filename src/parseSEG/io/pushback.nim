@@ -19,6 +19,7 @@ type
     pendingPos: int
 
 func initPushbackInput*(src: RecordSource): PushbackInput =
+  ## Creates an input reading from `src`, with nothing pushed back.
   PushbackInput(cursor: initRecordCursor(src))
 
 func offset*(p: PushbackInput): int64 {.inline.} =
@@ -27,25 +28,36 @@ func offset*(p: PushbackInput): int64 {.inline.} =
 
 proc readAvail*(p: var PushbackInput, dst: var openArray[byte]): int =
   ## Reads up to `dst.len` bytes; fewer only at a tape mark or end of data.
-  while result < dst.len and p.pendingPos < p.pending.len:
-    dst[result] = p.pending[p.pendingPos]
-    inc result
-    inc p.pendingPos
+  result = min(dst.len, p.pending.len - p.pendingPos)
+  if result > 0:
+    copyMem(addr dst[0], addr p.pending[p.pendingPos], result)
+    p.pendingPos += result
   if result < dst.len:
     result += p.cursor.read(dst.toOpenArray(result, dst.len - 1))
 
 proc unread*(p: var PushbackInput, data: openArray[byte]) =
   ## Pushes `data` (just read) back in front of the unread bytes.
-  var rest = p.pending[p.pendingPos..^1]
-  p.pending = @data
-  p.pending.add rest
-  p.pendingPos = 0
+  if data.len <= p.pendingPos:
+    # The consumed bytes in front of the unread ones make room.
+    p.pendingPos -= data.len
+  else:
+    let rest = p.pending.len - p.pendingPos
+    if rest == 0:
+      p.pending.setLen data.len
+    else:
+      var grown = newSeqUninit[byte](data.len + rest)
+      copyMem(addr grown[data.len], addr p.pending[p.pendingPos], rest)
+      p.pending = move grown
+    p.pendingPos = 0
+  if data.len > 0: copyMem(addr p.pending[p.pendingPos], addr data[0], data.len)
 
 proc stoppedAt*(p: var PushbackInput): RecordKind =
   ## `rkData` if bytes are available, else the tape mark or end of data ahead.
   if p.pendingPos < p.pending.len: rkData else: p.cursor.stoppedAt
 
-proc atData*(p: var PushbackInput): bool {.inline.} = p.stoppedAt == rkData
+proc atData*(p: var PushbackInput): bool {.inline.} =
+  ## True if bytes are available before the next tape mark or end of data.
+  p.stoppedAt == rkData
 
 proc skipTapeMark*(p: var PushbackInput) =
   ## Consumes a pending tape mark.

@@ -158,7 +158,7 @@ var lastErrorBuf {.threadvar.}: array[LastErrorCap, char]
 
 proc setLastError*(msg: string) =
   let n = min(msg.len, LastErrorCap - 1)
-  if n > 0: copyMem(addr lastErrorBuf[0], unsafeAddr msg[0], n)
+  if n > 0: copyMem(addr lastErrorBuf[0], addr msg[0], n)
   lastErrorBuf[n] = '\0'
 
 proc lastErrorPtr*(): cstring = cast[cstring](addr lastErrorBuf[0])
@@ -251,7 +251,7 @@ proc copyText(s: string, buf: ptr UncheckedArray[char], cap: int64) =
   # At most cap - 1 bytes, always NUL-terminated when cap > 0.
   if buf != nil and cap > 0:
     let n = min(int64(s.len), cap - 1)
-    if n > 0: copyMem(addr buf[0], unsafeAddr s[0], n)
+    if n > 0: copyMem(addr buf[0], addr s[0], n)
     buf[n] = '\0'
 
 proc writeText*(s: string, buf: ptr UncheckedArray[char], cap: int64, outLen: ptr int64) =

@@ -9,7 +9,7 @@ when not defined(linux):
   {.error: "tape_linux is only available on Linux".}
 
 import std/[posix, os]
-import tapedevice
+import tapedevice, records
 
 type
   MtOp {.importc: "struct mtop", header: "<sys/mtio.h>".} = object
@@ -71,25 +71,29 @@ proc linuxStatus(t: LinuxTape): TapeStatus =
 
 method status*(t: LinuxTape): TapeStatus {.raises: [CatchableError].} = t.linuxStatus()
 
-method readBlock*(t: LinuxTape; buf: var openArray[byte]): int {.raises: [CatchableError].} =
-  let n = posix.read(t.fd, if buf.len > 0: addr buf[0] else: nil, buf.len)
-  if n > 0:
-    result = n
-  elif n == 0:
+method readBlock*(t: LinuxTape; buf: var openArray[byte]; n: var int): RecordKind {.
+    raises: [CatchableError].} =
+  n = 0
+  let got = posix.read(t.fd, if buf.len > 0: addr buf[0] else: nil, buf.len)
+  if got > 0:
+    n = got
+    result = rkData
+  elif got == 0:
     # 0 bytes is a tape mark, unless the drive reports blank tape.
-    result = if t.linuxStatus.atEndOfData: -1 else: 0
+    result = if t.linuxStatus.atEndOfData: rkEndOfData else: rkTapeMark
   else:
     let err = errno
     if err == ENOMEM:
       raise newException(IOError, t.name & ": block exceeds the " & $buf.len &
         "-byte read buffer")
-    if (err == EIO or err == ENOSPC) and (let s = t.linuxStatus; s.atEndOfData or s.atEndOfMedium):
-      result = -1
+    if (err == EIO or err == ENOSPC) and
+        (let s = t.linuxStatus; s.atEndOfData or s.atEndOfMedium):
+      result = rkEndOfData
     else:
       t.fail("read")
 
 method writeBlock*(t: LinuxTape; data: openArray[byte]) {.raises: [CatchableError].} =
-  let n = posix.write(t.fd, if data.len > 0: unsafeAddr data[0] else: nil, data.len)
+  let n = posix.write(t.fd, if data.len > 0: addr data[0] else: nil, data.len)
   if n < 0: t.fail("write")
   if n != data.len:
     raise newException(IOError, t.name & ": short write (" & $n & " of " & $data.len &

@@ -11,10 +11,12 @@ import records
 
 type
   DiskSource* = ref object of RecordSource
+    ## Reads a disk file as a byte stream, in chunks; seeks to skip.
     f: File
     size: int64
 
   DiskSink* = ref object of RecordSink
+    ## Writes records back to back into a disk file; tape marks are dropped.
     f: File
 
 proc openDiskSource*(path: string): DiskSource =
@@ -46,7 +48,9 @@ method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKi
   # Never size the buffer beyond the bytes left: a 4 KB file must not cost a
   # zeroed 1 MB buffer per open.
   if s.size >= 0 and s.offset >= s.size: s.refreshSize()
-  let want = if s.size >= 0: int(max(0'i64, min(int64(maxLen), s.size - s.offset))) else: maxLen
+  let want =
+    if s.size >= 0: int(max(0'i64, min(int64(maxLen), s.size - s.offset)))
+    else: maxLen
   buf.setLen want
   let n = if want > 0: readBuffer(s.f, addr buf[0], want) else: 0
   buf.setLen n
@@ -76,7 +80,7 @@ proc openDiskSink*(path: string): DiskSink =
   DiskSink(f: f, name: path)
 
 method writeRecordImpl*(s: DiskSink; data: openArray[byte]) {.raises: [CatchableError].} =
-  if data.len > 0 and writeBuffer(s.f, unsafeAddr data[0], data.len) != data.len:
+  if data.len > 0 and writeBuffer(s.f, addr data[0], data.len) != data.len:
     raise newException(IOError, "write failed: " & s.name)
   s.offset += data.len
 
