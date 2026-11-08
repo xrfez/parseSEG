@@ -98,7 +98,11 @@ patch through the editor, in place or into a copy.
 
 ## Streaming readers and writers (disk and tape)
 - SEG-Y: `openSegy(src)` / `readTrace`, `readSegy(path)`, `openSegyWriter(sink, file, opts)` /
-  `writeTrace` / `close`, `initSegyWriteOptions(file, lenient)`.
+  `writeTrace` / `close`, `initSegyWriteOptions(file, lenient)`. `file.format` is an
+  `Option[SampleFormat]` (none for an undefined format code). Named trace values go through
+  the file's Layout: `fieldValue(file, trace, "iline")` returns an `Option[float64]`,
+  `initGeometryReader(file).geometry(trace)` the common ones; `layoutOf(file).entriesFor(name)`
+  lists the entries.
 - SEG-D: `openSegd(src)` / `nextRecord` / `readTrace`, `readSegd(path)`,
   `openSegdWriter(sink, opts)`, `writeSegd(sink, data)`.
 - Vendor maps: `loadVendorMaps`, `registerVendorDecoder`, `decode`, `applies`,

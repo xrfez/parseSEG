@@ -1619,7 +1619,9 @@ class Prefetcher(_Handle):
 
 def convert_segd_revision(src_path, dst_path, opts=None):
     """Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
-    version). Never raises: problems, including I/O failures, are in the result."""
+    version). Never raises: problems, including I/O failures, are in the
+    result. The output is written to `<dstPath>.tmp` and renamed when
+    complete."""
     _o = ctypes.c_void_p()
     _st = _lib.seg_convert_segd_revision(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegSegdConvertOptions, opts, "opts")), ctypes.byref(_o))
     return _logged(_st, _o)
@@ -1639,7 +1641,9 @@ def open_seismic(path, twos_complement8015=False, keys=False):
 def convert_file(src_path, dst_path, opts=None):
     """Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
     file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
-    problems, including I/O failures, are in the result."""
+    problems, including I/O failures, are in the result. The output is
+    written to `<dstPath>.tmp` and renamed when complete, so a failed
+    conversion leaves an existing `dstPath` untouched and no partial file."""
     _o = ctypes.c_void_p()
     _st = _lib.seg_convert_file(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_o))
     return _logged(_st, _o)

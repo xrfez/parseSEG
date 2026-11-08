@@ -1,7 +1,7 @@
-## Tests for the common primitives: endians, bcd, ibmfloat, ebcdic.
+## Tests for the common primitives: endians, bcd, ibmfloat, ebcdic, output files.
 
-import std/assertions
-import parseSEG/common/[endians, bcd, ibmfloat, ebcdic, errors]
+import std/[assertions, os, strutils]
+import parseSEG/common/[endians, bcd, ibmfloat, ebcdic, errors, diagnostics, outputfile]
 from parseSEG/abi/pragmas import segApi
 
 block endian_roundtrip:
@@ -81,3 +81,26 @@ block seg_api_options_checked_in_every_build:
     proc probe(): int {.segApi(flag).} = 1
   doAssert compiles(exportWith(concurrent))
   doAssert not compiles(exportWith(concurent))
+
+block output_files_through_tmp:
+  # 12.3: one helper renames complete outputs into place for every writer.
+  let dir = getTempDir() / "parseseg_tcommon"
+  createDir(dir)
+  let dst = dir / "out.bin"
+  let tmp = tmpPathFor(dst)
+  doAssert tmp == dst & ".tmp"
+  writeFile(tmp, "complete")
+  var log: DiagLog
+  finishOutput(tmp, dst, keep = true, log)
+  doAssert log.len == 0 and readFile(dst) == "complete" and not fileExists(tmp)
+  writeFile(tmp, "partial")
+  finishOutput(tmp, dst, keep = false, log)
+  doAssert log.len == 0 and readFile(dst) == "complete" and not fileExists(tmp)
+  doAssert sameAsInput(dst, dst, log) and log.isFatal
+  var log2: DiagLog
+  doAssert not sameAsInput(dst, dir / "other.bin", log2) and log2.len == 0
+  # A rename that fails is a fatal diagnostic, not an exception.
+  writeFile(tmp, "x")
+  finishOutput(tmp, dir / "missing" / "out.bin", keep = true, log2)
+  doAssert log2.isFatal and "cannot move the output into place" in log2[0].msg
+  removeFile(tmp)

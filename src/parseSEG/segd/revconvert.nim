@@ -53,8 +53,8 @@
 ##   interval / 2^k (k = 0..9), more than 99 skew blocks, more than 65535
 ##   extended or external blocks.
 
-import std/[math, os, strutils]
-import ../common/[errors, diagnostics, endians]
+import std/[math, strutils]
+import ../common/[errors, diagnostics, endians, outputfile]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer, rev3]
 import ../abi/pragmas
@@ -699,15 +699,12 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
 proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions()): DiagLog {.
     segApi.} =
   ## Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
-  ## version). Never raises: problems, including I/O failures, are in the result.
-  try:
-    if fileExists(dstPath) and sameFile(srcPath, dstPath):
-      result.report(sevFatal, dcValidation, "the output is the input file; refusing to " &
-        "overwrite it", loc = Location(file: dstPath))
-      return
-  except OSError:
-    discard
-  let tmp = dstPath & ".tmp" # renamed when complete (see convert.finishOutput)
+  ## version). Never raises: problems, including I/O failures, are in the
+  ## result. The output is written to `<dstPath>.tmp` and renamed when
+  ## complete.
+  if sameAsInput(srcPath, dstPath, result):
+    return
+  let tmp = tmpPathFor(dstPath)
   var src: RecordSource
   var sink: RecordSink
   try:
@@ -723,11 +720,4 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
   finally:
     if src != nil: src.close()
     if sink != nil: sink.close()
-  try:
-    if result.isFatal:
-      if fileExists(tmp): removeFile(tmp)
-    elif fileExists(tmp):
-      moveFile(tmp, dstPath)
-  except OSError as e:
-    result.report(sevFatal, dcIo, "cannot move the output into place: " & e.msg,
-      loc = Location(file: dstPath))
+  finishOutput(tmp, dstPath, keep = not result.isFatal, result)

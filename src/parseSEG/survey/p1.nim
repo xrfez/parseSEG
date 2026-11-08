@@ -20,7 +20,7 @@
 ## - Two-digit years: < 50 is 20YY, else 19YY.
 
 import std/[streams, strutils, math, os]
-import ../common/[diagnostics, errors]
+import ../common/[diagnostics, errors, outputfile]
 import ./textrec
 
 export textrec, diagnostics
@@ -384,7 +384,7 @@ proc writeP1*(f: P1File, s: Stream, opts = P1WriteOptions()): DiagLog =
 
 proc writeP1*(f: P1File, path: string, opts = P1WriteOptions()): DiagLog =
   ## Writes `f` to `path` through `<path>.tmp`, renamed on success.
-  let tmp = path & ".tmp"
+  let tmp = tmpPathFor(path)
   let s = newFileStream(tmp, fmWrite)
   if s == nil:
     result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
@@ -393,8 +393,7 @@ proc writeP1*(f: P1File, path: string, opts = P1WriteOptions()): DiagLog =
       result = writeP1(f, s, opts)
     finally:
       s.close()
-    if result.count(sevError) == 0: moveFile(tmp, path)
-    else: removeFile(tmp)
+    finishOutput(tmp, path, keep = result.count(sevError) == 0, result)
 
 proc p1Text*(f: P1File, opts = P1WriteOptions()): (string, DiagLog) =
   ## `f` written to a string, with the writer's diagnostics.

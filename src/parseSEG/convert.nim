@@ -41,15 +41,13 @@
 ## type). SEG-Y readers that honour Layout stanzas, this library included
 ## (`fieldValue(file, trace, "rec_line")`), read those values back.
 
-import std/[math, os, strutils]
-import ./common/[endians, errors, diagnostics]
-import ./io/[records, diskio]
+import std/[math, os, strutils, times]
+import ./common/[endians, errors, diagnostics, outputfile]
+import ./io/[records, diskio, memsource]
 import ./segy/[reader as segyreader, writer as segywriter, textheader, binheader, traceheader,
-  samples as segysamples, exttext]
+  samples as segysamples, exttext, layout]
 import ./segd/[reader as segdreader]
 import ./model/[traceindex, keys]
-import ./segy/layout
-import ./io/memsource
 import ./abi/pragmas
 import ./version
 
@@ -84,10 +82,31 @@ type
     applyDescale*: bool = false ## SEG-D: write millivolts (MP factor / descale multiplier).
     stationHeader*: bool = true ## SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza.
 
-proc note(log: var DiagLog, seen: var set[0..63], id: int, msg: string, loc: Location) =
+  LossNote = enum
+    ## Kinds of information a conversion drops; each is noted once.
+    lnExtendedText ## Rev 0 target: extended textual headers dropped.
+    lnStanzasAsText ## Rev 1 target: Rev 2 stanzas kept as plain text.
+    lnTrailers ## Rev 1 target: data trailers dropped.
+    lnTraceExtensions ## Rev 1 target: Trace Header Extension 1 and proprietary headers dropped.
+    lnIntervalRounding ## Rev 1 target: fractional sample intervals rounded.
+    lnSegdHeaders ## SEG-D extended/external headers.
+    lnSegdGeneral ## SEG-D general header blocks beyond the first source.
+    lnSegdTrailers ## SEG-D general trailers.
+    lnSegdIntervalRounding ## Rev 1 target: SEG-D intervals rounded to whole µs.
+    lnSegdLinePoint ## Rev 1 target: SEG-D line and point not carried.
+    lnSegdTimeRange ## A SEG-D record time outside years 1-9999.
+    lnSurveyType ## Rev 2.0 target: survey type dropped.
+    lnLayoutStanza ## Rev 2.0 target: the Layout stanza is not read.
+
+  Losses = object
+    ## Traces whose samples could not be written exactly.
+    traces, first: int
+
+proc note(log: var DiagLog, seen: var set[LossNote], kind: LossNote, msg: string,
+    loc: Location) =
   # An information-loss note, logged once per kind.
-  if id notin seen:
-    seen.incl id
+  if kind notin seen:
+    seen.incl kind
     log.report(sevInfo, dcValidation, msg, loc = loc)
 
 func checkTarget(opts: ConvertOptions, err: var string): bool =
@@ -113,11 +132,6 @@ func checkTarget(opts: ConvertOptions, err: var string): bool =
     return false
   true
 
-type
-  Losses = object
-    ## Traces whose samples could not be written exactly.
-    traces, first: int
-
 proc encodeExact(fmt: SampleFormat, vals: openArray[float64], dst: var seq[byte],
     order: ByteOrder, scratch: var seq[float64]): bool =
   # Encodes, then decodes back: false if any value changed (rounding, float32
@@ -130,7 +144,7 @@ proc encodeExact(fmt: SampleFormat, vals: openArray[float64], dst: var seq[byte]
     if scratch[i] != vals[i] and not (scratch[i].isNaN and vals[i].isNaN): return false
   true
 
-proc count(l: var Losses, trace: int) =
+proc add(l: var Losses, trace: int) =
   if l.traces == 0: l.first = trace
   inc l.traces
 
@@ -186,7 +200,7 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
     return
   var f = r.file
   let loc = Location(file: sink.name)
-  var seen: set[0..63]
+  var seen: set[LossNote]
   let fromRev = f.revision
   let rev = opts.revision
   let inFmt = f.format.get # known: else the read is fatal
@@ -202,32 +216,32 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
     result.report(sevFatal, dcUnsupportedFormat, "the 3-byte format " & $ord(outFmt) &
       " cannot be pair-swapped; choose another target format", loc = loc)
     return
-  f.binary.segyMajor = rev.major
-  f.binary.segyMinor = rev.minor
+  f.binary.revision = rev
   f.revision = rev
   f.binary.formatCode = int16(ord(outFmt))
   if rev == SegyRevision(major: 2, minor: 0):
     if f.binary.surveyType != 0:
-      result.note(seen, 20, "Rev 2.0 has no survey type (bytes 3509-3510 belong to the " &
-        "additional trace header count): survey type " & $f.binary.surveyType & " dropped", loc)
+      result.note(seen, lnSurveyType, "Rev 2.0 has no survey type (bytes 3509-3510 belong " &
+        "to the additional trace header count): survey type " & $f.binary.surveyType &
+        " dropped", loc)
       f.binary.surveyType = 0
     for s in f.extended.stanzas:
       if s.company.toUpperAscii == "SEG" and s.name.toLowerAscii.startsWith("layout"):
-        result.note(seen, 21, "the ((SEG:Layout)) stanza is defined from Rev 2.1; a Rev 2.0 " &
-          "reader ignores it (it is kept as text)", loc)
+        result.note(seen, lnLayoutStanza, "the ((SEG:Layout)) stanza is defined from Rev 2.1; " &
+          "a Rev 2.0 reader ignores it (it is kept as text)", loc)
   if rev.major == 0 and f.extended.recordCount > 0:
-    result.note(seen, 0, "Rev 0 has no extended textual headers: " & $f.extended.recordCount &
-      " records dropped", loc)
+    result.note(seen, lnExtendedText, "Rev 0 has no extended textual headers: " &
+      $f.extended.recordCount & " records dropped", loc)
   if rev.major == 0 or (rev.major < 2 and f.extended.recordCount > 0 and fromRev.major >= 2):
     if rev.major == 0:
       f.extended = initExtendedTextHeader()
       f.binary.numExtTextHeaders = 0
     else:
-      result.note(seen, 1, "Rev 2 stanzas (Layout, User Data) are kept as plain Rev 1 " &
-        "extended text", loc)
+      result.note(seen, lnStanzasAsText, "Rev 2 stanzas (Layout, User Data) are kept as " &
+        "plain Rev 1 extended text", loc)
   if rev.major < 2:
     if f.trailer.recordCount > 0:
-      result.note(seen, 2, "Rev 1 has no data trailers: " & $f.trailer.recordCount &
+      result.note(seen, lnTrailers, "Rev 1 has no data trailers: " & $f.trailer.recordCount &
         " records dropped", loc)
     f.trailer = initExtendedTextHeader()
     f.binary.byteOrderMarker = 0
@@ -238,11 +252,11 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
     f.binary.extSamplesPerTrace = 0
     if f.binary.sampleInterval == 0 and f.binary.extSampleInterval > 0:
       f.binary.sampleInterval = uint16(clamp(round(f.binary.extSampleInterval), 0, 65535))
-      result.note(seen, 4, "Rev 1 holds sample intervals as whole units; extended " &
-        "intervals were rounded", loc)
+      result.note(seen, lnIntervalRounding, "Rev 1 holds sample intervals as whole units; " &
+        "extended intervals were rounded", loc)
     f.binary.extSampleInterval = 0
   else:
-    f.binary.byteOrderMarker = 0x0102_0304
+    f.binary.byteOrderMarker = ByteOrderMarker
     if fromRev.major < 2:
       f.binary.firstTraceOffset = 0
       f.binary.numTrailerRecords = 0
@@ -257,7 +271,6 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
     result.add r.log
     result.report(sevFatal, dcIo, "cannot write the file headers: " & e.msg, loc = loc)
     return
-  let lay = f.layoutOf
   var t: SegyTrace
   var buf: seq[byte]
   var vals, scratch: seq[float64]
@@ -272,23 +285,23 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
           result.report(sevError, dcValidation, "the trace has " & $t.numSamples &
             " samples, which Rev 1 cannot hold; skipped", t.offset, tl)
           ok = false
-        result.note(seen, 3, "Rev 1 has no Trace Header Extension 1 or proprietary trace " &
-          "headers: dropped", loc)
+        result.note(seen, lnTraceExtensions, "Rev 1 has no Trace Header Extension 1 or " &
+          "proprietary trace headers: dropped", loc)
       t.hasExt1 = false
       t.proprietary.setLen 0
       t.header.numSamples = uint16(min(t.numSamples, int(high(uint16))))
       if t.sampleInterval != float64(t.header.sampleInterval):
-        result.note(seen, 4, "Rev 1 holds sample intervals as whole units; extended " &
-          "intervals were rounded", loc)
+        result.note(seen, lnIntervalRounding, "Rev 1 holds sample intervals as whole units; " &
+          "extended intervals were rounded", loc)
         t.header.sampleInterval = uint16(clamp(round(t.sampleInterval), 0, 65535))
     if ok and t.proprietary.len > 0 and opts.byteOrder != f.byteOrder:
-      if reorderProprietary(lay, t.proprietary, f.byteOrder, opts.byteOrder):
+      if reorderProprietary(f.layoutOf, t.proprietary, f.byteOrder, opts.byteOrder):
         layoutReordered.add t.index
     if ok and outFmt != inFmt:
       try:
         vals.setLen t.numSamples
         decodeSamples(inFmt, t.samples, vals, f.byteOrder)
-        if not encodeExact(outFmt, vals, buf, f.byteOrder, scratch): losses.count(t.index)
+        if not encodeExact(outFmt, vals, buf, f.byteOrder, scratch): losses.add(t.index)
         swap(t.samples, buf)
       except SegFormatError as e:
         result.report(sevError, dcValidation, "samples do not fit format " & $ord(outFmt) &
@@ -317,6 +330,18 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
     if keep: result.add d
 
 # ------------------------------------------------------------ SEG-D → SEG-Y --
+
+type
+  SegdToSegy = object
+    ## The state of one SEG-D → SEG-Y conversion.
+    opts: ConvertOptions
+    loc: Location ## The output file.
+    log: DiagLog ## The conversion's own diagnostics.
+    seen: set[LossNote]
+    outFmt: SampleFormat
+    losses: Losses
+    nOut: int ## Traces written so far.
+    vals, scratch: seq[float64]
 
 func losslessFormat(f: SegdSampleFormat, rev: SegyRevision, descale: bool,
     order: ByteOrder): SampleFormat =
@@ -348,11 +373,20 @@ func commonFormat(formats: set[SegdSampleFormat], rev: SegyRevision, descale: bo
              elif formats <= {sd8036, sd8038} and not descale: sfInt32
              else: sfFloat32
 
+func targetFormat(opts: ConvertOptions, rec: SegdRecord,
+    recordFormats: set[SegdSampleFormat]): SampleFormat =
+  # The SEG-Y format: the requested one, else one that holds every record
+  # exactly (or at least the first one).
+  let rev = opts.revision
+  if opts.format != 0: toSampleFormat(opts.format).get # checked by `checkTarget`
+  elif recordFormats.card > 0: commonFormat(recordFormats, rev, opts.applyDescale, opts.byteOrder)
+  elif rec.formatKnown: losslessFormat(rec.format, rev, opts.applyDescale, opts.byteOrder)
+  else: sfFloat32
+
 func traceIdOf(rec: SegdRecord, t: SegdTrace, sensor: uint8): int16 =
   # SEG-D channel type → SEG-Y trace identification code (Table 4.5).
   if t.channelSet < 0: return 0
-  let ct = if rec.isRev3: int(rec.scanTypes[t.scanType].descriptors3[t.channelSet].channelType)
-           else: int(rec.scanTypes[t.scanType].descriptors[t.channelSet].channelType)
+  let ct = rec.channelType(t)
   let seismic = if rec.isRev3: ct in {0x10, 0x11} else: ct == 1
   if seismic:
     case sensor
@@ -379,24 +413,6 @@ func traceIdOf(rec: SegdRecord, t: SegdTrace, sensor: uint8): int16 =
     of 8, 9: 9
     else: -1
 
-func intervalUs(rec: SegdRecord, t: SegdTrace): float64 =
-  if t.channelSet < 0:
-    (if rec.isRev3: baseScanIntervalUs(rec.gh1, rec.gh2r3) else: rec.gh1.baseScanIntervalMs * 1000)
-  elif rec.isRev3: float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].samplingInterval)
-  else: rec.scanTypes[t.scanType].descriptors[t.channelSet].sampleIntervalMs(rec.gh1) * 1000
-
-func startMs(rec: SegdRecord, t: SegdTrace): float64 =
-  if t.channelSet < 0: 0.0
-  elif rec.isRev3: float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].startTime) / 1000
-  else: rec.scanTypes[t.scanType].descriptors[t.channelSet].startTimeMs
-
-func descaleOf(rec: SegdRecord, t: SegdTrace): float64 =
-  if t.channelSet < 0: 1.0
-  elif rec.isRev3:
-    let m = float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].descaleMultiplier)
-    if m == 0 or m.isNaN: 1.0 else: m
-  else: pow(2.0, rec.scanTypes[t.scanType].descriptors[t.channelSet].mpFactor)
-
 func scalarFor(values: openArray[float64]): int16 =
   # The finest coordinate scalar (-1000, -100, -10, 1) whose scaled values
   # fit in int32; NaN values are ignored.
@@ -408,13 +424,13 @@ func scalarFor(values: openArray[float64]): int16 =
     if fits: return s
   1
 
+func clampI16(x: float64): int16 = int16(clamp(round(x), -32768.0, 32767.0))
+
+func clampI32(x: float64): int32 = int32(clamp(round(x), -2147483648.0, 2147483647.0))
+
 func scaled(v: float64, scalar: int16): int32 =
   if v.isNaN: 0'i32
-  else:
-    let mult = if scalar < 0: float64(-scalar) else: 1.0 / float64(max(scalar, 1))
-    int32(clamp(round(v * mult), -2147483648.0, 2147483647.0))
-
-func clampI16(x: float64): int16 = int16(clamp(round(x), -32768.0, 32767.0))
+  else: clampI32(v * (if scalar < 0: float64(-scalar) else: 1.0 / float64(max(scalar, 1))))
 
 proc fillTime(h: var SegyTraceHeader, rec: SegdRecord): bool =
   # False (fields left 0) when the record's time is outside years 1-9999.
@@ -422,26 +438,12 @@ proc fillTime(h: var SegyTraceHeader, rec: SegdRecord): bool =
   if rec.isRev3 and rec.gh3.timeZero != 0:
     let unix = timestampToUnix(rec.gh3.timeZero)
     if not (unix > -62135596800.0 and unix < 253402300800.0): return false
-    let days = floor(unix / 86400.0)
-    var secs = unix - days * 86400.0
-    # Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
-    let z = int64(days) + 719468
-    let era = (if z >= 0: z else: z - 146096) div 146097
-    let doe = z - era * 146097
-    let yoe = (doe - doe div 1460 + doe div 36524 - doe div 146096) div 365
-    let doy = doe - (365 * yoe + yoe div 4 - yoe div 100)
-    let mp = (5 * doy + 2) div 153
-    let m = if mp < 10: mp + 3 else: mp - 9
-    let y = yoe + era * 400 + (if m <= 2: 1 else: 0)
-    let leap = (y mod 4 == 0 and y mod 100 != 0) or y mod 400 == 0
-    let monthStart = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-    let d = doy - (153 * mp + 2) div 5 + 1
-    h.year = int16(y)
-    h.dayOfYear = int16(monthStart[m - 1] + int(d) + (if leap and m > 2: 1 else: 0))
-    h.hour = int16(secs / 3600)
-    secs -= float64(h.hour) * 3600
-    h.minute = int16(secs / 60)
-    h.second = int16(secs - float64(h.minute) * 60)
+    let dt = fromUnix(int64(floor(unix))).utc
+    h.year = int16(dt.year)
+    h.dayOfYear = int16(dt.yearday + 1)
+    h.hour = int16(dt.hour)
+    h.minute = int16(dt.minute)
+    h.second = int16(dt.second)
     h.timeBasisCode = 4 # UTC
   elif rec.gh1.year >= 0 and rec.gh1.julianDay in 0..366 and rec.gh1.hour in 0..24 and
       rec.gh1.minute in 0..60 and rec.gh1.second in 0..60:
@@ -465,11 +467,167 @@ proc stationHeader(k: TraceKeys, rec: SegdRecord, t: SegdTrace,
   putNum(result, 38, int16(k.component), order)
   putNum(result, 40, int32(rec.index), order)
   putNum(result, 44, int32(t.channelSet), order)
-  let ct = if t.channelSet < 0: 0'i16
-           elif rec.isRev3: int16(rec.scanTypes[t.scanType].descriptors3[t.channelSet].channelType)
-           else: int16(rec.scanTypes[t.scanType].descriptors[t.channelSet].channelType)
-  putNum(result, 48, ct, order)
+  putNum(result, 48, int16(rec.channelType(t)), order)
   for i, c in StationHeaderName: result[232 + i] = byte(c)
+
+proc noteRecord(c: var SegdToSegy, rec: SegdRecord) =
+  # What a record carries that SEG-Y has no place for.
+  if not rec.formatKnown:
+    c.log.report(sevError, dcUnsupportedFormat, "record " & $rec.index & ": SEG-D format " &
+      $rec.gh1.formatCode & " cannot be decoded; its traces are skipped", rec.offset, c.loc)
+  if rec.extended.len > 0 or rec.external.len > 0:
+    c.log.note(c.seen, lnSegdHeaders, "SEG-D extended/external headers are not carried into " &
+      "SEG-Y", c.loc)
+  if rec.generalBlocks.len > 0 or rec.sourceHeaders.len > 1:
+    c.log.note(c.seen, lnSegdGeneral, "SEG-D general header blocks beyond the first source " &
+      "are not carried into SEG-Y", c.loc)
+  if rec.trailer.len > 0 or rec.trailerBytes.len > 0:
+    c.log.note(c.seen, lnSegdTrailers, "SEG-D general trailers are not carried into SEG-Y",
+      c.loc)
+
+proc initSegyFileFor(c: SegdToSegy, rec: SegdRecord, t: SegdTrace, srcName: string): SegyFile =
+  # The SEG-Y file headers, from the first record and trace.
+  let opts = c.opts
+  let rev = opts.revision
+  result = SegyFile(byteOrder: opts.byteOrder, format: some(c.outFmt), revision: rev,
+    extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
+    text: initTextHeader(opts.textEncoding))
+  let cards = [
+    "CONVERTED FROM SEG-D REV " & $rec.revision & " BY " & ConverterName,
+    "SOURCE " & srcName.extractFilename,
+    "MANUFACTURER CODE " & $rec.gh1.manufacturerCode & " SERIAL " &
+      $rec.gh1.manufacturerSerial,
+    "SEG-D FORMAT " & $rec.gh1.formatCode & " WRITTEN AS SEG-Y FORMAT " & $ord(c.outFmt),
+    (if opts.applyDescale: "SAMPLES DESCALED TO MILLIVOLTS (MP FACTOR / DSM)"
+     else: "SAMPLES ARE RECORDED VALUES (NOT DESCALED)"),
+    "ONE SEG-Y TRACE PER SEG-D TRACE, FIELD RECORD = SEG-D FILE NUMBER",
+    (if rev.major >= 2 and opts.stationHeader:
+       "LINE/POINT IN PROPRIETARY HEADER " & StationHeaderName & " (LAYOUT STANZA)"
+     else: "SEG-D RECEIVER/SOURCE LINE AND POINT NOT CARRIED (REV 1)")]
+  for i, card in cards: result.text.setCard(i + 1, cardPrefix(i + 1) & card)
+  result.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
+    elif rev.major == 1: "SEG Y REV1" else: ""))
+  result.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+  let ns = t.numSamples
+  let dt = rec.sampleIntervalUs(t)
+  let dtWhole = dt == round(dt) and dt <= 65535 and dt >= 0
+  result.binary = SegyBinaryHeader(formatCode: int16(ord(c.outFmt)), segyMajor: rev.major,
+    segyMinor: rev.minor, fixedLengthTraces: 0, traceSorting: 1, measurementSystem: 1,
+    samplesPerTrace: uint16(min(ns, 65535)),
+    sampleInterval: uint16(if dtWhole or rev.major < 2: clamp(round(dt), 0, 65535) else: 0),
+    dataTracesPerEnsemble: int16(min(rec.traceCount, 32767)))
+  if rev.major >= 2:
+    result.binary.byteOrderMarker = ByteOrderMarker
+    if ns > 65535: result.binary.extSamplesPerTrace = uint32(ns)
+    if result.binary.sampleInterval == 0: result.binary.extSampleInterval = dt
+    result.binary.maxAddlTraceHeaders = if opts.stationHeader: 2 else: 1
+    if opts.stationHeader:
+      result.extended.addText("SEG", "Layout", stationLayout, "text/xml")
+    result.extended.addEndText()
+    result.binary.numExtTextHeaders = int16(result.extended.recordCount)
+
+proc toSegyHeader(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, k: TraceKeys,
+    inRecord: int): SegyTraceHeader =
+  # The standard trace header of SEG-Y trace `c.nOut` (see the module doc).
+  let rev = c.opts.revision
+  result = SegyTraceHeader(traceSeqLine: int32(c.nOut + 1), traceSeqFile: int32(c.nOut + 1),
+    fieldRecord: int32(clamp(k.record, -2147483648.0, 2147483647.0)),
+    traceInEnsemble: int32(inRecord), traceIdCode: traceIdOf(rec, t, k.sensorType))
+  result.traceNumberInField = int32(if rec.isRev3: traceNumber(t.header, t.ext1r3)
+                                    elif t.header.traceNumber >= 0: t.header.traceNumber
+                                    else: inRecord)
+  if not k.srcPoint.isNaN:
+    result.energySourcePoint = clampI32(k.srcPoint)
+    result.shotpointScalar = if k.srcPoint == round(k.srcPoint): 1 else: -100
+    result.shotpointNumber = scaled(k.srcPoint, result.shotpointScalar)
+  let dt = rec.sampleIntervalUs(t)
+  result.numSamples = uint16(min(t.numSamples, 65535))
+  result.sampleInterval = uint16(if dt == round(dt) and dt <= 65535: dt else: 0)
+  if result.sampleInterval == 0 and rev.major < 2:
+    c.log.note(c.seen, lnSegdIntervalRounding, "Rev 1 holds sample intervals as whole " &
+      "microseconds; intervals were rounded", c.loc)
+    result.sampleInterval = uint16(clamp(round(dt), 0, 65535))
+  result.delayRecordingTime = clampI16(rec.startTimeMs(t))
+  result.coordinateScalar = scalarFor([k.srcX, k.srcY, k.rcvX, k.rcvY, k.cmpX, k.cmpY])
+  result.sourceX = scaled(k.srcX, result.coordinateScalar)
+  result.sourceY = scaled(k.srcY, result.coordinateScalar)
+  result.groupX = scaled(k.rcvX, result.coordinateScalar)
+  result.groupY = scaled(k.rcvY, result.coordinateScalar)
+  result.cdpX = scaled(k.cmpX, result.coordinateScalar)
+  result.cdpY = scaled(k.cmpY, result.coordinateScalar)
+  if k.hasSourceXY or k.hasReceiverXY: result.coordinateUnits = 1
+  result.elevationScalar = scalarFor([k.srcZ, k.rcvZ])
+  result.receiverElevation = scaled(k.rcvZ, result.elevationScalar)
+  result.sourceSurfaceElevation = scaled(k.srcZ, result.elevationScalar)
+  if not k.offset.isNaN: result.offset = clampI32(k.offset)
+  if not result.fillTime(rec):
+    c.log.note(c.seen, lnSegdTimeRange, "a record's time is outside years 1-9999; the trace " &
+      "time fields are left 0", c.loc)
+
+func toSegyExt1(c: SegdToSegy, h: SegyTraceHeader, k: TraceKeys, numSamples: int,
+    dt: float64): SegyTraceHeaderExt1 =
+  # Trace Header Extension 1 (Rev 2 targets): the 64-bit counts and the
+  # unscaled coordinates.
+  result = initTraceHeaderExt1()
+  result.numAddlTraceHeaders = if c.opts.stationHeader: 2 else: 1
+  result.extFieldRecord = int64(h.fieldRecord)
+  result.extTraceSeqLine = uint64(c.nOut + 1)
+  result.extTraceSeqFile = uint64(c.nOut + 1)
+  if numSamples > 65535: result.extNumSamples = uint32(numSamples)
+  if h.sampleInterval == 0: result.extSampleInterval = dt
+  template f64(dst: untyped, v: float64) =
+    if not v.isNaN: dst = v
+  f64(result.extSourceX, k.srcX)
+  f64(result.extSourceY, k.srcY)
+  f64(result.extGroupX, k.rcvX)
+  f64(result.extGroupY, k.rcvY)
+  f64(result.extCdpX, k.cmpX)
+  f64(result.extCdpY, k.cmpY)
+  f64(result.extOffset, k.offset)
+  f64(result.extReceiverElevation, k.rcvZ)
+  f64(result.extSourceSurfaceElevation, k.srcZ)
+
+proc toSegySamples(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, twosComplement8015: bool,
+    dst: var seq[byte]) =
+  # The trace's samples in the target format: decoded exactly, optionally
+  # descaled, re-encoded. Values the format cannot hold zero the trace.
+  try:
+    if rec.format == sd8048 and c.outFmt == sfIbm32 and not c.opts.applyDescale:
+      # IBM words are copied: going through float64/float32 would lose
+      # values outside float32's range.
+      dst.setLen 4 * t.numSamples
+      for i in 0..<t.numSamples:
+        putNum(dst, 4 * i, getNum[uint32](t.samples, 4 * i, boBig), c.opts.byteOrder)
+    else:
+      c.vals.setLen t.numSamples
+      decodeSegdSamples(rec.format, t.samples, c.vals, twosComplement8015)
+      if c.opts.applyDescale:
+        let m = rec.descaleFactor(t)
+        for v in c.vals.mitems: v *= m
+      if not encodeExact(c.outFmt, c.vals, dst, c.opts.byteOrder, c.scratch):
+        c.losses.add(c.nOut)
+  except SegFormatError as e:
+    c.log.report(sevError, dcValidation, "samples do not fit SEG-Y format " & $ord(c.outFmt) &
+      " (" & e.msg & "); the trace is written as zeros", t.offset,
+      Location(file: c.loc.file, trace: c.nOut))
+    dst = newSeq[byte](t.numSamples * sampleSize(c.outFmt))
+
+proc toSegyTrace(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, inRecord: int,
+    twosComplement8015: bool): SegyTrace =
+  # SEG-Y trace `c.nOut` for SEG-D trace `t`, the `inRecord`-th of `rec`.
+  let k = traceKeys(rec, t)
+  let dt = rec.sampleIntervalUs(t)
+  result = SegyTrace(index: c.nOut, numSamples: t.numSamples, sampleInterval: dt,
+    header: c.toSegyHeader(rec, t, k, inRecord))
+  if c.opts.revision.major >= 2:
+    result.hasExt1 = true
+    result.ext1 = c.toSegyExt1(result.header, k, t.numSamples, dt)
+    if c.opts.stationHeader:
+      result.proprietary = stationHeader(k, rec, t, c.opts.byteOrder)
+  elif not (k.rcvLine.isNaN and k.srcLine.isNaN):
+    c.log.note(c.seen, lnSegdLinePoint, "Rev 1 has no field for SEG-D receiver/source line " &
+      "and point; they are not carried", c.loc)
+  c.toSegySamples(rec, t, twosComplement8015, result.samples)
 
 proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     recordFormats: set[SegdSampleFormat] = {}): DiagLog =
@@ -481,214 +639,85 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
   ## exactly are counted in a warning. The reader's, the writer's and the
   ## conversion's diagnostics are all in the result; a fatal one means the
   ## output is incomplete.
+  var c = SegdToSegy(opts: opts, loc: Location(file: sink.name))
   var err: string
   if not checkTarget(opts, err):
-    result.report(sevFatal, dcValidation, err, loc = Location(file: sink.name))
+    result.report(sevFatal, dcValidation, err, loc = c.loc)
     return
-  let rev = opts.revision
-  let loc = Location(file: sink.name)
-  var seen: set[0..63]
   var r = openSegd(src, headersOnly = false)
   var w: SegyWriter
   var opened = false
-  var outFmt: SampleFormat
-  var nOut = 0
-  var vals, scratch: seq[float64]
-  var losses: Losses
+  template stop() =
+    result = move c.log
+    result.add r.log
+    return
   while r.nextRecord():
-    let rec = r.record
-    if not rec.formatKnown:
-      result.report(sevError, dcUnsupportedFormat, "record " & $rec.index & ": SEG-D format " &
-        $rec.gh1.formatCode & " cannot be decoded; its traces are skipped", rec.offset, loc)
-    if rec.extended.len > 0 or rec.external.len > 0:
-      result.note(seen, 10, "SEG-D extended/external headers are not carried into SEG-Y", loc)
-    if rec.generalBlocks.len > 0 or rec.sourceHeaders.len > 1:
-      result.note(seen, 11, "SEG-D general header blocks beyond the first source are not " &
-        "carried into SEG-Y", loc)
-    if rec.trailer.len > 0 or rec.trailerBytes.len > 0:
-      result.note(seen, 12, "SEG-D general trailers are not carried into SEG-Y", loc)
+    c.noteRecord(r.record)
     var t: SegdTrace
     var inRecord = 0
     while r.readTrace(t):
       inc inRecord
       if not opened:
         # The file headers come from the first trace.
-        outFmt = if recordFormats.card > 0:
-                   commonFormat(recordFormats, rev, opts.applyDescale, opts.byteOrder)
-                 elif rec.formatKnown:
-                   losslessFormat(rec.format, rev, opts.applyDescale, opts.byteOrder)
-                 else: sfFloat32
-        if opts.format != 0: outFmt = toSampleFormat(opts.format).get # checked above
-        var f = SegyFile(byteOrder: opts.byteOrder, format: some(outFmt),
-          revision: rev, extended: initExtendedTextHeader(), trailer: initExtendedTextHeader())
-        f.text = initTextHeader(opts.textEncoding)
-        let cards = [
-          "CONVERTED FROM SEG-D REV " & $rec.revision & " BY " & ConverterName,
-          "SOURCE " & src.name.extractFilename,
-          "MANUFACTURER CODE " & $rec.gh1.manufacturerCode & " SERIAL " &
-            $rec.gh1.manufacturerSerial,
-          "SEG-D FORMAT " & $rec.gh1.formatCode & " WRITTEN AS SEG-Y FORMAT " & $ord(outFmt),
-          (if opts.applyDescale: "SAMPLES DESCALED TO MILLIVOLTS (MP FACTOR / DSM)"
-           else: "SAMPLES ARE RECORDED VALUES (NOT DESCALED)"),
-          "ONE SEG-Y TRACE PER SEG-D TRACE, FIELD RECORD = SEG-D FILE NUMBER",
-          (if rev.major >= 2 and opts.stationHeader:
-             "LINE/POINT IN PROPRIETARY HEADER " & StationHeaderName & " (LAYOUT STANZA)"
-           else: "SEG-D RECEIVER/SOURCE LINE AND POINT NOT CARRIED (REV 1)")]
-        for i, c in cards: f.text.setCard(i + 1, cardPrefix(i + 1) & c)
-        f.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev.major &
-          "." & $rev.minor elif rev.major == 1: "SEG Y REV1" else: ""))
-        f.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
-        let ns = t.numSamples
-        let dt = intervalUs(rec, t)
-        let dtWhole = dt == round(dt) and dt <= 65535 and dt >= 0
-        f.binary = SegyBinaryHeader(formatCode: int16(ord(outFmt)), segyMajor: rev.major,
-          segyMinor: rev.minor, fixedLengthTraces: 0, traceSorting: 1, measurementSystem: 1,
-          samplesPerTrace: uint16(min(ns, 65535)),
-          sampleInterval: uint16(if dtWhole or rev.major < 2: clamp(round(dt), 0, 65535) else: 0),
-          dataTracesPerEnsemble: int16(min(rec.traceCount, 32767)))
-        if rev.major >= 2:
-          f.binary.byteOrderMarker = 0x0102_0304
-          if ns > 65535: f.binary.extSamplesPerTrace = uint32(ns)
-          if f.binary.sampleInterval == 0: f.binary.extSampleInterval = dt
-          f.binary.maxAddlTraceHeaders = if opts.stationHeader: 2 else: 1
-          if opts.stationHeader:
-            f.extended.addText("SEG", "Layout", stationLayout, "text/xml")
-          f.extended.addEndText()
-          f.binary.numExtTextHeaders = int16(f.extended.recordCount)
+        c.outFmt = targetFormat(opts, r.record, recordFormats)
         try:
-          w = openSegyWriter(sink, f, SegyWriteOptions(byteOrder: opts.byteOrder, lenient: true))
+          w = openSegyWriter(sink, c.initSegyFileFor(r.record, t, src.name),
+            SegyWriteOptions(byteOrder: opts.byteOrder, lenient: true))
         except CatchableError as e:
-          result.report(sevFatal, dcIo, "cannot write the file headers: " & e.msg, loc = loc)
-          result.add r.log
-          return
+          c.log.report(sevFatal, dcIo, "cannot write the file headers: " & e.msg, loc = c.loc)
+          stop()
         opened = true
-      if rec.formatKnown:
-        let tl = Location(file: sink.name, trace: nOut)
-        let k = traceKeys(rec, t)
-        var ot = SegyTrace(index: nOut, numSamples: t.numSamples)
-        var h = SegyTraceHeader(traceSeqLine: int32(nOut + 1), traceSeqFile: int32(nOut + 1),
-          fieldRecord: int32(clamp(k.record, -2147483648.0, 2147483647.0)),
-          traceInEnsemble: int32(inRecord), traceIdCode: traceIdOf(rec, t, k.sensorType))
-        h.traceNumberInField = int32(if rec.isRev3: traceNumber(t.header, t.ext1r3)
-                                     elif t.header.traceNumber >= 0: t.header.traceNumber
-                                     else: inRecord)
-        if not k.srcPoint.isNaN:
-          h.energySourcePoint = int32(clamp(round(k.srcPoint), -2147483648.0, 2147483647.0))
-          h.shotpointScalar = if k.srcPoint == round(k.srcPoint): 1 else: -100
-          h.shotpointNumber = scaled(k.srcPoint, h.shotpointScalar)
-        let dt = intervalUs(rec, t)
-        h.numSamples = uint16(min(t.numSamples, 65535))
-        h.sampleInterval = uint16(if dt == round(dt) and dt <= 65535: dt else: 0)
-        let fits = t.numSamples <= 65535 or rev.major >= 2
-        if not fits:
-          result.report(sevError, dcValidation, "the trace has " & $t.numSamples &
-            " samples, which Rev 1 cannot hold; skipped", t.offset, tl)
-        if h.sampleInterval == 0 and rev.major < 2:
-          result.note(seen, 13, "Rev 1 holds sample intervals as whole microseconds; " &
-            "intervals were rounded", loc)
-          h.sampleInterval = uint16(clamp(round(dt), 0, 65535))
-        h.delayRecordingTime = clampI16(startMs(rec, t))
-        h.coordinateScalar = scalarFor([k.srcX, k.srcY, k.rcvX, k.rcvY, k.cmpX, k.cmpY])
-        h.sourceX = scaled(k.srcX, h.coordinateScalar)
-        h.sourceY = scaled(k.srcY, h.coordinateScalar)
-        h.groupX = scaled(k.rcvX, h.coordinateScalar)
-        h.groupY = scaled(k.rcvY, h.coordinateScalar)
-        h.cdpX = scaled(k.cmpX, h.coordinateScalar)
-        h.cdpY = scaled(k.cmpY, h.coordinateScalar)
-        if k.hasSourceXY or k.hasReceiverXY: h.coordinateUnits = 1
-        h.elevationScalar = scalarFor([k.srcZ, k.rcvZ])
-        h.receiverElevation = scaled(k.rcvZ, h.elevationScalar)
-        h.sourceSurfaceElevation = scaled(k.srcZ, h.elevationScalar)
-        if not k.offset.isNaN: h.offset = int32(clamp(round(k.offset), -2147483648.0, 2147483647.0))
-        if not h.fillTime(rec):
-          result.note(seen, 16, "a record's time is outside years 1-9999; the trace time " &
-            "fields are left 0", loc)
-        ot.header = h
-        ot.sampleInterval = dt
-        if rev.major >= 2:
-          ot.hasExt1 = true
-          var e = initTraceHeaderExt1()
-          e.numAddlTraceHeaders = if opts.stationHeader: 2 else: 1
-          e.extFieldRecord = int64(h.fieldRecord)
-          e.extTraceSeqLine = uint64(nOut + 1)
-          e.extTraceSeqFile = uint64(nOut + 1)
-          if t.numSamples > 65535: e.extNumSamples = uint32(t.numSamples)
-          if h.sampleInterval == 0: e.extSampleInterval = dt
-          template f64(dst: untyped, v: float64) =
-            if not v.isNaN: dst = v
-          f64(e.extSourceX, k.srcX)
-          f64(e.extSourceY, k.srcY)
-          f64(e.extGroupX, k.rcvX)
-          f64(e.extGroupY, k.rcvY)
-          f64(e.extCdpX, k.cmpX)
-          f64(e.extCdpY, k.cmpY)
-          f64(e.extOffset, k.offset)
-          f64(e.extReceiverElevation, k.rcvZ)
-          f64(e.extSourceSurfaceElevation, k.srcZ)
-          ot.ext1 = e
-          if opts.stationHeader: ot.proprietary = stationHeader(k, rec, t, opts.byteOrder)
-        else:
-          if not (k.rcvLine.isNaN and k.srcLine.isNaN):
-            result.note(seen, 14, "Rev 1 has no field for SEG-D receiver/source line and " &
-              "point; they are not carried", loc)
-        # Samples: decode exactly, optionally descale, encode in the target format.
-        vals.setLen t.numSamples
+      if not r.record.formatKnown:
+        discard # reported by `noteRecord`
+      elif t.numSamples > 65535 and opts.revision.major < 2:
+        c.log.report(sevError, dcValidation, "the trace has " & $t.numSamples &
+          " samples, which Rev 1 cannot hold; skipped", t.offset,
+          Location(file: sink.name, trace: c.nOut))
+      else:
+        let ot = c.toSegyTrace(r.record, t, inRecord, r.twosComplement8015)
         try:
-          if rec.format == sd8048 and outFmt == sfIbm32 and not opts.applyDescale:
-            # IBM words are copied: going through float64/float32 would lose
-            # values outside float32's range.
-            ot.samples = newSeq[byte](4 * t.numSamples)
-            for i in 0..<t.numSamples:
-              putNum(ot.samples, 4 * i, getNum[uint32](t.samples, 4 * i, boBig), opts.byteOrder)
-          else:
-            decodeSegdSamples(rec.format, t.samples, vals, r.twosComplement8015)
-            if opts.applyDescale:
-              let m = descaleOf(rec, t)
-              for v in vals.mitems: v *= m
-            if not encodeExact(outFmt, vals, ot.samples, opts.byteOrder, scratch):
-              losses.count(nOut)
-        except SegFormatError as e:
-          result.report(sevError, dcValidation, "samples do not fit SEG-Y format " &
-            $ord(outFmt) & " (" & e.msg & "); the trace is written as zeros", t.offset, tl)
-          ot.samples = newSeq[byte](t.numSamples * sampleSize(outFmt))
-        if fits:
-          try:
-            w.writeTrace(ot)
-          except CatchableError as e:
-            result.report(sevFatal, dcIo, "writing trace " & $nOut & ": " & e.msg, loc = tl)
-            result.add r.log
-            return
-          inc nOut
+          w.writeTrace(ot)
+        except CatchableError as e:
+          c.log.report(sevFatal, dcIo, "writing trace " & $c.nOut & ": " & e.msg,
+            loc = Location(file: sink.name, trace: c.nOut))
+          stop()
+        inc c.nOut
+  result = move c.log
   result.add r.log
-  result.report(losses, outFmt, loc)
+  result.report(c.losses, c.outFmt, c.loc)
   if not opened:
     result.report(sevFatal, dcValidation, "the SEG-D stream has no traces; nothing written",
-      loc = loc)
+      loc = c.loc)
     return
   try:
     w.close()
   except CatchableError as e:
-    result.report(sevFatal, dcIo, "closing: " & e.msg, loc = loc)
+    result.report(sevFatal, dcIo, "closing: " & e.msg, loc = c.loc)
   result.add w.log
 
 # ------------------------------------------------------------------- files --
 
-proc finishOutput*(tmp, dstPath: string, log: var DiagLog) =
-  ## Renames a complete output into place, or removes it after a fatal
-  ## problem (logged: "not written").
+proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
+  # The formats of all records of a SEG-D file, from a header-only scan;
+  # empty when the scan fails (the conversion reports what is wrong).
   try:
-    if log.isFatal:
-      if fileExists(tmp): removeFile(tmp)
-    elif fileExists(tmp):
-      moveFile(tmp, dstPath)
-  except OSError as e:
-    log.report(sevFatal, dcIo, "cannot move the output into place: " & e.msg,
-      loc = Location(file: dstPath))
+    let m = openMemFileSource(srcPath)
+    try:
+      let ix = buildIndex(m, skSegd)
+      for c in ix.codecs:
+        if c.known: result.incl c.segdFormat
+    finally:
+      m.close()
+  except CatchableError:
+    result = {}
 
-proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.segApi.} =
+proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.segApi,
+    raises: [].} =
   ## Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
   ## file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
-  ## problems, including I/O failures, are in the result.
+  ## problems, including I/O failures, are in the result. The output is
+  ## written to `<dstPath>.tmp` and renamed when complete, so a failed
+  ## conversion leaves an existing `dstPath` untouched and no partial file.
   var head = newSeq[byte](8192)
   try:
     let f = open(srcPath, fmRead)
@@ -702,40 +731,22 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.
     result.report(sevFatal, dcUnsupportedFormat, "neither a SEG-Y nor a SEG-D file",
       loc = Location(file: srcPath))
     return
-  try:
-    if fileExists(dstPath) and sameFile(srcPath, dstPath):
-      result.report(sevFatal, dcValidation, "the output is the input file; refusing to " &
-        "overwrite it", loc = Location(file: dstPath))
-      return
-  except OSError:
-    discard
-  # SEG-D: the formats of all records, from a header-only scan, so one
-  # target format can hold them all.
-  var formats: set[SegdSampleFormat]
-  if kind == skSegd and opts.format == 0:
-    try:
-      let m = openMemFileSource(srcPath)
-      try:
-        let ix = buildIndex(m, skSegd)
-        for c in ix.codecs:
-          if c.known: formats.incl c.segdFormat
-      finally:
-        m.close()
-    except CatchableError:
-      discard # the conversion itself reports what is wrong with the file
-  # Written to `<dst>.tmp` and renamed when complete: a failed conversion
-  # leaves an existing `dstPath` untouched and no partial file behind.
-  let tmp = dstPath & ".tmp"
+  if sameAsInput(srcPath, dstPath, result):
+    return
+  # SEG-D: one target format must hold every record.
+  let formats = if kind == skSegd and opts.format == 0: recordFormats(srcPath) else: {}
+  let tmp = tmpPathFor(dstPath)
   var src: RecordSource
   var sink: RecordSink
   try:
-    src = openDiskSource(srcPath)
-    sink = openDiskSink(tmp)
-    result = if kind == skSegy: convertSegy(src, sink, opts)
-             else: convertSegdToSegy(src, sink, opts, formats)
+    try:
+      src = openDiskSource(srcPath)
+      sink = openDiskSink(tmp)
+      result = if kind == skSegy: convertSegy(src, sink, opts)
+               else: convertSegdToSegy(src, sink, opts, formats)
+    finally:
+      if src != nil: src.close()
+      if sink != nil: sink.close()
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
-  finally:
-    if src != nil: src.close()
-    if sink != nil: sink.close()
-  finishOutput(tmp, dstPath, result)
+  finishOutput(tmp, dstPath, keep = not result.isFatal, result)

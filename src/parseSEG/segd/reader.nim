@@ -431,6 +431,42 @@ proc findChannelSet*(rec: SegdRecord, h: SegdTraceHeader, st, cs: var int) =
   else:
     st = -1
 
+# Channel set values of a trace, the same for every revision; the Rev 1/2 or
+# Rev 3 descriptor is chosen here. A trace whose channel set is unknown
+# (`channelSet` -1) gets the record-level value or a neutral one.
+
+func channelType*(rec: SegdRecord, t: SegdTrace): int =
+  ## The channel type code of the trace's channel set (Rev 1/2: 1 = seis,
+  ## 9 = signature filtered, ...; Rev 3: 0x10 seis, 0x20-0x70 auxiliary,
+  ## ...); 0 when the channel set is unknown.
+  if t.channelSet < 0: 0
+  elif rec.isRev3: int(rec.scanTypes[t.scanType].descriptors3[t.channelSet].channelType)
+  else: int(rec.scanTypes[t.scanType].descriptors[t.channelSet].channelType)
+
+func sampleIntervalUs*(rec: SegdRecord, t: SegdTrace): float64 =
+  ## The trace's sample interval in µs: its channel set's, or the record's
+  ## base scan interval when the channel set is unknown.
+  if t.channelSet < 0:
+    if rec.isRev3: baseScanIntervalUs(rec.gh1, rec.gh2r3) else: rec.gh1.baseScanIntervalMs * 1000
+  elif rec.isRev3: float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].samplingInterval)
+  else: rec.scanTypes[t.scanType].descriptors[t.channelSet].sampleIntervalMs(rec.gh1) * 1000
+
+func startTimeMs*(rec: SegdRecord, t: SegdTrace): float64 =
+  ## The start time of the trace's channel set in ms; 0 when it is unknown.
+  if t.channelSet < 0: 0.0
+  elif rec.isRev3: float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].startTime) / 1000
+  else: rec.scanTypes[t.scanType].descriptors[t.channelSet].startTimeMs
+
+func descaleFactor*(rec: SegdRecord, t: SegdTrace): float64 =
+  ## Millivolts per recorded unit of the trace's channel set: 2^MP factor
+  ## (Rev 1/2) or the descale multiplier (Rev 3; 1 when it is 0 or NaN).
+  ## 1 when the channel set is unknown.
+  if t.channelSet < 0: 1.0
+  elif rec.isRev3:
+    let m = float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].descaleMultiplier)
+    if m == 0 or m.isNaN: 1.0 else: m
+  else: pow(2.0, rec.scanTypes[t.scanType].descriptors[t.channelSet].mpFactor)
+
 proc readSamples(r: var SegdReader, t: var SegdTrace, nbytes: int) =
   if r.headersOnly:
     t.samples.setLen 0

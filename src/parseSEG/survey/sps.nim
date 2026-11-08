@@ -21,8 +21,8 @@
 ## - The revision comes from H00 (`SPS 2.1` / `SPS001`), else from the
 ##   column layout of the first data records, unless the caller sets it.
 
-import std/[streams, strutils, math, os]
-import ../common/[diagnostics, errors]
+import std/[streams, strutils, math]
+import ../common/[diagnostics, errors, outputfile]
 import ./textrec
 
 export textrec, diagnostics
@@ -631,7 +631,7 @@ proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
 proc writeSps*(f: SpsFile, path: string, opts = SpsWriteOptions()): DiagLog =
   ## Writes `f` to `path` through `<path>.tmp`, renamed on success; on
   ## validation errors nothing is written.
-  let tmp = path & ".tmp"
+  let tmp = tmpPathFor(path)
   let s = newFileStream(tmp, fmWrite)
   if s == nil:
     result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
@@ -640,8 +640,7 @@ proc writeSps*(f: SpsFile, path: string, opts = SpsWriteOptions()): DiagLog =
       result = writeSps(f, s, opts)
     finally:
       s.close()
-    if result.count(sevError) == 0: moveFile(tmp, path)
-    else: removeFile(tmp)
+    finishOutput(tmp, path, keep = result.count(sevError) == 0, result)
 
 func spsText*(f: SpsFile, opts = SpsWriteOptions()): (string, DiagLog) =
   ## `f` written to a string, with the writer's diagnostics.

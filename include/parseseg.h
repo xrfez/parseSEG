@@ -390,7 +390,9 @@ SegStatus seg_diag_log_to_nif(SegDiagLog *diag_log, char *out, int64_t out_cap, 
 
 /*
  * Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
- * version). Never raises: problems, including I/O failures, are in the result.
+ * version). Never raises: problems, including I/O failures, are in the
+ * result. The output is written to `<dstPath>.tmp` and renamed when
+ * complete.
  */
 SegStatus seg_convert_segd_revision(const char *src_path, const char *dst_path, const SegSegdConvertOptions *opts, SegDiagLog **out);
 
@@ -448,7 +450,9 @@ SegStatus seg_seismic_file_copy_bytes(SegSeismicFile *seismic_file, int64_t offs
 /*
  * Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
  * file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
- * problems, including I/O failures, are in the result.
+ * problems, including I/O failures, are in the result. The output is
+ * written to `<dstPath>.tmp` and renamed when complete, so a failed
+ * conversion leaves an existing `dstPath` untouched and no partial file.
  */
 SegStatus seg_convert_file(const char *src_path, const char *dst_path, const SegConvertOptions *opts, SegDiagLog **out);
 
