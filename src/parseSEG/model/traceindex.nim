@@ -1,4 +1,4 @@
-## Trace index: a header-only walk over a SEG-Y or SEG-D stream that records
+## Trace index: a header-only walk over a SEG-Y, SEG-D or SEG-2 file that records
 ## where every trace lives, so a viewer or a processing job can read any
 ## trace range without loading the file.
 ##
@@ -12,8 +12,13 @@
 ## `buildIndex` walks any `RecordSource` (disk, tape image, tape device) with
 ## the readers' `headersOnly` mode: sample bytes are skipped, by seeking where
 ## the source can. Each trace costs one 24-byte `TraceEntry`, so 10 million
-## traces take 240 MB. Header objects are kept per file (SEG-Y) or per record
-## (SEG-D), never per trace.
+## traces take 240 MB. Header objects are kept per file (SEG-Y, SEG-2) or per
+## record (SEG-D), never per trace.
+##
+## SEG-2 is a random-access disk format (a pointer per trace), so it is
+## indexed from a memory-mapped file only (`openSeismic`, or `buildIndex` on
+## a `MemFileSource`): `offset` is the Trace Descriptor Block, `headerBytes`
+## its size, and `record` indexes one codec per sample format met.
 ##
 ## `openSeismic` maps a disk file with `std/memfiles` and keeps the map, so
 ## range reads decode straight from the mapped bytes into the tensor's
@@ -24,6 +29,7 @@ import ../common/[endians, errors, diagnostics, bcd, seismickind]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
+import ../seg2/[reader as seg2reader]
 import ./[tensors, keys]
 import ../abi/pragmas
 
@@ -36,7 +42,9 @@ type
     offset*: int64       ## Medium offset of the trace header.
     headerBytes*: uint32 ## Header bytes before the samples (incl. extensions).
     numSamples*: uint32
-    record*: uint32      ## SEG-D record index (0 for SEG-Y); indexes `codecs`.
+    record*: uint32
+      ## Indexes `codecs`: the SEG-D record index, 0 for SEG-Y, the codec of
+      ## the trace's sample format for SEG-2 (a SEG-2 file is one record).
     channelSet*: uint16
       ## 0-based SEG-D channel set index, `NoChannelSet` if unknown (and for
       ## SEG-Y); see `channelSetIndex`.
@@ -44,22 +52,28 @@ type
     channelType*: uint8
       ## SEG-D channel type of the trace's channel set (Rev 1/2 nibble, 1 =
       ## seismic; Rev 3 byte, 0x10 = seismic); 0 for SEG-Y and unknown sets.
+      ## SEG-2: 1 + the `Seg2TraceType` ordinal of TRACE_TYPE, 0 if none.
 
   TraceCodec* = object
-    ## How the samples of one SEG-Y file or SEG-D record are encoded.
+    ## How the samples of one SEG-Y file, SEG-D record or SEG-2 sample
+    ## format are encoded.
     kind*: SeismicKind
     segyFormat*: Option[SampleFormat]
       ## SEG-Y format, when `kind == skSegy`; none if not decodable.
-    order*: ByteOrder             ## SEG-Y byte order.
+    order*: ByteOrder             ## SEG-Y and SEG-2 byte order.
     segdFormat*: Option[SegdSampleFormat]
       ## SEG-D format, when `kind == skSegd`; none if not decodable.
-    twosComplement8015*: bool     ## SEG-D 8015 read as two's complement.
+    seg2Format*: Option[Seg2Format]
+      ## SEG-2 format, when `kind == skSeg2`; none if not decodable.
+    twosComplement8015*: bool
+      ## SEG-D 8015 (and SEG-2 format 3) mantissas read as two's complement.
 
   TraceIndex* = object
     ## Every trace's location plus the file-level headers.
     kind*: SeismicKind
     entries*: seq[TraceEntry]
-    codecs*: seq[TraceCodec]  ## One per SEG-D record; one for SEG-Y.
+    codecs*: seq[TraceCodec]
+      ## One per SEG-D record; one for SEG-Y; one per sample format for SEG-2.
     contiguous*: bool
       ## Offsets are byte offsets in a plain file, so each trace's headers and
       ## samples are contiguous there (false for tape images and devices).
@@ -68,6 +82,9 @@ type
     segdLabel*: Option[SegdStorageUnitLabel] ## The SEG-D storage unit label, if any.
     segdRecords*: seq[SegdRecord] ## SEG-D record headers and trailers, by record index.
     segdToc*: seq[SegdToc]    ## SEG-D Rev 3 Table of Contents files met.
+    seg2*: Seg2File
+      ## The SEG-2 File Descriptor Block, when `kind == skSeg2` (trace
+      ## descriptors are re-read from the map: `SeismicFile.seg2Trace`).
     log*: DiagLog             ## Diagnostics of the walk.
     detected*: bool           ## The stream was identified as `kind` and walked.
     keys*: seq[TraceKeys]
@@ -94,13 +111,21 @@ func sampleOffset*(e: TraceEntry): int64 {.inline.} =
 
 func known*(c: TraceCodec): bool {.inline.} =
   ## True when the samples are decodable (the format is known).
-  if c.kind == skSegy: c.segyFormat.isSome else: c.segdFormat.isSome
+  case c.kind
+  of skSegy: c.segyFormat.isSome
+  of skSegd: c.segdFormat.isSome
+  of skSeg2: c.seg2Format.isSome
+  of skUnknown: false
 
 func dataBytes*(c: TraceCodec, samples: int): int =
   ## Bytes holding `samples` samples (0 for an undecodable format).
   if not c.known: 0
-  elif c.kind == skSegy: samples * sampleSize(c.segyFormat.get)
-  else: dataBytes(c.segdFormat.get, samples)
+  else:
+    case c.kind
+    of skSegy: samples * sampleSize(c.segyFormat.get)
+    of skSegd: dataBytes(c.segdFormat.get, samples)
+    of skSeg2: dataBytes(c.seg2Format.get, samples)
+    of skUnknown: 0
 
 func dataBytes*(ix: TraceIndex, i: int): int {.inline.} =
   ## Sample bytes of trace `i`.
@@ -109,9 +134,13 @@ func dataBytes*(ix: TraceIndex, i: int): int {.inline.} =
 func prefersFloat64*(ix: TraceIndex): bool =
   ## True when some trace's format would lose precision in float32.
   for c in ix.codecs:
-    if c.known and (if c.kind == skSegy: prefersFloat64(c.segyFormat.get)
-                    else: prefersFloat64(c.segdFormat.get)):
-      return true
+    if c.known:
+      let wide = case c.kind
+        of skSegy: prefersFloat64(c.segyFormat.get)
+        of skSegd: prefersFloat64(c.segdFormat.get)
+        of skSeg2: prefersFloat64(c.seg2Format.get)
+        of skUnknown: false
+      if wide: return true
 
 # ------------------------------------------------------------- detection --
 
@@ -154,13 +183,17 @@ func looksLikeSegy(head: openArray[byte], at: int): bool =
 
 func detectKind*(head: openArray[byte]): SeismicKind =
   ## Guesses the standard from the first bytes of a stream (pass at least
-  ## 3728). SEG-D: a storage unit label or a Table of Contents file. SEG-Y: a
+  ## 3728). SEG-2: the File Descriptor Block ID (`55 3A` or `3A 55`) and the
+  ## first trace's block ID or a plausible fixed part (`isSeg2`); neither
+  ## SEG-Y text nor a SEG-D BCD file number can start that way. SEG-D: a
+  ## storage unit label or a Table of Contents file. SEG-Y: a
   ## textual header starting with `C` that is mostly printable EBCDIC or
   ## ASCII, possibly after a 128-byte tape label. Otherwise SEG-D if the bytes
   ## are a plausible General Header #1 (a SEG-D file number 43xx starts with
   ## ASCII `C`, but its next 3200 bytes are not text). `skUnknown` if nothing
   ## fits.
-  if isStorageUnitLabel(head) or isTocFile(head): skSegd
+  if isSeg2(head): skSeg2
+  elif isStorageUnitLabel(head) or isTocFile(head): skSegd
   elif looksLikeSegy(head, 0) or (head.len >= 6 and head[4] == 0x53 and head[5] == 0x59 and
       looksLikeSegy(head, 128)):
     skSegy
@@ -207,16 +240,55 @@ proc indexSegd(src: RecordSource, twosComplement8015, keys: bool): TraceIndex =
   result.segdToc = r.toc
   result.log = r.log
 
+func traceTypeCode(t: Seg2Trace): uint8 =
+  # `TraceEntry.channelType` of a SEG-2 trace.
+  let tt = t.traceType
+  if tt.isSome: uint8(ord(tt.get) + 1) else: 0
+
+proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool): TraceIndex =
+  # The whole file, from the map: pointers may come in any order.
+  result = TraceIndex(kind: skSeg2, contiguous: true)
+  let size = src.size
+  let empty: seq[byte] = @[]
+  template data: untyped =
+    (if size > 0: src.memory.toOpenArray(0, int(size) - 1) else: empty.toOpenArray(0, -1))
+  var log: DiagLog
+  result.seg2 = readSeg2(data, log, src.name)
+  template f: untyped = result.seg2
+  for t in traces(data, f, log, src.name):
+    let fmt = if t.valid: t.format else: none(Seg2Format)
+    var c = 0
+    while c < result.codecs.len and result.codecs[c].seg2Format != fmt: inc c
+    if c == result.codecs.len:
+      result.codecs.add TraceCodec(kind: skSeg2, seg2Format: fmt, order: f.order,
+        twosComplement8015: twosComplement8015)
+    let n = t.sampleCount
+    result.entries.add TraceEntry(offset: t.offset,
+      headerBytes: if t.valid: uint32(t.blockSize) else: 0, numSamples: uint32(n),
+      record: uint32(c), channelSet: NoChannelSet, scanType: -1,
+      channelType: traceTypeCode(t))
+    result.maxSamples = max(result.maxSamples, n)
+    if keys: result.keys.add traceKeys(f, t)
+  result.log = log
+
 proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = false,
     keys = false): TraceIndex =
   ## Walks the stream at the current position of `src` with headers only and
   ## indexes every trace; with `keys`, also collects each trace's geometry
   ## (for `gathers` and `componentGroups`). Problems go to `log`, as with the
-  ## readers. Raises `ValueError` for `skUnknown`.
+  ## readers. SEG-2 is read from the start of a `MemFileSource` (its
+  ## pointers are file offsets); `twosComplement8015` then applies to its
+  ## format 3. Raises `ValueError` for `skUnknown` and for SEG-2 on another
+  ## source.
   result = case kind
     of skSegy: indexSegy(src, keys)
     of skSegd: indexSegd(src, twosComplement8015, keys)
-    of skUnknown: raise newException(ValueError, "buildIndex needs SEG-Y or SEG-D")
+    of skSeg2:
+      if not (src of MemFileSource):
+        raise newException(ValueError, "SEG-2 is indexed from a memory-mapped file " &
+          "(openSeismic or a MemFileSource), not from a stream")
+      indexSeg2(MemFileSource(src), twosComplement8015, keys)
+    of skUnknown: raise newException(ValueError, "buildIndex needs SEG-Y, SEG-D or SEG-2")
   result.detected = true
 
 # ---------------------------------------------------------- range decode --
@@ -237,12 +309,17 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: 
     raiseTruncated("trace samples lie past the end of the file", start)
   if n > 0:
     let a = int(start)
-    if c.kind == skSegy:
+    case c.kind
+    of skSegy:
       decodeSamples(c.segyFormat.get, mem.toOpenArray(a, a + nbytes - 1), dst.toOpenArray(0, n - 1),
         c.order)
-    else:
+    of skSegd:
       decodeSegdSamples(c.segdFormat.get, mem.toOpenArray(a, a + nbytes - 1),
         dst.toOpenArray(0, n - 1), c.twosComplement8015)
+    of skSeg2:
+      decodeSeg2Samples(c.seg2Format.get, mem.toOpenArray(a, a + nbytes - 1),
+        dst.toOpenArray(0, n - 1), c.order, c.twosComplement8015)
+    of skUnknown: discard # not known: raised above
   for k in n..<cols: dst[k] = T(0)
 
 # ---------------------------------------------------------- seismic file --
@@ -274,8 +351,9 @@ proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
 
 proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
     writable = false): SeismicFile {.segApi(hide = writable).} =
-  ## Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
-  ## index (with per-trace geometry when `keys`). Format problems are in
+  ## Maps the disk file `path`, detects SEG-Y, SEG-D or SEG-2, and builds the trace
+  ## index (with per-trace geometry when `keys`; `twosComplement8015` also
+  ## reads SEG-2 format-3 mantissas as two's complement). Format problems are in
   ## `index.log`; an undetectable file gives a fatal diagnostic and an empty
   ## index. Raises `IOError`/`OSError` if the file cannot be opened or
   ## mapped. `writable` maps it read-write, for in-place header edits
@@ -288,7 +366,7 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
   else:
     result.index.contiguous = true
     result.index.log.report(sevFatal, dcUnsupportedFormat,
-      "neither a SEG-Y nor a SEG-D file", 0, Location(file: path))
+      "not a SEG-Y, SEG-D or SEG-2 file", 0, Location(file: path))
 
 proc close*(f: var SeismicFile) =
   ## Unmaps the file. The index stays usable; range reads do not. (Not on the
@@ -303,7 +381,7 @@ func len*(f: SeismicFile): int {.inline, segApi.} =
   f.index.entries.len
 
 func kind*(f: SeismicFile): SeismicKind {.inline, segApi.} =
-  ## SEG-Y or SEG-D; `skUnknown` when the file was not recognized.
+  ## SEG-Y, SEG-D or SEG-2; `skUnknown` when the file was not recognized.
   if f.index.detected: f.index.kind else: skUnknown
 
 func log*(f: SeismicFile): lent DiagLog {.inline, segApi.} =
@@ -311,7 +389,7 @@ func log*(f: SeismicFile): lent DiagLog {.inline, segApi.} =
   f.index.log
 
 func recordCount*(f: SeismicFile): int {.segApi.} =
-  ## SEG-D records; 1 for SEG-Y; 0 for an unrecognized file.
+  ## SEG-D records; 1 for SEG-Y and SEG-2; 0 for an unrecognized file.
   if not f.index.detected: 0
   elif f.index.kind == skSegd: f.index.segdRecords.len
   else: 1
@@ -340,6 +418,17 @@ func traceKeys*(f: SeismicFile, trace: int): TraceKeys {.segApi.} =
   if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
   if not f.hasKeys: raise newException(ValueError, "open the file with keys = true")
   f.index.keys[trace]
+
+proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
+  ## The SEG-2 Trace Descriptor Block of trace `trace` (fixed part and
+  ## keyword strings), re-read from the map. Raises `ValueError` for a file
+  ## that is not SEG-2 or is closed, or a trace out of range.
+  if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
+  if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
+  if f.map.src == nil: raise newException(ValueError, "the file is closed")
+  var log: DiagLog # already reported by the index walk
+  readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.index.seg2, trace,
+    log, f.path)
 
 proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
   ## **Internal.** The mapped bytes (nil after `close`), for the library's own
@@ -411,7 +500,8 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: i
     except SegError as err:
       for c in 0..<cols: p[c] = T(0)
       log.report(sevError, if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat,
-        err.msg, e.offset, Location(file: f.path, record: int(e.record), trace: i))
+        err.msg, e.offset, Location(file: f.path,
+          record: if f.index.kind == skSeg2: 0 else: int(e.record), trace: i))
       inc failed
   failed
 

@@ -263,6 +263,13 @@ proc info(a: Args): int =
     echo "standard:    SEG-Y rev ", s.revision, ", ", s.byteOrder, "-endian",
       (if s.byteOrderDeclared: " (declared)" else: "")
     echo "format:      ", (if s.format.isSome: formatName(s.format.get) else: "unknown")
+  elif f.kind == skSeg2:
+    template s: untyped = ix.seg2
+    echo "standard:    SEG-2 rev ", s.revision, ", ", s.order, "-endian"
+    var fmts: seq[string]
+    for c in ix.codecs:
+      fmts.add (if c.seg2Format.isSome: $ord(c.seg2Format.get) else: "undecodable")
+    echo "format:      ", fmts.join(", ")
   else:
     var revs, fmts: seq[string]
     for r in ix.segdRecords:
@@ -423,6 +430,7 @@ proc convertCmd(a: Args): int =
   checkInput(src)
   refuseSame(dst, src)
   let kind = sourceKind(src)
+  if kind == skSeg2: cannot(src & ": conversion is not supported for SEG-2 yet")
   let to = a.get("to", if kind == skSegd and isSegdName(dst): "segd" else: "segy")
   var log: DiagLog
   case to
@@ -503,7 +511,8 @@ proc parseAssignments(f: SeismicFile, args: seq[string]): seq[Assignment] =
       x.targets = parseSelection(scope[1..^1], f.len, "trace", all = false)
     elif scope.len > 1 and scope[0] == 'r':
       x.scope = hsRecord
-      if f.kind != skSegd: usage("record scopes (r0, ...) are for SEG-D; SEG-Y has none")
+      if f.kind != skSegd:
+        usage("record scopes (r0, ...) are for SEG-D; " & $f.kind & " has none")
       x.targets = parseSelection(scope[1..^1], f.index.segdRecords.len, "record", all = false)
     else:
       usage("bad scope '" & scope & "' (t5, t0..9, r0 or file)")
@@ -653,13 +662,15 @@ proc vendormap(a: Args): int =
     if a.pos.len == 2:
       var f = openFile(a.pos[1])
       defer: f.close()
-      if f.kind == skSegd:
+      case f.kind
+      of skSegd:
         if f.index.segdRecords.len > 0:
           ctx = vendorContext(f.index.segdRecords[0])
           haveCtx = true
-      else:
+      of skSegy:
         ctx = vendorContext(f.index.segy)
         haveCtx = true
+      of skSeg2, skUnknown: discard # no vendor maps for SEG-2 yet
     if reg.maps.len == 0:
       echo "no vendor maps found in: ", a.mapPaths.join(", ")
     for m in reg.maps:
@@ -676,6 +687,7 @@ proc vendormap(a: Args): int =
     let n = f.len
     let kind = f.kind
     f.close()
+    if kind == skSeg2: cannot(path & ": vendor maps are not supported for SEG-2 yet")
     let sel = parseSelection(a.get("traces"), n)
     var want = newSeq[bool](n)
     for i in sel: want[i] = true

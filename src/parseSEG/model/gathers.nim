@@ -24,18 +24,23 @@
 ## separate gathers: the ensemble number for sorted data (2-4, 6, 8, 9), the
 ## offset for common-offset data (7), else the field record number. A key
 ## that never changes falls back to the receiver station (sort 6) or the
-## field record.
+## field record. SEG-2 files split the same way, with TRACE_SORT read as the
+## SEG-Y code it names (AS_ACQUIRED 1, CDP_GATHER 2, CDP_STACK 4,
+## COMMON_SOURCE 5, COMMON_RECEIVER 6, COMMON_OFFSET 7); the record key is
+## SHOT_SEQUENCE_NUMBER.
 ##
-## Only seismic traces count: SEG-D auxiliary channel sets are ignored when
-## classifying and grouping. Stations are compared on every known key
-## (line, point, index, coordinates); unknown values (NaN) match each other.
+## Only seismic traces count: SEG-D auxiliary channel sets and SEG-2
+## TEST_DATA / UPHOLE traces are ignored when classifying and grouping.
+## Stations are compared on every known key (line, point, index,
+## coordinates); unknown values (NaN) match each other.
 ##
 ## `componentGroups` collects the traces of one station recorded from one
 ## source: the components of a multi-component receiver (Rev 3 group index,
 ## else the sensor type; SEG-Y trace identification codes 11-17 and 27-41).
 
-import std/[tables, sets, math]
+import std/[tables, sets, math, options]
 import ./[traceindex, keys]
+from ../seg2/headers import Seg2TraceType, Seg2TraceSort, traceSort
 from ../segd/reader import isRev3
 import ../abi/pragmas
 
@@ -88,9 +93,12 @@ func knownReceiver(k: TraceKeys): bool =
 
 func isSeismic*(ix: TraceIndex, i: int): bool =
   ## False for SEG-D auxiliary traces (channel type other than seismic or
-  ## EM); true for SEG-Y and for traces of unknown channel sets.
+  ## EM) and SEG-2 TEST_DATA and UPHOLE traces; true for SEG-Y and for traces
+  ## of unknown channel sets.
   let e = ix.entries[i]
-  if ix.kind == skSegy or e.channelSet == NoChannelSet: true
+  if ix.kind == skSeg2:
+    e.channelType notin {uint8(ord(ttTestData) + 1), uint8(ord(ttUphole) + 1)}
+  elif ix.kind == skSegy or e.channelSet == NoChannelSet: true
   elif ix.segdRecords[e.record].isRev3: e.channelType in {0x10'u8, 0x11'u8}
   else: e.channelType == 1
 
@@ -137,6 +145,18 @@ proc constantKey(ix: TraceIndex, by: SplitKey): bool =
   for i in 1..<ix.len:
     if not sameKey(ix.keys[i], ix.keys[0], by): return false
 
+func sortingCode(s: Option[Seg2TraceSort]): int =
+  # The SEG-Y trace sorting code a SEG-2 TRACE_SORT names; 0 if none.
+  if s.isNone: 0
+  else:
+    case s.get
+    of tsAsAcquired: 1
+    of tsCdpGather: 2
+    of tsCdpStack: 4
+    of tsCommonSource: 5
+    of tsCommonReceiver: 6
+    of tsCommonOffset: 7
+
 proc gathers*(ix: TraceIndex): seq[Gather] =
   ## Splits the index into gathers and classifies each (see the module doc).
   ## Needs an index built with `keys = true`.
@@ -149,7 +169,8 @@ proc gathers*(ix: TraceIndex): seq[Gather] =
         result.add ix.classify(first..i - 1)
         first = i
   else:
-    let sorting = int(ix.segy.binary.traceSorting)
+    let sorting = if ix.kind == skSeg2: sortingCode(ix.seg2.traceSort)
+                  else: int(ix.segy.binary.traceSorting)
     var declared = gkUnknown
     var by = byRecord
     case sorting
