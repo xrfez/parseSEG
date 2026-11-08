@@ -185,7 +185,7 @@ proc locateRecordBlock*(ix: TraceIndex, record: int, blockName: string, b: var B
   if ix.kind != skSegd or record < 0 or record >= ix.segdRecords.len:
     err = "no SEG-D record " & $record
     return false
-  let rec = ix.segdRecords[record]
+  template rec: untyped = ix.segdRecords[record]
   if blockName == "gh1":
     b = BlockRef(kind: hbSegdGh1, offset: rec.offset, size: SegdBlockSize, order: boBig,
       name: blockName)
@@ -326,7 +326,7 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
   ## binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
   ## interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
   ## interval. NaN when unknown (a closed file, an out-of-range trace).
-  let ix = f.index
+  template ix: untyped = f.index
   if trace < 0 or trace >= ix.len or not f.isOpen: return NaN
   let e = ix.entries[trace]
   if ix.kind == skSegy:
@@ -339,7 +339,7 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
       return v.toFloat
     if f.traceField(trace, "trace.sampleInterval", v): v.toFloat else: NaN
   else:
-    let rec = ix.segdRecords[e.record]
+    template rec: untyped = ix.segdRecords[e.record]
     let cs = e.channelSetIndex
     if rec.isRev3:
       if cs >= 0 and int(e.scanType) >= 0:
