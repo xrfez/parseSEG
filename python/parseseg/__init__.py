@@ -489,6 +489,7 @@ class SegGather(ctypes.Structure):
 
 
 class SegSpsOptions(ctypes.Structure):
+    """How `readSps` reads a file."""
     _fields_ = [
         ("revision", ctypes.c_int32),
         ("strict_implied_decimals", ctypes.c_bool),

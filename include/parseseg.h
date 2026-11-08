@@ -345,6 +345,7 @@ typedef struct SegGather {
     int64_t receivers; /* Distinct known receiver stations among its seismic traces. */
 } SegGather;
 
+/* How `readSps` reads a file. */
 typedef struct SegSpsOptions {
     int32_t revision; /* SEG_SPS_REVISION_*: Force a revision. */
     bool strict_implied_decimals; /* F10.2 without `.`: FORTRAN-implied decimals. */

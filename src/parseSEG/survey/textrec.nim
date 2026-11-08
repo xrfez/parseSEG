@@ -6,14 +6,11 @@
 ## terminators, in ASCII or EBCDIC. `textRecords` reads all of these from a
 ## stream, one record at a time, so a file is never loaded whole.
 ##
-## Fields are addressed by 1-based inclusive columns, as the specs number
-## them. Numbers follow FORTRAN formatted input: `Iw` is a right-justified
-## integer; `Fw.d` has an implicit decimal point before the last `d` digits
-## unless the field holds a `.`. An all-blank field is missing (NaN, or
-## `none`).
+## An all-blank numeric field is missing: NaN for reals, `MissingInt` for
+## integers.
 
-import std/[streams, strutils, math]
-import ../common/ebcdic
+import std/streams
+import ../common/[ebcdic, diagnostics]
 
 type
   TextLayout* = enum
@@ -35,7 +32,7 @@ type
       ## follows as the next record. A reader should report it.
 
 const
-  CardWidth* = 80
+  CardWidth* = 80 ## Columns of a card image.
   MaxLineBytes* = 65536 ## Longer "lines" are cut (a binary file, or fixed records with a stray LF).
 
 proc detectLayout*(head: openArray[char]): TextLayout =
@@ -135,101 +132,11 @@ proc openLayout*(s: Stream): TextLayout =
   s.setPosition(start)
   detectLayout(head)
 
-# ------------------------------------------------------------ field access --
+const MissingInt* = low(int64)
+  ## An `Iw` integer field that was blank (e.g. `SpsRelation.fieldRecord`).
 
-func col*(line: string, first, last: int): string =
-  ## Columns `first..last` (1-based, inclusive) of `line`, blank-padded where
-  ## the line is shorter.
-  result = newString(last - first + 1)
-  for i in first..last:
-    result[i - first] = if i - 1 < line.len: line[i - 1] else: ' '
-
-func colChar*(line: string, c: int): char {.inline.} =
-  ## Column `c` (1-based), a blank past the end of the line.
-  if c - 1 < line.len: line[c - 1] else: ' '
-
-func isBlank*(s: string): bool =
-  ## Only blanks (or empty).
-  for c in s:
-    if c != ' ': return false
-  true
-
-proc parseFortranFloat*(field: string, decimals = 0, value: var float64): bool =
-  ## Parses a FORTRAN `Fw.d` field: a value with an explicit `.` (or an
-  ## exponent) is taken as written; digits only get an implicit decimal point
-  ## before the last `decimals` digits. Embedded blanks are not zeros here:
-  ## they make the field invalid. A blank field is valid and NaN. False if the
-  ## text is not a number.
-  let t = field.strip
-  if t.len == 0:
-    value = NaN
-    return true
-  try:
-    let v = parseFloat(t)
-    value = if decimals > 0 and '.' notin t and 'e' notin t and 'E' notin t:
-              v / pow(10.0, float64(decimals))
-            else: v
-    result = true
-  except ValueError:
-    result = false
-
-proc parseFortranInt*(field: string, value: var int64): bool =
-  ## Parses a FORTRAN `Iw` field (sign allowed). A blank field is valid and
-  ## leaves `value` at `low(int64)`, the "missing" marker. False if the text
-  ## is not an integer.
-  let t = field.strip
-  if t.len == 0:
-    value = low(int64)
-    return true
-  try:
-    value = parseBiggestInt(t)
-    result = true
-  except ValueError:
-    result = false
-
-const MissingInt* = low(int64) ## An `Iw` field that was blank.
-
-# ------------------------------------------------------------- formatting --
-
-func rjust*(s: string, width: int): string =
-  ## `s` right-justified in `width` columns; longer text is returned as is
-  ## (the caller checks the width).
-  if s.len >= width: s else: repeat(' ', width - s.len) & s
-
-func ljust*(s: string, width: int): string =
-  ## `s` left-justified in `width` columns.
-  if s.len >= width: s else: s & repeat(' ', width - s.len)
-
-func formatFixed*(v: float64, width, decimals: int, implicit = false): string =
-  ## `v` as an `Fw.d` field: `decimals` digits after an explicit point, or
-  ## with `implicit`, the scaled integer without a point. NaN is blank.
-  ## Returns "" when the value does not fit in `width` (or is infinite).
-  if v.isNaN: return repeat(' ', width)
-  if abs(v) > 1e15: return "" # wider than any card field; also Inf
-  let s = if implicit: $int64(round(v * pow(10.0, float64(decimals))))
-          else: formatFloat(v, ffDecimal, decimals)
-  if s.len > width: "" else: rjust(s, width)
-
-func formatInt*(v: int64, width: int): string =
-  ## `v` as an `Iw` field; `MissingInt` is blank. "" when it does not fit.
-  if v == MissingInt: return repeat(' ', width)
-  let s = $v
-  if s.len > width: "" else: rjust(s, width)
-
-proc putCol*(line: var string, first: int, text: string) =
-  ## Writes `text` into `line` starting at column `first` (1-based),
-  ## extending the line with blanks as needed.
-  let last = first + text.len - 1
-  if line.len < last: line.add repeat(' ', last - line.len)
-  for i, c in text: line[first - 1 + i] = c
-
-func sameValues*[T: object](a, b: T): bool =
-  ## Field-by-field equality where NaN equals NaN (a missing value is the
-  ## same missing value). Writers use it to tell an unchanged record, whose
-  ## raw text is written back, from an edited one.
-  result = true
-  for x, y in fields(a, b):
-    when x is SomeFloat:
-      if not (x == y or (x != x and y != y)): return false
-    else:
-      if x != y: return false
+type
+  SurveyText* = object
+    ## A survey file written to a string (`spsText`, `p1Text`).
+    text*: string ## The records, as the file would hold them.
+    log*: DiagLog ## The writer's diagnostics.

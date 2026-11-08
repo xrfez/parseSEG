@@ -81,11 +81,11 @@ X records name the stations each channel was recorded from. Spec notes: `docs/sp
 
 | Proc | What |
 |---|---|
-| `readSps(path or stream, SpsOptions)`, `parseSps(text)` → `SpsFile` | H, R/S (`points`), X (`relations`) and C records; revision from H00 or the columns. Every record keeps its raw text. |
-| `writeSps(f, path or stream, SpsWriteOptions(revision, lineEnding, lenient))`, `spsText(f)` | Column-exact; unchanged records byte for byte; 1.0 ↔ 2.1. A value that does not fit is an error and nothing is written (unless `lenient`). |
+| `readSps(path or stream, SpsOptions)`, `parseSps(text)` → `SpsFile` | H, R/S (`points`, `kind` `pkReceiver`/`pkSource`), X (`relations`) and C records; revision from H00 or the columns. Every record keeps its raw text. Blank integers are `MissingInt`, blank reals NaN. |
+| `writeSps(f, path or stream, SpsWriteOptions(revision, lineEnding, lenient))`, `spsText(f)` (a `SurveyText`: `text`, `log`), `encodeSps(record, rev)` | Column-exact; unchanged records byte for byte; 1.0 ↔ 2.1. A value that does not fit is an error and nothing is written (unless `lenient`). |
 | `readP1(path or stream, P1Options(gridDecimals, depthDecimals, angleUnit))`, `parseP1` → `P1File` | Logical files (`files`), each with its header text and records; P1 decoded, P2-P4 kept raw. |
-| `writeP1(f, path or stream, P1WriteOptions)`, `p1Text(f)` | Header blocks padded to 20 records; unchanged records byte for byte. |
-| `SurveyGeometry` (`initSurveyGeometry()`): `addSps(g, sps or path)`, `addP1(g, p1 or path, ..., elevation)`, `addSource`/`addReceiver`, `relation(g, record, channel, rel)` | Station coordinates (`table`, `sourceCount`, `receiverCount`) and relation runs (`relationCount`). Text line names go through `mapLine(g, name, line)` (`lineNames`), then `trailingDigits`. `multiComponent`, `tape` refine X records; problems are in `log`. |
+| `writeP1(f, path or stream, P1WriteOptions)`, `p1Text(f)` (a `SurveyText`), `encodeP1(record, opts)` | Header blocks padded to 20 records; unchanged records byte for byte. |
+| `SurveyGeometry` (`initSurveyGeometry()`): `addSps(g, sps or path)`, `addP1(g, p1 or path, ..., elevation)`, `addSource`/`addReceiver`, `relation(g, record, channel)` (an `Option[StationRelation]`), `resolveLine(g, name, numeric)` (an `Option`) | Station coordinates (`table`, `sourceCount`, `receiverCount`) and relation runs (`relationCount`). Text line names go through `mapLine(g, name, line)` (`lineNames`), then `trailingDigits`. `multiComponent`, `tape` refine X records; problems are in `log`. |
 | `applySurvey(f, keys or index, g, overwrite = false)` | Stations from relations (on `TraceKeys.record` and `.channel`), then coordinates, offset, midpoint; in memory only, the file does not change. |
 | `GeometryTable`, `addSource`/`addReceiver`, `applyGeometry` | The coordinate table alone (a host's database). Keys are rounded to 1/100; a trace without a point index also matches index 1. |
 

@@ -21,9 +21,9 @@
 ## - The revision comes from H00 (`SPS 2.1` / `SPS001`), else from the
 ##   column layout of the first data records, unless the caller sets it.
 
-import std/[streams, strutils, math]
+import std/[options, streams, strutils, math]
 import ../common/[diagnostics, errors, outputfile]
-import ./textrec
+import ./[textrec, cards]
 
 export textrec, diagnostics
 
@@ -40,10 +40,15 @@ type
     data*: string        ## Cols 33-80, trailing blanks trimmed (H26: cols 5-80).
     raw*: string         ## The line as read; "" for a built record.
 
+  SpsPointKind* = enum
+    ## The record type of a point record (column 1).
+    pkReceiver = "R"
+    pkSource = "S"
+
   SpsPoint* = object
     ## An R (receiver) or S (source) point record. Missing numbers are NaN,
     ## missing day/time parts -1.
-    kind*: char          ## 'R' or 'S'.
+    kind*: SpsPointKind
     lineName*: string    ## The line field as text (trimmed).
     pointName*: string   ## The point field as text (trimmed).
     line*, point*: float64 ## Numeric line and point; NaN for non-numeric 1.0 names.
@@ -97,7 +102,12 @@ type
     log*: DiagLog
 
   SpsEntryKind* = enum
-    seHeader, sePoint, seRelation, seComment, seOther
+    ## The list a record of the file went to (see `SpsEntry`).
+    seHeader   ## `headers`
+    sePoint    ## `points`
+    seRelation ## `relations`
+    seComment  ## `comments`
+    seOther    ## `others`
 
   SpsEntry* = object
     ## Where record N of the file went: `kind` and the index in its list.
@@ -106,12 +116,13 @@ type
     at*: int
 
   SpsOptions* = object
+    ## How `readSps` reads a file.
     revision*: SpsRevision = spsAuto ## Force a revision.
     strictImpliedDecimals*: bool     ## F10.2 without `.`: FORTRAN-implied decimals.
     layout*: TextLayout = tlLines    ## Used only with `forceLayout`.
     forceLayout*: bool               ## Don't detect the layout.
 
-func initSpsPoint*(kind = 'S'): SpsPoint =
+func initSpsPoint*(kind = pkSource): SpsPoint =
   ## A point with every value missing (index 1).
   SpsPoint(kind: kind, line: NaN, point: NaN, index: 1, staticCorrection: NaN, pointDepth: NaN,
     seismicDatum: NaN, upholeTime: NaN, waterDepth: NaN, easting: NaN, northing: NaN,
@@ -157,68 +168,69 @@ func c(line: string, s: Slice[int]): string {.inline.} = col(line, s.a, s.b)
 # ------------------------------------------------------------------ reading --
 
 type Ctx = object
-  f: ptr SpsFile
+  ## Where a record is being parsed; problems go to the `log` passed along.
+  name: string
   rec: TextRecord
   opts: SpsOptions
 
-proc problem(x: Ctx, sev: Severity, code: DiagCode, field, msg: string) =
-  x.f.log.report(sev, code, msg, x.rec.offset,
-    Location(file: x.f.name, record: x.rec.index, field: field))
+proc problem(x: Ctx, log: var DiagLog, sev: Severity, code: DiagCode, field, msg: string) =
+  log.report(sev, code, msg, x.rec.offset,
+    Location(file: x.name, record: x.rec.index, field: field))
 
-proc numberField(x: Ctx, text, field: string, decimals: int, rev: SpsRevision,
-    v: var float64) =
+proc numberField(x: Ctx, log: var DiagLog, text, field: string, decimals: int,
+    rev: SpsRevision): float64 =
   ## A real field; bad text is a warning and NaN. In Rev 2.1, `decimals` only
   ## applies in strict mode (else a value without `.` is an integer).
   let d = if rev == sps21 and not x.opts.strictImpliedDecimals: 0 else: decimals
-  if not parseFortranFloat(text, d, v):
-    if text.strip.startsWith("-") and text.strip.allCharsInSet({'-'}):
-      v = NaN # "----": undefined
-    else:
-      x.problem(sevWarning, dcBadValue, field, "not a number: '" & text.strip & "'")
-      v = NaN
+  let v = parseFortranFloat(text, d)
+  if v.isSome: v.get
+  else:
+    if not (text.strip.startsWith("-") and text.strip.allCharsInSet({'-'})): # "----": undefined
+      x.problem(log, sevWarning, dcBadValue, field, "not a number: '" & text.strip & "'")
+    NaN
 
-proc intField(x: Ctx, text, field: string, default: int64, v: var int64) =
-  if not parseFortranInt(text, v):
-    x.problem(sevWarning, dcBadValue, field, "not an integer: '" & text.strip & "'")
-    v = MissingInt
-  elif v == MissingInt: v = default
+proc intField(x: Ctx, log: var DiagLog, text, field: string, default: int64): int64 =
+  let v = parseFortranInt(text)
+  if v.isNone:
+    x.problem(log, sevWarning, dcBadValue, field, "not an integer: '" & text.strip & "'")
+    MissingInt
+  elif v.get == MissingInt: default
+  else: v.get
 
-proc smallField(x: Ctx, text, field: string, default: int): int =
-  var v: int64
-  x.intField(text, field, default, v)
-  result = if v == MissingInt: default else: int(v)
+proc smallField(x: Ctx, log: var DiagLog, text, field: string, default: int): int =
+  let v = x.intField(log, text, field, default)
+  if v == MissingInt: default else: int(v)
 
-proc nameField(x: Ctx, text, field: string, rev: SpsRevision, name: var string,
-    value: var float64) =
+proc nameField(x: Ctx, log: var DiagLog, text, field: string, rev: SpsRevision,
+    name: var string, value: var float64) =
   ## A line or point: text in 1.0 (numeric value when it is a number), F10.2
   ## in 2.1.
   name = text.strip
-  if rev == sps10:
-    if not parseFortranFloat(text, 0, value): value = NaN
-  else:
-    x.numberField(text, field, 2, rev, value)
+  value = if rev == sps10: parseFortranFloat(text).get(NaN)
+          else: x.numberField(log, text, field, 2, rev)
 
-proc parsePoint(x: Ctx, line: string, rev: SpsRevision): SpsPoint =
+proc parsePoint(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsPoint =
   let cols = pointCols[rev]
   let k = $line[0]
-  result = initSpsPoint(line[0])
-  x.nameField(line.c(cols.line), k & ".line", rev, result.lineName, result.line)
-  x.nameField(line.c(cols.point), k & ".point", rev, result.pointName, result.point)
-  if result.lineName.len == 0: x.problem(sevWarning, dcBadValue, k & ".line", "no line")
-  if result.pointName.len == 0: x.problem(sevWarning, dcBadValue, k & ".point", "no point")
-  result.index = x.smallField(line.c(cols.index), k & ".index", 1)
+  result = initSpsPoint(if line[0] == 'R': pkReceiver else: pkSource)
+  x.nameField(log, line.c(cols.line), k & ".line", rev, result.lineName, result.line)
+  x.nameField(log, line.c(cols.point), k & ".point", rev, result.pointName, result.point)
+  if result.lineName.len == 0: x.problem(log, sevWarning, dcBadValue, k & ".line", "no line")
+  if result.pointName.len == 0: x.problem(log, sevWarning, dcBadValue, k & ".point", "no point")
+  result.index = x.smallField(log, line.c(cols.index), k & ".index", 1)
   result.code = line.c(cols.code).strip
-  x.numberField(line.c(cols.statics), k & ".staticCorrection", 0, rev, result.staticCorrection)
-  x.numberField(line.c(cols.depth), k & ".pointDepth", 1, rev, result.pointDepth)
-  x.numberField(line.c(cols.datum), k & ".seismicDatum", 0, rev, result.seismicDatum)
-  x.numberField(line.c(cols.uphole), k & ".upholeTime", 0, rev, result.upholeTime)
+  result.staticCorrection =
+    x.numberField(log, line.c(cols.statics), k & ".staticCorrection", 0, rev)
+  result.pointDepth = x.numberField(log, line.c(cols.depth), k & ".pointDepth", 1, rev)
+  result.seismicDatum = x.numberField(log, line.c(cols.datum), k & ".seismicDatum", 0, rev)
+  result.upholeTime = x.numberField(log, line.c(cols.uphole), k & ".upholeTime", 0, rev)
   # 1.0 writes water depth as "99.9" or "999" (no implied decimal).
-  x.numberField(line.c(cols.water), k & ".waterDepth", (if rev == sps10: 0 else: 1), rev,
-    result.waterDepth)
-  x.numberField(line.c(eastingCols), k & ".easting", 1, rev, result.easting)
-  x.numberField(line.c(northingCols), k & ".northing", 1, rev, result.northing)
-  x.numberField(line.c(elevationCols), k & ".elevation", 1, rev, result.elevation)
-  result.dayOfYear = x.smallField(line.c(dayCols), k & ".dayOfYear", -1)
+  result.waterDepth = x.numberField(log, line.c(cols.water), k & ".waterDepth",
+    (if rev == sps10: 0 else: 1), rev)
+  result.easting = x.numberField(log, line.c(eastingCols), k & ".easting", 1, rev)
+  result.northing = x.numberField(log, line.c(northingCols), k & ".northing", 1, rev)
+  result.elevation = x.numberField(log, line.c(elevationCols), k & ".elevation", 1, rev)
+  result.dayOfYear = x.smallField(log, line.c(dayCols), k & ".dayOfYear", -1)
   let t = line.col(75, 80)
   if not t.isBlank:
     if t.allCharsInSet(Digits):
@@ -226,46 +238,47 @@ proc parsePoint(x: Ctx, line: string, rev: SpsRevision): SpsPoint =
       result.minute = parseInt(t[2..3])
       result.second = parseInt(t[4..5])
       if result.hour > 23 or result.minute > 59 or result.second > 59:
-        x.problem(sevWarning, dcBadValue, k & ".time", "time out of range: " & t)
+        x.problem(log, sevWarning, dcBadValue, k & ".time", "time out of range: " & t)
     else:
-      x.problem(sevWarning, dcBadValue, k & ".time", "not hhmmss: '" & t & "'")
+      x.problem(log, sevWarning, dcBadValue, k & ".time", "not hhmmss: '" & t & "'")
   if result.index notin 1..9:
-    x.problem(sevWarning, dcBadValue, k & ".index", "point index " & $result.index &
+    x.problem(log, sevWarning, dcBadValue, k & ".index", "point index " & $result.index &
       " is not 1-9")
   if result.easting.isNaN or result.northing.isNaN:
-    x.problem(sevWarning, dcBadValue, k & ".easting", "no coordinates")
+    x.problem(log, sevWarning, dcBadValue, k & ".easting", "no coordinates")
   result.raw = line
 
-proc parseRelation(x: Ctx, line: string, rev: SpsRevision): SpsRelation =
+proc parseRelation(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsRelation =
   let cols = relCols[rev]
   result = initSpsRelation()
   result.fieldTape = line.c(cols.tape).strip
-  x.intField(line.c(cols.rec), "X.fieldRecord", MissingInt, result.fieldRecord)
-  result.recordIncrement = x.smallField(line.c(cols.recInc), "X.recordIncrement", 1)
+  result.fieldRecord = x.intField(log, line.c(cols.rec), "X.fieldRecord", MissingInt)
+  result.recordIncrement = x.smallField(log, line.c(cols.recInc), "X.recordIncrement", 1)
   let ic = line.c(cols.instr)[0]
   result.instrumentCode = if ic == ' ': '1' else: ic
-  x.nameField(line.c(cols.srcLine), "X.srcLine", rev, result.srcLineName, result.srcLine)
-  x.nameField(line.c(cols.srcPoint), "X.srcPoint", rev, result.srcPointName, result.srcPoint)
-  result.srcIndex = x.smallField(line.c(cols.srcIndex), "X.srcIndex", 1)
-  x.intField(line.c(cols.fromCh), "X.fromChannel", MissingInt, result.fromChannel)
-  x.intField(line.c(cols.toCh), "X.toChannel", MissingInt, result.toChannel)
-  result.channelIncrement = x.smallField(line.c(cols.chInc), "X.channelIncrement", 1)
-  x.nameField(line.c(cols.rcvLine), "X.rcvLine", rev, result.rcvLineName, result.rcvLine)
-  x.nameField(line.c(cols.fromRcv), "X.fromReceiver", rev, result.fromReceiverName,
+  x.nameField(log, line.c(cols.srcLine), "X.srcLine", rev, result.srcLineName, result.srcLine)
+  x.nameField(log, line.c(cols.srcPoint), "X.srcPoint", rev, result.srcPointName,
+    result.srcPoint)
+  result.srcIndex = x.smallField(log, line.c(cols.srcIndex), "X.srcIndex", 1)
+  result.fromChannel = x.intField(log, line.c(cols.fromCh), "X.fromChannel", MissingInt)
+  result.toChannel = x.intField(log, line.c(cols.toCh), "X.toChannel", MissingInt)
+  result.channelIncrement = x.smallField(log, line.c(cols.chInc), "X.channelIncrement", 1)
+  x.nameField(log, line.c(cols.rcvLine), "X.rcvLine", rev, result.rcvLineName, result.rcvLine)
+  x.nameField(log, line.c(cols.fromRcv), "X.fromReceiver", rev, result.fromReceiverName,
     result.fromReceiver)
-  x.nameField(line.c(cols.toRcv), "X.toReceiver", rev, result.toReceiverName,
+  x.nameField(log, line.c(cols.toRcv), "X.toReceiver", rev, result.toReceiverName,
     result.toReceiver)
-  result.rcvIndex = x.smallField(line.c(cols.rcvIndex), "X.rcvIndex", 1)
+  result.rcvIndex = x.smallField(log, line.c(cols.rcvIndex), "X.rcvIndex", 1)
   if result.fieldRecord == MissingInt:
-    x.problem(sevWarning, dcBadValue, "X.fieldRecord", "no field record number")
+    x.problem(log, sevWarning, dcBadValue, "X.fieldRecord", "no field record number")
   if result.fromChannel == MissingInt or result.toChannel == MissingInt:
-    x.problem(sevWarning, dcBadValue, "X.fromChannel", "no channel range")
+    x.problem(log, sevWarning, dcBadValue, "X.fromChannel", "no channel range")
   elif result.channelIncrement < 1:
-    x.problem(sevWarning, dcBadValue, "X.channelIncrement", "channel increment " &
+    x.problem(log, sevWarning, dcBadValue, "X.channelIncrement", "channel increment " &
       $result.channelIncrement & " is not 1-9")
   elif result.toChannel < result.fromChannel or
       (result.toChannel - result.fromChannel) mod result.channelIncrement != 0:
-    x.problem(sevWarning, dcInconsistent, "X.toChannel", "channels " & $result.fromChannel &
+    x.problem(log, sevWarning, dcInconsistent, "X.toChannel", "channels " & $result.fromChannel &
       ".." & $result.toChannel & " are not a run with increment " & $result.channelIncrement)
   result.raw = line
 
@@ -297,16 +310,14 @@ func layoutScore(line: string): int =
   result = 0
   case line[0]
   of 'R', 'S':
-    var v: float64
     if line.col(22, 23).isBlank and line.colChar(24) in Digits: inc result
     if line.colChar(26) in Digits and line.colChar(24) notin Digits: dec result
-    if parseFortranFloat(line.col(2, 11), 0, v) and parseFortranFloat(line.col(12, 21), 0, v) and
+    if parseFortranFloat(line.col(2, 11)).isSome and parseFortranFloat(line.col(12, 21)).isSome and
         not line.col(12, 21).isBlank:
       inc result
     else: dec result
   of 'X':
-    var v: float64
-    if parseFortranFloat(line.col(18, 27), 0, v) and parseFortranFloat(line.col(28, 37), 0, v):
+    if parseFortranFloat(line.col(18, 27)).isSome and parseFortranFloat(line.col(28, 37)).isSome:
       inc result
     else: dec result
   else: discard
@@ -342,7 +353,7 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
   result.revision = rev
   result.options = opts
   result.options.revision = rev
-  var x = Ctx(f: result.addr, opts: opts)
+  var x = Ctx(name: name, opts: opts)
   try:
     for r in textRecords(s, result.layout):
       x.rec = r
@@ -350,7 +361,7 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
       if r.index == 0: result.crlf = r.crlf
       result.finalNewline = r.terminated
       if r.cut:
-        x.problem(sevWarning, dcBadValue, "", "line longer than " & $MaxLineBytes &
+        x.problem(result.log, sevWarning, dcBadValue, "", "line longer than " & $MaxLineBytes &
           " bytes; cut into records (is this a text file?)")
       if line.len == 0 or line.isBlank:
         result.order.add SpsEntry(kind: seOther, at: result.others.len)
@@ -362,21 +373,22 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
           result.headers.add parseHeader(line)
         of 'R', 'S':
           result.order.add SpsEntry(kind: sePoint, at: result.points.len)
-          result.points.add x.parsePoint(line, rev)
+          result.points.add x.parsePoint(result.log, line, rev)
         of 'X':
           result.order.add SpsEntry(kind: seRelation, at: result.relations.len)
-          result.relations.add x.parseRelation(line, rev)
+          result.relations.add x.parseRelation(result.log, line, rev)
         of 'C':
           result.order.add SpsEntry(kind: seComment, at: result.comments.len)
           result.comments.add line.substr(1)
         else:
           if not line.startsWith("EOF"):
-            x.problem(sevWarning, dcBadValue, "recordId", "unknown record type '" & line[0] &
-              "'; kept raw")
+            x.problem(result.log, sevWarning, dcBadValue, "recordId", "unknown record type '" &
+              line[0] & "'; kept raw")
           result.order.add SpsEntry(kind: seOther, at: result.others.len)
           result.others.add line
         if line.len > 80:
-          x.problem(sevInfo, dcBadValue, "", "record longer than 80 columns (" & $line.len & ")")
+          x.problem(result.log, sevInfo, dcBadValue, "",
+            "record longer than 80 columns (" & $line.len & ")")
   except IOError, OSError:
     result.log.report(sevFatal, dcIo, getCurrentExceptionMsg(), loc = Location(file: name))
 
@@ -388,14 +400,13 @@ proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
   ## have hemisphere letters in columns 35 and 45. Rewinds `s`.
   let start = s.getPosition
   var sps, p1 = 0
-  var e, n: float64
   for r in textRecords(s, openLayout(s)):
     let t = r.text
     if t.len > 0:
       case t[0]
       of 'R', 'S':
-        if parseFortranFloat(t.col(47, 55), 1, e) and parseFortranFloat(t.col(56, 65), 1, n) and
-            not (e.isNaN or n.isNaN):
+        let (e, n) = (parseFortranFloat(t.col(47, 55), 1), parseFortranFloat(t.col(56, 65), 1))
+        if e.isSome and n.isSome and not (e.get.isNaN or n.get.isNaN):
           inc sps
       of 'X':
         if t.col(39, 48).strip.len > 0 and t.col(39, 48).strip.allCharsInSet(Digits + {' '}):
@@ -434,11 +445,6 @@ func numText(v: float64): string =
   ## A short text for a numeric name: integers without a fraction.
   if v == round(v) and abs(v) < 1e15: $int64(v) else: $v
 
-proc fit(text: string, width: int, field: string): string =
-  if text.len == 0 or text.len > width:
-    raiseFormat(field & ": value does not fit in " & $width & " columns")
-  text
-
 proc fixed(v: float64, width, decimals: int, field: string): string =
   fit(formatFixed(v, width, decimals), width, field)
 
@@ -460,28 +466,30 @@ proc nameText(name: string, v: float64, width: int, rev: SpsRevision, left: bool
     if v.isNaN: raiseFormat(field & ": not numeric ('" & name & "'); Rev 2.1 needs F10.2")
     result = fixed(v, width, 2, field)
   else:
-    var parsed: float64
-    let keep = name.len in 1..width and (v.isNaN or
-      (parseFortranFloat(name, 0, parsed) and parsed == v))
+    let keep = name.len in 1..width and (v.isNaN or parseFortranFloat(name) == some(v))
     let t = if keep: name elif v.isNaN: "" else: numText(v)
     if t.len == 0: raiseFormat(field & ": missing")
     result = fit(t, width, field)
-    result = if left: ljust(result, width) else: rjust(result, width)
+    result = if left: alignLeft(result, width) else: align(result, width)
 
-proc encode*(p: SpsPoint, rev: SpsRevision): string =
+proc checkTarget(rev: SpsRevision) =
+  if rev notin {sps10, sps21}:
+    raise newException(ValueError, "encode for SPS 1.0 or 2.1, not " & $rev)
+
+proc encodeSps*(p: SpsPoint, rev: SpsRevision): string =
   ## The 80-column text of `p` in revision `rev`; raises `SegFormatError`
-  ## when a value does not fit its field.
-  doAssert rev in {sps10, sps21}
+  ## when a value does not fit its field, `ValueError` for `spsAuto`.
+  checkTarget(rev)
   let cols = pointCols[rev]
   let k = $p.kind
   result = repeat(' ', 80)
-  result[0] = p.kind
+  result[0] = k[0]
   result.putCol(cols.line.a, nameText(p.lineName, p.line, cols.line.len, rev, true, k & ".line"))
   result.putCol(cols.point.a, nameText(p.pointName, p.point, cols.point.len, rev, false,
     k & ".point"))
   result.putCol(cols.index.a, digit(p.index, k & ".index"))
   if p.code.len > 2: raiseFormat(k & ".code: more than 2 characters")
-  result.putCol(cols.code.a, ljust(p.code, 2))
+  result.putCol(cols.code.a, alignLeft(p.code, 2))
   result.putCol(cols.statics.a, whole(p.staticCorrection, cols.statics.len,
     k & ".staticCorrection"))
   result.putCol(cols.depth.a, fixed(p.pointDepth, cols.depth.len, 1, k & ".pointDepth"))
@@ -503,14 +511,14 @@ proc encode*(p: SpsPoint, rev: SpsRevision): string =
     result.putCol(75, align($p.hour, 2, '0') & align($p.minute, 2, '0') &
       align($p.second, 2, '0'))
 
-proc encode*(r: SpsRelation, rev: SpsRevision): string =
+proc encodeSps*(r: SpsRelation, rev: SpsRevision): string =
   ## The 80-column text of `r` in revision `rev`; raises `SegFormatError`
-  ## when a value does not fit its field.
-  doAssert rev in {sps10, sps21}
+  ## when a value does not fit its field, `ValueError` for `spsAuto`.
+  checkTarget(rev)
   let cols = relCols[rev]
   result = repeat(' ', 80)
   result[0] = 'X'
-  result.putCol(cols.tape.a, ljust(fit(r.fieldTape & (if r.fieldTape.len == 0: " " else: ""),
+  result.putCol(cols.tape.a, alignLeft(fit(r.fieldTape & (if r.fieldTape.len == 0: " " else: ""),
     cols.tape.len, "X.fieldTape"), cols.tape.len))
   result.putCol(cols.rec.a, fit(formatInt(r.fieldRecord, cols.rec.len), cols.rec.len,
     "X.fieldRecord"))
@@ -534,35 +542,36 @@ proc encode*(r: SpsRelation, rev: SpsRevision): string =
     false, "X.toReceiver"))
   result.putCol(cols.rcvIndex.a, digit(r.rcvIndex, "X.rcvIndex"))
 
-proc encode*(h: SpsHeader): string =
+proc encodeSps*(h: SpsHeader): string =
   ## The text of an H record (data past column 80 is kept).
   if h.code.len == 0 or h.code.len > 3: raiseFormat("H.code: '" & h.code & "' is not 2-3 digits")
-  result = "H" & ljust(h.code, 3)
+  result = "H" & alignLeft(h.code, 3)
   if h.code == "26": result.add h.data
   else:
     if h.description.len > 28: raiseFormat("H" & h.code & ".description: more than 28 columns")
-    result.add ljust(h.description, 28) & h.data
+    result.add alignLeft(h.description, 28) & h.data
 
-proc quietCtx(f: var SpsFile, strict: bool): Ctx =
-  Ctx(f: f.addr, opts: SpsOptions(strictImpliedDecimals: strict))
+func quietCtx(strict: bool): Ctx =
+  # Re-parses a record to compare it; its diagnostics are dropped.
+  Ctx(opts: SpsOptions(strictImpliedDecimals: strict))
 
 proc pointLine(p: SpsPoint, rev, fileRev: SpsRevision, strict: bool): string =
   ## The raw text when `p` is unchanged since it was read (its raw text
   ## parses to the same values), else encoded.
   if p.raw.len > 0 and rev == fileRev and p.raw[0] in {'R', 'S'}:
-    var scratch = SpsFile()
-    if sameValues(quietCtx(scratch, strict).parsePoint(p.raw, rev), p): return p.raw
-  encode(p, rev)
+    var scratch: DiagLog
+    if sameValues(quietCtx(strict).parsePoint(scratch, p.raw, rev), p): return p.raw
+  encodeSps(p, rev)
 
 proc relationLine(r: SpsRelation, rev, fileRev: SpsRevision, strict: bool): string =
   if r.raw.len > 0 and rev == fileRev and r.raw[0] == 'X':
-    var scratch = SpsFile()
-    if sameValues(quietCtx(scratch, strict).parseRelation(r.raw, rev), r): return r.raw
-  encode(r, rev)
+    var scratch: DiagLog
+    if sameValues(quietCtx(strict).parseRelation(scratch, r.raw, rev), r): return r.raw
+  encodeSps(r, rev)
 
 proc headerLine(h: SpsHeader): string =
   if h.raw.len > 0 and h.raw[0] == 'H' and sameValues(parseHeader(h.raw), h): h.raw
-  else: encode(h)
+  else: encodeSps(h)
 
 proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
   ## Writes `f` to `s`: records in file order (`f.order`), then any records
@@ -642,9 +651,8 @@ proc writeSps*(f: SpsFile, path: string, opts = SpsWriteOptions()): DiagLog =
       s.close()
     finishOutput(tmp, path, keep = result.count(sevError) == 0, result)
 
-func spsText*(f: SpsFile, opts = SpsWriteOptions()): (string, DiagLog) =
+proc spsText*(f: SpsFile, opts = SpsWriteOptions()): SurveyText =
   ## `f` written to a string, with the writer's diagnostics.
-  {.cast(noSideEffect).}:
-    let s = newStringStream()
-    let log = writeSps(f, s, opts)
-    (s.data, log)
+  let s = newStringStream()
+  result.log = writeSps(f, s, opts)
+  result.text = s.data

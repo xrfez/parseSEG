@@ -7,6 +7,7 @@
 
 import std/[os, strutils, sequtils, tables, math, streams]
 import ../parseSEG
+import ./common/niftext
 
 const
   Usage = """
@@ -79,10 +80,18 @@ Other
   version | help
 """
 
-type UsageError = object of CatchableError
+type
+  UsageError = object of CatchableError
+    ## The command line is wrong: exit status 2.
+  CommandError = object of CatchableError
+    ## The command cannot run on its input (an unreadable or unrecognized
+    ## file): exit status 1.
 
 proc usage(msg: string) {.noinline, noreturn.} =
   raise newException(UsageError, msg)
+
+proc cannot(msg: string) {.noinline, noreturn.} =
+  raise newException(CommandError, msg)
 
 type Args = object
   pos: seq[string]
@@ -91,8 +100,8 @@ type Args = object
 const ValueOptions = ["o", "out", "journal", "traces", "fields", "rev", "format", "to",
   "byte-order", "text", "min", "map", "name", "sps", "p1", "decimals", "line-map"]
 
-const Flags = ["force", "keys", "all", "nif", "descale", "no-station-header", "fields-only", "dry-run",
-  "help", "h", "elevation", "trailing-digits", "multi-component", "overwrite"]
+const Flags = ["force", "keys", "all", "nif", "descale", "no-station-header", "fields-only",
+  "dry-run", "help", "h", "elevation", "trailing-digits", "multi-component", "overwrite"]
 
 const SurveyOptions = ["sps", "p1", "decimals", "line-map", "elevation", "trailing-digits",
   "multi-component", "overwrite"]
@@ -166,14 +175,14 @@ proc checkInput(path: string) =
     var fh = open(path, fmRead)
     fh.close()
   except IOError:
-    quit("parseSEG: cannot read " & path & " (" & osErrorMsg(osLastError()) & ")", 1)
+    cannot("cannot read " & path & " (" & osErrorMsg(osLastError()) & ")")
 
 proc openFile(path: string, keys = false): SeismicFile =
   checkInput(path)
   result = openSeismic(path, keys = keys)
   if not result.index.detected:
     printLog(result.index.log, sevError)
-    quit("parseSEG: " & path & " is neither SEG-Y nor SEG-D", 1)
+    cannot(path & " is neither SEG-Y nor SEG-D")
 
 proc refuseSame(output, input: string) =
   if output == input or (fileExists(output) and fileExists(input) and sameFile(output, input)):
@@ -213,7 +222,8 @@ proc loadSurvey(a: Args, log: var DiagLog): SurveyGeometry =
       if kv.len != 2 or kv[0].strip.len == 0: usage("--line-map needs NAME=N[,NAME=N...]")
       let v = try: parseFloat(kv[1].strip)
               except ValueError: usage("--line-map: '" & kv[1] & "' is not a number")
-      if v.isNaN or v.classify in {fcInf, fcNegInf}: usage("--line-map: '" & kv[1] & "' is not finite")
+      if v.isNaN or v.classify in {fcInf, fcNegInf}:
+        usage("--line-map: '" & kv[1] & "' is not finite")
       result.mapLine(kv[0], v)
   result.multiComponent = a.has("multi-component")
   let (grid, depth) = parseDecimals(a)
@@ -274,23 +284,17 @@ proc info(a: Args): int =
   echo "traces:      ", f.len, " (up to ", ix.maxSamples, " samples, interval ",
     intervals.mapIt($it & " µs").join(", "), ")"
   if a.has("keys"):
-    var kinds: seq[(GatherKind, int)]
-    for g in ix.gathers:
-      var found = false
-      for k in kinds.mitems:
-        if k[0] == g.kind:
-          inc k[1]
-          found = true
-      if not found: kinds.add (g.kind, 1)
-    echo "gathers:     ", kinds.mapIt($it[1] & " " & $it[0]).join(", ")
+    var kinds: CountTable[GatherKind]
+    for g in ix.gathers: kinds.inc g.kind
+    var parts: seq[string]
+    for k in GatherKind:
+      if k in kinds: parts.add $kinds[k] & " " & $k
+    echo "gathers:     ", parts.join(", ")
   echo "diagnostics: ", ix.log.count(sevFatal), " fatal, ", ix.log.count(sevError), " error, ",
     ix.log.count(sevWarning), " warning, ", ix.log.count(sevInfo), " info"
   printLog(ix.log, sevError)
   printLog(surveyLog, sevWarning)
   if ix.log.failed or surveyLog.failed: 1 else: 0
-
-proc keysCmd(a: Args): int
-proc surveyCmd(a: Args): int
 
 # ------------------------------------------------------------------- dump --
 
@@ -394,8 +398,7 @@ proc sourceKind(path: string): SeismicKind =
   head.setLen fh.readBuffer(addr head[0], head.len)
   fh.close()
   result = detectKind(head.toOpenArrayByte(0, head.len - 1))
-  if result == skUnknown:
-    quit("parseSEG: " & path & " is neither SEG-Y nor SEG-D", 1)
+  if result == skUnknown: cannot(path & " is neither SEG-Y nor SEG-D")
 
 proc parseRev(s: string, minParts, maxParts: int, what: string): (uint8, uint8) =
   let parts = s.split('.')
@@ -584,36 +587,31 @@ proc journal(a: Args): int =
 
 # -------------------------------------------------------------- vendormap --
 
-proc loadRegistry(a: Args, log: var DiagLog): VendorRegistry =
-  var paths = vendorSearchPath()
+proc mapPaths(a: Args): seq[string] =
+  ## The vendor map search path plus every `--map`.
+  result = vendorSearchPath()
   for (k, v) in a.opts:
-    if k == "map": paths.add v
-  result.loadVendorMaps(paths, log)
+    if k == "map": result.add v
 
-func nifStr(s: string): string =
-  ## A NIF string literal (`"`, `\`, control and non-ASCII bytes as `\HH`).
-  result = "\""
-  for c in s:
-    if c in {'"', '\\'} or ord(c) < 0x20 or ord(c) >= 0x7F: result.add "\\" & toHex(ord(c), 2)
-    else: result.add c
-  result.add '"'
+proc loadRegistry(a: Args, log: var DiagLog): VendorRegistry =
+  result.loadVendorMaps(a.mapPaths, log)
 
 func `$`(v: VendorValue): string =
   result = case v.kind
     of vvInt: $v.intVal
     of vvFloat: $v.floatVal
-    of vvText: nifStr(v.text)
+    of vvText: nifString(v.text)
     of vvBytes:
       var h = "\""
       for b in v.bytes: h.add toHex(b, 2)
       h & "\""
-  if v.label.len > 0: result.add " (label " & nifStr(v.label) & ")"
+  if v.label.len > 0: result.add " (label " & nifString(v.label) & ")"
   if v.flags.len > 0: result.add " (flags " & v.flags.join(" ") & ")"
-  if v.unit.len > 0: result.add " (unit " & nifStr(v.unit) & ")"
+  if v.unit.len > 0: result.add " (unit " & nifString(v.unit) & ")"
 
 proc printBlocks(indent: string, blocks: seq[VendorBlock]) =
   for b in blocks:
-    stdout.write indent, "(block ", nifStr(b.mapName), " ", b.name
+    stdout.write indent, "(block ", nifString(b.mapName), " ", b.name
     for f in b.fields: stdout.write "\n", indent, "  (f ", f.name, " ", $f.value, ")"
     stdout.write ")\n"
 
@@ -653,10 +651,7 @@ proc vendormap(a: Args): int =
         ctx = vendorContext(f.index.segy)
         haveCtx = true
     if reg.maps.len == 0:
-      var paths = vendorSearchPath()
-      for (k, v) in a.opts:
-        if k == "map": paths.add v
-      echo "no vendor maps found in: ", paths.join(", ")
+      echo "no vendor maps found in: ", a.mapPaths.join(", ")
     for m in reg.maps:
       echo m.name, " (version ", m.version, ", ", m.targets.len, " targets) ", m.source,
         (if haveCtx: (if m.applies(ctx): "  [matches]" else: "  [does not match]") else: "")
@@ -674,7 +669,7 @@ proc vendormap(a: Args): int =
     let sel = parseSelection(a.get("traces"), n)
     var want = newSeq[bool](n)
     for i in sel: want[i] = true
-    echo "(.nif27)\n(vendor ", nifStr(path.extractFilename)
+    echo "(.nif27)\n(vendor ", nifString(path.extractFilename)
     var src: RecordSource = openDiskSource(path)
     try:
       var k = 0
@@ -721,7 +716,8 @@ proc vendormap(a: Args): int =
     printLog(log, sevWarning)
     let s = scaffoldVendorMap(a.pos[1], reg)
     if s.len == 0:
-      echo "no unmapped vendor areas", (if outPath.len > 0: "; " & outPath & " not written" else: "")
+      echo "no unmapped vendor areas",
+        (if outPath.len > 0: "; " & outPath & " not written" else: "")
     elif outPath.len == 0: stdout.write s.toNif(a.get("name"))
     else:
       writeFile(outPath, s.toNif(a.get("name")))
@@ -756,7 +752,7 @@ proc keysCmd(a: Args): int =
 proc isSps(path: string): bool =
   ## SPS or SEG P1, from the shape of the data records (`looksLikeSps`).
   let s = newFileStream(path, fmRead)
-  if s == nil: quit("parseSEG: cannot read " & path, 1)
+  if s == nil: cannot("cannot read " & path)
   try: looksLikeSps(s)
   finally: s.close()
 
@@ -779,12 +775,13 @@ proc surveyCmd(a: Args): int =
     if a.has("decimals"): usage("--decimals applies to P1 files only")
     let f = readSps(path)
     log.add f.log
-    var kinds: array['A'..'Z', int]
+    var kinds: array[SpsPointKind, int]
     for p in f.points: inc kinds[p.kind]
     echo "file:        ", path
-    echo "standard:    SPS ", f.revision, (if f.revisionDeclared: " (H00)" else: " (from the columns)"),
+    echo "standard:    SPS ", f.revision,
+      (if f.revisionDeclared: " (H00)" else: " (from the columns)"),
       ", ", f.layout, (if f.crlf: ", CR LF" else: "")
-    echo "records:     ", f.headers.len, " H, ", kinds['S'], " S, ", kinds['R'], " R, ",
+    echo "records:     ", f.headers.len, " H, ", kinds[pkSource], " S, ", kinds[pkReceiver], " R, ",
       f.relations.len, " X, ", f.comments.len, " C"
     if output.len > 0:
       log.add writeSps(f, output, SpsWriteOptions(revision: rev))
