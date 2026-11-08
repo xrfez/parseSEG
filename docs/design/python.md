@@ -97,7 +97,9 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 - Handles have `close()` and are context managers. After `close()` any call raises
   `StateError`. A `Prefetcher` keeps its file's map open, as in C.
 - Options are dicts of `ConvertOptions` / `SegdConvertOptions` / `SpsOptions` fields:
-  `convert_file(src, dst, {"revision": (1, 0), "byte_order": "little"})`.
+  `convert_file(src, dst, {"revision": (1, 0), "byte_order": "little"})`. Enum fields take
+  the value's name: `convert_segd_revision(src, dst, {"revision": (2, 1), "format": "8058"})`
+  (`"keep"` is the default).
 - A diagnostic dict holds `severity` ("info", "warning", "error", "fatal"), `code`, `offset`,
   `loc` (`file`, `record`, `channel_set`, `trace`, `block_index`, `field`) and `msg`, as the
   Nim `Diagnostic`.

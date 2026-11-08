@@ -23,7 +23,7 @@ import ./segapi
 export segapi
 
 const
-  AbiVersion* = 3'i32 ## `SEG_ABI_VERSION`; bump on any incompatible C change.
+  AbiVersion* = 4'i32 ## `SEG_ABI_VERSION`; bump on any incompatible C change.
   MaxBufferBytes* = 1'i64 shl 40 ## Largest tensor or prefetch ring the library allocates.
   MaxChunkTraces* = 1 shl 24 ## Largest prefetch chunk.
   MaxDepth* = 1024 ## Most prefetch ring slots.
@@ -150,7 +150,7 @@ proc abiVersion*(): int32 {.segApi(abiOnly).} =
   AbiVersion
 
 proc version*(): string {.segApi(abiOnly).} =
-  ## The package version, e.g. "0.3.0".
+  ## The package version, e.g. "0.4.0".
   PackageVersion
 
 proc statusName*(status: int32): string {.segApi(abiOnly).} =

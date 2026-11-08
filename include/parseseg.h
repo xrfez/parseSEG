@@ -97,7 +97,7 @@ extern "C" {
 
 /* The ABI version this header describes. seg_init() returns the library's
    version; refuse to run if they differ. */
-#define SEG_ABI_VERSION 3
+#define SEG_ABI_VERSION 4
 
 typedef int32_t SegStatus;
 #define SEG_OK            0  /* success */
@@ -182,6 +182,23 @@ const char *seg_last_error(void);
 #define SEG_DIAG_CODE_TAPE_LAYOUT 12
 #define SEG_DIAG_CODE_VALIDATION 13
 
+/* SegdTargetFormat */
+#define SEG_SEGD_TARGET_FORMAT_KEEP 0
+#define SEG_SEGD_TARGET_FORMAT_8015 1
+#define SEG_SEGD_TARGET_FORMAT_8022 2
+#define SEG_SEGD_TARGET_FORMAT_8024 3
+#define SEG_SEGD_TARGET_FORMAT_8036 4
+#define SEG_SEGD_TARGET_FORMAT_8038 5
+#define SEG_SEGD_TARGET_FORMAT_8042 6
+#define SEG_SEGD_TARGET_FORMAT_8044 7
+#define SEG_SEGD_TARGET_FORMAT_8048 8
+#define SEG_SEGD_TARGET_FORMAT_8058 9
+#define SEG_SEGD_TARGET_FORMAT_8080 10
+#define SEG_SEGD_TARGET_FORMAT_9036 11
+#define SEG_SEGD_TARGET_FORMAT_9038 12
+#define SEG_SEGD_TARGET_FORMAT_9058 13
+#define SEG_SEGD_TARGET_FORMAT_9080 14
+
 /* ByteOrder */
 #define SEG_BYTE_ORDER_BIG 0
 #define SEG_BYTE_ORDER_LITTLE 1
@@ -260,9 +277,10 @@ typedef struct SegSegdRevision {
     uint8_t minor;
 } SegSegdRevision;
 
+/* Options of `convertSegdRevision`. */
 typedef struct SegSegdConvertOptions {
     SegSegdRevision revision; /* Target revision: 2.0, 2.1, 3.0 or 3.1. */
-    int64_t format; /* Target sample format code; 0 keeps each record's (8080 becomes 8058 for Rev 2). */
+    int32_t format; /* SEG_SEGD_TARGET_FORMAT_*: Target sample format; `tfKeep` keeps each record's (8080 becomes 8058 before Rev 3, a 90xx format its 80xx twin before Rev 3.1). */
     bool twos_complement8015; /* Decode 8015 as two's complement when re-encoding. */
 } SegSegdConvertOptions;
 
@@ -594,7 +612,7 @@ SegStatus seg_seismic_file_apply_survey(SegSeismicFile *seismic_file, SegSurveyG
 /* The library's ABI version (SEG_ABI_VERSION). */
 SegStatus seg_abi_version(int32_t *out);
 
-/* The package version, e.g. "0.3.0". */
+/* The package version, e.g. "0.4.0". */
 SegStatus seg_version(char *out, int64_t out_cap, int64_t *out_len);
 
 /* The name of a status code ("SEG_OK", "SEG_ERR_IO", ...). */

@@ -553,7 +553,8 @@ static void test_convert(void) {
     seg_seismic_file_release(f);
     SegSegdConvertOptions so;
     seg_init_segd_convert_options(&so);
-    CHECK(so.revision.major == 3 && so.revision.minor == 0 && so.format == 0);
+    CHECK(so.revision.major == 3 && so.revision.minor == 0 &&
+          so.format == SEG_SEGD_TARGET_FORMAT_KEEP);
     so.revision.major = 2;
     so.revision.minor = 1;
     OK(seg_convert_segd_revision(path(tmp, "63_r3.sgd"), path(tmp, "63_r2.sgd"), &so, NULL));
@@ -565,9 +566,12 @@ static void test_convert(void) {
     seg_diag_log_release(slog);
     so.revision.major = 2;
     so.revision.minor = 1;
-    so.format = 8080;
+    so.format = SEG_SEGD_TARGET_FORMAT_8080;
     CHECK(seg_convert_segd_revision(path(dir, "63.sgd"), path(tmp, "x.sgd"), &so, NULL) ==
           SEG_ERR_FORMAT);
+    so.format = 8058; /* a format code is not a SEG_SEGD_TARGET_FORMAT_* value */
+    CHECK(seg_convert_segd_revision(path(dir, "63.sgd"), path(tmp, "x.sgd"), &so, NULL) ==
+          SEG_ERR_ARGUMENT);
     CHECK(seg_convert_segd_revision(NULL, path(tmp, "x.sgd"), NULL, NULL) == SEG_ERR_ARGUMENT);
 }
 
@@ -720,14 +724,14 @@ int main(int argc, char **argv) {
     snprintf(dir, sizeof dir, "%s", argv[1]);
     snprintf(tmp, sizeof tmp, "%s", argv[2]);
     test_concurrent_init();
-    CHECK(seg_init() == SEG_ABI_VERSION && SEG_ABI_VERSION == 3);
+    CHECK(seg_init() == SEG_ABI_VERSION && SEG_ABI_VERSION == 4);
     int32_t abi = 0;
     OK(seg_abi_version(&abi));
     CHECK(abi == SEG_ABI_VERSION);
     char ver[16];
     int64_t len = 0;
     OK(seg_version(ver, sizeof ver, &len));
-    CHECK(strcmp(ver, "0.3.0") == 0 && len == 5);
+    CHECK(strcmp(ver, "0.4.0") == 0 && len == 5);
     test_layout();
     test_files();
     test_reads();

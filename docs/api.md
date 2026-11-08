@@ -138,7 +138,8 @@ patch through the editor, in place or into a copy.
 - `convertSegdRevision(src, dst, SegdConvertOptions(revision, format))` converts SEG-D
   between revisions (Rev 1/2 → 3.0, Rev 3 → 2.0/2.1, within a layout), streaming, with
   samples copied byte for byte; the mapping and what is dropped are in `segd/revconvert.nim`.
-  The stream form takes `scanRecords` (a headers-only pass) for exact sample counts.
+  `format` is a `SegdTargetFormat` (`tfKeep`, or `tf8058` ...; `targetFormat(sd8058)`).
+  The stream form takes `scanSegdRecords` (a headers-only pass) for exact sample counts.
 
 ## Diagnostics
 `DiagLog` (`len`, `[]`, `items`, `count(severity)`, `hasErrors`, `isFatal`, `toNif`, `writeNif`), `Diagnostic`,

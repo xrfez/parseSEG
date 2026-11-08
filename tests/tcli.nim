@@ -100,6 +100,8 @@ block convert:
     fails(2, "convert", s63, tmp / "x.sgd", "--to=segd", "--descale")
   doAssert "--to is segy or segd" in fails(2, "convert", s63, tmp / "x.sgy", "--to=segx")
   discard fails(1, "convert", s63, tmp / "x.sgd", "--to=segd", "--rev=1.0")
+  doAssert "--format: 1234" in fails(2, "convert", s63, tmp / "x.sgd", "--to=segd",
+    "--format=1234")
   discard fails(2, "convert", inglewood, inglewood)
   doAssert "--byte-order is" in fails(2, "convert", inglewood, tmp / "x.sgy", "--byte-order=up")
 

@@ -12,7 +12,7 @@ import os
 import sys
 import threading
 
-_ABI_VERSION = 3
+_ABI_VERSION = 4
 _LIB_NAMES = {"win32": "parseseg.dll", "darwin": "libparseseg.dylib"}
 
 
@@ -323,6 +323,8 @@ _E_Severity = {"info": 0, "warning": 1, "error": 2, "fatal": 3, }
 _N_Severity = {0: "info", 1: "warning", 2: "error", 3: "fatal", }
 _E_DiagCode = {"internal": 0, "io": 1, "truncated": 2, "badValue": 3, "badBcd": 4, "inconsistent": 5, "byteOrder": 6, "unsupportedRevision": 7, "unsupportedFormat": 8, "unknownBlock": 9, "vendorBlock": 10, "vendorMap": 11, "tapeLayout": 12, "validation": 13, }
 _N_DiagCode = {0: "internal", 1: "io", 2: "truncated", 3: "badValue", 4: "badBcd", 5: "inconsistent", 6: "byteOrder", 7: "unsupportedRevision", 8: "unsupportedFormat", 9: "unknownBlock", 10: "vendorBlock", 11: "vendorMap", 12: "tapeLayout", 13: "validation", }
+_E_SegdTargetFormat = {"keep": 0, "8015": 1, "8022": 2, "8024": 3, "8036": 4, "8038": 5, "8042": 6, "8044": 7, "8048": 8, "8058": 9, "8080": 10, "9036": 11, "9038": 12, "9058": 13, "9080": 14, }
+_N_SegdTargetFormat = {0: "keep", 1: "8015", 2: "8022", 3: "8024", 4: "8036", 5: "8038", 6: "8042", 7: "8044", 8: "8048", 9: "8058", 10: "8080", 11: "9036", 12: "9038", 13: "9058", 14: "9080", }
 _E_ByteOrder = {"big": 0, "little": 1, "pairSwapped": 2, }
 _N_ByteOrder = {0: "big", 1: "little", 2: "pairSwapped", }
 _E_TextEncoding = {"ebcdic": 0, "ascii": 1, }
@@ -389,13 +391,14 @@ class SegSegdRevision(ctypes.Structure):
 
 
 class SegSegdConvertOptions(ctypes.Structure):
+    """Options of `convertSegdRevision`."""
     _fields_ = [
         ("revision", SegSegdRevision),
-        ("format", ctypes.c_int64),
+        ("format", ctypes.c_int32),
         ("twos_complement8015", ctypes.c_bool),
     ]
-    _out = (("revision", lambda _v: _struct_dict(_v)), ("format", lambda _v: _v), ("twos_complement8015", lambda _v: _v), )
-    _in = {"revision": lambda _x, _n: _struct_arg(SegSegdRevision, _x, _n), "format": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "twos_complement8015": lambda _x, _n: bool(_x), }
+    _out = (("revision", lambda _v: _struct_dict(_v)), ("format", lambda _v: _N_SegdTargetFormat.get(_v, _v)), ("twos_complement8015", lambda _v: _v), )
+    _in = {"revision": lambda _x, _n: _struct_arg(SegSegdRevision, _x, _n), "format": lambda _x, _n: _enum(_E_SegdTargetFormat, _x, _n), "twos_complement8015": lambda _x, _n: bool(_x), }
     _defaults = {}
 
 
@@ -522,7 +525,7 @@ class SegPrefetchChunk(ctypes.Structure):
     _in = {}
     _defaults = {}
 SegSegdRevision._defaults = {"major": 0, "minor": 0}
-SegSegdConvertOptions._defaults = {"revision": {"major": 3, "minor": 0}, "format": 0, "twos_complement8015": False}
+SegSegdConvertOptions._defaults = {"revision": {"major": 3, "minor": 0}, "format": "keep", "twos_complement8015": False}
 SegSegyRevision._defaults = {"major": 0, "minor": 0}
 SegConvertOptions._defaults = {"revision": {"major": 2, "minor": 1}, "byte_order": "big", "format": 0, "text_encoding": "ebcdic", "apply_descale": False, "station_header": True}
 SegSpsOptions._defaults = {"revision": "auto", "strict_implied_decimals": False, "layout": "lines", "force_layout": False}
@@ -1683,7 +1686,7 @@ def abi_version():
     return _o.value
 
 def version():
-    """The package version, e.g. "0.3.0"."""
+    """The package version, e.g. "0.4.0"."""
     return _text(lambda _b, _c, _n: _call(_lib.seg_version, _b, _c, _n))
 
 def status_name(status):

@@ -17,4 +17,4 @@ proc nimbleVersion(): string {.compileTime.} =
   "unknown"
 
 const PackageVersion* = when NimblePkgVersion.len > 0: NimblePkgVersion else: nimbleVersion()
-  ## The package version, e.g. "0.3.0".
+  ## The package version, e.g. "0.4.0".

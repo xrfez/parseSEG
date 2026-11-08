@@ -358,7 +358,7 @@ block rev3_8080_to_rev2_and_format_changes:
   # An explicit format: Rev 3 8058 → 3.0 8038, sizes recomputed.
   toDisk(makeRev3(sd8058, [1.0, -2.0, 300.0, 4.0, 5.0]), tmp / "f32.sgd")
   var o = rev(3, 0)
-  o.format = 8038
+  o.format = tf8038
   log = convertSegdRevision(tmp / "f32.sgd", tmp / "i32.sgd", o)
   doAssert log.clean, $log
   let i32 = readSegd(tmp / "i32.sgd")
@@ -372,7 +372,7 @@ block rev31_target_and_little_endian_formats:
   # INOVA 3.0 -> 3.1 in 9058 (little-endian) -> 3.0 (back to 8058).
   let src = exampleDir / "inova_rev30_5traces.sgd"
   var o = rev(3, 1)
-  o.format = 9058
+  o.format = tf9058
   var log = convertSegdRevision(src, tmp / "inova31.sgd", o)
   doAssert not log.isFatal and log.count(sevError) == 0, $log
   let d = readSegd(tmp / "inova31.sgd")
@@ -396,7 +396,7 @@ block rev31_target_and_little_endian_formats:
     g.close()
   # 90xx has no code before 3.1: refused as an explicit target format.
   o = rev(3, 0)
-  o.format = 9058
+  o.format = tf9058
   doAssert convertSegdRevision(src, tmp / "x.sgd", o).isFatal
   # 9058 to Rev 2.1 becomes 8058.
   log = convertSegdRevision(tmp / "inova31.sgd", tmp / "inova21.sgd", rev(2, 1))
@@ -435,11 +435,10 @@ block invalid_requests:
     let log = convertSegdRevision(exampleDir / "63.sgd", tmp / "x.sgd", rev(ma, mi))
     doAssert log.isFatal and log.has("is not 2.0, 2.1, 3.0 or 3.1", sevFatal)
   var o = rev(2, 1)
-  o.format = 8080
+  o.format = tf8080
   doAssert convertSegdRevision(exampleDir / "63.sgd", tmp / "x.sgd", o).has(
     "8080 is not defined in Rev 2.1", sevFatal)
-  o.format = 1234
-  doAssert convertSegdRevision(exampleDir / "63.sgd", tmp / "x.sgd", o).isFatal
+  doAssert targetFormat(sd8080) == tf8080 and $tf9036 == "9036"
   copyFile(exampleDir / "63.sgd", tmp / "same.sgd")
   doAssert convertSegdRevision(tmp / "same.sgd", tmp / "same.sgd", rev(3, 0)).has(
     "the output is the input file", sevFatal)
@@ -473,7 +472,7 @@ block review_trailers_within_a_layout:
   r3.records[0].record.trailerRev3[40] = byte('x')
   computeRev3Sizes(r3.records[0].record, r3.records[0].traces)
   toDisk(r3, tmp / "tr3.sgd")
-  for fmt in [0, 8038]:
+  for fmt in [tfKeep, tf8038]:
     var o = rev(3, 0)
     o.format = fmt
     log = convertSegdRevision(tmp / "tr3.sgd", tmp / "tr3b.sgd", o)
@@ -566,7 +565,7 @@ block review_nan_filters_and_zeroed_traces:
   doAssert not log.isFatal and log.has("filter frequencies"), $log
   toDisk(makeRev3(sd8058, [1.0, 1e12, 3.0]), tmp / "big.sgd")
   var o = rev(3, 0)
-  o.format = 8036
+  o.format = tf8036
   log = convertSegdRevision(tmp / "big.sgd", tmp / "big36.sgd", o)
   doAssert log.has("written as zeros", sevError), $log
 

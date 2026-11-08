@@ -53,7 +53,7 @@ def fresh(name):
 
 
 # ------------------------------------------------------------- the module --
-assert parseseg.version() == "0.3.0" and parseseg.abi_version() == 3
+assert parseseg.version() == "0.4.0" and parseseg.abi_version() == 4
 assert "SEG-Y" in parseseg.__doc__
 assert parseseg.status_name(-2) == "SEG_ERR_IO"
 # Exception classes exist before any error, with their documented bases.
@@ -380,7 +380,9 @@ err = raises(parseseg.FormatError, parseseg.convert_segd_revision, S63, dst,
              {"revision": (1, 0)})
 assert err.diagnostics[-1]["severity"] == "fatal"
 raises(parseseg.FormatError, parseseg.convert_segd_revision, S63, dst,
-       {"revision": (2, 1), "format": 8080})
+       {"revision": (2, 1), "format": "8080"})
+raises(parseseg.ArgumentError, parseseg.convert_segd_revision, S63, dst,
+       {"format": 8080})                                 # a name, not a code
 
 # ---------------------------------------------------------- object hygiene --
 # Objects made directly from their classes are empty, not crashes.

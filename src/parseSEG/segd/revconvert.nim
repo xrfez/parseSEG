@@ -56,20 +56,29 @@
 import std/[math, strutils]
 import ../common/[errors, diagnostics, endians, outputfile]
 import ../io/[records, diskio]
-import ./[headers, samples, reader, writer, rev3]
+import ./[headers, samples, reader, writer]
 import ../abi/pragmas
 
 type
+  SegdTargetFormat* = enum
+    ## The sample format `convertSegdRevision` writes.
+    tfKeep = "keep" ## Each record's own (8080 becomes 8058 before Rev 3, 90xx its 80xx twin
+                    ## before Rev 3.1).
+    tf8015 = "8015", tf8022 = "8022", tf8024 = "8024", tf8036 = "8036", tf8038 = "8038",
+    tf8042 = "8042", tf8044 = "8044", tf8048 = "8048", tf8058 = "8058", tf8080 = "8080",
+    tf9036 = "9036", tf9038 = "9038", tf9058 = "9058", tf9080 = "9080"
+
   SegdConvertOptions* = object
+    ## Options of `convertSegdRevision`.
     revision*: SegdRevision = SegdRevision(major: 3, minor: 0)
       ## Target revision: 2.0, 2.1, 3.0 or 3.1.
-    format*: int = 0
-      ## Target sample format code; 0 keeps each record's (8080 becomes 8058
-      ## for Rev 2).
+    format*: SegdTargetFormat = tfKeep
+      ## Target sample format; `tfKeep` keeps each record's (8080 becomes 8058
+      ## before Rev 3, a 90xx format its 80xx twin before Rev 3.1).
     twosComplement8015*: bool = false ## Decode 8015 as two's complement when re-encoding.
 
-  RecordScan* = object
-    ## What a record's headers do not say exactly (see `scanRecords`).
+  SegdRecordScan* = object
+    ## What a record's headers do not say exactly (see `scanSegdRecords`).
     setSamples*: seq[seq[int]]
       ## Samples per trace of each channel set, `[scan type][set]`: the
       ## longest trace (-1 when the set has no trace).
@@ -78,12 +87,39 @@ type
     orphans*: int
       ## Traces naming a channel set no descriptor has (the record is skipped).
 
-  SkipRecord = object of CatchableError
+  SkipRecordError = object of CatchableError
     ## The record cannot be represented in the target revision.
+
+  RevisionNote = enum
+    ## Kinds of information a conversion drops or approximates; each is noted once.
+    rnIntervalRounded     ## Rev 3 target: sample intervals rounded to whole µs.
+    rnTrailerWrapped      ## Rev 3 target: the Rev 2 trailer carried as a user group.
+    rnNoTimeZero          ## Rev 3 target: no GH#1 date, so relative time mode.
+    rnTimeZeroFromGh1     ## Rev 3 target: GH#3 time zero from GH#1.
+    rnExtensionsDropped   ## Rev 3 target: Rev 2 trace header extensions after #1.
+    rnExtensionsOver15    ## Rev 2 target: trace header blocks after the 15th.
+    rnRev3TrailerDropped  ## Rev 2 target: a Rev 3 general trailer.
+    rnExt1FieldsDropped   ## Rev 2 target: THE#1 fields Rev 2 lacks.
+    rnBlocksKeptRaw       ## Rev 2 target: Rev 3 trace header blocks kept as raw extensions.
+    rnSourceFieldsDropped ## Rev 2 target: Source Description fields Rev 2 lacks.
+    rnChannelTypeApprox   ## Rev 2 target: channel types without a Rev 2 code.
+    rnTimesRounded        ## Rev 2 target: start/end times rounded to 2 ms.
+    rnDescaleApprox       ## Rev 2 target: descale multipliers as MP factors.
+    rnFiltersRounded      ## Rev 2 target: filter values rounded to BCD units.
+    rnCsdFieldsDropped    ## Rev 2 target: CSD fields Rev 2 lacks.
+    rnSourcesOver14       ## Rev 2 target: source headers after the 14th.
+    rnGh3Dropped          ## Rev 2 target: General Header #3.
+    rnRecordSetDropped    ## Rev 2.0 target: the record set (line sequence) number.
+    rnRecordLengthRounded ## Rev 2 target: record lengths rounded to whole ms.
+    rnCrsNotConverted     ## 3.1 to 3.0: the CRS text is not converted.
+    rnCountsFromTimes     ## Rev 3 target without a scan: sample counts from the CSD times.
+    rnUndefinedChannelType ## Rev 3 target: undefined Rev 2 channel types.
+    rnRecordLengthClamped ## Rev 3 target: record lengths over 4294 s.
+    rnRev0StackArray      ## Rev 0 source: vertical stack and array forming set to 1.
 
   Conv = object
     log: DiagLog
-    seen: set[0..63]
+    seen: set[RevisionNote]
     droppedTypes: set[uint8]
     loc: Location
     opts: SegdConvertOptions
@@ -95,20 +131,34 @@ const
   WrapDescription = "SEG-D REV2 TRLR " ## Trailer group holding a Rev 2 trailer.
   WrapType = 0xA0'u8
 
-proc note(c: var Conv, id: int, msg: string) =
-  if id notin c.seen:
-    c.seen.incl id
+static:
+  # `SegdTargetFormat` lists `segdSampleFormats` in order, after `tfKeep`.
+  for i, f in segdSampleFormats: doAssert $SegdTargetFormat(i + 1) == $ord(f)
+
+func sampleFormat(t: SegdTargetFormat): SegdSampleFormat =
+  # The sample format of a target other than `tfKeep`.
+  segdSampleFormats[ord(t) - 1]
+
+func targetFormat*(f: SegdSampleFormat): SegdTargetFormat =
+  ## The target format that writes `f`.
+  for i, x in segdSampleFormats:
+    if x == f: return SegdTargetFormat(i + 1)
+  tfKeep # not reached: every format has a target
+
+proc note(c: var Conv, kind: RevisionNote, msg: string) =
+  if kind notin c.seen:
+    c.seen.incl kind
     c.log.report(sevInfo, dcValidation, msg, loc = c.loc)
 
 proc skipRecord(msg: string) {.noinline, noreturn.} =
-  raise newException(SkipRecord, msg)
+  raise newException(SkipRecordError, msg)
 
 func validTarget(r: SegdRevision): bool =
   (r.major == 2 and r.minor in {0'u8, 1}) or (r.major == 3 and r.minor in {0'u8, 1})
 
 func definedIn(f: SegdSampleFormat, r: SegdRevision): bool =
   ## Whether format `f` exists in revision `r` (8080 from 3.0, 90xx from 3.1).
-  if f.isLittleEndian: r.major > 3 or (r.major == 3 and r.minor >= 1)
+  if f.isLittleEndian: SegdRevision(major: 3, minor: 1) <= r
   elif f == sd8080: r.major >= 3
   else: true
 
@@ -117,52 +167,46 @@ func bcd(x: int): int {.inline.} = max(x, 0) # BcdAllF / BcdInvalid count as 0
 func rev3ChannelType(t: uint8): uint8 =
   if t == 0xC: 0xA0'u8 elif t <= 9: t shl 4 else: 0x70'u8
 
-func rev2ChannelType(t: uint8, exact: var bool): uint8 =
-  exact = true
+func rev2ChannelType(t: uint8): tuple[code: uint8, exact: bool] =
   case t
-  of 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90: t shr 4
-  of 0xA0: 0xC'u8
-  else:
-    exact = false
-    case t
-    of 0x21, 0x22: 0x2'u8      # clock / field time break
-    of 0x61..0x63: 0x6'u8      # acoustic measurements: external data
-    of 0x91: 0x8'u8            # source signature, unfiltered
-    of 0x92: 0x9'u8            # source signature, filtered
-    else: 0x7'u8               # other
+  of 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90: (t shr 4, true)
+  of 0xA0: (0xC'u8, true)
+  of 0x21, 0x22: (0x2'u8, false) # clock / field time break
+  of 0x61..0x63: (0x6'u8, false) # acoustic measurements: external data
+  of 0x91: (0x8'u8, false)       # source signature, unfiltered
+  of 0x92: (0x9'u8, false)       # source signature, filtered
+  else: (0x7'u8, false)          # other
 
-proc outFormat(c: var Conv, f: SegdSampleFormat): SegdSampleFormat =
-  if c.opts.format != 0: result = toSegdFormat(c.opts.format).get # checked up front
-  else:
-    result = f
-    if not result.definedIn(c.opts.revision): result = bigEndianOf(result) # 90xx before 3.1
-    if not result.definedIn(c.opts.revision): result = sd8058              # 8080 before 3.0
+func outFormat(c: Conv, f: SegdSampleFormat): SegdSampleFormat =
+  if c.opts.format != tfKeep: return c.opts.format.sampleFormat # checked up front
+  result = f
+  if not result.definedIn(c.opts.revision): result = bigEndianOf(result) # 90xx before 3.1
+  if not result.definedIn(c.opts.revision): result = sd8058              # 8080 before 3.0
 
-proc samplesFor(c: var Conv, src: seq[byte], nIn, nOut: int, fIn, fOut: SegdSampleFormat):
-    seq[byte] =
+proc samplesFor(c: var Conv, src: openArray[byte], nIn, nOut: int,
+    fIn, fOut: SegdSampleFormat): seq[byte] =
   ## The trace's samples in `fOut`, cut or zero-padded to `nOut` samples.
+  result = newSeq[byte](dataBytes(fOut, nOut))
   if fIn == fOut and (fIn != sd8015 or nIn == nOut):
     let keep = min(dataBytes(fIn, min(nIn, nOut)), src.len)
-    result = newSeq[byte](dataBytes(fOut, nOut))
     if keep > 0: copyMem(addr result[0], addr src[0], keep)
-  else:
-    var v = newSeq[float64](nIn)
-    decodeSegdSamples(fIn, src, v, c.opts.twosComplement8015)
-    v.setLen nOut
-    result = newSeq[byte](dataBytes(fOut, nOut))
-    try:
-      encodeSegdSamples(fOut, v, result)
-    except SegFormatError:
-      # A value out of the target's range: the trace is zeroed, and counted.
-      for b in result.mitems: b = 0
-      inc c.zeroed
+    return
+  var v = newSeq[float64](nIn)
+  decodeSegdSamples(fIn, src, v, c.opts.twosComplement8015)
+  v.setLen nOut
+  try:
+    encodeSegdSamples(fOut, v, result)
+  except SegFormatError:
+    # A value out of the target's range: the trace is zeroed, and counted.
+    for b in result.mitems: b = 0
+    inc c.zeroed
+    return
+  var back = newSeq[float64](nOut)
+  decodeSegdSamples(fOut, result, back)
+  for i in 0..<nOut:
+    if back[i] != v[i] and not (back[i].isNaN and v[i].isNaN):
+      inc c.inexact
       return
-    var back = newSeq[float64](nOut)
-    decodeSegdSamples(fOut, result, back)
-    for i in 0..<nOut:
-      if back[i] != v[i] and not (back[i].isNaN and v[i].isNaN):
-        inc c.inexact
-        break
 
 # ------------------------------------------------------- Rev 1/2 to Rev 3 --
 
@@ -183,49 +227,57 @@ proc fromRev0(c: var Conv, d: var SegdChannelSetDescriptor) =
   ## stack (0 = intentionally zeroed data) and array forming (0 = undefined):
   ## write "no stack" and "no array forming" (1) instead.
   if d.verticalStack == 0 or d.arrayForming == 0:
-    c.note(34, "Rev 0 channel sets have no vertical stack or array forming; written as 1 " &
-      "(no stacking, no array forming)")
+    c.note(rnRev0StackArray, "Rev 0 channel sets have no vertical stack or array forming; " &
+      "written as 1 (no stacking, no array forming)")
     if d.verticalStack == 0: d.verticalStack = 1
     if d.arrayForming == 0: d.arrayForming = 1
 
-proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
-    ns: var int): SegdChannelSetDescriptorRev3 =
+func timeSamples(d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1): int =
+  # Samples per trace from the descriptor's times: (end - start) / interval.
   let si = d.sampleIntervalMs(g1)
-  let siUs = si * 1000.0
+  if si > 0: max(0, int(round((d.endTimeMs - d.startTimeMs) / si))) else: 0
+
+proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
+    samples: int): SegdChannelSetDescriptorRev3 =
+  ## The Rev 3 descriptor of `d`, with `samples` samples per trace.
+  let siUs = d.sampleIntervalMs(g1) * 1000.0
   if siUs != round(siUs):
-    c.note(1, "a sample interval of " & $siUs & " µs is rounded to whole µs (Rev 3 CSD)")
-  ns = if si > 0: max(0, int(round((d.endTimeMs - d.startTimeMs) / si))) else: 0
+    c.note(rnIntervalRounded, "a sample interval of " & $siUs &
+      " µs is rounded to whole µs (Rev 3 CSD)")
   result = SegdChannelSetDescriptorRev3(scanTypeNumber: bcd(d.scanTypeNumber),
     channelSetNumber: uint16(max(0, headers.channelSetNumber(d))), # resolves FF + extended
     channelType: rev3ChannelType(d.channelType),
     startTime: int32(round(d.startTimeMs * 1000)), endTime: int32(round(d.endTimeMs * 1000)),
-    numSamples: uint32(max(0, ns)), descaleMultiplier: float32(pow(2.0, d.mpFactor)),
+    numSamples: uint32(samples), descaleMultiplier: float32(pow(2.0, d.mpFactor)),
     channelsInSet: uint32(bcd(d.channelCount)), samplingInterval: uint32(round(siUs)),
     arrayForming: d.arrayForming, traceHeaderExtensions: 1,
     extendedHeaderFlag: d.extendedHeaderFlag, channelGainControl: d.gainControl,
-    verticalStack: d.verticalStack, streamerNumber: d.streamerNumber, blockType1: BlockTypeChannelSet1,
+    verticalStack: d.verticalStack, streamerNumber: d.streamerNumber,
+    blockType1: BlockTypeChannelSet1,
     aliasFilterFreq: float32(bcd(d.aliasFilterFreq)),
     lowCutFilterFreq: float32(bcd(d.lowCutFreq)),
     aliasFilterSlope: float32(bcd(d.aliasFilterSlope)),
     lowCutFilterSlope: float32(bcd(d.lowCutSlope)),
     notch1Freq: float32(bcd(d.notch1Freq)) / 10, notch2Freq: float32(bcd(d.notch2Freq)) / 10,
-    notch3Freq: float32(bcd(d.notch3Freq)) / 10, blockType2: BlockTypeChannelSet2, blockType3: BlockTypeChannelSet3)
+    notch3Freq: float32(bcd(d.notch3Freq)) / 10, blockType2: BlockTypeChannelSet2,
+    blockType3: BlockTypeChannelSet3)
   for i in 0..<result.description.len: result.description[i] = ' '
   if d.channelType notin {0'u8..9'u8, 0xC'u8}:
-    c.note(32, "undefined Rev 2 channel types (0xA, 0xB, 0xD-0xF) are written as 0x70 (other)")
+    c.note(rnUndefinedChannelType, "undefined Rev 2 channel types (0xA, 0xB, 0xD-0xF) are " &
+      "written as 0x70 (other)")
 
-proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, scan: RecordScan,
-    setSamples: var seq[seq[int]]): SegdRecord =
-  ## The Rev 3 record headers for Rev 1/2 `rec`; `setSamples[st][cs]` gets
-  ## each channel set's sample count: `known` (from the traces) where it has
-  ## one, else from the descriptor. The trailer is a placeholder of the right
-  ## size (filled once the traces are read).
+proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
+    scan: SegdRecordScan): SegdRecord =
+  ## The Rev 3 record headers for Rev 1/2 `rec`. Each channel set's sample
+  ## count (`numSamples`) is the scan's (from the traces) where it has one,
+  ## else from the descriptor's times. The trailer is a placeholder of the
+  ## right size (filled once the traces are read).
   result = SegdRecord(layout: slRev3, index: rec.index, format: some(fOut),
     revision: SegdRevision(major: 3, minor: c.opts.revision.minor))
   var g1 = rec.gh1
   g1.formatCode = ord(fOut)
   for g in rec.sourceHeaders: result.generalBlocks.add sourceFromGhn(g)
-  let after = 2 + result.generalBlocks.len div 32 # GH#2, GH#3, sources
+  let after = 2 + result.generalBlocks.len div SegdBlockSize # GH#2, GH#3, sources
   var g2 = SegdGeneralHeader2Rev3(revisionMajor: 3, revisionMinor: c.opts.revision.minor,
     blockType: BlockTypeGeneralHeader2)
   if after > 14:
@@ -241,55 +293,52 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, scan: RecordSc
     g2.extExternalHeaderBlocks = uint32(o.extExternalHeaderBlocks)
     let us = uint64(o.extRecordLength) * 1000 # ms to µs
     if us > uint64(high(uint32)):
-      c.note(33, "record lengths over 4294 s do not fit Rev 3's µs field and are clamped")
+      c.note(rnRecordLengthClamped, "record lengths over 4294 s do not fit Rev 3's µs field " &
+        "and are clamped")
     g2.extRecordLength = uint32(min(us, uint64(high(uint32))))
-    if rec.revision.major == 2 and rec.revision.minor >= 1:
+    if SegdRevision(major: 2, minor: 1) <= rec.revision:
       g2.recordSetNumber = o.lineSequenceNumber
   # The trailer is read after the traces; GH#2 announces its size.
   let n2 = if rec.gh2.isSome: int(rec.gh2.get.generalTrailerBlocks) else: 0
   g2.generalTrailerBlocks = uint32(if n2 > 0: n2 + 1 else: 0)
-  if n2 > 0: c.note(2, "the Rev 2 general trailer is carried as one user trailer group " &
-    "(0xA0, \"" & WrapDescription.strip & "\")")
+  if n2 > 0:
+    c.note(rnTrailerWrapped, "the Rev 2 general trailer is carried as one user trailer " &
+      "group (0xA0, \"" & WrapDescription.strip & "\")")
   var g3 = SegdGeneralHeader3(blockType: BlockTypeGeneralHeader3)
   let utc = generalHeaderUtc(g1, if g1.year < 80: 2000 else: 1900)
   if utc.isNaN:
     g3.relativeTimeMode = 1
-    c.note(3, "General Header #1 has no valid date and time: GH#3 time zero is 0 " &
+    c.note(rnNoTimeZero, "General Header #1 has no valid date and time: GH#3 time zero is 0 " &
       "(relative time mode)")
   else:
     g3.timeZero = unixToTimestamp(utc)
-    c.note(4, "GH#3 time zero comes from General Header #1 (whole seconds, UTC)")
-  setSamples.setLen rec.scanTypes.len
+    c.note(rnTimeZeroFromGh1, "GH#3 time zero comes from General Header #1 (whole seconds, UTC)")
   for i, st in rec.scanTypes:
     var s3 = SegdScanType(layout: slRev3, skew: st.skew)
     for k, d in st.descriptors:
-      var ns: int
       var d = d
       if rec.gh2.isNone: c.fromRev0(d)
-      var d3 = c.csdToRev3(d, rec.gh1, ns)
-      if i < scan.setSamples.len and k < scan.setSamples[i].len and
-          scan.setSamples[i][k] >= 0:
+      var ns = timeSamples(d, rec.gh1)
+      if i < scan.setSamples.len and k < scan.setSamples[i].len and scan.setSamples[i][k] >= 0:
         ns = scan.setSamples[i][k]
-        d3.numSamples = uint32(ns)
       elif d.channelCount > 0:
-        c.note(31, "without a header scan, channel set sample counts come from the " &
-          "descriptors' times ((end - start) / interval); traces that differ are adjusted")
-      s3.descriptorsRev3.add d3
-      setSamples[i].add ns
+        c.note(rnCountsFromTimes, "without a header scan, channel set sample counts come " &
+          "from the descriptors' times ((end - start) / interval); traces that differ are " &
+          "adjusted")
+      s3.descriptorsRev3.add c.csdToRev3(d, rec.gh1, ns)
     result.scanTypes.add s3
   result.gh1 = g1
   result.gh2Rev3 = g2
   result.extended = rec.extended
   result.external = rec.external
-  result.trailerRev3 = newSeq[byte](if n2 > 0: 32 * (n2 + 1) else: 0)
+  result.trailerRev3 = newSeq[byte](if n2 > 0: SegdBlockSize * (n2 + 1) else: 0)
+  result.traceCount = result.announcedTraces
   # Sizes: every trace of a set has the set's sample count and THE#1 only.
   let header = result.headerBytes
   var data = header
-  for i, st in result.scanTypes:
-    for k, d in st.descriptorsRev3:
-      result.traceCount += int(d.channelsInSet)
-      data += int64(d.channelsInSet) *
-        int64(SegdTraceHeaderSize + SegdBlockSize + dataBytes(fOut, setSamples[i][k]))
+  for st in result.scanTypes:
+    for d in st.descriptorsRev3:
+      data += int64(d.channelsInSet) * int64(traceBytes(d, dataBytes(fOut, int(d.numSamples))))
   g3.headerSize = uint32(header)
   g3.dataSize = uint64(data)
   g3.recordSize = uint64(data + result.trailerRev3.len)
@@ -309,7 +358,7 @@ proc traceToRev3(c: var Conv, t: SegdTrace, fIn, fOut: SegdSampleFormat, ns: int
   result.header.traceHeaderExtensions = 1
   var e = SegdTraceHeaderExt1Rev3(numSamples: uint32(ns), blockType: BlockTypeTraceHeaderExt1)
   if t.ext1.isSome:
-    let o = t.ext1.get
+    template o: untyped = t.ext1.get
     e.receiverLineNumber = o.receiverLineNumber
     e.receiverPointNumber = o.receiverPointNumber
     e.receiverPointIndex = o.receiverPointIndex
@@ -318,8 +367,8 @@ proc traceToRev3(c: var Conv, t: SegdTrace, fIn, fOut: SegdSampleFormat, ns: int
     e.sensorType = o.sensorType
   result.ext1Rev3 = some(e)
   if t.extensions.len > 0:
-    c.note(5, "trace header extensions after #1 are dropped (Rev 2 blocks have no type " &
-      "byte, so Rev 3 readers would misread them)")
+    c.note(rnExtensionsDropped, "trace header extensions after #1 are dropped (Rev 2 blocks " &
+      "have no type byte, so Rev 3 readers would misread them)")
   if t.numSamples != ns: inc c.adjusted
   result.samples = c.samplesFor(t.samples, t.numSamples, ns, fIn, fOut)
 
@@ -338,15 +387,15 @@ proc ghnFromSource(c: var Conv, b: openArray[byte], n: int): SegdGeneralHeaderN 
   if s.sourceId != 0 or s.reshootIndex != 0 or s.groupIndex != 0 or s.depthIndex != 0 or
       s.offsetCrossline != 0 or s.offsetInline != 0 or s.offsetDepth != 0 or
       (s.blockType != 0x15 and (s.depth != 0 or s.size != 0)):
-    c.note(10, "Source Description fields Rev 2 lacks (source id, reshoot/group/depth " &
-      "index, offsets, type-specific values) are dropped")
+    c.note(rnSourceFieldsDropped, "Source Description fields Rev 2 lacks (source id, " &
+      "reshoot/group/depth index, offsets, type-specific values) are dropped")
 
 proc toBcdUnits(c: var Conv, v: float32, scale: float64, digits: int): int =
   ## `v × scale` as a BCD field of `digits` digits (rounded and clamped, noted).
   let x = if v.isNaN: -1.0 else: round(float64(v) * scale) # NaN: noted, written as 0
   let top = float64(10 ^ digits - 1)
   if x != float64(v) * scale or x < 0 or x > top:
-    c.note(14, "filter frequencies and slopes are rounded to Rev 2's BCD units")
+    c.note(rnFiltersRounded, "filter frequencies and slopes are rounded to Rev 2's BCD units")
   int(clamp(x, 0, top))
 
 proc csdToRev2(c: var Conv, d: SegdChannelSetDescriptorRev3, bsiUs: float64,
@@ -363,17 +412,16 @@ proc csdToRev2(c: var Conv, d: SegdChannelSetDescriptorRev3, bsiUs: float64,
   if d.channelsInSet > 0 and (k != round(k) or k < 0 or k > 9):
     skipRecord("channel set " & $d.channelSetNumber & ": a sample interval of " &
       $d.samplingInterval & " µs is not the base scan interval (" & $bsiUs & " µs) / 2^k")
-  var exact = true
+  let channelType = rev2ChannelType(d.channelType)
   result = SegdChannelSetDescriptor(scanTypeNumber: d.scanTypeNumber,
-    channelCount: int(d.channelsInSet),
-    channelType: rev2ChannelType(d.channelType, exact),
+    channelCount: int(d.channelsInSet), channelType: channelType.code,
     subscanExponent: (if k >= 0 and k <= 9: int(k) else: 0),
     gainControl: d.channelGainControl, extendedHeaderFlag: d.extendedHeaderFlag,
     traceHeaderExtensions: the, verticalStack: d.verticalStack,
     streamerNumber: d.streamerNumber, arrayForming: d.arrayForming)
-  if not exact:
-    c.note(11, "Rev 3 channel types without a Rev 2 code are approximated (time break, " &
-      "external data, signature or other)")
+  if not channelType.exact:
+    c.note(rnChannelTypeApprox, "Rev 3 channel types without a Rev 2 code are approximated " &
+      "(time break, external data, signature or other)")
   if d.channelSetNumber <= 99:
     result.channelSetNumber = int(d.channelSetNumber)
   else:
@@ -382,19 +430,17 @@ proc csdToRev2(c: var Conv, d: SegdChannelSetDescriptorRev3, bsiUs: float64,
   let st = float64(d.startTime) / 2000
   let en = float64(d.endTime) / 2000
   if st != round(st) or en != round(en):
-    c.note(12, "start and end times are rounded to Rev 2's 2 ms units")
+    c.note(rnTimesRounded, "start and end times are rounded to Rev 2's 2 ms units")
   if round(st) > 65535 or round(en) > 65535:
     skipRecord("channel set " & $d.channelSetNumber & " ends after 131 s, Rev 2's limit")
   result.startTime = uint16(round(st))
   result.endTime = uint16(round(en))
   let dsm = float64(d.descaleMultiplier)
-  if dsm > 0 and dsm.classify in {fcNormal, fcSubnormal}:
-    result.mpFactor = clamp(log2(dsm), -32.0, 31.99)
-    if pow(2.0, result.mpFactor) != dsm:
-      c.note(13, "descale multipliers are approximated by MP factors (2^MP, MP in 1/1024)")
-  else:
-    result.mpFactor = 0
-    c.note(13, "descale multipliers are approximated by MP factors (2^MP, MP in 1/1024)")
+  let exactMp = dsm > 0 and dsm.classify in {fcNormal, fcSubnormal}
+  result.mpFactor = if exactMp: clamp(log2(dsm), -32.0, 31.99) else: 0
+  if not exactMp or pow(2.0, result.mpFactor) != dsm:
+    c.note(rnDescaleApprox, "descale multipliers are approximated by MP factors (2^MP, MP " &
+      "in 1/1024)")
   result.aliasFilterFreq = c.toBcdUnits(d.aliasFilterFreq, 1, 4)
   result.aliasFilterSlope = c.toBcdUnits(d.aliasFilterSlope, 1, 3)
   result.lowCutFreq = c.toBcdUnits(d.lowCutFilterFreq, 1, 4)
@@ -403,25 +449,30 @@ proc csdToRev2(c: var Conv, d: SegdChannelSetDescriptorRev3, bsiUs: float64,
   result.notch2Freq = c.toBcdUnits(d.notch2Freq, 10, 4)
   result.notch3Freq = c.toBcdUnits(d.notch3Freq, 10, 4)
   if d.filterPhase != 0 or d.physicalUnit != 0 or d.filterDelay != 0 or
-      d.descriptionText.strip.len > 0:
-    c.note(15, "channel set fields Rev 2 lacks (filter phase and delay, physical unit, " &
-      "description) are dropped")
+      d.descriptionText.len > 0:
+    c.note(rnCsdFieldsDropped, "channel set fields Rev 2 lacks (filter phase and delay, " &
+      "physical unit, description) are dropped")
 
-proc unwrapTrailer(b: openArray[byte], blocks: var seq[SegdTrailerBlock]): bool =
-  ## The Rev 2 trailer blocks of a trailer `wrapTrailer` made.
-  if b.len < 32 or b[31] != BlockTypeTrailerDescription: return false
+proc unwrapTrailer(b: openArray[byte]): Option[seq[SegdTrailerBlock]] =
+  ## The Rev 2 trailer blocks of a trailer `wrapTrailer` made; none for any
+  ## other trailer.
+  if b.len < SegdBlockSize or b[31] != BlockTypeTrailerDescription:
+    return none(seq[SegdTrailerBlock])
   let d = decodeBlock[SegdTrailerDescription](b)
   var text = ""
   for ch in d.description: text.add ch
   if d.trailerBlockType != WrapType or text != WrapDescription or
-      b.len != 32 * (1 + int(d.blockSize)):
-    return false
+      b.len != SegdBlockSize * (1 + int(d.blockSize)):
+    return none(seq[SegdTrailerBlock])
+  var blocks: seq[SegdTrailerBlock]
   for i in 1..int(d.blockSize):
     blocks.add decodeBlock[SegdTrailerBlock](b.toOpenArray(32 * i, 32 * i + 31))
-  true
+  some(blocks)
 
 proc toRev2(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, minor: uint8,
-    scan: RecordScan, the: var seq[seq[uint8]]): SegdRecord =
+    scan: SegdRecordScan): SegdRecord =
+  ## The Rev 2 record headers for Rev 3 `rec`. Each descriptor's
+  ## `traceHeaderExtensions` is what its traces keep (THE#1 plus up to 14).
   let g2o = rec.gh2Rev3
   result = SegdRecord(layout: slRev2, index: rec.index, format: some(fOut),
     revision: SegdRevision(major: 2, minor: minor))
@@ -437,26 +488,27 @@ proc toRev2(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, minor: uint8,
         toHex(t, 2) & " (" & blockTypeName(t) & ") have no Rev 2 place and are dropped",
         loc = c.loc)
   if srcBlocks.len > 14:
-    c.note(16, "Rev 2 holds 14 source headers (GH#3-#16); the rest are dropped")
+    c.note(rnSourcesOver14, "Rev 2 holds 14 source headers (GH#3-#16); the rest are dropped")
     srcBlocks.setLen 14
   for i, off in srcBlocks:
     result.sourceHeaders.add c.ghnFromSource(rec.generalBlocks.toOpenArray(off, off + 31),
       i + 3)
-  c.note(17, "General Header #3 (time zero, sizes, recording modes) has no Rev 2 place " &
-    "and is dropped")
+  c.note(rnGh3Dropped, "General Header #3 (time zero, sizes, recording modes) has no Rev 2 " &
+    "place and is dropped")
   g1.additionalGhBlocks = uint8(1 + result.sourceHeaders.len)
   var g2 = SegdGeneralHeader2(extFileNumber: g2o.extFileNumber,
     extChannelSetsPerScanType: g2o.extChannelSetsPerScanType, revisionMajor: 2,
     revisionMinor: minor, blockNumber: 2)
   if minor >= 1: g2.lineSequenceNumber = g2o.recordSetNumber
   elif g2o.recordSetNumber != 0:
-    c.note(18, "Rev 2.0 has no record set (line sequence) number; it is dropped")
+    c.note(rnRecordSetDropped, "Rev 2.0 has no record set (line sequence) number; it is " &
+      "dropped")
   # Counts behind FF sentinels.
-  let nSK = skewBlocks(rec.gh1, g2o)
+  let nSK = rec.skewBlocks
   if nSK > 99: skipRecord($nSK & " skew blocks; Rev 2 holds 99")
   g1.skewBlocks = nSK
-  let nEC = extendedHeaderBlocks(rec.gh1, g2o)
-  let nEX = externalHeaderBlocks(rec.gh1, g2o)
+  let nEC = rec.extendedHeaderBlocks
+  let nEX = rec.externalHeaderBlocks
   if nEC > 65535 or nEX > 65535:
     skipRecord("more than 65535 extended or external header blocks")
   # Kept even when GH#1 does not point at them (they round-trip that way).
@@ -466,23 +518,20 @@ proc toRev2(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat, minor: uint8,
     else: int(min(g2o.extExternalHeaderBlocks, 0xFFFF)))
   g2.extRecordLength = uint32(round(float64(g2o.extRecordLength) / 1000))
   if g2o.extRecordLength mod 1000 != 0 and rec.gh1.recordLength == BcdAllF:
-    c.note(19, "record lengths are rounded to Rev 2's whole ms")
-  let bsiUs = baseScanIntervalUs(rec.gh1, g2o)
+    c.note(rnRecordLengthRounded, "record lengths are rounded to Rev 2's whole ms")
+  let bsiUs = rec.baseScanIntervalUs
   if rec.gh1.baseScanInterval16 == 0xFF:
     let b16 = bsiUs * 16 / 1000
     if b16 != round(b16) or b16 < 1 or b16 > 254:
       skipRecord("a base scan interval of " & $bsiUs & " µs is not a whole 1/16 ms (Rev 2)")
     g1.baseScanInterval16 = uint8(b16)
-  # Scan types: Rev 2 THE counts (THE#1 plus up to 14 kept blocks).
-  the.setLen rec.scanTypes.len
-  for i, st in rec.scanTypes:
+  for st in rec.scanTypes:
     var s2 = SegdScanType(layout: slRev2, skew: st.skew)
     for d in st.descriptorsRev3:
-      let n = min(int(d.traceHeaderExtensions), 15)
       if int(d.traceHeaderExtensions) > 15:
-        c.note(6, "Rev 2 holds 15 trace header extensions; later Rev 3 blocks are dropped")
-      the[i].add uint8(n)
-      s2.descriptors.add c.csdToRev2(d, bsiUs, uint8(n))
+        c.note(rnExtensionsOver15, "Rev 2 holds 15 trace header extensions; later Rev 3 " &
+          "blocks are dropped")
+      s2.descriptors.add c.csdToRev2(d, bsiUs, min(d.traceHeaderExtensions, 15))
     result.scanTypes.add s2
   # The trailer is read after the traces: the scan says whether it unwraps.
   g2.generalTrailerBlocks = uint16(max(0, scan.rev2Trailer))
@@ -497,7 +546,7 @@ proc traceToRev2(c: var Conv, t: SegdTrace, fIn, fOut: SegdSampleFormat, the: ui
   result = SegdTrace(layout: slRev2, header: t.header, numSamples: t.numSamples,
     scanType: t.scanType, channelSet: t.channelSet, index: t.index)
   if t.header.traceNumber == BcdAllF:
-    let n = int64(t.ext1Rev3.get(SegdTraceHeaderExt1Rev3()).extTraceNumber)
+    let n = if t.ext1Rev3.isSome: int64(t.ext1Rev3.get.extTraceNumber) else: 0
     if n <= 9999:
       result.header.traceNumber = int(n)
     else:
@@ -506,7 +555,7 @@ proc traceToRev2(c: var Conv, t: SegdTrace, fIn, fOut: SegdSampleFormat, the: ui
         record: c.loc.record, trace: t.index, field: "trace.traceNumber"))
       result.header.traceNumber = 9999
   if t.ext1Rev3.isSome and the > 0:
-    let e = t.ext1Rev3.get
+    template e: untyped = t.ext1Rev3.get
     if t.numSamples > 0xFF_FFFF:
       raiseFormat("a trace of " & $t.numSamples & " samples exceeds Rev 2's 24-bit count")
     result.ext1 = some SegdTraceHeaderExt1(receiverLineNumber: e.receiverLineNumber,
@@ -515,19 +564,76 @@ proc traceToRev2(c: var Conv, t: SegdTrace, fIn, fOut: SegdSampleFormat, the: ui
       extReceiverPointNumber: e.extReceiverPointNumber, sensorType: e.sensorType)
     if e.reshootIndex != 0 or e.groupIndex != 0 or e.depthIndex != 0 or e.sensorMoving != 0 or
         e.physicalUnit != 0:
-      c.note(8, "Trace Header Extension #1 fields Rev 2 lacks (reshoot, group and depth " &
-        "index, sensor moving, physical unit) are dropped")
-    let keep = min(t.extensions.len div 32, int(the) - 1)
-    result.extensions = t.extensions[0 ..< 32 * keep]
+      c.note(rnExt1FieldsDropped, "Trace Header Extension #1 fields Rev 2 lacks (reshoot, " &
+        "group and depth index, sensor moving, physical unit) are dropped")
+    let keep = min(t.extensions.len div SegdBlockSize, int(the) - 1)
+    result.extensions = t.extensions[0 ..< SegdBlockSize * keep]
     if keep > 0:
-      c.note(9, "Rev 3 trace header blocks after #1 are kept as raw Rev 2 extensions")
+      c.note(rnBlocksKeptRaw, "Rev 3 trace header blocks after #1 are kept as raw Rev 2 " &
+        "extensions")
   result.header.traceHeaderExtensions = uint8(ord(result.ext1.isSome) +
-    result.extensions.len div 32)
+    result.extensions.len div SegdBlockSize)
   result.samples = c.samplesFor(t.samples, t.numSamples, t.numSamples, fIn, fOut)
+
+# ----------------------------------------------------- within a layout --
+
+proc withinRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecord =
+  ## 3.x to 3.y: the same layout, a new minor revision and maybe format.
+  let target = c.opts.revision
+  result = rec
+  result.gh2Rev3.revisionMinor = target.minor
+  # The trailer comes after the traces; a placeholder of the announced size
+  # until then (see setRev3Trailer).
+  let gt = rec.gh2Rev3.generalTrailerBlocks
+  result.trailerRev3 = newSeq[byte](if gt == UnknownTrailerBlocks: 0
+                                    else: SegdBlockSize * int(gt))
+  result.gh1.formatCode = ord(fOut)
+  result.format = some(fOut)
+  if rec.revision.minor > target.minor:
+    c.note(rnCrsNotConverted, "Rev 3." & $rec.revision.minor & " records are written as 3." &
+      $target.minor & " unchanged; their CRS text (P1/11 in 3.1) is not converted")
+  if fOut != rec.format.get:
+    # A new format: sizes from the descriptors (the trailer, read after the
+    # traces, keeps the size GH#2 announces).
+    var data = result.headerBytes
+    for st in result.scanTypes:
+      for d in st.descriptorsRev3:
+        data += int64(d.channelsInSet) *
+          int64(traceBytes(d, dataBytes(fOut, int(d.numSamples))))
+    result.gh3.headerSize = uint32(result.headerBytes)
+    result.gh3.dataSize = uint64(data)
+    result.gh3.recordSize = if gt == UnknownTrailerBlocks or rec.gh3.recordSize == 0: 0'u64
+                            else: uint64(data + SegdBlockSize * int64(gt))
+
+proc withinRev2(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecord =
+  ## Rev 0/1/2.x to 2.y: the same layout, a GH#2 for Rev 0, a new revision
+  ## and maybe format.
+  let target = c.opts.revision
+  result = rec
+  result.gh1.formatCode = ord(fOut)
+  result.format = some(fOut)
+  if rec.gh2.isNone:
+    result.gh1.additionalGhBlocks = rec.gh1.additionalGhBlocks + 1
+    result.gh2 = some(SegdGeneralHeader2(blockNumber: 2))
+    # Rev 0: the multiplexed-only GH1 fields are "record as zero" in 2.x.
+    result.gh1.unused20 = [0'u8, 0, 0]
+    result.gh1.unused24L = 0
+    result.gh1.unused25 = 0
+    for st in result.scanTypes.mitems:
+      for d in st.descriptors.mitems: c.fromRev0(d)
+  template g2: untyped = result.gh2.get
+  g2.revisionMajor = 2
+  g2.revisionMinor = target.minor
+  if target.minor >= 1 and rec.revision < SegdRevision(major: 2, minor: 1):
+    g2.lineSequenceNumber = 0 # bytes 21-22 are undefined before 2.1
+  if target.minor == 0 and g2.lineSequenceNumber != 0:
+    c.note(rnRecordSetDropped, "Rev 2.0 has no record set (line sequence) number; it is " &
+      "dropped")
+    g2.lineSequenceNumber = 0
 
 # ------------------------------------------------------------ the stream --
 
-proc scanRecords*(src: RecordSource, twosComplement8015 = false): seq[RecordScan] =
+proc scanSegdRecords*(src: RecordSource, twosComplement8015 = false): seq[SegdRecordScan] =
   ## A headers-only pass over every record. A record's headers are written
   ## before its traces and trailer are read, but some header values depend on
   ## them: Rev 2 descriptors do not hold sample counts exactly (real data
@@ -535,7 +641,7 @@ proc scanRecords*(src: RecordSource, twosComplement8015 = false): seq[RecordScan
   ## trailer block count.
   var r = openSegd(src, twosComplement8015, headersOnly = true)
   while r.nextRecord():
-    var rs = RecordScan(rev2Trailer: -1)
+    var rs = SegdRecordScan(rev2Trailer: -1)
     for st in r.record.scanTypes:
       rs.setSamples.add newSeq[int](st.channelSetCount)
       for x in rs.setSamples[^1].mitems: x = -1
@@ -546,16 +652,84 @@ proc scanRecords*(src: RecordSource, twosComplement8015 = false): seq[RecordScan
           max(rs.setSamples[t.scanType][t.channelSet], t.numSamples)
       else:
         inc rs.orphans
-    var blocks: seq[SegdTrailerBlock]
-    if r.record.isRev3 and unwrapTrailer(r.record.trailerRev3, blocks):
-      rs.rev2Trailer = blocks.len
+    if r.record.isRev3:
+      let blocks = unwrapTrailer(r.record.trailerRev3)
+      if blocks.isSome: rs.rev2Trailer = blocks.get.len
     result.add rs
 
+proc convertHeaders(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
+    scan: SegdRecordScan): SegdRecord =
+  ## The record's headers in the target revision. Raises `SkipRecordError`
+  ## when they cannot be represented there.
+  if scan.orphans > 0:
+    skipRecord($scan.orphans & " traces name a channel set no descriptor has")
+  let target = c.opts.revision
+  if target.major == 3 and not rec.isRev3: c.toRev3(rec, fOut, scan)
+  elif target.major == 2 and rec.isRev3: c.toRev2(rec, fOut, target.minor, scan)
+  elif rec.isRev3: c.withinRev3(rec, fOut)
+  else: c.withinRev2(rec, fOut)
+
+proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: SegdRecordScan) =
+  ## Converts the reader's current record: its headers, its traces as they
+  ## are read, then its trailer. A record the target cannot represent is
+  ## skipped with an error.
+  let rec = r.record
+  c.loc.record = rec.index
+  if rec.format.isNone:
+    c.log.report(sevError, dcUnsupportedFormat, "record " & $rec.index & ": SEG-D " &
+      "format " & $rec.gh1.formatCode & " cannot be decoded; the record is skipped",
+      rec.offset, c.loc)
+    return
+  let fIn = rec.format.get
+  let fOut = c.outFormat(fIn)
+  var outRec: SegdRecord
+  try:
+    outRec = c.convertHeaders(rec, fOut, scan)
+  except SkipRecordError as e:
+    c.log.report(sevError, dcValidation, "record " & $rec.index & " cannot be written " &
+      "as Rev " & $c.opts.revision & ": " & e.msg & "; it is skipped", rec.offset, c.loc)
+    return
+  w.writeRecordHeaders(outRec)
+  var t: SegdTrace
+  while r.readTrace(t):
+    if t.scanType < 0 or t.channelSet < 0:
+      raiseFormat("trace " & $t.index & " names a channel set no descriptor has " &
+        "(convert the file by path: its header scan skips such records)")
+    template outSet: untyped = outRec.scanTypes[t.scanType]
+    if outRec.layout == rec.layout:
+      if fIn != fOut:
+        var samples = c.samplesFor(t.samples, t.numSamples, t.numSamples, fIn, fOut)
+        swap(t.samples, samples)
+      w.writeTrace(t)
+    elif outRec.isRev3:
+      let ns = int(outSet.descriptorsRev3[t.channelSet].numSamples)
+      w.writeTrace(c.traceToRev3(t, fIn, fOut, ns))
+    else:
+      let the = outSet.descriptors[t.channelSet].traceHeaderExtensions
+      w.writeTrace(c.traceToRev2(t, fIn, fOut, the))
+  # The trailer is read after the traces.
+  case outRec.layout
+  of slRev3:
+    w.setRev3Trailer(if rec.isRev3: r.record.trailerRev3 else: wrapTrailer(r.record.trailer))
+    w.endRecord()
+  of slRev2:
+    if not rec.isRev3:
+      w.endRecord(r.record.trailer)
+    else:
+      template tb: untyped = r.record.trailerRev3
+      let blocks = unwrapTrailer(tb)
+      if tb.len > 0 and (blocks.isNone or blocks.get.len != scan.rev2Trailer):
+        c.note(rnRev3TrailerDropped, "Rev 3 general trailers (description-block groups) " &
+          "have no Rev 2 place and are dropped")
+        w.endRecord()
+      else:
+        w.endRecord(blocks.get(@[]))
+
 proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
-    opts = SegdConvertOptions(), scan: seq[RecordScan] = @[]): DiagLog =
+    opts = SegdConvertOptions(), scan: seq[SegdRecordScan] = @[]): DiagLog =
   ## Converts the SEG-D stream at `src` to revision `opts.revision` on
-  ## `sink` (see the module doc). `scan`, from `scanRecords` over the same
-  ## data (`convertSegdRevision(path, ...)` makes one), gives Rev 1/2 to
+  ## `sink` (see the module doc). `scan`, from `scanSegdRecords` over the
+  ## same data (`convertSegdRevision(path, ...)` makes one), gives Rev 1/2 to
   ## Rev 3 each channel set's exact sample count and Rev 3 to Rev 2 the
   ## unwrapped trailer size. Without it the descriptors' times decide, traces
   ## that differ are adjusted (with a warning), and Rev 3 trailers are
@@ -567,8 +741,7 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
     c.log.report(sevFatal, dcValidation, "target SEG-D revision " & $target &
       " is not 2.0, 2.1, 3.0 or 3.1", loc = c.loc)
     return c.log
-  let f = toSegdFormat(opts.format)
-  if opts.format != 0 and (f.isNone or not f.get.definedIn(target)):
+  if opts.format != tfKeep and not opts.format.sampleFormat.definedIn(target):
     c.log.report(sevFatal, dcValidation, "SEG-D format " & $opts.format &
       " is not defined in Rev " & $target, loc = c.loc)
     return c.log
@@ -579,108 +752,9 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
     if label.isSome: label.get.revision = "SD" & $target
     w = openSegdWriter(sink, SegdWriteOptions(), label)
     while r.nextRecord():
-      let rec = r.record
-      c.loc.record = rec.index
-      if rec.format.isNone:
-        c.log.report(sevError, dcUnsupportedFormat, "record " & $rec.index & ": SEG-D " &
-          "format " & $rec.gh1.formatCode & " cannot be decoded; the record is skipped",
-          rec.offset, c.loc)
-      else:
-        let fIn = rec.format.get
-        let fOut = c.outFormat(fIn)
-        var ok = true
-        var outRec: SegdRecord
-        var setSamples: seq[seq[int]]
-        var the: seq[seq[uint8]]
-        let rs = if rec.index < scan.len: scan[rec.index] else: RecordScan(rev2Trailer: -1)
-        try:
-          if rs.orphans > 0:
-            skipRecord($rs.orphans & " traces name a channel set no descriptor has")
-          if target.major == 3 and not rec.isRev3:
-            outRec = c.toRev3(rec, fOut, rs, setSamples)
-          elif target.major == 2 and rec.isRev3:
-            outRec = c.toRev2(rec, fOut, target.minor, rs, the)
-          elif target.major == 3:
-            outRec = rec # 3.x to 3.y: the same layout
-            outRec.gh2Rev3.revisionMinor = target.minor
-            # The trailer comes after the traces; a placeholder of the
-            # announced size until then (see setRev3Trailer).
-            let gt = rec.gh2Rev3.generalTrailerBlocks
-            outRec.trailerRev3 = newSeq[byte](if gt == 0xFFFF_FFFF'u32: 0 else: 32 * int(gt))
-            outRec.gh1.formatCode = ord(fOut)
-            outRec.format = some(fOut)
-            if rec.revision.minor > target.minor:
-              c.note(30, "Rev 3." & $rec.revision.minor & " records are written as 3." &
-                $target.minor & " unchanged; their CRS text (P1/11 in 3.1) is not converted")
-          else:
-            outRec = rec # 1/2.x to 2.y
-            outRec.gh1.formatCode = ord(fOut)
-            outRec.format = some(fOut)
-            if rec.gh2.isNone:
-              outRec.gh1.additionalGhBlocks = rec.gh1.additionalGhBlocks + 1
-              outRec.gh2 = some(SegdGeneralHeader2(blockNumber: 2))
-              # Rev 0: the multiplexed-only GH1 fields are "record as zero" in 2.x.
-              outRec.gh1.unused20 = [0'u8, 0, 0]
-              outRec.gh1.unused24L = 0
-              outRec.gh1.unused25 = 0
-              for st in outRec.scanTypes.mitems:
-                for d in st.descriptors.mitems: c.fromRev0(d)
-            template g2: untyped = outRec.gh2.get
-            g2.revisionMajor = 2
-            g2.revisionMinor = target.minor
-            if target.minor >= 1 and not (rec.revision.major == 2 and rec.revision.minor >= 1):
-              g2.lineSequenceNumber = 0 # bytes 21-22 are undefined before 2.1
-            if target.minor == 0 and g2.lineSequenceNumber != 0:
-              c.note(18, "Rev 2.0 has no record set (line sequence) number; it is dropped")
-              g2.lineSequenceNumber = 0
-        except SkipRecord as e:
-          ok = false
-          c.log.report(sevError, dcValidation, "record " & $rec.index & " cannot be written " &
-            "as Rev " & $target & ": " & e.msg & "; it is skipped", rec.offset, c.loc)
-        if ok:
-          if outRec.isRev3 and rec.isRev3 and fOut != fIn:
-            # 3.x with a new format: sizes from the descriptors (the trailer,
-            # read after the traces, keeps the size GH#2 announces).
-            var data = outRec.headerBytes
-            for st in outRec.scanTypes:
-              for d in st.descriptorsRev3:
-                data += int64(d.channelsInSet) * int64(traceBytes(d, dataBytes(fOut,
-                  int(d.numSamples))))
-            outRec.gh3.headerSize = uint32(outRec.headerBytes)
-            outRec.gh3.dataSize = uint64(data)
-            let gt = outRec.gh2Rev3.generalTrailerBlocks
-            outRec.gh3.recordSize = if gt == 0xFFFF_FFFF'u32 or rec.gh3.recordSize == 0: 0'u64
-                                    else: uint64(data + 32 * int64(gt))
-          w.writeRecordHeaders(outRec)
-          var t: SegdTrace
-          while r.readTrace(t):
-            if t.scanType < 0 or t.channelSet < 0:
-              raiseFormat("trace " & $t.index & " names a channel set no descriptor has " &
-                "(convert the file by path: its header scan skips such records)")
-            if outRec.isRev3 and not rec.isRev3:
-              w.writeTrace(c.traceToRev3(t, fIn, fOut, setSamples[t.scanType][t.channelSet]))
-            elif not outRec.isRev3 and rec.isRev3:
-              w.writeTrace(c.traceToRev2(t, fIn, fOut, the[t.scanType][t.channelSet]))
-            else:
-              var o = t
-              o.samples = c.samplesFor(t.samples, t.numSamples, t.numSamples, fIn, fOut)
-              w.writeTrace(o)
-          if outRec.isRev3 and not rec.isRev3:
-            w.setRev3Trailer(wrapTrailer(r.record.trailer))
-            w.endRecord()
-          elif not outRec.isRev3 and rec.isRev3:
-            var blocks: seq[SegdTrailerBlock]
-            let tb = r.record.trailerRev3
-            if tb.len > 0 and (not unwrapTrailer(tb, blocks) or blocks.len != rs.rev2Trailer):
-              blocks.setLen 0
-              c.note(7, "Rev 3 general trailers (description-block groups) have no Rev 2 " &
-                "place and are dropped")
-            w.endRecord(blocks)
-          elif outRec.isRev3:
-            w.setRev3Trailer(r.record.trailerRev3) # read after the traces
-            w.endRecord()
-          else:
-            w.endRecord(r.record.trailer)
+      let rs = if r.record.index < scan.len: scan[r.record.index]
+               else: SegdRecordScan(rev2Trailer: -1)
+      c.convertRecord(r, w, rs)
     w.close()
   except CatchableError as e:
     c.log.report(sevFatal, dcValidation, "conversion stopped: " & e.msg, loc = c.loc)
@@ -710,7 +784,7 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
   var sink: RecordSink
   try:
     src = openDiskSource(srcPath)
-    let scan = scanRecords(src, opts.twosComplement8015)
+    let scan = scanSegdRecords(src, opts.twosComplement8015)
     src.close()
     src = nil
     src = openDiskSource(srcPath)

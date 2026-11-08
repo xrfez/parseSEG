@@ -424,7 +424,11 @@ proc convertCmd(a: Args): int =
     var o = SegdConvertOptions()
     let (ma, mi) = parseRev(a.get("rev", "3.0"), 2, 2, "2.0, 2.1, 3.0 or 3.1")
     o.revision = SegdRevision(major: ma, minor: mi)
-    o.format = parseIntOpt(a.get("format", "0"), "format")
+    let code = parseIntOpt(a.get("format", "0"), "format")
+    if code != 0:
+      let f = toSegdFormat(code)
+      if f.isNone: usage("--format: " & $code & " is not a SEG-D demultiplexed format")
+      o.format = targetFormat(f.get)
     log = convertSegdRevision(src, dst, o)
   of "segy":
     var o = ConvertOptions()
