@@ -62,6 +62,10 @@ block info:
   let b = ok("info", inova, "--keys")
   doAssert "SEG-D rev 3.0" in b and "8058" in b and "records:     1" in b and "1 shot" in b
   doAssert "5 (up to 4001 samples" in ok("info", inova)
+  doAssert "length:      4000.0 ms" in ok("info", inova) and "field rec:   151 .. 151" in
+    ok("info", inova)
+  doAssert "coordinates: unknown, CRS stanza (155 chars)" in ok("info", inova)
+  doAssert "coordinates: meters, CRS P1/11" in ok("info", inglewood)
 
 block dump:
   let d = fails(1, "dump", inglewood, "--traces=4..5", "--fields=trace.sourceX,trace.bogus")

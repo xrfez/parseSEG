@@ -42,6 +42,7 @@ Conventions that hold throughout:
 | `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). |
 | `f.len`, `f.kind` (`skSegy`, `skSegd`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path` | File facts. |
 | `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval (`ValueError` for a trace out of range; `sampleIntervalUs` and `copyBytes` also for a closed file). |
+| `f.summary` (`FileSummary`), `f.channelSets` (`seq[ChannelSetSummary]`), `f.crsText` | Common metadata with no branch on the standard (task 6.8): standard and revision, byte order, format code, trace/record counts, first/last field record, sample interval, samples per trace and record length (NaN / -1 when not uniform), coordinate units (`CoordinateUnits`) and the CRS text's format (`CrsTextFormat`). `channelSets` gives each SEG-D channel set's interval, timing and trace count; `crsText` the CRS text (P1/11 or Location Data). |
 | `f.index.segy`, `f.index.segdRecords`, `f.close()` | The format's own headers. A `SeismicFile` that goes out of scope unmaps itself; `close` does it early. |
 
 ## Reading samples

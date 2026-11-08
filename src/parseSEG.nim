@@ -28,12 +28,12 @@ import parseSEG/convert
 export convert
 
 import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
-  headernif]
+  headernif, summary]
 export traceindex except unsafeMemory, decodeEntry, readTracesRaw, mappedSize, flush,
   requireKeys, checkSpan, spanLen
 export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
   isLayoutField
-export keys, gathers, prefetch, edit, headernif
+export keys, gathers, prefetch, edit, headernif, summary
 
 import parseSEG/survey/[textrec, sps, p1, join]
 export textrec, sps, p1, join

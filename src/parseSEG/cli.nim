@@ -18,7 +18,9 @@ Usage: parseSEG <command> [options] <arguments>
 
 Inspecting
   info <file> [--keys] [SURVEY] what the file is: standard, revision, format,
-                                records, traces, samples, gathers, diagnostics
+                                records, traces, samples, record length, field
+                                records, coordinate units and CRS, gathers,
+                                diagnostics
   dump <file> [--traces=SEL] [--fields=a,b,...] [--all]
                                 trace headers as a table (SEL: 5 | 0..9 | 1,4,7);
                                 --fields picks header fields (trace.sourceX,
@@ -284,6 +286,13 @@ proc info(a: Args): int =
     if intervals.len > 4: break
   echo "traces:      ", f.len, " (up to ", ix.maxSamples, " samples, interval ",
     intervals.mapIt($it & " µs").join(", "), ")"
+  let s = f.summary
+  echo "length:      ", (if s.recordLengthMs.isNaN: "varies" else: $s.recordLengthMs & " ms")
+  if s.firstFieldRecord >= 0:
+    echo "field rec:   ", s.firstFieldRecord, " .. ", s.lastFieldRecord
+  echo "coordinates: ", s.coordinateUnits,
+    (if s.crsFormat != ctNone: ", CRS " & $s.crsFormat & " (" & $f.crsText.len & " chars)"
+     else: "")
   if a.has("keys"):
     var kinds: CountTable[GatherKind]
     for g in ix.gathers: kinds.inc g.kind

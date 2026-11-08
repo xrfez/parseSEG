@@ -233,6 +233,26 @@ const char *seg_last_error(void);
 #define SEG_GATHER_KIND_OFFSET 4
 #define SEG_GATHER_KIND_OTHER 5
 
+/* SeismicKind */
+#define SEG_SEISMIC_KIND_UNKNOWN 0
+#define SEG_SEISMIC_KIND_SEG_Y 1
+#define SEG_SEISMIC_KIND_SEG_D 2
+
+/* CoordinateUnits */
+#define SEG_COORDINATE_UNITS_UNKNOWN 0
+#define SEG_COORDINATE_UNITS_METERS 1
+#define SEG_COORDINATE_UNITS_FEET 2
+#define SEG_COORDINATE_UNITS_LENGTH 3
+#define SEG_COORDINATE_UNITS_ARC_SECONDS 4
+#define SEG_COORDINATE_UNITS_DEGREES 5
+#define SEG_COORDINATE_UNITS_DMS 6
+
+/* CrsTextFormat */
+#define SEG_CRS_TEXT_FORMAT_NONE 0
+#define SEG_CRS_TEXT_FORMAT_STANZA 1
+#define SEG_CRS_TEXT_FORMAT_P1_11 2
+#define SEG_CRS_TEXT_FORMAT_UNKNOWN 3
+
 /* SpsRevision */
 #define SEG_SPS_REVISION_AUTO 0
 #define SEG_SPS_REVISION_1_0 1
@@ -246,11 +266,6 @@ const char *seg_last_error(void);
 /* Dtype */
 #define SEG_DTYPE_FLOAT32 1
 #define SEG_DTYPE_FLOAT64 2
-
-/* SeismicKind */
-#define SEG_SEISMIC_KIND_UNKNOWN 0
-#define SEG_SEISMIC_KIND_SEG_Y 1
-#define SEG_SEISMIC_KIND_SEG_D 2
 
 /* ---------------------------------------------------------- handles */
 
@@ -361,6 +376,45 @@ typedef struct SegGather {
     int64_t sources; /* Distinct known sources among its seismic traces. */
     int64_t receivers; /* Distinct known receiver stations among its seismic traces. */
 } SegGather;
+
+/* A revision of the standard, e.g. 2.1. */
+typedef struct SegStandardRevision {
+    int64_t major;
+    int64_t minor;
+} SegStandardRevision;
+
+/* A file's common metadata, the same for every standard and revision. Unknown or non-uniform numbers are NaN (floats) or -1 (integers). */
+typedef struct SegFileSummary {
+    int32_t standard; /* SEG_SEISMIC_KIND_* */
+    SegStandardRevision revision; /* SEG-Y: the revision whose rules were applied. SEG-D: the first record's (0.0 for Rev 0); see `mixedRevisions`. */
+    bool mixed_revisions; /* SEG-D records of more than one revision. */
+    int32_t byte_order; /* SEG_BYTE_ORDER_*: Of binary fields and samples (SEG-D: always big). */
+    int64_t format_code; /* The sample format code (SEG-Y 1-16, SEG-D 8058, ...); -1 when SEG-D records differ or there are none. */
+    bool decodable; /* Every trace's sample format can be decoded. */
+    int64_t trace_count;
+    int64_t record_count;
+    int64_t first_field_record; /* SEG-Y: field record numbers of the first and last trace; SEG-D: file numbers of the first and last record; -1 when there are none. */
+    int64_t last_field_record; /* SEG-Y: field record numbers of the first and last trace; SEG-D: file numbers of the first and last record; -1 when there are none. */
+    double sample_interval_us; /* The interval every trace shares (µs; SEG-Y non-time data: Hz or m/ft); NaN when they differ (SEG-D: see `channelSets`). */
+    int64_t samples_per_trace; /* Samples every trace has; -1 when they differ. */
+    double record_length_ms; /* SEG-Y: (samples - 1) × interval when both are uniform. SEG-D: the general header's record length when every record has the same (NaN for 0, "indeterminate"). */
+    int32_t coordinate_units; /* SEG_COORDINATE_UNITS_* */
+    int32_t crs_format; /* SEG_CRS_TEXT_FORMAT_*: Format of `crsText`; `ctNone` when there is none. */
+} SegFileSummary;
+
+/* One SEG-D channel set of one record. */
+typedef struct SegChannelSetSummary {
+    int64_t record; /* 0-based record index. */
+    int64_t scan_type; /* 0-based scan type index. */
+    int64_t channel_set; /* 0-based index within the scan type. */
+    int64_t number; /* The channel set number in the headers. */
+    int64_t channel_type; /* Rev 1/2 nibble (1 = seismic) or Rev 3 byte (0x10 = seismic). */
+    int64_t trace_count; /* Traces of this set in the index. */
+    int64_t samples_per_trace; /* Samples of its longest trace; 0 when it has none. */
+    double sample_interval_us;
+    double start_time_ms;
+    double end_time_ms;
+} SegChannelSetSummary;
 
 /* How `readSps` reads a file. */
 typedef struct SegSpsOptions {
@@ -594,6 +648,32 @@ SegStatus seg_header_editor_set_file_field(SegHeaderEditor *header_editor, const
  * `log`, if the edit is refused.
  */
 SegStatus seg_header_editor_set_record_field(SegHeaderEditor *header_editor, int64_t record, const char *name, const SegValue *value, bool *out);
+
+/*
+ * The coordinate reference system text, as stored: SEG-Y, the first P1/11
+ * or Location Data stanza of the extended textual header (its data);
+ * SEG-D Rev 3, the 0x55 blocks of the first record that has them (from
+ * `((SEG:` or `((OGP:`). Empty when the file has none; `summary` says
+ * which format it is in.
+ */
+SegStatus seg_seismic_file_crs_text(SegSeismicFile *seismic_file, char *out, int64_t out_cap, int64_t *out_len);
+
+/*
+ * The file's common metadata: standard, revision, byte order, sample
+ * format, trace and record counts, first and last field record, sample
+ * interval, samples per trace, record length, coordinate units and the
+ * CRS text's format. Reads the index and at most two trace headers. An unrecognized file gives
+ * `standard == skUnknown` and zero counts. Raises `ValueError` for a SEG-Y
+ * file that has been closed (its trace headers are read from the map).
+ */
+SegStatus seg_seismic_file_summary(SegSeismicFile *seismic_file, SegFileSummary *out);
+
+/*
+ * Every channel set of every SEG-D record, in record, scan type and
+ * channel set order, with its sample interval, timing and the traces the
+ * index holds for it. Empty for SEG-Y.
+ */
+SegStatus seg_seismic_file_channel_sets(SegSeismicFile *seismic_file, SegChannelSetSummary *out, int64_t out_cap, int64_t *out_len);
 
 /* The number of X runs loaded. */
 SegStatus seg_survey_geometry_relation_count(SegSurveyGeometry *survey_geometry, int64_t *out);

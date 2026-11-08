@@ -16,7 +16,7 @@ stopping a read.
 ## Command line
 
 ```
-parseSEG info line.sgy --keys                  # standard, revision, format, traces, gathers
+parseSEG info line.sgy --keys                  # standard, revision, format, traces, units, gathers
 parseSEG dump line.sgy --traces=0..9 --fields=trace.sourceX,trace.groupX
 parseSEG diag shot.sgd --min=warning           # the diagnostics (--nif: as NIF)
 parseSEG convert shot.sgd shot.sgy --rev=2.1   # SEG-D or SEG-Y to SEG-Y

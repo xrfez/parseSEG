@@ -51,8 +51,8 @@ per-function documentation.
    int64_t x_len`); any other overload of an exported name fails the build. The prefix is
    `seg`, so the project name never reaches the C API.
 4. **The core declares its own boundary.** `{.segApi.}` sits on the public core procs
-   (`traceindex`, `headerfields`, `gathers`, `edit`, `join`, `diagnostics`, `convert`,
-   `revconvert`), `{.segHandle.}` on the types that cross as handles (`SeismicFile`,
+   (`traceindex`, `headerfields`, `summary`, `gathers`, `edit`, `join`, `diagnostics`,
+   `convert`, `revconvert`), `{.segHandle.}` on the types that cross as handles (`SeismicFile`,
    `HeaderEditor`, `SurveyGeometry`, `DiagLog`) and `{.segField.}` on fields exported as
    properties. The pragmas (`src/parseSEG/abi/pragmas.nim`) need only `std/macros`, and
    without `-d:segCapi` they change nothing.

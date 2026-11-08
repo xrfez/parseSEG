@@ -105,6 +105,25 @@ with parseseg.open_seismic(junk) as j:
     assert j.kind == "unknown" and len(j) == 0 and j.log.is_fatal   # a log, not a failure
     assert j.log[-1]["severity"] == "fatal" and j.log[0]["loc"]["file"] == junk
 
+# File summary (task 6.8): a dict, the same keys for every standard.
+s = f.summary()
+assert s["standard"] == "SEG-Y" and s["revision"] == {"major": 2, "minor": 1}
+assert s["byte_order"] == "big" and s["format_code"] == 1 and s["decodable"]
+assert s["trace_count"] == 200 and s["samples_per_trace"] == 2001
+assert s["sample_interval_us"] == 2000.0 and s["record_length_ms"] == 4000.0
+assert s["coordinate_units"] == "meters" and s["crs_format"] == "P1/11"
+assert f.crs_text().startswith("IOGP,IOGP P1") and f.channel_sets() == []
+with parseseg.open_seismic(INOVA) as d3:
+    s3 = d3.summary()
+    assert set(s3) == set(s) and s3["standard"] == "SEG-D" and s3["first_field_record"] == 151
+    assert s3["crs_format"] == "stanza" and "CRS code=32050" in d3.crs_text()
+    cs = d3.channel_sets()
+    assert [c["channel_type"] for c in cs] == [0x20, 0x30, 0x70, 0x10]
+    assert cs[3]["trace_count"] == 2 and cs[0]["sample_interval_us"] == 1000.0
+with parseseg.open_seismic(junk) as j:
+    sj = j.summary()
+    assert sj["standard"] == "unknown" and math.isnan(sj["sample_interval_us"])
+
 # Text fields come back as str.
 assert isinstance(f.trace_field(0, "trace.headerName"), str)
 

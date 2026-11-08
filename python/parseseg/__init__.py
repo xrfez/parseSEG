@@ -333,14 +333,18 @@ _E_TextEncoding = {"ebcdic": 0, "ascii": 1, }
 _N_TextEncoding = {0: "ebcdic", 1: "ascii", }
 _E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
 _N_GatherKind = {0: "unknown", 1: "shot", 2: "receiver", 3: "cmp", 4: "offset", 5: "other", }
+_E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, }
+_N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", }
+_E_CoordinateUnits = {"unknown": 0, "meters": 1, "feet": 2, "length": 3, "arcSeconds": 4, "degrees": 5, "dms": 6, }
+_N_CoordinateUnits = {0: "unknown", 1: "meters", 2: "feet", 3: "length", 4: "arcSeconds", 5: "degrees", 6: "dms", }
+_E_CrsTextFormat = {"none": 0, "stanza": 1, "P1/11": 2, "unknown": 3, }
+_N_CrsTextFormat = {0: "none", 1: "stanza", 2: "P1/11", 3: "unknown", }
 _E_SpsRevision = {"auto": 0, "1.0": 1, "2.1": 2, }
 _N_SpsRevision = {0: "auto", 1: "1.0", 2: "2.1", }
 _E_TextLayout = {"lines": 0, "fixed80": 1, "ebcdic80": 2, }
 _N_TextLayout = {0: "lines", 1: "fixed80", 2: "ebcdic80", }
 _E_Dtype = {"float32": 1, "float64": 2, }
 _N_Dtype = {1: "float32", 2: "float64", }
-_E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, }
-_N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", }
 
 # ---------------------------------------------------------- structs
 
@@ -490,6 +494,60 @@ class SegGather(ctypes.Structure):
     _defaults = {}
 
 
+class SegStandardRevision(ctypes.Structure):
+    """A revision of the standard, e.g. 2.1."""
+    _fields_ = [
+        ("major", ctypes.c_int64),
+        ("minor", ctypes.c_int64),
+    ]
+    _out = (("major", lambda _v: _v), ("minor", lambda _v: _v), )
+    _in = {"major": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "minor": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), }
+    _defaults = {}
+
+
+class SegFileSummary(ctypes.Structure):
+    """A file's common metadata, the same for every standard and revision. Unknown or non-uniform numbers are NaN (floats) or -1 (integers)."""
+    _fields_ = [
+        ("standard", ctypes.c_int32),
+        ("revision", SegStandardRevision),
+        ("mixed_revisions", ctypes.c_bool),
+        ("byte_order", ctypes.c_int32),
+        ("format_code", ctypes.c_int64),
+        ("decodable", ctypes.c_bool),
+        ("trace_count", ctypes.c_int64),
+        ("record_count", ctypes.c_int64),
+        ("first_field_record", ctypes.c_int64),
+        ("last_field_record", ctypes.c_int64),
+        ("sample_interval_us", ctypes.c_double),
+        ("samples_per_trace", ctypes.c_int64),
+        ("record_length_ms", ctypes.c_double),
+        ("coordinate_units", ctypes.c_int32),
+        ("crs_format", ctypes.c_int32),
+    ]
+    _out = (("standard", lambda _v: _N_SeismicKind.get(_v, _v)), ("revision", lambda _v: _struct_dict(_v)), ("mixed_revisions", lambda _v: _v), ("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format_code", lambda _v: _v), ("decodable", lambda _v: _v), ("trace_count", lambda _v: _v), ("record_count", lambda _v: _v), ("first_field_record", lambda _v: _v), ("last_field_record", lambda _v: _v), ("sample_interval_us", lambda _v: _v), ("samples_per_trace", lambda _v: _v), ("record_length_ms", lambda _v: _v), ("coordinate_units", lambda _v: _N_CoordinateUnits.get(_v, _v)), ("crs_format", lambda _v: _N_CrsTextFormat.get(_v, _v)), )
+    _in = {"standard": lambda _x, _n: _enum(_E_SeismicKind, _x, _n), "revision": lambda _x, _n: _struct_arg(SegStandardRevision, _x, _n), "mixed_revisions": lambda _x, _n: bool(_x), "byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format_code": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "decodable": lambda _x, _n: bool(_x), "trace_count": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "record_count": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "first_field_record": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "last_field_record": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "sample_interval_us": lambda _x, _n: _f64(_x, _n), "samples_per_trace": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "record_length_ms": lambda _x, _n: _f64(_x, _n), "coordinate_units": lambda _x, _n: _enum(_E_CoordinateUnits, _x, _n), "crs_format": lambda _x, _n: _enum(_E_CrsTextFormat, _x, _n), }
+    _defaults = {}
+
+
+class SegChannelSetSummary(ctypes.Structure):
+    """One SEG-D channel set of one record."""
+    _fields_ = [
+        ("record", ctypes.c_int64),
+        ("scan_type", ctypes.c_int64),
+        ("channel_set", ctypes.c_int64),
+        ("number", ctypes.c_int64),
+        ("channel_type", ctypes.c_int64),
+        ("trace_count", ctypes.c_int64),
+        ("samples_per_trace", ctypes.c_int64),
+        ("sample_interval_us", ctypes.c_double),
+        ("start_time_ms", ctypes.c_double),
+        ("end_time_ms", ctypes.c_double),
+    ]
+    _out = (("record", lambda _v: _v), ("scan_type", lambda _v: _v), ("channel_set", lambda _v: _v), ("number", lambda _v: _v), ("channel_type", lambda _v: _v), ("trace_count", lambda _v: _v), ("samples_per_trace", lambda _v: _v), ("sample_interval_us", lambda _v: _v), ("start_time_ms", lambda _v: _v), ("end_time_ms", lambda _v: _v), )
+    _in = {"record": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "scan_type": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "channel_set": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "number": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "channel_type": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "trace_count": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "samples_per_trace": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "sample_interval_us": lambda _x, _n: _f64(_x, _n), "start_time_ms": lambda _x, _n: _f64(_x, _n), "end_time_ms": lambda _x, _n: _f64(_x, _n), }
+    _defaults = {}
+
+
 class SegSpsOptions(ctypes.Structure):
     """How `readSps` reads a file."""
     _fields_ = [
@@ -615,6 +673,12 @@ _lib.seg_header_editor_set_file_field.argtypes = [ctypes.c_void_p, ctypes.c_char
 _lib.seg_header_editor_set_file_field.restype = ctypes.c_int32
 _lib.seg_header_editor_set_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue), ctypes.POINTER(ctypes.c_bool)]
 _lib.seg_header_editor_set_record_field.restype = ctypes.c_int32
+_lib.seg_seismic_file_crs_text.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_crs_text.restype = ctypes.c_int32
+_lib.seg_seismic_file_summary.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegFileSummary)]
+_lib.seg_seismic_file_summary.restype = ctypes.c_int32
+_lib.seg_seismic_file_channel_sets.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegChannelSetSummary), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_channel_sets.restype = ctypes.c_int32
 _lib.seg_survey_geometry_relation_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_survey_geometry_relation_count.restype = ctypes.c_int32
 _lib.seg_survey_geometry_new.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
@@ -1136,6 +1200,44 @@ class SeismicFile(_Handle, _SeismicFileExtras):
             if _call(_lib.seg_seismic_file_sample_interval_us, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
             return _o.value
+        finally:
+            self._leave()
+
+    def crs_text(self):
+        """The coordinate reference system text, as stored: SEG-Y, the first P1/11
+        or Location Data stanza of the extended textual header (its data);
+        SEG-D Rev 3, the 0x55 blocks of the first record that has them (from
+        `((SEG:` or `((OGP:`). Empty when the file has none; `summary` says
+        which format it is in."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_seismic_file_crs_text, _h, _b, _c, _n))
+        finally:
+            self._leave()
+
+    def summary(self):
+        """The file's common metadata: standard, revision, byte order, sample
+        format, trace and record counts, first and last field record, sample
+        interval, samples per trace, record length, coordinate units and the
+        CRS text's format. Reads the index and at most two trace headers. An unrecognized file gives
+        `standard == skUnknown` and zero counts. Raises `ValueError` for a SEG-Y
+        file that has been closed (its trace headers are read from the map)."""
+        _h = self._enter()
+        try:
+            _o = SegFileSummary()
+            if _call(_lib.seg_seismic_file_summary, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _struct_dict(_o)
+        finally:
+            self._leave()
+
+    def channel_sets(self):
+        """Every channel set of every SEG-D record, in record, scan type and
+        channel set order, with its sample interval, timing and the traces the
+        index holds for it. Empty for SEG-Y."""
+        _h = self._enter()
+        try:
+            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_channel_sets, _h, _b, _c, _n), SegChannelSetSummary, _struct_dict)
         finally:
             self._leave()
 

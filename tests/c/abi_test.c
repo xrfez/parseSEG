@@ -67,7 +67,8 @@ static void test_layout(void) {
     SIZE(SegTraceEntry); SIZE(SegTraceKeys); SIZE(SegTensorView); SIZE(SegValue);
     SIZE(SegGather); SIZE(SegDiagnostic); SIZE(SegLocation); SIZE(SegPrefetchChunk);
     SIZE(SegSlice); SIZE(SegConvertOptions); SIZE(SegSegyRevision); SIZE(SegSegdConvertOptions);
-    SIZE(SegSegdRevision); SIZE(SegSpsOptions);
+    SIZE(SegSegdRevision); SIZE(SegSpsOptions); SIZE(SegFileSummary);
+    SIZE(SegStandardRevision); SIZE(SegChannelSetSummary);
     OFF(SegTraceEntry, offset); OFF(SegTraceEntry, header_bytes); OFF(SegTraceEntry, num_samples);
     OFF(SegTraceEntry, record); OFF(SegTraceEntry, channel_set); OFF(SegTraceEntry, scan_type);
     OFF(SegTraceEntry, channel_type);
@@ -99,7 +100,55 @@ static void test_layout(void) {
     OFF(SegSegdConvertOptions, twos_complement8015);
     OFF(SegSpsOptions, revision); OFF(SegSpsOptions, strict_implied_decimals);
     OFF(SegSpsOptions, layout); OFF(SegSpsOptions, force_layout);
+    OFF(SegFileSummary, standard); OFF(SegFileSummary, revision);
+    OFF(SegFileSummary, mixed_revisions); OFF(SegFileSummary, byte_order);
+    OFF(SegFileSummary, format_code); OFF(SegFileSummary, decodable);
+    OFF(SegFileSummary, trace_count); OFF(SegFileSummary, record_count);
+    OFF(SegFileSummary, first_field_record); OFF(SegFileSummary, last_field_record);
+    OFF(SegFileSummary, sample_interval_us); OFF(SegFileSummary, samples_per_trace);
+    OFF(SegFileSummary, record_length_ms); OFF(SegFileSummary, coordinate_units);
+    OFF(SegFileSummary, crs_format);
+    OFF(SegStandardRevision, major); OFF(SegStandardRevision, minor);
+    OFF(SegChannelSetSummary, record); OFF(SegChannelSetSummary, scan_type);
+    OFF(SegChannelSetSummary, channel_set); OFF(SegChannelSetSummary, number);
+    OFF(SegChannelSetSummary, channel_type); OFF(SegChannelSetSummary, trace_count);
+    OFF(SegChannelSetSummary, samples_per_trace); OFF(SegChannelSetSummary, sample_interval_us);
+    OFF(SegChannelSetSummary, start_time_ms); OFF(SegChannelSetSummary, end_time_ms);
     CHECK(seg_sizeof("NoSuchType") == -1 && seg_offsetof("SegValue", "nope") == -1);
+}
+
+/* ---- summary (task 6.8) ----------------------------------------------- */
+static void test_summary(void) {
+    SegSeismicFile *f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
+    SegFileSummary s;
+    OK(seg_seismic_file_summary(f, &s));
+    CHECK(s.standard == SEG_SEISMIC_KIND_SEG_Y && s.revision.major == 2 && s.revision.minor == 1);
+    CHECK(s.byte_order == SEG_BYTE_ORDER_BIG && s.format_code == 1 && s.decodable);
+    CHECK(s.trace_count == 200 && s.record_count == 1 && s.samples_per_trace == 2001);
+    CHECK(s.sample_interval_us == 2000.0 && s.record_length_ms == 4000.0);
+    CHECK(s.coordinate_units == SEG_COORDINATE_UNITS_METERS);
+    CHECK(s.crs_format == SEG_CRS_TEXT_FORMAT_P1_11);
+    int64_t len = -1;
+    OK(seg_seismic_file_crs_text(f, NULL, 0, &len));
+    CHECK(len > 1000);
+    char head[16];
+    OK(seg_seismic_file_crs_text(f, head, sizeof head, &len));
+    CHECK(strncmp(head, "IOGP,IOGP P1", 12) == 0);
+    SegChannelSetSummary cs[8];
+    OK(seg_seismic_file_channel_sets(f, cs, 8, &len));
+    CHECK(len == 0);
+    seg_seismic_file_release(f);
+    f = open_file("inova_rev30_5traces.sgd", false);
+    OK(seg_seismic_file_summary(f, &s));
+    CHECK(s.standard == SEG_SEISMIC_KIND_SEG_D && s.revision.major == 3 && !s.mixed_revisions);
+    CHECK(s.format_code == 8058 && s.first_field_record == 151 && s.sample_interval_us == 1000.0);
+    CHECK(s.crs_format == SEG_CRS_TEXT_FORMAT_STANZA);
+    OK(seg_seismic_file_channel_sets(f, cs, 8, &len));
+    CHECK(len == 4 && cs[3].channel_type == 0x10 && cs[3].trace_count == 2);
+    CHECK(cs[0].samples_per_trace == 4001 && cs[0].end_time_ms == 4000.0);
+    OK(seg_seismic_file_channel_sets(f, cs, 2, &len)); /* too small: the full length */
+    CHECK(len == 4);
+    seg_seismic_file_release(f);
 }
 
 /* ---- files, fields, logs --------------------------------------------- */
@@ -755,6 +804,7 @@ int main(int argc, char **argv) {
     CHECK(strcmp(ver, "0.4.0") == 0 && len == 5);
     test_layout();
     test_files();
+    test_summary();
     test_reads();
     test_gathers_and_prefetch();
     test_edits();
