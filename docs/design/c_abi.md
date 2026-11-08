@@ -178,6 +178,14 @@ per-function documentation.
     `include/parseseg.h` and `python/parseseg/__init__.py`, and add C and Python tests. A new
     handle type needs `{.segHandle.}` on its declaration; structs and enums need nothing.
     Only a generic routine needs an adapter in `api.nim`.
+14. **SEG-2.** A SEG-2 file opens like the others (`SEG_SEISMIC_KIND_SEG_2`). Its keyword
+    strings are read with `seg_seismic_file_seg2_string_count(f, trace)`,
+    `seg_seismic_file_seg2_keyword(f, trace, n, ...)` and `..._seg2_value(...)` (trace -1:
+    the File Descriptor Block), or by name through `seg_seismic_file_trace_field` /
+    `..._file_field` (`"trace.SAMPLE_INTERVAL"`, `"file.UNITS"`: text values; fixed fields
+    such as `"trace.numSamples"`: integers). Edits of SEG-2 headers are refused (`false`).
+    `SegConvertOptions.target` (`SEG_SEISMIC_KIND_*`) picks the output standard of
+    `seg_convert_file`, with the nested `segd` and `seg2` options.
 
 ## Out of scope for now
 

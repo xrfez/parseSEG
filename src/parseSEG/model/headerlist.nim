@@ -27,9 +27,15 @@
 ## - file (`fileHeaders`): SEG-Y `label`, `text`, `binary`, `extended`,
 ##   `trailer`; SEG-D `label` (storage unit label); SEG-2 `file` (the File
 ##   Descriptor Block, up to the first Trace Descriptor Block);
-## - SEG-2 trace: `trace` (its Trace Descriptor Block). SEG-2 blocks are
-##   listed raw for now; their keyword strings are in `seg2Trace` and
-##   `index.seg2.strings`.
+## - SEG-2 trace: `trace` (its Trace Descriptor Block).
+##
+## A SEG-2 block (`file` or `trace`) gives one row per fixed-part field
+## (`Seg2FileFixed`, `Seg2TraceFixed`), then one row per keyword string in
+## file order: `field` is the keyword as written, `value` the string's value
+## (`fvText`), `offset`/`size` the string entry (its offset word and
+## terminator included). `blockOffset`/`blockSize` span the whole descriptor
+## block, strings included. Nothing of SEG-2 can be patched: string edits
+## change block sizes, so the editor refuses them (rewrite the file).
 ##
 ## Field names are those of `HeaderEditor` and the NIF export
 ## (`<block>.<field>`), so a row's `blockName & "." & field` is what an edit
@@ -45,6 +51,7 @@ import std/options
 import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
+import ../seg2/[reader as seg2reader]
 import ./[traceindex, headerfields]
 import ../abi/pragmas
 
@@ -167,6 +174,20 @@ proc located(L: var Lister, f: SeismicFile, scope: HeaderScope, index: int,
   result = r.error.len == 0
   if result: L.addBlock(name, r.blk.kind, r.blk.offset, r.blk.size, r.blk.order)
 
+proc addSeg2Block(L: var Lister, f: SeismicFile, name: string, kind: HeaderBlock,
+    at: int64, size: int) =
+  # A SEG-2 descriptor block: its fixed fields, then a row per string.
+  if at < 0 or size < Seg2FixedSize or at + size > L.size: return
+  L.addBlock(name, kind, at, size, f.index.seg2.order)
+  let first = if kind == hbSeg2File: Seg2FixedSize + int(f.index.seg2.pointerBytes)
+              else: int(at) + Seg2FixedSize
+  var spans: seq[Slice[int]]
+  let strs = blockStrings(L.mem.toOpenArray(0, int(L.size) - 1), first, int(at) + size,
+    f.index.seg2, spans)
+  for i, x in strs:
+    L.rows.add HeaderRow(blockName: name, kind: kind, field: x.key, value: toFieldValue(x.value),
+      offset: spans[i].a, size: spans[i].len, blockOffset: at, blockSize: size)
+
 func traceEnd(f: SeismicFile, i: int): int64 =
   # The offset after trace `i`'s samples.
   let e = f.index.entries[i]
@@ -180,6 +201,9 @@ proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing {.segApi.} =
     raise newException(ValueError, "no trace " & $trace & " (the file has " & $f.len & ")")
   var L = initLister(f)
   let e = f.index.entries[trace]
+  if f.kind == skSeg2:
+    L.addSeg2Block(f, "trace", hbSeg2Trace, e.offset, int(e.headerBytes))
+    return HeaderListing(rows: move L.rows)
   discard L.located(f, hsTrace, trace, "trace")
   let hasExt1 = L.located(f, hsTrace, trace, "ext1")
   if f.kind == skSegy:
@@ -189,8 +213,6 @@ proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing {.segApi.} =
       for k in 0 ..< n:
         L.addRaw("ext" & $(k + 2), "proprietary", first + int64(k) * TraceHeaderSize,
           TraceHeaderSize)
-  elif f.kind == skSeg2:
-    L.addRaw("trace", "trace descriptor block", e.offset, int(e.headerBytes))
   else:
     let first = e.offset + SegdTraceHeaderSize + SegdBlockSize
     let n = (int(e.headerBytes) - SegdTraceHeaderSize - SegdBlockSize) div SegdBlockSize
@@ -260,7 +282,8 @@ proc recordHeaders*(f: SeismicFile, record: int): HeaderListing {.segApi.} =
 proc fileHeaders*(f: SeismicFile): HeaderListing {.segApi.} =
   ## The file-level header blocks, as rows in file order: SEG-Y tape label,
   ## textual, binary, extended textual headers and data trailer; SEG-D the
-  ## storage unit label. Raises `ValueError` for a closed file.
+  ## storage unit label; SEG-2 the File Descriptor Block (fixed fields and
+  ## strings). Raises `ValueError` for a closed file.
   var L = initLister(f)
   case f.kind
   of skSegy:
@@ -278,9 +301,7 @@ proc fileHeaders*(f: SeismicFile): HeaderListing {.segApi.} =
   of skSegd:
     if f.index.segdLabel.isSome: L.addRaw("label", "storage unit label", 0, 128)
   of skSeg2:
-    let s = f.index.seg2
-    var size = int64(L.size)
-    for p in s.pointers: size = min(size, int64(p)) # the strings end before the first trace
-    L.addRaw("file", "file descriptor block", 0, int(size))
+    L.addSeg2Block(f, "file", hbSeg2File, 0,
+      fileBlockSize(L.mem.toOpenArray(0, int(L.size) - 1), f.index.seg2))
   of skUnknown: discard
   HeaderListing(rows: move L.rows)

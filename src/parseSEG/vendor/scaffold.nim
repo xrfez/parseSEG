@@ -184,7 +184,8 @@ proc scaffoldVendorMap*(path: string, reg: VendorRegistry): VendorScaffold =
   case kind
   of skSegd: result.scanSegd(path, reg)
   of skSegy: result.scanSegy(path, reg)
-  of skSeg2: raise newException(ValueError, "vendor maps are not supported for SEG-2 yet")
+  of skSeg2: raise newException(ValueError, "vendor maps do not apply to SEG-2: its vendor " &
+    "fields are keyword strings (seg2Strings, traceHeaders)")
   of skUnknown: raise newException(ValueError, path & " is neither SEG-Y nor SEG-D")
 
 func len*(s: VendorScaffold): int =

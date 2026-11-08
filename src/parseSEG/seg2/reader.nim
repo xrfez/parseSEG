@@ -65,7 +65,7 @@ proc checkList(s: openArray[Seg2String], st: var WalkState, log: var DiagLog,
         x.key & ")")
 
 proc readStrings(data: openArray[byte], first, limit: int, f: Seg2File, log: var DiagLog,
-    loc: Location): seq[Seg2String] =
+    loc: Location, spans: var seq[Slice[int]]): seq[Seg2String] =
   # The string list at `first`, which must end before `limit`. Each entry is
   # a u16 offset to the next one (the entry's length, these 2 bytes
   # included; 0 ends the list), then the text up to the String Terminator.
@@ -87,8 +87,50 @@ proc readStrings(data: openArray[byte], first, limit: int, f: Seg2File, log: var
     let cut = if f.stringTerm.len > 0: text.find(f.stringTerm) else: -1
     if cut >= 0: text.setLen cut
     let s = toSeg2String(text)
-    if s.key.len > 0: result.add s
+    if s.key.len > 0:
+      result.add s
+      spans.add p .. p + n - 1
     p += n
+
+proc blockStrings*(data: openArray[byte], first, limit: int, f: Seg2File): seq[Seg2String] =
+  ## The string list starting at byte `first` of `data` and ending before
+  ## `limit` (a Trace Descriptor Block's strings start at its byte 32, the
+  ## file strings at `32 + pointerBytes`), parsed as the reader does,
+  ## without diagnostics.
+  var log: DiagLog
+  var spans: seq[Slice[int]]
+  if first >= 0 and limit <= data.len:
+    result = readStrings(data, first, limit, f, log, Location(), spans)
+
+proc blockStrings*(data: openArray[byte], first, limit: int, f: Seg2File,
+    spans: var seq[Slice[int]]): seq[Seg2String] =
+  ## `blockStrings`, with `spans` set to each string entry's bytes in
+  ## `data` (offset word and terminator included), one per string.
+  var log: DiagLog
+  spans.setLen 0
+  if first >= 0 and limit <= data.len:
+    result = readStrings(data, first, limit, f, log, Location(), spans)
+
+func stringListEnd*(data: openArray[byte], first, limit: int, order: ByteOrder): int =
+  ## Where the string list at `first` ends: past its 0 end word, rounded up
+  ## to 4 bytes and bounded by `limit` (`limit` when the list is damaged).
+  var p = first
+  while p + 2 <= limit:
+    let n = int(getNum[uint16](data, p, order))
+    if n == 0: return min(limit, (p + 2 + 3) div 4 * 4)
+    if n < 2: return limit
+    p += n
+  limit
+
+func fileBlockSize*(data: openArray[byte], f: Seg2File): int =
+  ## Bytes of the File Descriptor Block of the file `data`: fixed part,
+  ## trace pointers and the padded file strings (ending at the first trace
+  ## block at the latest).
+  let first = Seg2FixedSize + int(f.pointerBytes)
+  var limit = data.len
+  for p in f.pointers:
+    if int64(p) >= first and int64(p) < limit: limit = int(p)
+  if first >= limit: min(first, data.len) else: stringListEnd(data, first, limit, f.order)
 
 proc readSeg2*(data: openArray[byte], log: var DiagLog, name = ""): Seg2File =
   ## Parses the File Descriptor Block at the start of `data` (the whole
@@ -156,7 +198,8 @@ proc readSeg2*(data: openArray[byte], log: var DiagLog, name = ""): Seg2File =
   if first + 2 > data.len:
     log.report(sevWarning, dcTruncated, "the file ends before the file strings", first, loc)
   else:
-    result.strings = readStrings(data, first, limit, result, log, loc)
+    var spans: seq[Slice[int]]
+    result.strings = readStrings(data, first, limit, result, log, loc, spans)
 
 proc readTrace(data: openArray[byte], f: Seg2File, i: int, log: var DiagLog,
     name: string): Seg2Trace =
@@ -193,7 +236,8 @@ proc readTrace(data: openArray[byte], f: Seg2File, i: int, log: var DiagLog,
   if result.dataSize mod 4 != 0:
     log.report(sevWarning, dcBadValue, "the Data Block size " & $result.dataSize &
       " is not a multiple of 4", p + 4, loc)
-  result.strings = readStrings(data, a + Seg2FixedSize, a + bs, f, log, loc)
+  var spans: seq[Slice[int]]
+  result.strings = readStrings(data, a + Seg2FixedSize, a + bs, f, log, loc, spans)
   result.valid = true
   let fmt = result.format
   if fmt.isNone:

@@ -828,6 +828,10 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
   except IOError as e:
     result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
     return
+  if opts.target != skSegy and kind in {skSegy, skSegd}:
+    result.report(sevFatal, dcValidation, "geometry is written into SEG-Y output only " &
+      "(ConvertOptions.target)", loc = Location(file: dstPath))
+    return
   case kind
   of skSegd:
     result.add convertFile(srcPath, dstPath, opts,
@@ -844,5 +848,8 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
       except CatchableError as e:
         result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
     finishOutput(tmp, dstPath, keep = not result.isFatal, result)
-  of skSeg2, skUnknown:
+  of skSeg2:
+    result.report(sevFatal, dcUnsupportedFormat, "geometry cannot be written to SEG-2 " &
+      "files or their conversions yet", loc = Location(file: srcPath))
+  of skUnknown:
     result.add convertFile(srcPath, dstPath, opts) # reports why it cannot

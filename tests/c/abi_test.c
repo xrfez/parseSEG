@@ -691,6 +691,46 @@ static void test_convert(void) {
     OK(seg_seismic_file_trace_field(f, 3, "ext1.extGroupX", &v));
     CHECK(v.kind == SEG_VALUE_FLOAT && v.f == 1826232.375);
     seg_seismic_file_release(f);
+    /* SEG-2 (11.2): to SEG-2, its keyword strings, named fields, back to SEG-D. */
+    CHECK(o.target == SEG_SEISMIC_KIND_SEG_Y && o.seg2.byte_order == SEG_BYTE_ORDER_LITTLE &&
+          o.seg2.format == SEG_SEG2TARGET_FORMAT_KEEP && o.segd.revision.major == 3);
+    o.target = SEG_SEISMIC_KIND_SEG_2;
+    o.seg2.format = SEG_SEG2TARGET_FORMAT_4;
+    log = NULL;
+    OK(seg_convert_file(path(dir, "inova_rev30_5traces.sgd"), path(tmp, "inova.sg2"), &o, &log));
+    seg_diag_log_release(log);
+    OK(seg_open_seismic(path(tmp, "inova.sg2"), false, false, &f));
+    CHECK(kind_of(f) == SEG_SEISMIC_KIND_SEG_2 && file_len(f) == 5);
+    int64_t count = 0, len = 0;
+    char text[256];
+    OK(seg_seismic_file_seg2_string_count(f, -1, &count));
+    CHECK(count >= 3);
+    OK(seg_seismic_file_seg2_string_count(f, 0, &count));
+    CHECK(count >= 3);
+    int64_t channel = -1;
+    for (int64_t k = 0; k < count; k++) {
+        OK(seg_seismic_file_seg2_keyword(f, 0, k, text, sizeof text, &len));
+        if (strcmp(text, "CHANNEL_NUMBER") == 0) channel = k;
+    }
+    CHECK(channel >= 0);
+    OK(seg_seismic_file_seg2_value(f, 0, channel, text, sizeof text, &len));
+    CHECK(len == 1 && strcmp(text, "1") == 0);
+    CHECK(seg_seismic_file_seg2_value(f, 0, 99, text, sizeof text, &len) == SEG_ERR_ARGUMENT);
+    OK(seg_seismic_file_trace_field(f, 0, "trace.formatCode", &v));
+    CHECK(v.kind == SEG_VALUE_INT && v.i == 4);
+    char units[16];
+    v.text = units;
+    v.text_cap = sizeof units;
+    OK(seg_seismic_file_file_field(f, "file.UNITS", &v));
+    CHECK(v.kind == SEG_VALUE_TEXT && v.text_len == 4 && strcmp(units, "NONE") == 0);
+    seg_seismic_file_release(f);
+    o.target = SEG_SEISMIC_KIND_SEG_D;
+    log = NULL;
+    OK(seg_convert_file(path(tmp, "inova.sg2"), path(tmp, "inova2.sgd"), &o, &log));
+    seg_diag_log_release(log);
+    CHECK(seg_convert_file(path(tmp, "inova.sgy"), path(tmp, "x.sgd"), &o, NULL) ==
+          SEG_ERR_FORMAT); /* SEG-Y to SEG-D is not supported */
+    seg_init_convert_options(&o);
     /* Little-endian needs Rev 2: the failure hands its log out. */
     log = NULL;
     o.revision.major = 1;

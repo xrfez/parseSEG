@@ -10,6 +10,17 @@
 ##   (source headers);
 ## - per file (`fileField`): the SEG-Y `binary` header.
 ##
+## SEG-2 has one block per trace (`trace`, the Trace Descriptor Block) and
+## one per file (`file`, the File Descriptor Block). Their names are the
+## fixed-part fields (`Seg2TraceFixed`, `Seg2FileFixed`: `trace.numSamples`,
+## `file.revision`, ...) and the block's keyword strings (`trace.
+## SAMPLE_INTERVAL`, `file.UNITS`; matched case-insensitively, the first
+## string with the keyword), whose values come back verbatim as `fvText`.
+## `fieldNames` lists the fixed fields; `seg2StringCount`, `seg2Keyword` and
+## `seg2Value` list the strings of a block. SEG-2 fields are read-only: a
+## string edit changes the block's size, so the editor refuses SEG-2 edits
+## and the file is rewritten instead (`seg2/writer`, `convertFile`).
+##
 ## Values are read from the mapped bytes, so they reflect in-place edits at
 ## once. Integers (BCD included; -1 = all F, -2 = invalid BCD) come back as
 ## `fvInt`, floats and fixed point as `fvFloat`, character fields as
@@ -24,7 +35,7 @@ import std/[macros, options, strutils]
 import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
-from ../seg2/headers import sampleInterval
+import ../seg2/[headers as seg2headers, reader as seg2reader]
 import ./traceindex
 import ../abi/pragmas
 
@@ -69,6 +80,8 @@ type
     hbSegdOrientation = "SEG-D orientation"
     hbSegdTrailerDescription = "SEG-D trailer description"
     hbRaw = "raw" ## A block without named fields (listings only).
+    hbSeg2File = "SEG-2 file"   ## The File Descriptor Block (fixed part and strings).
+    hbSeg2Trace = "SEG-2 trace" ## A Trace Descriptor Block (fixed part and strings).
 
   HeaderScope* = enum
     ## Where a named field lives: the file (`fileField`), a SEG-D record
@@ -228,6 +241,14 @@ template withBlockType*(k: HeaderBlock, body: untyped) =
     type BlockT {.inject.} = RawBlock
     const firstByte {.inject.} = 1
     body
+  of hbSeg2File:
+    type BlockT {.inject.} = Seg2FileFixed
+    const firstByte {.inject.} = 0 # SEG-2 numbers bytes from 0
+    body
+  of hbSeg2Trace:
+    type BlockT {.inject.} = Seg2TraceFixed
+    const firstByte {.inject.} = 0
+    body
 
 template isLayoutField*(f: untyped): bool =
   ## **Internal.** True for fields with a layout pragma (raw copies like
@@ -251,18 +272,21 @@ proc fieldNames*(kind: HeaderBlock): seq[string] {.segApi.} =
 
 # ----------------------------------------------------------------- lookup --
 
-const Seg2NoFields = "SEG-2 headers are keyword strings, which named fields do not " &
-  "cover yet (not supported for SEG-2 yet; use seg2Trace or index.seg2)"
-
 proc traceBlock(ix: TraceIndex, trace: int, blockName: string, b: var FieldRef) =
   # Block `trace` or `ext1` of trace `trace`.
   if trace notin 0 ..< ix.len:
     b.error = "no trace " & $trace
     return
-  if ix.kind == skSeg2:
-    b.error = Seg2NoFields
-    return
   let e = ix.entries[trace]
+  if ix.kind == skSeg2:
+    if blockName != "trace":
+      b.error = "the SEG-2 trace block is trace (trace.<field or KEYWORD>)"
+    elif e.headerBytes == 0:
+      b.error = "the trace has no valid Trace Descriptor Block"
+    else:
+      b.blk = BlockRef(kind: hbSeg2Trace, offset: e.offset, size: int(e.headerBytes),
+        order: ix.seg2.order, name: blockName)
+    return
   case blockName
   of "trace":
     b.blk = if ix.kind == skSegy:
@@ -290,7 +314,12 @@ proc traceBlock(ix: TraceIndex, trace: int, blockName: string, b: var FieldRef) 
 proc fileBlock(ix: TraceIndex, blockName: string, b: var FieldRef) =
   # The SEG-Y `binary` header.
   if ix.kind == skSeg2:
-    b.error = Seg2NoFields
+    if blockName != "file":
+      b.error = "the SEG-2 file-level block is file (file.<field or KEYWORD>)"
+    else:
+      # The fixed part and the pointers; the strings follow (see `seg2Strings`).
+      b.blk = BlockRef(kind: hbSeg2File, offset: 0,
+        size: Seg2FixedSize + int(ix.seg2.pointerBytes), order: ix.seg2.order, name: blockName)
   elif ix.kind != skSegy or blockName != "binary":
     b.error = "the file-level block is the SEG-Y binary header (binary.<field>)"
   else:
@@ -372,9 +401,18 @@ proc checkBlock(f: SeismicFile, b: BlockRef): string =
   elif b.offset < 0 or b.offset + b.size > f.mappedSize: "the header lies outside the file"
   else: ""
 
+proc blockStrings(f: SeismicFile, b: BlockRef): seq[Seg2String] =
+  # The keyword strings of a located SEG-2 block (checked by `checkBlock`).
+  if b.kind == hbSeg2File: f.index.seg2.strings
+  else:
+    let a = int(b.offset)
+    blockStrings(f.unsafeMemory.toOpenArray(0, int(f.mappedSize) - 1), a + Seg2FixedSize,
+      a + b.size, f.index.seg2)
+
 proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
   ## **Internal.** Reads `field` of the located block from the mapped bytes;
-  ## `error` says why it cannot.
+  ## `error` says why it cannot. A SEG-2 block also has its keyword strings
+  ## as fields.
   let err = f.checkBlock(b)
   if err.len > 0: return FieldRead(error: err)
   let mem = f.unsafeMemory
@@ -384,6 +422,13 @@ proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
     var h: BlockT
     decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
     v = fieldByName(h, field)
+  if v.isNone and b.kind in {hbSeg2File, hbSeg2Trace}:
+    let strs = f.blockStrings(b)
+    let i = strs.find(field)
+    if i >= 0: v = some(toFieldValue(strs[i].value))
+    else:
+      return FieldRead(error: "is neither a fixed field of the " & $b.kind &
+        " block nor a keyword string it holds")
   if v.isSome: FieldRead(value: v.get)
   else: FieldRead(error: "is not a field of " & $b.kind)
 
@@ -418,7 +463,8 @@ func optional(r: sink FieldRead): Option[FieldValue] {.inline.} =
 
 proc traceField*(f: SeismicFile, trace: int, name: string): FieldValue {.segApi.} =
   ## A trace header field by name, e.g. "trace.sourceX" or
-  ## "ext1.receiverLine". Raises `ValueError` for an unknown field, a trace
+  ## "ext1.receiverLine" (SEG-2: "trace.numSamples", "trace.SAMPLE_INTERVAL").
+  ## Raises `ValueError` for an unknown field, a trace
   ## out of range or a closed file; the message says which.
   f.lookup(hsTrace, trace, name).required(name)
 
@@ -429,7 +475,8 @@ proc recordField*(f: SeismicFile, record: int, name: string): FieldValue {.segAp
   f.lookup(hsRecord, record, name).required(name)
 
 proc fileField*(f: SeismicFile, name: string): FieldValue {.segApi.} =
-  ## A file-level field by name, e.g. "binary.formatCode" (SEG-Y). Raises
+  ## A file-level field by name, e.g. "binary.formatCode" (SEG-Y) or
+  ## "file.UNITS" (SEG-2). Raises
   ## `ValueError` for an unknown field or a closed file.
   f.lookup(hsFile, 0, name).required(name)
 
@@ -453,6 +500,40 @@ proc blockKind*(f: SeismicFile, scope: HeaderScope, index: int,
   ## `fieldNames` lists its fields.
   let r = f.index.locateBlock(scope, index, blockName)
   if r.error.len > 0: none(HeaderBlock) else: some(r.blk.kind)
+
+# ------------------------------------------------------- SEG-2 strings --
+
+proc seg2Strings*(f: SeismicFile, trace: int): seq[Seg2String] =
+  ## The keyword strings of SEG-2 trace `trace`, or of the File Descriptor
+  ## Block when `trace` is -1, in file order. Raises `ValueError` for a file
+  ## that is not SEG-2 or is closed, or a trace out of range.
+  if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
+  if trace == -1: f.index.seg2.strings
+  else: f.seg2Trace(trace).strings
+
+proc seg2StringCount*(f: SeismicFile, trace: int): int {.segApi.} =
+  ## How many keyword strings SEG-2 trace `trace` has (-1: the File
+  ## Descriptor Block); read them with `seg2Keyword` and `seg2Value`. Raises
+  ## `ValueError` like `seg2Strings`.
+  f.seg2Strings(trace).len
+
+proc seg2String(f: SeismicFile, trace, n: int): Seg2String =
+  let s = f.seg2Strings(trace)
+  if n notin 0 ..< s.len:
+    raise newException(ValueError, "no string " & $n & " (the block has " & $s.len & ")")
+  s[n]
+
+proc seg2Keyword*(f: SeismicFile, trace, n: int): string {.segApi.} =
+  ## The keyword of string `n` of SEG-2 trace `trace` (-1: the File
+  ## Descriptor Block), as written. Raises `ValueError` like `seg2Strings`,
+  ## and for `n` out of range.
+  f.seg2String(trace, n).key
+
+proc seg2Value*(f: SeismicFile, trace, n: int): string {.segApi.} =
+  ## The value of string `n` of SEG-2 trace `trace` (-1: the File
+  ## Descriptor Block), terminators stripped (NOTE lines are separated by
+  ## the file's Line Terminator). Raises `ValueError` like `seg2Keyword`.
+  f.seg2String(trace, n).value
 
 # ---------------------------------------------------------- sample timing --
 

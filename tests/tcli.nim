@@ -53,7 +53,7 @@ block usage_and_version:
   doAssert "unknown option --bogus" in fails(2, "info", inglewood, "--bogus")
   doAssert "Usage" in fails(2)
   writeFile(tmp / "junk.bin", "not seismic data at all")
-  doAssert "neither SEG-Y nor SEG-D" in fails(1, "info", tmp / "junk.bin")
+  doAssert "is not SEG-Y, SEG-D or SEG-2" in fails(1, "info", tmp / "junk.bin")
 
 block info:
   let a = ok("info", inglewood, "--keys")
@@ -116,12 +116,30 @@ block convert:
   doAssert "IEEE float32" in ok("info", tmp / "le0.sgy") and "little-endian" in ok("info", tmp / "le0.sgy")
   doAssert "applies to SEG-Y output only" in
     fails(2, "convert", s63, tmp / "x.sgd", "--to=segd", "--descale")
-  doAssert "--to is segy or segd" in fails(2, "convert", s63, tmp / "x.sgy", "--to=segx")
+  doAssert "--to is segy, segd or seg2" in fails(2, "convert", s63, tmp / "x.sgy", "--to=segx")
   discard fails(1, "convert", s63, tmp / "x.sgd", "--to=segd", "--rev=1.0")
   doAssert "--format: 1234" in fails(2, "convert", s63, tmp / "x.sgd", "--to=segd",
     "--format=1234")
   discard fails(2, "convert", inglewood, inglewood)
   doAssert "--byte-order is" in fails(2, "convert", inglewood, tmp / "x.sgy", "--byte-order=up")
+  # SEG-2 (11.2): SEG-D to SEG-2 (by the .sg2 name), then to SEG-Y and SEG-D
+  discard ok("convert", inova, tmp / "inova.sg2", "--byte-order=big")
+  let i2 = ok("info", tmp / "inova.sg2")
+  doAssert "SEG-2 rev 1, big-endian" in i2 and "pointers:    5 of 5 slots" in i2 and
+    "UNITS: NONE" in i2 and "NOTE: Converted from SEG-D rev 3.0" in i2, i2
+  doAssert "trace.CHANNEL_NUMBER" in ok("dump", tmp / "inova.sg2", "--all", "--traces=0")
+  discard ok("convert", tmp / "inova.sg2", tmp / "inova2.sgy")
+  doAssert "SEG-Y rev 2.1" in ok("info", tmp / "inova2.sgy")
+  discard ok("convert", tmp / "inova.sg2", tmp / "inova2.sgd", "--to=segd", "--rev=3.1")
+  doAssert "SEG-D rev 3.1" in ok("info", tmp / "inova2.sgd")
+  discard ok("convert", inglewood, tmp / "ingle.dat", "--to=seg2", "--format=4")
+  doAssert "format:      4" in ok("info", tmp / "ingle.dat")
+  doAssert "SEG-2 formats are 1 to 5" in fails(2, "convert", inglewood, tmp / "x.sg2",
+    "--format=7")
+  doAssert "does not apply to SEG-2" in fails(2, "convert", inglewood, tmp / "x.sg2", "--rev=1")
+  doAssert "little or big" in fails(2, "convert", inglewood, tmp / "x.sg2",
+    "--byte-order=pairSwapped")
+  doAssert "variable length" in fails(1, "edit", tmp / "inova.sg2", "t0:trace.DELAY=1")
 
 # -------------------------------------------------------- 7.3: editing --
 
@@ -293,7 +311,7 @@ block review_edit_validates_first:
   doAssert "SEG-Y has none" in fails(2, "edit", f, "r0:binary.jobId=7")
   doAssert "out of range (the file has 200 traces)" in fails(2, "edit", f, "t200:trace.sourceX=1")
   writeFile(tmp / "empty.sgy", "")
-  doAssert "neither SEG-Y nor SEG-D" in fails(1, "edit", tmp / "empty.sgy", "t0:trace.sourceX=1")
+  doAssert "is not SEG-Y, SEG-D or SEG-2" in fails(1, "edit", tmp / "empty.sgy", "t0:trace.sourceX=1")
   doAssert not fileExists(tmp / "empty.sgy.edits.nif")
   # Number-like text, and big edit batches (one journal sync per batch).
   discard ok("edit", f, "t0:trace.headerName=12345678", "t0..199:trace.groupStatic=3")
@@ -308,7 +326,7 @@ block review_ranges_and_revisions:
   for r in ["256", "258.1", "300", "-1", "2.1.1", "x.y", "2."]:
     discard fails(2, "convert", inglewood, tmp / "r.sgy", "--rev=" & r)
   doAssert "--rev parts are 0..255" in fails(2, "convert", s63, tmp / "r.sgd", "--rev=256.0")
-  doAssert "needs a SEG-D input" in fails(2, "convert", inglewood, tmp / "r.sgd", "--to=segd")
+  doAssert "needs a SEG-D or SEG-2 input" in fails(2, "convert", inglewood, tmp / "r.sgd", "--to=segd")
   # The output kind follows the input's content, not its name.
   copyFile(s63, tmp / "d.raw")
   discard ok("convert", tmp / "d.raw", tmp / "fromraw.sgd")

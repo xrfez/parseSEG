@@ -450,6 +450,31 @@ assert err.diagnostics and err.diagnostics[-1]["severity"] == "fatal"
 err = raises(parseseg.Error, parseseg.convert_file, INGLEWOOD, INGLEWOOD)
 assert err.diagnostics
 
+# SEG-2 (11.2): conversion both ways, keyword strings, named fields, refused edits
+dst_s2 = os.path.join(scratch, "inova.sg2")
+log = parseseg.convert_file(INOVA, dst_s2, {"target": "SEG-2", "seg2": {"byte_order": "big"}})
+assert not log.is_fatal
+with parseseg.open_seismic(dst_s2) as s2, parseseg.open_seismic(INOVA) as s0:
+    assert s2.kind == "SEG-2" and len(s2) == 5
+    assert s2.read_traces(range(5)).tobytes() == s0.read_traces(range(5)).tobytes()
+    keys = [s2.seg2_keyword(0, k) for k in range(s2.seg2_string_count(0))]
+    assert "CHANNEL_NUMBER" in keys and "SAMPLE_INTERVAL" in keys
+    assert s2.seg2_value(0, keys.index("SAMPLE_INTERVAL")) == "0.001"
+    assert s2.trace_field(0, "trace.SAMPLE_INTERVAL") == "0.001"
+    assert s2.file_field("file.UNITS") == "NONE" and s2.file_field("file.revision") == 1
+    assert s2.seg2_string_count(-1) >= 3
+    raises(parseseg.ArgumentError, s2.seg2_value, 0, 99)
+    rows = s2.trace_headers(0)
+    assert any(r["field"] == "CHANNEL_NUMBER" and r["block_name"] == "trace" for r in rows)
+log = parseseg.convert_file(dst_s2, os.path.join(scratch, "inova_s2.sgd"),
+                            {"target": "SEG-D", "segd": {"revision": (3, 1)}})
+assert not log.is_fatal
+with parseseg.open_seismic(os.path.join(scratch, "inova_s2.sgd")) as d2:
+    assert d2.kind == "SEG-D" and len(d2) == 5
+ed = parseseg.open_editor(dst_s2)
+assert not ed.set_trace_field(0, "trace.DELAY", "1")
+ed.close()
+
 # SEG-D revisions (task 8.7).
 r3 = os.path.join(scratch, "63_r3.sgd")
 log = parseseg.convert_segd_revision(S63, r3)          # default 3.0

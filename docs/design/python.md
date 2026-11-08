@@ -96,6 +96,7 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 | `f.geometry_changes(fields=None)` → dict, `f.preview_geometry(fields=None)` → `DiagLog`, `editor.write_geometry(f, fields=None)` → dict, `copy_with_geometry(src, dst, g, fields=None, overwrite=False)`, `convert_with_geometry(src, dst, g, opts=None, fields=None, overwrite=False)` → `DiagLog` (`fields`: a dict of `source_xy`, `receiver_xy`, `elevations`, `midpoints`, `offsets`, `stations`) | `geometryChanges`, `previewGeometry`, `writeGeometry`, `copyWithGeometry`, `convertWithGeometry` |
 | `apply_journal(path, journal_path)`, `rollback_journal` → `DiagLog` | `applyJournal`, `rollbackJournal` |
 | `convert_file(src_path, dst_path, opts=None)`, `convert_segd_revision(src_path, dst_path, opts=None)` → `DiagLog` | `convertFile`, `convertSegdRevision` |
+| `f.seg2_string_count(trace)`, `f.seg2_keyword(trace, n)`, `f.seg2_value(trace, n)` (trace -1: the File Descriptor Block); `f.trace_field(i, "trace.SAMPLE_INTERVAL")`, `f.file_field("file.UNITS")` → str | `seg2StringCount`, ... (SEG-2 keyword strings) |
 | `version()`, `abi_version()`, `status_name(status)` | |
 
 - Handles have `close()` and are context managers. After `close()` any call raises
@@ -103,7 +104,9 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 - Options are dicts of `ConvertOptions` / `SegdConvertOptions` / `SpsOptions` fields:
   `convert_file(src, dst, {"revision": (1, 0), "byte_order": "little"})`. Enum fields take
   the value's name: `convert_segd_revision(src, dst, {"revision": (2, 1), "format": "8058"})`,
-  `convert_file(src, dst, {"format": "5"})` (`"keep"` is the default for both).
+  `convert_file(src, dst, {"format": "5"})` (`"keep"` is the default for both). The output
+  standard is `target`: `convert_file(src, "x.sg2", {"target": "SEG-2", "seg2":
+  {"byte_order": "big", "format": "4"}})`, `{"target": "SEG-D", "segd": {"revision": (3, 1)}}`.
 - A diagnostic dict holds `severity` ("info", "warning", "error", "fatal"), `code`, `offset`,
   `loc` (`file`, `record`, `channel_set`, `trace`, `block_index`, `field`) and `msg`, as the
   Nim `Diagnostic`.

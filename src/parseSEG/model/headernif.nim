@@ -18,6 +18,13 @@
 ##  (trace 0 (block trace (f sourceX 1704188) ...) (block ext1 ...) (raw "...")))
 ## ```
 ##
+## SEG-2 files have a `file` block (the File Descriptor Block) and a `trace`
+## block per trace: their fixed fields as `(f ...)`, then each keyword
+## string, in file order, as `(s "KEYWORD" "value")`. A block's `(raw ...)`
+## holds the whole descriptor block, strings included. String entries are
+## not imported: SEG-2 headers cannot be edited in place (the editor refuses
+## them, since a string edit changes the block's size).
+##
 ## Values are integer, float (`(nan)`, `(inf)`, `(neginf)` for the special
 ## ones) or string literals; strings escape `"`, `\`, control and non-ASCII
 ## bytes as `\HH`. A trace's `(raw ...)` holds all its header bytes; raw bytes
@@ -35,6 +42,7 @@
 import std/[os, strutils, math, options]
 import ../common/[errors, diagnostics, niftext]
 import ../segd/reader as segdreader
+from ../seg2/reader import Seg2String, fileBlockSize
 import ./[traceindex, headerfields, edit]
 import ../abi/pragmas
 
@@ -109,16 +117,21 @@ func hexOf(b: openArray[byte]): string =
   result = newStringOfCap(2 * b.len)
   for x in b: result.add toHex(x, 2)
 
-proc putBlock(o: var NifOut, f: SeismicFile, blk: BlockRef, raw: bool, indent: string) =
-  # The block is decoded once, into `o.values`.
+proc putBlock(o: var NifOut, f: SeismicFile, blk: BlockRef, raw: bool, indent: string,
+    strings: openArray[Seg2String] = [], rawSize = -1) =
+  # The block is decoded once, into `o.values`. `strings`: a SEG-2 block's
+  # keyword strings; `rawSize`: the raw bytes when they differ from the block's.
   o.put indent & "(block " & blk.name
   if f.readFields(blk, o.values).len == 0:
     for i, n in o.names[blk.kind]:
       if o.values[i].isSome:
         o.put "\n" & indent & " (f " & n & " " & nifValue(o.values[i].get) & ")"
+  for x in strings:
+    o.put "\n" & indent & " (s " & nifString(x.key) & " " & nifString(x.value) & ")"
   if raw:
+    let size = if rawSize >= 0: rawSize else: blk.size
     o.put "\n" & indent & " (raw \"" &
-      hexOf(f.unsafeMemory.toOpenArray(int(blk.offset), int(blk.offset) + blk.size - 1)) & "\")"
+      hexOf(f.unsafeMemory.toOpenArray(int(blk.offset), int(blk.offset) + size - 1)) & "\")"
   o.put ")"
 
 func standardName(k: SeismicKind): string =
@@ -144,11 +157,9 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   ## through a buffer (memory does not grow with the file). `raw` adds each
   ## block's bytes, and each trace's whole header, as hex. The document is
   ## written to `path.tmp` and renamed when complete. Raises `IOError` if it
-  ## cannot be written, and `ValueError` if `f` is closed, is SEG-2 (its
-  ## keyword strings have no named fields yet), or `path` is the seismic
-  ## file itself.
-  if f.kind == skSeg2:
-    raise newException(ValueError, "header export is not supported for SEG-2 yet")
+  ## cannot be written, and `ValueError` if `f` is closed or `path` is the
+  ## seismic file itself. SEG-2 blocks also list their keyword strings
+  ## (see the module doc).
   if not f.isOpen and f.len > 0: raise newException(ValueError, "the file is closed")
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
@@ -161,10 +172,16 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
       standardName(f.kind) & ")\n (traces " & $f.len & ")\n"
     let records = if f.kind == skSegd: f.index.segdRecords.len else: 0
     o.put " (records " & $records & ")"
-    let bin = f.index.locateBlock(hsFile, 0, "binary")
+    let seg2 = f.kind == skSeg2
+    let bin = f.index.locateBlock(hsFile, 0, if seg2: "file" else: "binary")
     if bin.error.len == 0:
       o.put "\n (file\n"
-      o.putBlock(f, bin.blk, raw, "  ")
+      if seg2:
+        let size = fileBlockSize(f.unsafeMemory.toOpenArray(0, int(f.mappedSize) - 1),
+          f.index.seg2)
+        o.putBlock(f, bin.blk, raw, "  ", f.index.seg2.strings, size)
+      else:
+        o.putBlock(f, bin.blk, raw, "  ")
       o.put ")"
     for r in 0..<records:
       o.put "\n (record " & $r
@@ -178,8 +195,9 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
         let b = f.index.locateBlock(hsTrace, t, name)
         if b.error.len == 0:
           o.put "\n"
-          o.putBlock(f, b.blk, false, "  ")
-      if raw:
+          if seg2: o.putBlock(f, b.blk, false, "  ", f.seg2Strings(t))
+          else: o.putBlock(f, b.blk, false, "  ")
+      if raw and f.index.entries[t].headerBytes > 0:
         template e: untyped = f.index.entries[t]
         o.put "\n  (raw \"" & hexOf(f.unsafeMemory.toOpenArray(int(e.offset),
           int(e.offset) + int(e.headerBytes) - 1)) & "\")"

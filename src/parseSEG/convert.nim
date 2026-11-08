@@ -11,7 +11,12 @@
 ##   the table below. Everything SEG-Y has no place for (general, extended
 ##   and external headers, vendor blocks, the general trailer) is reported,
 ##   once per kind, as an info diagnostic.
-## - `convertFile`: detects the input standard and dispatches.
+## - `convertSeg2ToSegy`: SEG-2 to SEG-Y, one SEG-Y trace per SEG-2 trace
+##   (table below).
+## - `convertFile`: detects the input standard and dispatches on
+##   `ConvertOptions.target`: SEG-Y (above), SEG-D (`convertSegdRevision`
+##   for SEG-D input, `convertSeg2ToSegd` for SEG-2) or SEG-2
+##   (`convertToSeg2`, from any standard; see `seg2convert`).
 ##
 ## Samples go through float64 (exact for every SEG-D and SEG-Y format) and
 ## are re-encoded in the target format. The default (`format = stKeep`) picks a
@@ -40,15 +45,40 @@
 ## index; sensor type; component; SEG-D record, channel set and channel
 ## type). SEG-Y readers that honour Layout stanzas, this library included
 ## (`fieldValue(file, trace, "rec_line")`), read those values back.
+##
+## SEG-2 to SEG-Y (the SEG-D rules above for formats, losses, Ext1 and the
+## `PSEGD001` header apply; record 0, channel set -1):
+##
+## | SEG-Y field | SEG-2 source |
+## |---|---|
+## | fieldRecord, traceNumberInField | SHOT_SEQUENCE_NUMBER; CHANNEL_NUMBER (else the trace's position) |
+## | ensembleNumber, traceInEnsemble | CDP_NUMBER; CDP_TRACE (else the position) |
+## | energySourcePoint, shotpointNumber | SOURCE_STATION_NUMBER |
+## | traceIdCode | TRACE_TYPE: DEAD 2, UPHOLE 5, TEST_DATA -1 (other), else the RECEIVER component (12-14) or 1 |
+## | numVertSummed, instrumentGainConstant | STACK, FIXED_GAIN |
+## | delayRecordingTime; source/group/totalStatic | DELAY; STATIC_CORRECTIONS (s to whole ms) |
+## | alias, low-cut, high-cut, notch filter fields | ALIAS_FILTER, LOW_CUT_FILTER, HIGH_CUT_FILTER, NOTCH_FREQUENCY |
+## | coordinates, offset, elevations | `TraceKeys` (SOURCE_ / RECEIVER_LOCATION, z plus DATUM); receiver/sourceDatumElevation: DATUM |
+## | transduction constant, units (mV) | DESCALING_FACTOR / STACK |
+## | year ... second | ACQUISITION_DATE / _TIME (time basis left 0: SEG-2 gives no zone) |
+## | binary traceSorting, measurementSystem, impulsePolarity | TRACE_SORT, UNITS (METERS 1, FEET 2), trace 0's POLARITY (1 → 2, -1 → 1) |
+## | textual header | the file strings, one per card (NOTE: one card per line) |
+##
+## SEG-2 samples go out in one format: their own (1 → 3, 2 → 2, 3 and 4 → 5,
+## 5 → 6 in Rev 2), int32 for mixed integer formats, else float64 (Rev 2) or
+## float32. Trace strings with no slot are listed in one info note.
 
 import std/[math, os, strutils, times]
 import ./common/[endians, errors, diagnostics, outputfile]
 import ./io/[records, diskio, memsource]
 import ./segy/[reader as segyreader, writer as segywriter, textheader, binheader, traceheader,
   samples as segysamples, exttext, layout]
-import ./segd/[reader as segdreader]
-import ./model/[traceindex, keys]
+import ./segd/[reader as segdreader, revconvert]
+import ./seg2/[reader as seg2reader]
+import ./model/[traceindex, keys, headerfields]
 import ./survey/join
+import ./seg2convert
+export seg2convert.Seg2ConvertOptions, seg2convert.Seg2TargetFormat
 import ./abi/pragmas
 import ./version
 
@@ -92,6 +122,11 @@ type
     textEncoding*: TextEncoding = teEbcdic ## SEG-D → SEG-Y: the textual header's encoding.
     applyDescale*: bool = false ## SEG-D: write millivolts (MP factor / descale multiplier).
     stationHeader*: bool = true ## SEG-D → SEG-Y Rev 2: the `PSEGD001` header and Layout stanza.
+    target*: SeismicKind = skSegy
+      ## `convertFile`'s output standard: SEG-Y (the fields above), SEG-D
+      ## (`segd`; from SEG-D or SEG-2 input) or SEG-2 (`seg2`; from any input).
+    segd*: SegdConvertOptions ## SEG-D output: revision and sample format.
+    seg2*: Seg2ConvertOptions ## SEG-2 output: byte order and sample format.
 
   LossNote = enum
     ## Kinds of information a conversion drops; each is noted once.
@@ -108,6 +143,10 @@ type
     lnSegdTimeRange ## A SEG-D record time outside years 1-9999.
     lnSurveyType ## Rev 2.0 target: survey type dropped.
     lnLayoutStanza ## Rev 2.0 target: the Layout stanza is not read.
+    lnSeg2Text ## SEG-2 file strings that do not fit the textual header.
+    lnSeg2Rounding ## SEG-2 delays or statics rounded to whole ms.
+    lnSeg2Units ## SEG-2 UNITS without a SEG-Y measurement system.
+    lnSeg2Polarity ## SEG-2 POLARITY varying between traces.
 
   GeometryJoin* = object
     ## **Internal.** Survey geometry joined to the SEG-D keys before they go
@@ -461,6 +500,24 @@ func scaled(v: float64, scalar: int16): int32 =
   if v.isNaN: 0'i32
   else: clampI32(v * (if scalar < 0: float64(-scalar) else: 1.0 / float64(max(scalar, 1))))
 
+proc setGeometry(h: var SegyTraceHeader, k: TraceKeys, datum = NaN) =
+  # Coordinates, elevations (and `datum` as both datum elevations) and
+  # offset, with the finest scalars that fit.
+  h.coordinateScalar = scalarFor([k.srcX, k.srcY, k.rcvX, k.rcvY, k.cmpX, k.cmpY])
+  h.sourceX = scaled(k.srcX, h.coordinateScalar)
+  h.sourceY = scaled(k.srcY, h.coordinateScalar)
+  h.groupX = scaled(k.rcvX, h.coordinateScalar)
+  h.groupY = scaled(k.rcvY, h.coordinateScalar)
+  h.cdpX = scaled(k.cmpX, h.coordinateScalar)
+  h.cdpY = scaled(k.cmpY, h.coordinateScalar)
+  if k.hasSourceXY or k.hasReceiverXY: h.coordinateUnits = 1
+  h.elevationScalar = scalarFor([k.srcZ, k.rcvZ, datum])
+  h.receiverElevation = scaled(k.rcvZ, h.elevationScalar)
+  h.sourceSurfaceElevation = scaled(k.srcZ, h.elevationScalar)
+  h.receiverDatumElevation = scaled(datum, h.elevationScalar)
+  h.sourceDatumElevation = scaled(datum, h.elevationScalar)
+  if not k.offset.isNaN: h.offset = clampI32(k.offset)
+
 proc fillTime(h: var SegyTraceHeader, rec: SegdRecord): bool =
   # False (fields left 0) when the record's time is outside years 1-9999.
   result = true
@@ -483,7 +540,7 @@ proc fillTime(h: var SegyTraceHeader, rec: SegdRecord): bool =
     h.second = int16(max(rec.gh1.second, 0))
     h.timeBasisCode = 4 # SEG-D general header times are UTC
 
-proc stationHeader(k: TraceKeys, rec: SegdRecord, t: SegdTrace,
+proc stationHeader(k: TraceKeys, record, channelSet, channelType: int,
     order: ByteOrder): seq[byte] =
   result = newSeq[byte](TraceHeaderSize)
   putNum(result, 0, k.srcLine, order)
@@ -494,9 +551,9 @@ proc stationHeader(k: TraceKeys, rec: SegdRecord, t: SegdTrace,
   putNum(result, 34, k.rcvIndex, order)
   putNum(result, 36, int16(k.sensorType), order)
   putNum(result, 38, int16(k.component), order)
-  putNum(result, 40, int32(rec.index), order)
-  putNum(result, 44, int32(t.channelSet), order)
-  putNum(result, 48, int16(rec.channelType(t)), order)
+  putNum(result, 40, int32(record), order)
+  putNum(result, 44, int32(channelSet), order)
+  putNum(result, 48, int16(channelType), order)
   for i, c in StationHeaderName: result[232 + i] = byte(c)
 
 proc noteRecord(c: var SegdToSegy, rec: SegdRecord) =
@@ -584,18 +641,7 @@ proc toSegyHeader(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, k: TraceKeys
       "microseconds; intervals were rounded", c.loc)
     result.sampleInterval = uint16(clamp(round(dt), 0, 65535))
   result.delayRecordingTime = clampI16(rec.startTimeMs(t))
-  result.coordinateScalar = scalarFor([k.srcX, k.srcY, k.rcvX, k.rcvY, k.cmpX, k.cmpY])
-  result.sourceX = scaled(k.srcX, result.coordinateScalar)
-  result.sourceY = scaled(k.srcY, result.coordinateScalar)
-  result.groupX = scaled(k.rcvX, result.coordinateScalar)
-  result.groupY = scaled(k.rcvY, result.coordinateScalar)
-  result.cdpX = scaled(k.cmpX, result.coordinateScalar)
-  result.cdpY = scaled(k.cmpY, result.coordinateScalar)
-  if k.hasSourceXY or k.hasReceiverXY: result.coordinateUnits = 1
-  result.elevationScalar = scalarFor([k.srcZ, k.rcvZ])
-  result.receiverElevation = scaled(k.rcvZ, result.elevationScalar)
-  result.sourceSurfaceElevation = scaled(k.srcZ, result.elevationScalar)
-  if not k.offset.isNaN: result.offset = clampI32(k.offset)
+  result.setGeometry(k)
   if not result.fillTime(rec):
     c.log.note(c.seen, lnSegdTimeRange, "a record's time is outside years 1-9999; the trace " &
       "time fields are left 0", c.loc)
@@ -662,7 +708,8 @@ proc toSegyTrace(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, inRecord: int
     result.hasExt1 = true
     result.ext1 = c.toSegyExt1(result.header, k, t.numSamples, dt)
     if c.opts.stationHeader:
-      result.proprietary = stationHeader(k, rec, t, c.opts.byteOrder)
+      result.proprietary = stationHeader(k, rec.index, t.channelSet, rec.channelType(t),
+        c.opts.byteOrder)
   elif not (k.rcvLine.isNaN and k.srcLine.isNaN):
     c.log.note(c.seen, lnSegdLinePoint, "Rev 1 has no field for SEG-D receiver/source line " &
       "and point; they are not carried", c.loc)
@@ -735,6 +782,277 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
     result.report(sevFatal, dcIo, "closing: " & e.msg, loc = c.loc)
   result.add w.log
 
+# ------------------------------------------------------------ SEG-2 → SEG-Y --
+
+const MappedSeg2Keys = ["SHOT_SEQUENCE_NUMBER", "CHANNEL_NUMBER", "CDP_NUMBER", "CDP_TRACE",
+  "SOURCE_STATION_NUMBER", "RECEIVER_STATION_NUMBER", "LINE_ID", "TRACE_TYPE", "RECEIVER",
+  "STACK", "FIXED_GAIN", "DELAY", "STATIC_CORRECTIONS", "ALIAS_FILTER", "LOW_CUT_FILTER",
+  "HIGH_CUT_FILTER", "NOTCH_FREQUENCY", "SOURCE_LOCATION", "RECEIVER_LOCATION", "DATUM",
+  "DESCALING_FACTOR", "SAMPLE_INTERVAL", "POLARITY"]
+  ## Trace keywords the SEG-Y headers hold (LINE_ID, station numbers: in
+  ## `PSEGD001`, Rev 2 only).
+
+func segyFormatOf(f: Seg2Format, rev: SegyRevision): SampleFormat =
+  case f
+  of s2Int16: sfInt16
+  of s2Int32: sfInt32
+  of s2Float20, s2Float32: sfFloat32
+  of s2Float64: (if rev.major >= 2: sfFloat64 else: sfFloat32)
+
+func seg2SegyFormat(ix: TraceIndex, opts: ConvertOptions): SampleFormat =
+  # One format for every trace (see the module doc).
+  let rev = opts.revision
+  if opts.format != stKeep: return opts.format.sampleFormat
+  var fs: set[Seg2Format]
+  for c in ix.codecs:
+    if c.seg2Format.isSome: fs.incl c.seg2Format.get
+  if fs.card == 1:
+    for x in fs: return segyFormatOf(x, rev)
+  if fs.card == 0: sfFloat32
+  elif fs <= {s2Int16, s2Int32}: sfInt32
+  elif s2Float64 in fs or s2Int32 in fs: (if rev.major >= 2: sfFloat64 else: sfFloat32)
+  else: sfFloat32
+
+func seg2TraceId(t: Seg2Trace, k: TraceKeys): int16 =
+  let tt = t.traceType
+  if tt == some(ttDead): 2
+  elif tt == some(ttUphole): 5
+  elif tt == some(ttTestData): -1
+  elif k.component in 12'u8..14'u8: int16(k.component)
+  else: 1
+
+proc msRounded(c: var SegdToSegy, seconds: float64): int16 =
+  # Seconds as whole ms, noting the rounding.
+  let ms = seconds * 1000
+  if ms != round(ms):
+    c.log.note(c.seen, lnSeg2Rounding, "SEG-Y holds delays and statics as whole ms; SEG-2 " &
+      "values were rounded", c.loc)
+  clampI16(ms)
+
+proc toSegyHeader(c: var SegdToSegy, fdb: Seg2File, t: Seg2Trace, k: TraceKeys, i: int,
+    dt: float64, ns: int): SegyTraceHeader =
+  # The standard trace header of SEG-Y trace `c.nOut` for SEG-2 trace `i`.
+  let rev = c.opts.revision
+  result = SegyTraceHeader(traceSeqLine: int32(c.nOut + 1), traceSeqFile: int32(c.nOut + 1),
+    traceIdCode: seg2TraceId(t, k))
+  if not k.record.isNaN: result.fieldRecord = clampI32(k.record)
+  result.traceNumberInField = if k.channel.isNaN: int32(i + 1) else: clampI32(k.channel)
+  if not k.ensemble.isNaN: result.ensembleNumber = clampI32(k.ensemble)
+  let cdpTrace = t.number("CDP_TRACE")
+  result.traceInEnsemble = if cdpTrace.isSome: clampI32(cdpTrace.get) else: int32(i + 1)
+  if not k.srcPoint.isNaN:
+    result.energySourcePoint = clampI32(k.srcPoint)
+    result.shotpointScalar = if k.srcPoint == round(k.srcPoint): 1 else: -100
+    result.shotpointNumber = scaled(k.srcPoint, result.shotpointScalar)
+  let stack = t.number("STACK")
+  if stack.isSome: result.numVertSummed = clampI16(stack.get)
+  let gain = t.number("FIXED_GAIN")
+  if gain.isSome: result.instrumentGainConstant = clampI16(gain.get)
+  result.numSamples = uint16(min(ns, 65535))
+  let whole = dt == round(dt) and dt <= 65535 and dt >= 0
+  result.sampleInterval = uint16(if whole: dt else: 0)
+  if result.sampleInterval == 0 and rev.major < 2 and not dt.isNaN:
+    c.log.note(c.seen, lnSegdIntervalRounding, "Rev 1 holds sample intervals as whole " &
+      "microseconds; intervals were rounded", c.loc)
+    result.sampleInterval = uint16(clamp(round(dt), 0, 65535))
+  let delay = t.delay
+  if delay.isSome: result.delayRecordingTime = c.msRounded(delay.get)
+  let st = t.numbers("STATIC_CORRECTIONS")
+  if st.len >= 1: result.sourceStatic = c.msRounded(st[0])
+  if st.len >= 2: result.groupStatic = c.msRounded(st[1])
+  if st.len >= 3: result.totalStatic = c.msRounded(st[2])
+  template filter(key: string, freq, slope: untyped) =
+    let n = t.numbers(key)
+    if n.len >= 1: result.freq = clampI16(n[0])
+    if n.len >= 2: result.slope = clampI16(n[1])
+  filter("ALIAS_FILTER", aliasFilterFreq, aliasFilterSlope)
+  filter("LOW_CUT_FILTER", lowCutFreq, lowCutSlope)
+  filter("HIGH_CUT_FILTER", highCutFreq, highCutSlope)
+  let notch = t.number("NOTCH_FREQUENCY")
+  if notch.isSome: result.notchFilterFreq = clampI16(notch.get)
+  var datum = t.number("DATUM")
+  if datum.isNone: datum = fdb.number("DATUM")
+  result.setGeometry(k, datum.get(NaN))
+  let df = t.number("DESCALING_FACTOR")
+  if df.isSome and df.get != 0 and not df.get.isNaN:
+    # mV per count for one shot: DESCALING_FACTOR / STACK, as mantissa × 10^exponent.
+    let v = df.get / max(stack.get(1.0), 1.0)
+    var e = int16(floor(log10(abs(v)))) - 8
+    var m = round(v / pow(10.0, float64(e)))
+    while abs(m) > 2147483647.0:
+      inc e
+      m = round(v / pow(10.0, float64(e)))
+    result.transductionMantissa = int32(m)
+    result.transductionExponent = e
+    result.transductionUnits = 3 # millivolts
+  let acq = fdb.acquisitionTime
+  if acq.isSome and acq.get > -62135596800.0 and acq.get < 253402300800.0:
+    let d = fromUnix(int64(floor(acq.get))).utc
+    result.year = int16(d.year)
+    result.dayOfYear = int16(d.yearday + 1)
+    result.hour = int16(d.hour)
+    result.minute = int16(d.minute)
+    result.second = int16(d.second)
+
+func textCard(s: string): string =
+  result = s
+  for ch in result.mitems:
+    if ch notin {' '..'~'}: ch = ' '
+
+proc initSegyFileForSeg2(c: var SegdToSegy, f: SeismicFile, t0: Seg2Trace, dt: float64,
+    ns: int): SegyFile =
+  # The SEG-Y file headers: binary from the file strings and trace 0, the
+  # file strings as text cards.
+  let opts = c.opts
+  let rev = opts.revision
+  let fdb = f.index.seg2
+  result = SegyFile(byteOrder: opts.byteOrder, format: some(c.outFmt), revision: rev,
+    extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
+    text: initTextHeader(opts.textEncoding))
+  var cards = @["CONVERTED FROM SEG-2 REV " & $fdb.revision & " BY " & ConverterName,
+    "SOURCE " & f.path.extractFilename,
+    "SEG-2 FORMATS WRITTEN AS SEG-Y FORMAT " & $ord(c.outFmt) & "; SEG-2 FILE STRINGS:"]
+  var dropped = 0
+  for s in fdb.strings:
+    if cmpIgnoreCase(s.key, "NOTE") == 0:
+      for line in s.value.split(fdb.lineTerm): cards.add "NOTE " & line
+    else:
+      cards.add s.key & " " & s.value
+  for i, card in cards:
+    let n = i + 1
+    if n > 38 or card.len > CardWidth - 4: inc dropped
+    if n <= 38: result.text.setCard(n, cardPrefix(n) & card.textCard)
+  if dropped > 0:
+    c.log.note(c.seen, lnSeg2Text, $dropped & " SEG-2 file strings (or NOTE lines) did not " &
+      "fit the textual header's cards and were cut or dropped", c.loc)
+  result.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
+    elif rev.major == 1: "SEG Y REV1" else: ""))
+  result.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+  let dtWhole = dt == round(dt) and dt <= 65535 and dt >= 0
+  let sorting = case fdb.traceSort.get(tsAsAcquired)
+    of tsAsAcquired: 1'i16
+    of tsCdpGather: 2
+    of tsCdpStack: 4
+    of tsCommonSource: 5
+    of tsCommonReceiver: 6
+    of tsCommonOffset: 7
+  let units = fdb.units
+  let system = if units == some(unMeters): 1'i16 elif units == some(unFeet): 2 else: 0
+  if system == 0 and units.isSome and units.get != unNone:
+    c.log.note(c.seen, lnSeg2Units, "SEG-Y has no measurement system for SEG-2 UNITS " &
+      $units.get & "; the values are written unconverted", c.loc)
+  let polarity = t0.integer("POLARITY")
+  result.binary = SegyBinaryHeader(formatCode: int16(ord(c.outFmt)), segyMajor: rev.major,
+    segyMinor: rev.minor, fixedLengthTraces: 0, traceSorting: sorting,
+    measurementSystem: system,
+    impulsePolarity: (if polarity == some(1'i64): 2 elif polarity == some(-1'i64): 1 else: 0),
+    samplesPerTrace: uint16(min(ns, 65535)),
+    sampleInterval: uint16(if dtWhole or rev.major < 2: clamp(round(dt), 0, 65535) else: 0),
+    dataTracesPerEnsemble: int16(min(f.len, 32767)))
+  if rev.major >= 2:
+    result.binary.byteOrderMarker = ByteOrderMarker
+    if ns > 65535: result.binary.extSamplesPerTrace = uint32(ns)
+    if result.binary.sampleInterval == 0: result.binary.extSampleInterval = dt
+    result.binary.maxAddlTraceHeaders = if opts.stationHeader: 2 else: 1
+    if opts.stationHeader:
+      result.extended.addText("SEG", "Layout", stationLayout, "text/xml")
+    result.extended.addEndText()
+    result.binary.numExtTextHeaders = int16(result.extended.recordCount)
+
+proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions()): DiagLog =
+  ## Converts the SEG-2 file `f` (opened with `keys = true`) to one SEG-Y
+  ## file (see the module doc for the mapping). Undecodable traces are
+  ## skipped with an error. The index's, the writer's and the conversion's
+  ## diagnostics are all in the result; a fatal one means the output is
+  ## incomplete. Raises `ValueError` when `f` is not SEG-2 or has no keys.
+  if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
+  if not f.hasKeys: raise newException(ValueError, "open the file with keys = true")
+  var c = SegdToSegy(opts: opts, loc: Location(file: sink.name))
+  var err: string
+  if not checkTarget(opts, err):
+    result.report(sevFatal, dcValidation, err, loc = c.loc)
+    return
+  c.outFmt = seg2SegyFormat(f.index, opts)
+  var w: SegyWriter
+  var opened = false
+  var unmapped: seq[string]
+  var polarity = none(int64)
+  template stop() =
+    result = move c.log
+    result.add f.index.log
+    return
+  for i in 0..<f.len:
+    let e = f.index.entries[i]
+    let codec = f.index.codecs[e.record]
+    let tl = Location(file: sink.name, trace: c.nOut)
+    if not codec.known or e.headerBytes == 0:
+      c.log.report(sevError, dcUnsupportedFormat, "SEG-2 trace " & $i & " cannot be decoded; " &
+        "it is skipped", e.offset, tl)
+    elif int(e.numSamples) > 65535 and opts.revision.major < 2:
+      c.log.report(sevError, dcValidation, "the trace has " & $e.numSamples &
+        " samples, which Rev 1 cannot hold; skipped", e.offset, tl)
+    else:
+      let t = f.seg2Trace(i)
+      let k = f.traceKeys(i)
+      let ns = int(e.numSamples)
+      let dt = f.sampleIntervalUs(i)
+      for x in t.strings:
+        if x.key.toUpperAscii notin MappedSeg2Keys and x.key.toUpperAscii notin unmapped:
+          unmapped.add x.key.toUpperAscii
+      let p = t.integer("POLARITY")
+      if p.isSome:
+        if polarity.isSome and polarity != p:
+          c.log.note(c.seen, lnSeg2Polarity, "SEG-2 POLARITY varies between traces; SEG-Y " &
+            "holds one impulse polarity (trace 0's)", c.loc)
+        polarity = p
+      if not opened:
+        try:
+          w = openSegyWriter(sink, c.initSegyFileForSeg2(f, t, dt, ns),
+            SegyWriteOptions(byteOrder: opts.byteOrder, lenient: true))
+        except CatchableError as x:
+          c.log.report(sevFatal, dcIo, "cannot write the file headers: " & x.msg, loc = c.loc)
+          stop()
+        opened = true
+      var ot = SegyTrace(index: c.nOut, numSamples: ns, sampleInterval: dt,
+        header: c.toSegyHeader(f.index.seg2, t, k, i, dt, ns))
+      if opts.revision.major >= 2:
+        ot.hasExt1 = true
+        ot.ext1 = c.toSegyExt1(ot.header, k, ns, dt)
+        if opts.stationHeader:
+          ot.proprietary = stationHeader(k, 0, -1, int(e.channelType), opts.byteOrder)
+      try:
+        c.vals.setLen ns
+        if ns > 0:
+          decodeEntry(f.unsafeMemory, f.mappedSize, e, codec,
+            cast[ptr UncheckedArray[float64]](addr c.vals[0]), ns)
+        if not encodeExact(c.outFmt, c.vals, ot.samples, opts.byteOrder, c.scratch):
+          c.losses.add(c.nOut)
+      except SegFormatError as x:
+        c.log.report(sevError, dcValidation, "samples do not fit SEG-Y format " &
+          $ord(c.outFmt) & " (" & x.msg & "); the trace is written as zeros", e.offset, tl)
+        ot.samples = newSeq[byte](ns * sampleSize(c.outFmt))
+      try:
+        w.writeTrace(ot)
+      except CatchableError as x:
+        c.log.report(sevFatal, dcIo, "writing trace " & $c.nOut & ": " & x.msg, loc = tl)
+        stop()
+      inc c.nOut
+  if unmapped.len > 0:
+    c.log.report(sevInfo, dcValidation, "SEG-2 trace strings with no SEG-Y slot are not " &
+      "carried: " & unmapped.join(", "), loc = c.loc)
+  result = move c.log
+  result.add f.index.log
+  result.report(c.losses, c.outFmt, c.loc)
+  if not opened:
+    result.report(sevFatal, dcValidation, "the SEG-2 file has no decodable traces; nothing " &
+      "written", loc = c.loc)
+    return
+  try:
+    w.close()
+  except CatchableError as x:
+    result.report(sevFatal, dcIo, "closing: " & x.msg, loc = c.loc)
+  result.add w.log
+
 # ------------------------------------------------------------------- files --
 
 proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
@@ -753,13 +1071,16 @@ proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
 
 proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
     join = GeometryJoin()): DiagLog {.segApi(hide = join), raises: [].} =
-  ## Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
-  ## file `dstPath` (see `convertSegy` / `convertSegdToSegy`); SEG-2 input is
-  ## not supported yet (a fatal diagnostic). Never raises:
-  ## problems, including I/O failures, are in the result. The output is
-  ## written to `<dstPath>.tmp` and renamed when complete, so a failed
+  ## Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
+  ## `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
+  ## `convertSegdToSegy`, `convertSeg2ToSegy`), SEG-D (`convertSegdRevision`
+  ## with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
+  ## input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
+  ## raises: problems, including I/O failures, are in the result. The output
+  ## is written to `<dstPath>.tmp` and renamed when complete, so a failed
   ## conversion leaves an existing `dstPath` untouched and no partial file.
-  ## `join` (internal) joins survey geometry to SEG-D keys; for survey
+  ## `join` (internal) joins survey geometry to SEG-D keys (SEG-Y target
+  ## only); for survey
   ## geometry in the output use `convertWithGeometry`.
   var head = newSeq[byte](8192)
   try:
@@ -770,16 +1091,29 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
     result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
     return
   let kind = detectKind(head)
-  case kind
-  of skUnknown:
-    result.report(sevFatal, dcUnsupportedFormat, "neither a SEG-Y nor a SEG-D file",
+  if kind == skUnknown:
+    result.report(sevFatal, dcUnsupportedFormat, "not a SEG-Y, SEG-D or SEG-2 file",
       loc = Location(file: srcPath))
     return
-  of skSeg2:
-    result.report(sevFatal, dcUnsupportedFormat,
-      "conversion is not supported for SEG-2 yet", loc = Location(file: srcPath))
+  case opts.target
+  of skSeg2: return convertToSeg2(srcPath, dstPath, opts.seg2)
+  of skSegd:
+    case kind
+    of skSegd:
+      try: return convertSegdRevision(srcPath, dstPath, opts.segd)
+      except CatchableError as e:
+        result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
+        return
+    of skSeg2: return convertSeg2ToSegd(srcPath, dstPath, opts.segd)
+    else:
+      result.report(sevFatal, dcUnsupportedFormat, "SEG-Y to SEG-D conversion is not " &
+        "supported (only SEG-D and SEG-2 input)", loc = Location(file: srcPath))
+      return
+  of skUnknown:
+    result.report(sevFatal, dcValidation, "the target standard is unknown (SEG-Y, SEG-D or " &
+      "SEG-2)", loc = Location(file: dstPath))
     return
-  of skSegy, skSegd: discard
+  of skSegy: discard
   if sameAsInput(srcPath, dstPath, result):
     return
   # SEG-D: one target format must hold every record.
@@ -787,15 +1121,24 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
   let tmp = tmpPathFor(dstPath)
   var src: RecordSource
   var sink: RecordSink
+  var seg2: SeismicFile
   try:
     try:
-      src = openDiskSource(srcPath)
       sink = openDiskSink(tmp)
-      result = if kind == skSegy: convertSegy(src, sink, opts)
-               else: convertSegdToSegy(src, sink, opts, formats, join)
+      case kind
+      of skSeg2:
+        seg2 = openSeismic(srcPath, keys = true)
+        result = convertSeg2ToSegy(seg2, sink, opts)
+      of skSegy:
+        src = openDiskSource(srcPath)
+        result = convertSegy(src, sink, opts)
+      else:
+        src = openDiskSource(srcPath)
+        result = convertSegdToSegy(src, sink, opts, formats, join)
     finally:
       if src != nil: src.close()
       if sink != nil: sink.close()
+      seg2.close()
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)

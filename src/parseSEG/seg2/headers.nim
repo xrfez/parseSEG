@@ -10,10 +10,15 @@
 ## Strings are kept verbatim and in file order (`Seg2String`: keyword as
 ## written, value with the terminators stripped), so vendor keywords,
 ## mixed-case keywords and unsorted lists survive. Lookups match keywords
-## case-insensitively and take the first match.
+## case-insensitively and take the first match; `[]=` sets a value (the first
+## match, else a new string at the end) and `formatNumber` writes numbers as
+## the standard spells them.
+##
+## `Seg2FileFixed` and `Seg2TraceFixed` describe the fixed parts as layout
+## types, for named header fields (`model/headerfields`).
 
-import std/[options, parseutils, strutils, times]
-import ../common/endians
+import std/[algorithm, math, options, parseutils, strutils, times]
+import ../common/[endians, fieldlayout]
 import ./samples
 export options, endians, samples
 
@@ -54,6 +59,27 @@ type
 
   Seg2Header* = Seg2File | Seg2Trace ## Either descriptor block (both hold strings).
 
+  Seg2FileFixed* = object
+    ## The fixed part of the File Descriptor Block as a layout (0-based
+    ## bytes): the named fields `file.<field>`.
+    blockId* {.at: 0.}: uint16
+    revision* {.at: 2.}: uint16
+    pointerBytes* {.at: 4.}: uint16
+    traceCount* {.at: 6.}: uint16
+    stringTermLength* {.at: 8.}: uint8
+    stringTerm* {.at: 9.}: array[2, char]
+    lineTermLength* {.at: 11.}: uint8
+    lineTerm* {.at: 12.}: array[2, char]
+
+  Seg2TraceFixed* = object
+    ## The fixed part of a Trace Descriptor Block as a layout (0-based
+    ## bytes): the named fields `trace.<field>`.
+    blockId* {.at: 0.}: uint16
+    blockSize* {.at: 2.}: uint16
+    dataSize* {.at: 4.}: uint32
+    numSamples* {.at: 8.}: uint32
+    formatCode* {.at: 12.}: uint8
+
   Seg2Location* = object
     ## A `SOURCE_LOCATION` / `RECEIVER_LOCATION` value, in the file's `UNITS`.
     x*, y*, z*: float64
@@ -78,6 +104,13 @@ type
     ttUphole = "UPHOLE", ttRadarData = "RADAR_DATA"
 
 # --------------------------------------------------------- fixed parts --
+
+func initSeg2File*(order = boLittle): Seg2File =
+  ## An empty File Descriptor Block for writing: revision 1, `order` (PC
+  ## files are little-endian), NUL as String Terminator and CR LF as Line
+  ## Terminator (the standard's usual choices). Set `traceCount` (or
+  ## `pointerBytes`) to size the trace pointers before writing.
+  Seg2File(order: order, revision: 1, stringTerm: "\0", lineTerm: "\r\n")
 
 func seg2Order*(b: openArray[byte]): Option[ByteOrder] =
   ## The byte order the first two bytes declare (`55 3A` little-endian,
@@ -139,6 +172,41 @@ func value*(h: Seg2Header, key: string): Option[string] =
 func contains*(h: Seg2Header, key: string): bool {.inline.} =
   ## The block has a string with keyword `key` (case-insensitive).
   h.strings.find(key) >= 0
+
+proc `[]=`*(h: var Seg2Header, key, value: string) =
+  ## Sets keyword `key`'s value: the first string with that keyword
+  ## (case-insensitive) gets `value`, else a string is appended (the writer
+  ## keeps the order; `sortStrings` puts it where the standard wants it).
+  let i = h.strings.find(key)
+  if i >= 0: h.strings[i].value = value
+  else: h.strings.add Seg2String(key: key, value: value)
+
+proc sortStrings*(s: var seq[Seg2String]) =
+  ## Orders a string list as the standard wants: by keyword, `NOTE` last.
+  ## The sort is stable, so repeated keywords keep their order.
+  func rank(x: Seg2String): (bool, string) =
+    (cmpIgnoreCase(x.key, "NOTE") == 0, x.key.toUpperAscii)
+  s.sort(proc (a, b: Seg2String): int = cmp(rank(a), rank(b)))
+
+func formatNumber*(x: float64): string =
+  ## `x` as a SEG-2 decimal number: an integer without a point when `x` is
+  ## integral (below 1e15), else the shortest text that reads back exactly,
+  ## with an `E` exponent (`0.001`, `1.5E-30`). NaN and infinities have no
+  ## SEG-2 spelling: the result is empty.
+  if x.isNaN or x == Inf or x == -Inf: return ""
+  if x == trunc(x) and abs(x) < 1e15: return $int64(x)
+  let t = $x
+  let e = t.find({'e', 'E'})
+  if e < 0: return t
+  var mant = t[0 ..< e]
+  var expo = t[e + 1 .. ^1]
+  var neg = false
+  if expo.len > 0 and expo[0] in {'+', '-'}:
+    neg = expo[0] == '-'
+    expo = expo[1 .. ^1]
+  while expo.len > 1 and expo[0] == '0': expo = expo[1 .. ^1]
+  if mant.endsWith(".0"): mant.setLen mant.len - 2
+  mant & "E" & (if neg: "-" else: "") & expo
 
 func words(s: string): seq[string] =
   # Whitespace-separated words (spaces, tabs, line breaks).

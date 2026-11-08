@@ -67,7 +67,7 @@ Sorting is a selection: a sort produces a list of trace indices, and no data is 
 | `traceField(f, trace, "trace.sourceX")`, `recordField(f, record, "gh1.year")`, `fileField(f, "binary.sampleInterval")` | Any named header field, read from the map, as a `FieldValue` (`intVal`, `floatVal` or `text` by `kind`). Raises `ValueError` for an unknown name, trace or record. |
 | `findTraceField`, `findRecordField`, `findFileField` | The same, as an `Option[FieldValue]` (none when the field cannot be read). |
 | `fieldNames(HeaderBlock)`, `f.blockKind(scope, index, "ext1")`, `h.fieldByName("sourceX")` | The fields of a block kind; the kind of a file's block (`hsFile`, `hsRecord`, `hsTrace`); a field of a decoded header object (`Option`). |
-| `f.traceHeaders(i)`, `f.recordHeaders(r)`, `f.fileHeaders` (`HeaderListing`: `len`, `[]`, `items` of `HeaderRow`) | A viewer's headers tab (task 6.10, `model/headerlist`): every header block of a trace, SEG-D record or the file as ordered rows of `blockName`, `kind` (`HeaderBlock`, `hbRaw` for blocks without named fields), `field`, `value`, `offset`, `size`, `blockOffset`, `blockSize` (raw bytes for a hex pane: `copyBytes(blockOffset, blockSize)`). It covers the blocks the trace or record has: SEG-Y `trace`/`ext1`/`ext2..`, SEG-D `trace`/`ext1`/`ext2..` (Rev 3 blocks typed by byte 32), `gh1`, `gh2`, ..., `st<s>cs<c>`, `extended`, `external`, `trailer`; SEG-Y `label`, `text`, `binary`, `extended`, `trailer`. Read-only; names as in `traceField` and the editor. |
+| `f.traceHeaders(i)`, `f.recordHeaders(r)`, `f.fileHeaders` (`HeaderListing`: `len`, `[]`, `items` of `HeaderRow`) | A viewer's headers tab (task 6.10, `model/headerlist`): every header block of a trace, SEG-D record or the file as ordered rows of `blockName`, `kind` (`HeaderBlock`, `hbRaw` for blocks without named fields), `field`, `value`, `offset`, `size`, `blockOffset`, `blockSize` (raw bytes for a hex pane: `copyBytes(blockOffset, blockSize)`). It covers the blocks the trace or record has: SEG-Y `trace`/`ext1`/`ext2..`, SEG-D `trace`/`ext1`/`ext2..` (Rev 3 blocks typed by byte 32), `gh1`, `gh2`, ..., `st<s>cs<c>`, `extended`, `external`, `trailer`; SEG-Y `label`, `text`, `binary`, `extended`, `trailer`; SEG-2 `file` and `trace` (fixed fields, then one row per keyword string: `field` = keyword, `offset`/`size` = the string entry). Read-only; names as in `traceField` and the editor. |
 | `readSegyHeaders(path)`, `readSegdHeaders(path)`; `openSegy`/`openSegd(src, headersOnly = true)` | Every header object, samples skipped (also on tape). |
 | `traceKeys(...)`, `TraceKeys` | Per-trace geometry (record, source and receiver line/point/index/coordinates, component) and the trace's UTC time (`time`, POSIX seconds, NaN if unknown; task 6.9: SEG-Y bytes 157-168 with the time basis, SEG-D GH#1, Rev 3 GH#3 time zero or the trace's Timestamp block). |
 
@@ -148,7 +148,7 @@ fatal diagnostic.
   `headerBytes`, `findChannelSet` (an `Option[SegdChannelSetRef]`), and per trace
   `channelType`, `sampleIntervalUs`, `startTimeMs`, `descaleFactor`. The reader's `record`,
   `label`, `log` and `toc` are read-only.
-- SEG-2 (read only; random access, so it works on the whole file as an `openArray[byte]`,
+- SEG-2 (random access, so the reader works on the whole file as an `openArray[byte]`,
   normally the map): `readSeg2(bytes, log, name): Seg2File` (File Descriptor Block: `order`,
   `revision`, `stringTerm`, `lineTerm`, `pointers`, `strings`), `traces(bytes, file, log)` /
   `readSeg2Trace(bytes, file, i, log): Seg2Trace` (`valid`, `blockSize`, `dataSize`,
@@ -157,9 +157,22 @@ fatal diagnostic.
   `Seg2String(key, value)`; lookups are case-insensitive: `value`, `contains`, `number`,
   `numbers`, `integer`, `noteLines`, and typed getters `sampleInterval`, `delay`,
   `channelNumber`, `receiverLocation`/`sourceLocation` (`Seg2Location`), `traceType`,
-  `traceSort`, `units`, `acquisitionTime` (UTC seconds), all `Option`s. Named header fields,
-  header export, conversion, vendor maps, the writer, C ABI and Python names for SEG-2 are
-  not supported yet (`ValueError` / fatal diagnostic saying so).
+  `traceSort`, `units`, `acquisitionTime` (UTC seconds), all `Option`s; `h[key] = value`
+  sets one, `sortStrings` orders a list (keyword, NOTE last), `formatNumber` spells a number
+  the SEG-2 way. `blockStrings(bytes, first, limit, file[, spans])` parses a string list
+  (with each entry's byte span), `fileBlockSize` gives the File Descriptor Block's length.
+  - Writer (`seg2/writer`): `openSeg2Writer(path, initSeg2File(order), opts)` (set
+    `traceCount` first: it sizes the pointer subblock), `writeTrace(t, rawData)` or
+    `writeTrace(t, samples)` (encoded in `t.formatCode`; `encodeSeg2Samples`), `close()`
+    (writes N and the pointers). A file read and written back is byte-identical; output the
+    standard forbids raises `SegFormatError` unless `Seg2WriteOptions(lenient: true)`.
+  - Named fields: `trace.<fixed field>` / `file.<fixed field>` (`Seg2TraceFixed`,
+    `Seg2FileFixed`: `numSamples`, `formatCode`, `revision`, ...) and `trace.<KEYWORD>` /
+    `file.<KEYWORD>` (the string's value as text) through `traceField`/`fileField`;
+    `f.seg2Strings(trace)` (trace -1: the file), `seg2StringCount`, `seg2Keyword`,
+    `seg2Value`. Listings give a row per fixed field and per string; `exportHeaders`
+    writes `(s "KEYWORD" "value")` entries. Edits are refused (strings are variable
+    length: rewrite the file). Vendor maps do not apply to SEG-2.
 - Multiplexed SEG-D (Rev 0/1 formats 0015, 0022, 0024, 0036, 0038, 0042, 0044, 0048, 0058):
   the reader walks each record's scans and gives demultiplexed traces in the twin format
   (8015 for 0015, ...); the record says `multiplexed`. `demultiplexSegd(src, dst)` writes a
@@ -177,7 +190,14 @@ fatal diagnostic.
   through the read-only `recordIndex` and `fileIndex`.
 
 ## Conversion
-- `convertFile(src, dst, ConvertOptions(...))` detects the input and writes SEG-Y.
+- `convertFile(src, dst, ConvertOptions(...))` detects the input (SEG-Y, SEG-D or SEG-2)
+  and writes the standard `target` names (`skSegy`, the default; `skSegd` with the
+  `segd: SegdConvertOptions` for SEG-D or SEG-2 input; `skSeg2` with `seg2:
+  Seg2ConvertOptions(byteOrder = boLittle, format = s2tKeep)` for any input). SEG-2 → SEG-Y
+  is `convertSeg2ToSegy(file, sink, opts)`; to SEG-2 `convertToSeg2(src, dst, opts)`; SEG-2
+  → SEG-D `convertSeg2ToSegd(src, dst, segdOpts)` (one Rev 3 record; Rev 2 through
+  `convertSegdRevision`). The keyword mappings, and what has no slot (reported once per
+  kind), are in `convert.nim` and `seg2convert.nim`.
   `ConvertOptions.format` is a `SegyTargetFormat`: `stKeep` (the default: keep a SEG-Y
   input's format, or choose a lossless one for SEG-D) or `st1` .. `st16` (a format code;
   `targetFormat(sfFloat32)` gives `st5`). Each value's ordinal is its format code (C:

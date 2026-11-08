@@ -1,13 +1,16 @@
-## SEG-2 reader, trace index, keys and `openSeismic` detection (task 11.1).
+## SEG-2 reader, trace index, keys and `openSeismic` detection (task 11.1);
+## writer, named fields, export and conversions (task 11.2).
 ## No SEG-2 sample file exists, so every file here is built by the test.
 
 import std/[assertions, os, math, strutils, options]
 import parseSEG/common/errors
 import parseSEG/io/[diskio, memsource]
-import parseSEG/seg2/[reader as seg2reader]
+import parseSEG/seg2/[reader as seg2reader, writer as seg2writer]
+import parseSEG/segy/[reader as segyreader, samples as segysamples]
+import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, gathers, headerfields, headernif, prefetch, summary,
-  headerlist]
-import parseSEG/convert
+  headerlist, edit]
+import parseSEG/[convert, seg2convert]
 import parseSEG/survey/writeback
 
 let tmp = getTempDir() / "parseseg_tseg2"
@@ -211,12 +214,25 @@ block all_formats_both_orders:
     doAssert sm.formatCode == -1 and sm.decodable and sm.traceCount == 5 # five formats
     doAssert sm.sampleIntervalUs.isNaN and sm.samplesPerTrace == -1 and sm.recordLengthMs.isNaN # mixed
     doAssert sm.firstFieldRecord == 7 and sm.lastFieldRecord == 7 and sm.coordinateUnits == cuMeters
+    # the listing: fixed fields, then one row per keyword string
     let fh = f.fileHeaders
-    doAssert fh.len == 1 and fh[0].blockName == "file" and fh[0].offset == 0 and
-      fh[0].size == int(f.index.entries[0].offset)
+    doAssert fh.len == fieldNames(hbSeg2File).len + 5, $fh.len
+    doAssert fh[0].blockName == "file" and fh[0].kind == hbSeg2File and fh[0].field == "blockId" and
+      fh[0].offset == 0 and fh[0].size == 2 and fh[0].value == toFieldValue(0x3A55)
+    doAssert fh[0].blockSize == int(f.index.entries[0].offset) # the strings end before trace 0
+    let units = fh[fh.len - 1]
+    doAssert units.field == "UNITS" and units.value == toFieldValue("METERS") and
+      units.size == 2 + "UNITS METERS".len + 1 and units.blockOffset == 0
+    doAssert fh[fieldNames(hbSeg2File).len].offset == 32 + int(f.index.seg2.pointerBytes)
     let th = f.traceHeaders(1)
-    doAssert th.len == 1 and th[0].blockName == "trace" and th[0].kind == hbRaw and
-      th[0].offset == f.index.entries[1].offset
+    let e1 = f.index.entries[1]
+    doAssert th.len == fieldNames(hbSeg2Trace).len + 4
+    doAssert th[0].blockName == "trace" and th[0].kind == hbSeg2Trace and
+      th[0].offset == e1.offset and th[0].blockSize == int(e1.headerBytes)
+    doAssert th[1].field == "blockSize" and th[1].value == toFieldValue(int(e1.headerBytes))
+    let ch = th[fieldNames(hbSeg2Trace).len]
+    doAssert ch.field == "CHANNEL_NUMBER" and ch.value == toFieldValue("2") and
+      ch.offset == e1.offset + 32 and ch.size == 2 + "CHANNEL_NUMBER 2".len + 1
     doAssert f.recordHeaders(0).len == 0
     doAssert t[3, 0] == 0.5 and t[3, 1] == -1.25 and t[3, 2] == float64(float32(1e10))
     doAssert t[4, 0] == 0.1 and t[4, 1] == -1e-300 and t[4, 2] == 1e300 and t[4, 3] == 2.0
@@ -398,21 +414,18 @@ block overlapping_blocks:
   doAssert f.readTraces(4..4)[0, 0] == 1
   f.close()
 
-block format_specific_features_say_so:
+block format_specific_features:
   let path = build(allFormats(boLittle)).save("features.sg2")
   var f = openSeismic(path)
   try:
-    discard f.traceField(0, "trace.sampleInterval")
+    discard f.traceField(0, "trace.sampleInterval") # SEG-Y's name; SEG-2 has SAMPLE_INTERVAL
     doAssert false
   except ValueError as e:
-    doAssert "SEG-2" in e.msg
+    doAssert "keyword" in e.msg, e.msg
   doAssert f.findFileField("binary.formatCode").isNone
-  doAssert f.blockKind(hsTrace, 0, "trace").isNone
-  doAssertRaises(ValueError): f.exportHeaders(tmp / "features.nif")
+  doAssert f.blockKind(hsTrace, 0, "trace") == some(hbSeg2Trace)
+  doAssert f.blockKind(hsFile, 0, "file") == some(hbSeg2File)
   f.close()
-  let log = convertFile(path, tmp / "features.sgy")
-  doAssert log.isFatal and "SEG-2" in log[0].msg
-  doAssert not fileExists(tmp / "features.sgy")
   # SEG-2 is indexed from a map, not a stream
   let src = openDiskSource(path)
   doAssertRaises(ValueError): discard buildIndex(src, skSeg2)
@@ -425,11 +438,292 @@ block format_specific_features_say_so:
   segy.close()
   doAssertRaises(ValueError): discard segy.seg2Trace(0) # closed
 
-echo "tseg2: ok"
+# ------------------------------------------------------- 11.2: writer --
+
+func failed(log: DiagLog): bool = log.count(sevError) + log.count(sevFatal) > 0
+
+func has(log: DiagLog, text: string): bool =
+  for d in log:
+    if text in d.msg: return true
+
+proc readAll(path: string): seq[byte] =
+  let s = readFile(path)
+  result = newSeq[byte](s.len)
+  for i, c in s: result[i] = byte(c)
+
+proc rewrite(src, dst: string, floats = false) =
+  ## Reads `src` and writes it back with the writer (raw Data Blocks, or
+  ## decoded floats re-encoded).
+  var f = openSeismic(src)
+  var w = openSeg2Writer(dst, f.index.seg2)
+  for i in 0 ..< f.len:
+    let t = f.seg2Trace(i)
+    if floats:
+      w.writeTrace(t, f.readTraces(i..i, float64).toFlatSeq[0 ..< int(t.numSamples)])
+    else:
+      w.writeTrace(t, f.copyBytes(t.dataOffset, int(t.dataSize)))
+  w.close()
+  f.close()
+
+block encode_decode_all_formats:
+  for o in [boLittle, boBig]:
+    for fmt in Seg2Format:
+      let vals = if fmt == s2Float20: f20Values
+                 elif fmt == s2Int32: @[1.0, -1.0, 2147483647.0, -2147483648.0]
+                 elif fmt == s2Float32: @[0.5, -1.25, 17179869184.0, -3.0]
+                 else: ramp
+      for twos in [false, true]:
+        var b = newSeq[byte](dataBytes(fmt, vals.len))
+        encodeSeg2Samples(fmt, vals, b, o, twos)
+        var back = newSeq[float64](vals.len)
+        decodeSeg2Samples(fmt, b, back, o, twos)
+        doAssert back == vals, $fmt & " " & $o & " " & $back
+  var b = newSeq[byte](10)
+  doAssertRaises(SegFormatError): encodeSeg2Samples(s2Int16, [40000.0], b, boLittle)
+  doAssertRaises(SegFormatError): encodeSeg2Samples(s2Int32, [NaN], b, boLittle)
+  doAssertRaises(SegFormatError): encodeSeg2Samples(s2Float20, [32768.0 * 32768.0], b, boLittle)
+  doAssertRaises(ValueError): encodeSeg2Samples(s2Float64, [1.0, 2.0], b, boLittle)
+  # format 3: the smallest exponent; -1 is one's complement 0xFFFE
+  encodeSeg2Samples(s2Float20, [-1.0, 65536.0], b, boLittle)
+  doAssert getNum[uint16](b, 2, boLittle) == 0xFFFE and getNum[uint16](b, 0, boLittle) == 0x0020
+  doAssert getNum[uint16](b, 4, boLittle) == 0x4000 # 65536 = 16384 * 2^2
+
+block number_text_and_strings:
+  doAssert formatNumber(12.0) == "12" and formatNumber(-3.0) == "-3"
+  doAssert formatNumber(0.00025) == "0.00025" and formatNumber(1.5e-30) == "1.5E-30"
+  doAssert formatNumber(1e20) == "1E20" and formatNumber(NaN) == ""
+  doAssert parseFloat(formatNumber(0.1 + 0.2)) == 0.1 + 0.2
+  var f = initSeg2File()
+  f["UNITS"] = "FEET"
+  f["NOTE"] = "a"
+  f["TRACE_SORT"] = "AS_ACQUIRED"
+  f["units"] = "METERS" # case-insensitive: replaces
+  doAssert f.strings.len == 3 and f.value("UNITS") == some("METERS")
+  f.strings.sortStrings()
+  doAssert f.strings[0].key == "TRACE_SORT" and f.strings[^1].key == "NOTE"
+
+block writer_round_trip_byte_for_byte:
+  for o in [boLittle, boBig]:
+    for extra in [0, 3]:
+      var spec = allFormats(o)
+      spec.extraPointers = extra
+      spec.stringTerm = (if extra == 0: "\0" else: "\r\n")
+      let path = build(spec).save("rt_" & $o & $extra & ".sg2")
+      rewrite(path, tmp / "rt_out.sg2")
+      doAssert readAll(path) == readAll(tmp / "rt_out.sg2"), $o & " " & $extra
+  # decoded floats re-encode to the same bytes (format 3 too: its words are minimal)
+  var spec = allFormats(boLittle)
+  spec.traces.delete(2) # 0xFFFF (-0) and non-minimal format-3 words do not survive a decode
+  let path = build(spec).save("rt_floats.sg2")
+  rewrite(path, tmp / "rt_floats_out.sg2", floats = true)
+  doAssert readAll(path) == readAll(tmp / "rt_floats_out.sg2")
+
+block writer_validation:
+  var fdb = initSeg2File(boBig)
+  doAssertRaises(ValueError): discard openSeg2Writer(tmp / "w0.sg2", fdb) # no traceCount
+  fdb.traceCount = 1
+  fdb["BAD KEY"] = "x"
+  doAssertRaises(SegFormatError): discard openSeg2Writer(tmp / "w1.sg2", fdb)
+  var w = openSeg2Writer(tmp / "w1.sg2", fdb, Seg2WriteOptions(lenient: true))
+  doAssert w.log.len == 1 and w.log[0].severity == sevWarning
+  var t = Seg2Trace(formatCode: 4)
+  t["SAMPLE_INTERVAL"] = "0.001"
+  t["NOTE"] = "zero\0here" # holds the String Terminator
+  w.writeTrace(t, [1.0, 2.0])
+  doAssert w.log.len == 2
+  doAssertRaises(ValueError): w.writeTrace(t, [1.0]) # the pointer subblock is full
+  w.close()
+  var f = openSeismic(tmp / "w1.sg2")
+  doAssert f.kind == skSeg2 and f.len == 1 and f.index.seg2.order == boBig
+  doAssert f.readTraces(0..0, float64)[0, 1] == 2.0
+  doAssert f.seg2Trace(0).value("NOTE") == some("zero") # cut by the reader, as warned
+  f.close()
+  var fdb2 = initSeg2File()
+  fdb2.traceCount = 2
+  var w2 = openSeg2Writer(tmp / "w2.sg2", fdb2)
+  doAssertRaises(SegFormatError): w2.writeTrace(Seg2Trace(formatCode: 9), [1.0])
+  doAssertRaises(ValueError): w2.writeTrace(Seg2Trace(formatCode: 1, numSamples: 4), [1'u8, 2])
+  doAssertRaises(SegFormatError): w2.close() # no traces
+  doAssert w2.log.len == 1
+
+# ------------------------------------------- 11.2: named fields, export --
+
+block named_fields_listing_and_edits:
+  let path = build(allFormats(boLittle)).save("named.sg2")
+  var f = openSeismic(path)
+  doAssert f.traceField(0, "trace.SAMPLE_INTERVAL") == toFieldValue("0.00025")
+  doAssert f.traceField(0, "trace.sample_interval") == toFieldValue("0.00025")
+  doAssert f.traceField(1, "trace.numSamples") == toFieldValue(4)
+  doAssert f.traceField(2, "trace.formatCode") == toFieldValue(3)
+  doAssert f.fileField("file.UNITS") == toFieldValue("METERS")
+  doAssert f.fileField("file.revision") == toFieldValue(1)
+  doAssert f.fileField("file.traceCount") == toFieldValue(5)
+  doAssert f.findTraceField(0, "trace.NO_SUCH").isNone
+  doAssert f.findTraceField(0, "ext1.x").isNone
+  doAssert "blockSize" in fieldNames(hbSeg2Trace) and "pointerBytes" in fieldNames(hbSeg2File)
+  doAssert f.seg2StringCount(-1) == 5 and f.seg2StringCount(0) == 6
+  doAssert f.seg2Keyword(-1, 4) == "UNITS" and f.seg2Value(-1, 4) == "METERS"
+  doAssert f.seg2Keyword(2, 1) == "RECEIVER_LOCATION" and f.seg2Value(2, 1) == "30 4 -1"
+  doAssertRaises(ValueError): discard f.seg2Value(0, 6)
+  doAssertRaises(ValueError): discard f.seg2StringCount(5)
+  # header export: fixed fields and strings; an unchanged import changes nothing
+  f.exportHeaders(tmp / "named.nif")
+  let doc = readFile(tmp / "named.nif")
+  doAssert "(standard seg2)" in doc and "(s \"UNITS\" \"METERS\")" in doc and
+    "(f numSamples 4)" in doc and "(block file" in doc, doc[0 ..< 400]
+  f.close()
+  let dry = importHeaders(path, tmp / "named.nif", ImportOptions(dryRun: true))
+  doAssert dry.applied == 0 and dry.refused == 0 and not dry.log.failed, $dry.log
+  # edits are refused: strings are variable length
+  copyFile(path, tmp / "named_edit.sg2")
+  var ed = openEditor(tmp / "named_edit.sg2")
+  doAssert not ed.setTraceField(0, "trace.SAMPLE_INTERVAL", toFieldValue("0.0005"))
+  doAssert not ed.setFileField("file.revision", toFieldValue(1))
+  doAssert ed.log.len == 2 and "variable length" in ed.log[0].msg, $ed.log
+  ed.close()
+  doAssert readAll(path) == readAll(tmp / "named_edit.sg2")
+
+# ---------------------------------------------------- 11.2: conversions --
+
+proc uniformSpec(o: ByteOrder, format = 4): FileSpec =
+  ## Three traces with one sample interval, length and source.
+  result = FileSpec(order: o, strings: @["ACQUISITION_DATE 01/04/2024",
+    "ACQUISITION_TIME 10:20:30", "COMPANY ACME", "TRACE_SORT AS_ACQUIRED", "UNITS METERS",
+    "NOTE line one\nline two"])
+  for k in 0..2:
+    result.traces.add TraceSpec(format: format, samples: @[1.0, -2.0, 3.5, float64(k), 0.0,
+      100.0, -7.0, 8.0], strings: @["CHANNEL_NUMBER " & $(k + 1), "DELAY 0.004",
+      "DESCALING_FACTOR 0.5", "LINE_ID 12", "RECEIVER VERTICAL_GEOPHONE",
+      "RECEIVER_LOCATION " & $(10 * (k + 1)) & " 5 1.5", "RECEIVER_STATION_NUMBER " & $(101 + k),
+      "SAMPLE_INTERVAL 0.001", "SHOT_SEQUENCE_NUMBER 42", "SKEW 0.0001", "SOURCE DYNAMITE",
+      "SOURCE_LOCATION 0 0 2", "SOURCE_STATION_NUMBER 7", "STACK 2"])
+
+proc sameSamples(a, b: string, n: int) =
+  var x = openSeismic(a)
+  var y = openSeismic(b)
+  doAssert x.len == n and y.len == n, $y.index.log
+  let tx = x.readTraces(0 ..< n, float64)
+  let ty = y.readTraces(0 ..< n, float64)
+  for i in 0 ..< n:
+    for k in 0 ..< int(x.traceEntry(i).numSamples):
+      doAssert tx[i, k] == ty[i, k], $i & "," & $k & ": " & $tx[i, k] & " vs " & $ty[i, k]
+  x.close()
+  y.close()
+
+block seg2_to_segy:
+  let path = build(allFormats(boLittle)).save("conv.sg2")
+  let log = convertFile(path, tmp / "conv.sgy")
+  doAssert not log.failed, $log
+  doAssert log.has("CHANNEL_NUMBER") == false
+  sameSamples(path, tmp / "conv.sgy", 5)
+  var y = openSeismic(tmp / "conv.sgy", keys = true)
+  doAssert y.kind == skSegy and y.index.segy.format == some(sfFloat64) # five formats, Rev 2.1
+  doAssert y.traceField(2, "trace.traceNumberInField") == toFieldValue(3)
+  doAssert y.traceField(0, "trace.fieldRecord") == toFieldValue(7)
+  doAssert y.traceField(0, "trace.traceIdCode") == toFieldValue(12) # vertical geophone
+  doAssert y.sampleIntervalUs(1) == 500 and y.sampleIntervalUs(0) == 250
+  doAssert y.fileField("binary.measurementSystem") == toFieldValue(1)
+  doAssert y.traceField(0, "trace.year") == toFieldValue(1988)
+  let k = y.traceKeys(2)
+  doAssert k.rcvX == 30 and k.rcvY == 4 and k.rcvZ == -1 and k.channel == 3
+  doAssert "SEG-2 FILE STRINGS" in y.index.segy.text.text and
+    "UNITS METERS" in y.index.segy.text.text
+  y.close()
+  # uniform data, Rev 1, int16 kept
+  let p2 = build(uniformSpec(boBig, 1)).save("conv16.sg2")
+  var o = ConvertOptions(revision: SegyRevision(major: 1, minor: 0))
+  let l2 = convertFile(p2, tmp / "conv16.sgy", o)
+  doAssert not l2.failed, $l2
+  doAssert l2.has("SKEW") # no slot: listed
+  var z = openSeismic(tmp / "conv16.sgy")
+  doAssert z.index.segy.format == some(sfInt16)
+  doAssert z.traceField(1, "trace.delayRecordingTime") == toFieldValue(4)
+  doAssert z.traceField(1, "trace.numVertSummed") == toFieldValue(2)
+  doAssert z.traceField(1, "trace.transductionUnits") == toFieldValue(3)
+  z.close()
+  sameSamples(p2, tmp / "conv16.sgy", 3)
+
+block seg2_to_segd:
+  let p = build(uniformSpec(boLittle)).save("tosegd.sg2")
+  for rev in [(3'u8, 0'u8), (3'u8, 1'u8), (2'u8, 1'u8)]:
+    let dst = tmp / ("tosegd_" & $rev[0] & $rev[1] & ".sgd")
+    var o = ConvertOptions(target: skSegd)
+    o.segd.revision = SegdRevision(major: rev[0], minor: rev[1])
+    let log = convertFile(p, dst, o)
+    doAssert not log.failed, $rev & " " & $log
+    doAssert log.has("SKEW") and log.has("local"), $log
+    var d = openSeismic(dst, keys = true)
+    doAssert d.kind == skSegd and d.len == 3 and not d.index.log.failed, $d.index.log
+    doAssert d.index.segdRecords[0].revision == SegdRevision(major: rev[0], minor: rev[1])
+    doAssert d.index.segdRecords[0].format == some(sd8058)
+    doAssert d.sampleIntervalUs(0) == 1000
+    let k = d.traceKeys(1)
+    doAssert k.record == 42 and k.channel == 2 and k.srcPoint == 7
+    doAssert k.rcvPoint == 102 and k.rcvLine == 12, $k
+    if rev[0] == 3:
+      doAssert k.rcvX == 20 and k.rcvY == 5 and k.rcvZ == 1.5 and k.srcZ == 2, $k
+      doAssert k.time == d.traceKeys(0).time and k.time == 1711966830.0, $k.time
+    d.close()
+    sameSamples(p, dst, 3)
+  # mixed formats and intervals: one channel set each, float64 needs 8080
+  let pm = build(allFormats(boBig)).save("tosegd_mixed.sg2")
+  let lm = convertFile(pm, tmp / "tosegd_mixed.sgd", ConvertOptions(target: skSegd))
+  doAssert not lm.failed, $lm
+  var d = openSeismic(tmp / "tosegd_mixed.sgd", keys = true)
+  doAssert d.index.segdRecords[0].format == some(sd8080) and d.len == 5
+  # sets 250 µs x 8 samples (traces 0, 2), 500 x 4, 250 x 5, 250 x 4: written set by set
+  doAssert d.index.segdRecords[0].scanTypes[0].channelSetCount == 4
+  doAssert lm.has("reordered") and d.traceKeys(1).channel == 3
+  d.close()
+  # SEG-Y input cannot go to SEG-D
+  let ly = convertFile(tmp / "conv.sgy", tmp / "no.sgd", ConvertOptions(target: skSegd))
+  doAssert ly.isFatal and not fileExists(tmp / "no.sgd")
+
+block to_seg2:
+  # SEG-2 to SEG-2: big-endian, strings kept, samples exact
+  let p = build(allFormats(boLittle)).save("re.sg2")
+  var o = ConvertOptions(target: skSeg2)
+  o.seg2.byteOrder = boBig
+  let log = convertFile(p, tmp / "re_big.sg2", o)
+  doAssert not log.failed, $log
+  sameSamples(p, tmp / "re_big.sg2", 5)
+  var a = openSeismic(p)
+  var b = openSeismic(tmp / "re_big.sg2")
+  doAssert b.index.seg2.order == boBig and b.index.seg2.strings == a.index.seg2.strings
+  for i in 0..4: doAssert b.seg2Trace(i).strings == a.seg2Trace(i).strings
+  a.close()
+  b.close()
+  # SEG-Y to SEG-2 (the file converted above): keys and samples come back
+  let ly = convertFile(tmp / "conv.sgy", tmp / "from_segy.sg2", ConvertOptions(target: skSeg2))
+  doAssert not ly.failed, $ly
+  sameSamples(tmp / "conv.sgy", tmp / "from_segy.sg2", 5)
+  var s = openSeismic(tmp / "from_segy.sg2", keys = true)
+  doAssert s.kind == skSeg2 and s.index.seg2.order == boLittle
+  doAssert s.index.codecs.len == 1 and s.index.codecs[0].seg2Format == some(s2Float64)
+  doAssert s.fileField("file.UNITS") == toFieldValue("METERS")
+  doAssert s.fileField("file.ACQUISITION_DATE") == toFieldValue("01/04/1988")
+  doAssert "Converted from SEG-Y" in s.fileField("file.NOTE").text
+  let k = s.traceKeys(2)
+  doAssert k.rcvX == 30 and k.rcvY == 4 and k.channel == 3 and k.record == 7
+  doAssert s.sampleIntervalUs(1) == 500
+  doAssert s.traceField(0, "trace.TRACE_TYPE") == toFieldValue("SEISMIC_DATA")
+  doAssert s.traceField(0, "trace.RECEIVER") == toFieldValue("VERTICAL_GEOPHONE")
+  s.close()
+  # SEG-D to SEG-2, with a format override
+  var o4 = ConvertOptions(target: skSeg2)
+  o4.seg2.format = s2t4
+  let ld = convertFile(tmp / "tosegd_30.sgd", tmp / "from_segd.sg2", o4)
+  doAssert not ld.failed, $ld
+  sameSamples(tmp / "tosegd_30.sgd", tmp / "from_segd.sg2", 3)
+  var g = openSeismic(tmp / "from_segd.sg2", keys = true)
+  doAssert g.traceKeys(1).rcvPoint == 102 and g.traceKeys(1).rcvX == 20
+  doAssert g.traceField(1, "trace.DELAY") == toFieldValue("0.004")
+  doAssert g.traceField(1, "trace.DESCALING_FACTOR") == toFieldValue("0.5")
+  g.close()
 
 block geometry_write_back_is_refused:
-  # SEG-2 conversion and editing come later (11.2): survey geometry is
-  # refused, with a fatal diagnostic or a ValueError (10.5).
+  # Survey geometry is not written to SEG-2 yet: refused, with a fatal
+  # diagnostic or a ValueError (10.5).
   let path = build(allFormats(boLittle)).save("geo.sg2")
   var f = openSeismic(path, keys = true)
   doAssertRaises ValueError: discard f.geometryChanges()
@@ -438,3 +732,5 @@ block geometry_write_back_is_refused:
   doAssert log.isFatal and "SEG-2" in log.messages
   doAssert not fileExists(tmp / "geo2.sg2")
   doAssert convertWithGeometry(path, tmp / "geo.sgy", initSurveyGeometry()).isFatal
+
+echo "tseg2: ok"
