@@ -66,7 +66,7 @@ block text_header_basics:
   doAssert back.encoding == teEbcdic and back.text == h.text
   var a = initTextHeader(teAscii)
   doAssert a.data[0] == byte('C')
-  a.setText("hello")
+  a.text = "hello"
   doAssert a.text.len == TextHeaderSize and a.text.startsWith("hello ")
   # Without a leading 'C' the printable-character count decides.
   doAssert detectTextEncoding(encodeText("  some text here", teEbcdic)) == teEbcdic

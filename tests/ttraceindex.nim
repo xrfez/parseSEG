@@ -140,7 +140,7 @@ block headers_only_reads:
   for n in segyFiles:
     let full = readSegy(exampleDir / n)
     let h = readSegyHeaders(exampleDir / n)
-    doAssert h.traces.len == full.traces.len and h.diagnostics.len == full.diagnostics.len
+    doAssert h.traces.len == full.traces.len and h.log.len == full.log.len
     for i, t in full.traces:
       doAssert h.traces[i].header == t.header and h.traces[i].samples.len == 0
     var x = newTraceTensor[float32](1, 10)
@@ -226,7 +226,7 @@ block segy_repeated_trace_warnings_are_capped:
   for t in d.traces: w.writeTrace(t)
   w.close()
   sink.close()
-  for log in [readSegy(path).diagnostics, readSegyHeaders(path).diagnostics]:
+  for log in [readSegy(path).log, readSegyHeaders(path).log]:
     var mismatches, summaries = 0
     for e in log.items:
       if e.loc.field == "trace.numSamples":

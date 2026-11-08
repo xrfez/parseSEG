@@ -10,8 +10,9 @@
 ## Pair-swapping is undefined for 3-byte samples (formats 7 and 15), which are
 ## rejected in that order.
 
-import std/math
+import std/[math, options]
 import ../common/[endians, ibmfloat, errors]
+export options
 
 type
   SampleFormat* = enum
@@ -32,22 +33,22 @@ type
     sfUInt8 = 16     ## Unsigned, 1 byte (Rev 2).
 
   SampleType* = float32 | float64
+    ## The element types samples decode to.
 
 const definedSampleFormats* = [sfIbm32, sfInt32, sfInt16, sfFixedGain, sfFloat32, sfFloat64,
   sfInt24, sfInt8, sfInt64, sfUInt32, sfUInt16, sfUInt64, sfUInt24, sfUInt8]
   ## Every format code, in code order (codes 13 and 14 are undefined, so the
   ## enum has holes and cannot be iterated directly).
 
-func toSampleFormat*(code: int, f: var SampleFormat): bool =
-  ## Converts a format code; false if the code is not defined in any revision.
+func toSampleFormat*(code: int): Option[SampleFormat] =
+  ## Converts a format code; none if the code is not defined in any revision.
   case code
   of 1..12, 15, 16:
     {.push warning[HoleEnumConv]: off.}
-    f = SampleFormat(code) # checked against the holes above
+    result = some(SampleFormat(code)) # checked against the holes above
     {.pop.}
-    result = true
   else:
-    result = false
+    result = none(SampleFormat)
 
 func sampleSize*(f: SampleFormat): int =
   ## Bytes per stored sample.
@@ -126,7 +127,8 @@ proc decodeSamples*[T: SampleType](f: SampleFormat, src: openArray[byte],
       # whole 4-byte word.
       for i in 0..<n:
         let w = getNum[uint32](src, 4*i, o)
-        dst[i] = T(float64(cast[int16](uint16(w and 0xFFFF))) * pow(2.0, -float64((w shr 16) and 0xFF)))
+        dst[i] = T(float64(cast[int16](uint16(w and 0xFFFF))) *
+          pow(2.0, -float64((w shr 16) and 0xFF)))
     of sfFloat32:
       for i in 0..<n: dst[i] = T(getNum[float32](src, 4*i, o))
     of sfFloat64:
@@ -163,7 +165,7 @@ proc fixedGainWord(x: float64, i: int): uint32 =
   ## Format 4: the largest gain G (0-255) whose mantissa round(x * 2^G)
   ## still fits an i16, so value = mantissa * 2^-G keeps the most precision.
   ## |x| above 32767 does not fit any G.
-  if x != x or abs(x) > 32767.5:
+  if x.isNaN or abs(x) > 32767.5:
     raiseFormat("sample " & $i & " = " & $x & " does not fit format 4 (|value| <= 32767)")
   var g = 0
   if x != 0:

@@ -5,8 +5,8 @@
 ## Inglewood sample stores the inline number at byte 13 and CDP X/Y at 73/77)
 ## and say so in a Layout stanza. The reader merges that stanza over the
 ## standard layout of the file's revision, so named values (`iline`,
-## `cdp_x`, ...) come from the right bytes; see `reader.fieldValue` and
-## `reader.geometry`.
+## `cdp_x`, ...) come from the right bytes; see `fields.fieldValue` and
+## `fields.geometry`.
 ##
 ## Entry names follow the spec's Fig. 3 (`ffid`, `chan`, `iline`, `xline`,
 ## `sht_x`, `rec_y`, `cdp_x`, ...), lower case. `inline` is accepted for
@@ -33,7 +33,7 @@ type
     ## Where one named value lives.
     name*: string      ## Lower case, e.g. `iline`.
     extension*: string ## "" for the standard header, else the header name, e.g. `SEG00001`.
-    byte*: int         ## 1-based byte within its 240-byte header.
+    bytePos*: int      ## 1-based byte within its 240-byte header.
     kind*: LayoutType
     ifNonZero*: bool   ## Overrides earlier entries of the same name only when non-zero.
 
@@ -173,16 +173,28 @@ const rev2Entries = [
   ## The spec's Fig. 3 (standard Rev 2 layout); ns/dt typed u16 per the
   ## spec-note resolution.
 
-func standardLayout*(rev: SegyRevision): TraceLayout =
-  ## The standard layout of a revision: Fig. 3 (Rev 2), Fig. 4 (Rev 1:
-  ## without Extension 1) or Fig. 5 (Rev 0: bytes 1-179 only, times unscaled).
+func buildStandardLayout(rev: SegyRevision): TraceLayout =
   result = TraceLayout(name: "rev" & $rev.major, desc: "SEG-Y Rev " & $rev & " standard entries")
   for (name, ext, b, t, inz) in rev2Entries:
-    var e = LayoutEntry(name: name, extension: ext, byte: b, kind: parseEnum[LayoutType](t),
+    var e = LayoutEntry(name: name, extension: ext, bytePos: b, kind: parseEnum[LayoutType](t),
       ifNonZero: inz)
     if rev.major >= 2 or (ext == "" and (rev.major == 1 or b < 181)):
       if rev.major == 0 and e.kind == ltTime2: e.kind = ltInt2
       result.entries.add e
+
+const standardLayouts = [buildStandardLayout(SegyRevision(major: 0, minor: 0)),
+  buildStandardLayout(SegyRevision(major: 1, minor: 0)),
+  buildStandardLayout(SegyRevision(major: 2, minor: 0)),
+  buildStandardLayout(SegyRevision(major: 2, minor: 1))]
+
+func standardLayout*(rev: SegyRevision): lent TraceLayout =
+  ## The standard layout of a revision: Fig. 3 (Rev 2), Fig. 4 (Rev 1:
+  ## without Extension 1) or Fig. 5 (Rev 0: bytes 1-179 only, times unscaled).
+  ## Revisions after 2.1 get the Rev 2.1 layout.
+  if rev.major == 0: result = standardLayouts[0]
+  elif rev.major == 1: result = standardLayouts[1]
+  elif rev.major == 2 and rev.minor == 0: result = standardLayouts[2]
+  else: result = standardLayouts[3]
 
 proc addEntry(r: var TraceLayout, n: XmlNode, ext: string) =
   let name = normalizeEntryName(n.attr("name"))
@@ -201,7 +213,8 @@ proc addEntry(r: var TraceLayout, n: XmlNode, ext: string) =
     raise newException(ValueError, "Layout XML: entry '" & name & "' at byte " & $pos &
       " does not fit a 240-byte header")
   let inz = n.attr("if-non-zero").strip.toLowerAscii in ["1", "true", "yes"]
-  r.entries.add LayoutEntry(name: name, extension: ext, byte: pos, kind: kind, ifNonZero: inz)
+  r.entries.add LayoutEntry(name: name, extension: ext, bytePos: pos, kind: kind,
+    ifNonZero: inz)
 
 proc checkCharRefs(xml: string) =
   # The XML parser raises a defect on out-of-range numeric character
@@ -251,7 +264,8 @@ proc parseLayout*(xml: string): TraceLayout =
       else: discard
 
 func overlaps(a, b: LayoutEntry): bool =
-  a.extension == b.extension and a.byte < b.byte + b.kind.size and b.byte < a.byte + a.kind.size
+  a.extension == b.extension and a.bytePos < b.bytePos + b.kind.size and
+    b.bytePos < a.bytePos + a.kind.size
 
 func merge*(base, file: TraceLayout): TraceLayout =
   ## `file` (a Layout stanza) over `base` (a standard layout): file entries
@@ -266,8 +280,9 @@ func merge*(base, file: TraceLayout): TraceLayout =
     if not reused: result.entries.add e
   result.entries.add file.entries
 
-func find*(layout: TraceLayout, name: string): seq[LayoutEntry] =
-  ## The entries for `name` in order (apply the last applicable one).
+iterator entriesFor*(layout: TraceLayout, name: string): lent LayoutEntry =
+  ## The entries for `name` (normalized, see `normalizeEntryName`) in order;
+  ## the last applicable one wins.
   let n = normalizeEntryName(name)
   for e in layout.entries:
-    if e.name == n: result.add e
+    if e.name == n: yield e

@@ -1,8 +1,9 @@
 ## SEG-Y User Data (D-9) in extended headers and trailers (task 3.4b).
 
 import std/[assertions, os, strutils]
-import parseSEG/common/errors
+import parseSEG/common/[errors, diagnostics, endians]
 import parseSEG/io/[records, diskio, tapeimage]
+import parseSEG/model/tensors
 import parseSEG/segy/[reader, writer]
 
 let tmp = getTempDir() / "parseseg_tsegyuserdata"
@@ -36,7 +37,7 @@ proc desc(label, format: string): UserDataBlock =
 
 proc makeFile(ext, trailer: ExtendedTextHeader, nExt: int16, nTrailer: int32): SegyData =
   ## A Rev 2.1 file with 3 fixed-length traces of 4 int16 samples.
-  var f = SegyFile(byteOrder: boBig, format: sfInt16, formatKnown: true)
+  var f = SegyFile(byteOrder: boBig, format: some(sfInt16))
   f.text = initTextHeader(teAscii)
   f.binary = SegyBinaryHeader(segyMajor: 2, segyMinor: 1, formatCode: 3, sampleInterval: 500,
     samplesPerTrace: 4, fixedLengthTraces: 1, numExtTextHeaders: nExt,
@@ -59,10 +60,12 @@ proc write(d: SegyData, sink: RecordSink) =
   sink.close()
 
 let items = @[
-  (desc("SurvPars", "text-xml"), toBytes("<survey><area>Test</area></survey>")),
-  (desc("Blob", "bin-le-other"), nastyBlob(10_000)),
-  (desc("Empty", "text-us-ascii"), newSeq[byte]()),
-  (desc("ObsLog", "text-iso-8859-1"), toBytes("11:38 Start of line\r\n12:03 Missed shots\r\n"))]
+  UserDataItem(desc: desc("SurvPars", "text-xml"),
+    data: toBytes("<survey><area>Test</area></survey>")),
+  UserDataItem(desc: desc("Blob", "bin-le-other"), data: nastyBlob(10_000)),
+  UserDataItem(desc: desc("Empty", "text-us-ascii"), data: newSeq[byte]()),
+  UserDataItem(desc: desc("ObsLog", "text-iso-8859-1"),
+    data: toBytes("11:38 Start of line\r\n12:03 Missed shots\r\n"))]
 
 block user_data_in_extended_header_with_variable_count:
   var ext = initExtendedTextHeader()
@@ -73,13 +76,14 @@ block user_data_in_extended_header_with_variable_count:
   let path = tmp / "ext_userdata.sgy"
   d.write(openDiskSink(path))
   let e = readSegy(path)
-  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+  doAssert e.log.len == 0, $e.log[0]
   doAssert e.traces.len == 3 and e.samples[2, 3] == 23'f32
   let x = e.file.extended
   doAssert x.recordCount == ext.recordCount and x.hasEndText
   doAssert x.stanzas.len == 3 and x.stanzas[1].isUserData
   doAssert x.userData.len == 4
-  for i, (dsc, data) in items:
+  for i, it in items:
+    let (dsc, data) = (it.desc, it.data)
     let b = x.userData[i]
     doAssert b.dataLabel == dsc.dataLabel and b.dataFormat == dsc.dataFormat
     doAssert b.blockSize == data.len and b.creator == "parseSEG tests"
@@ -102,12 +106,12 @@ block user_data_in_trailer:
     let path = tmp / "trailer_userdata.sgy"
     d.write(openDiskSink(path))
     let e = readSegy(path)
-    doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+    doAssert e.log.len == 0, $e.log[0]
     doAssert e.traces.len == 3
     doAssert e.file.trailer.recordCount == tr.recordCount
     doAssert e.file.trailer.userData.len == 4
     let blob = e.file.trailer.userData[1]
-    doAssert e.file.trailer.userDataBytes(blob) == items[1][1]
+    doAssert e.file.trailer.userDataBytes(blob) == items[1].data
     doAssert blob.mediumOffset == int64(3600 + 3200 + 3 * (240 + 8) + blob.dataStart)
 
 block description_block_split_across_records:
@@ -118,7 +122,8 @@ block description_block_split_across_records:
   first.blockSize = 0
   let firstXmlLen = toDescXml(first).len + 2 # blocksize grows from "0" to 3 digits
   let n1 = 3200 - 40 - header.len - firstXmlLen
-  let two = @[(desc("A", "bin-x"), nastyBlob(n1)), (desc("B", "text-x"), toBytes("hello"))]
+  let two = @[UserDataItem(desc: desc("A", "bin-x"), data: nastyBlob(n1)),
+    UserDataItem(desc: desc("B", "text-x"), data: toBytes("hello"))]
   var tr = initExtendedTextHeader()
   tr.addUserData(two)
   doAssert tr.userData.len == 2
@@ -151,14 +156,15 @@ block malformed_description_is_reported:
 block retention_limit_indexes_without_holding:
   let big = nastyBlob(100_000)
   var tr = initExtendedTextHeader()
-  tr.addUserData(@[(desc("Big", "bin-tar"), big), (desc("After", "text-x"), toBytes("tail"))])
+  tr.addUserData(@[UserDataItem(desc: desc("Big", "bin-tar"), data: big),
+    UserDataItem(desc: desc("After", "text-x"), data: toBytes("tail"))])
   var ext = initExtendedTextHeader()
   ext.addEndText()
   let d = makeFile(ext, tr, 1, int32(tr.recordCount))
   let path = tmp / "big_trailer.sgy"
   d.write(openDiskSink(path))
   let e = readSegy(path, maxRetained = 16 * 1024)
-  doAssert e.traces.len == 3 and not e.diagnostics.hasErrors
+  doAssert e.traces.len == 3 and not e.log.hasErrors
   let t = e.file.trailer
   doAssert not t.isComplete and t.recordCount == tr.recordCount
   doAssert t.userData.len == 2 and t.userData[0].blockSize == 100_000
@@ -169,7 +175,7 @@ block retention_limit_indexes_without_holding:
   extractUserData(path, t.userData[1], tmp / "after.bin")
   doAssert readBytes(tmp / "after.bin") == toBytes("tail")
   var sawInfo = false
-  for x in e.diagnostics:
+  for x in e.log:
     if x.severity == sevInfo and x.loc.field == "trailer": sawInfo = true
   doAssert sawInfo
   # A partly held file cannot be rewritten from memory.
@@ -181,7 +187,7 @@ block huge_declared_attachment_is_bounded:
   # A 5 GB attachment declared in a 30 KB file: the read stops at the end of
   # the file without allocating gigabytes.
   var tr = initExtendedTextHeader()
-  tr.addUserData(@[(desc("Huge", "bin-tar"), nastyBlob(20_000))])
+  tr.addUserData(@[UserDataItem(desc: desc("Huge", "bin-tar"), data: nastyBlob(20_000))])
   var ext = initExtendedTextHeader()
   ext.addEndText()
   let d = makeFile(ext, tr, 1, -1)
@@ -197,11 +203,11 @@ block huge_declared_attachment_is_bounded:
   s2.setLen s.len
   writeFile(path, s2)
   let e = readSegy(path, maxRetained = 8 * 1024)
-  doAssert e.traces.len == 3 and not e.diagnostics.isFatal
+  doAssert e.traces.len == 3 and not e.log.isFatal
   # On disk the declared size is checked against the file: not indexed, warned.
   doAssert e.file.trailer.userData.len == 0
   var warned = false
-  for x in e.diagnostics:
+  for x in e.log:
     if x.severity == sevWarning and "beyond the end of the file" in x.msg: warned = true
   doAssert warned
 
@@ -217,8 +223,8 @@ block tape_image_round_trip:
   var src: RecordSource = openTapeImageSource(tap)
   let e = readSegy(src)
   src.close()
-  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+  doAssert e.log.len == 0, $e.log[0]
   doAssert e.traces.len == 3
   doAssert e.file.extended.userData.len == 2 and e.file.trailer.userData.len == 4
   doAssert e.file.trailer.userData[1].mediumOffset == -1 # tape: no file offsets
-  doAssert e.file.trailer.userDataBytes(e.file.trailer.userData[1]) == items[1][1]
+  doAssert e.file.trailer.userDataBytes(e.file.trailer.userData[1]) == items[1].data

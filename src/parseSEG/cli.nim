@@ -251,7 +251,7 @@ proc info(a: Args): int =
     template s: untyped = ix.segy
     echo "standard:    SEG-Y rev ", s.revision, ", ", s.byteOrder, "-endian",
       (if s.byteOrderDeclared: " (declared)" else: "")
-    echo "format:      ", (if s.formatKnown: formatName(s.format) else: "unknown")
+    echo "format:      ", (if s.format.isSome: formatName(s.format.get) else: "unknown")
   else:
     var revs, fmts: seq[string]
     for r in ix.segdRecords:

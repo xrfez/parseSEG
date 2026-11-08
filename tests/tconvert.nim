@@ -1,6 +1,7 @@
 ## Conversion between revisions and standards (task 8.6).
 
 import std/[assertions, os, math, strutils]
+import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, fields]
 import parseSEG/segd/[reader as segdreader, writer as segdwriter]
@@ -18,7 +19,9 @@ proc noted(log: DiagLog, text: string): bool =
     if text in e.msg: return true
 
 proc value(d: SegyData, i: int, name: string): float64 =
-  doAssert d.file.fieldValue(d.traces[i], name, result), name
+  let v = d.file.fieldValue(d.traces[i], name)
+  doAssert v.isSome, name
+  v.get
 
 block segd_rev2_to_segy_rev21:
   let src = exampleDir / "63.sgd"
@@ -26,8 +29,8 @@ block segd_rev2_to_segy_rev21:
   doAssert log.errorsAndWorse == 0, $log
   doAssert log.noted("extended/external headers are not carried")
   let d = readSegy(tmp / "63.sgy")
-  doAssert d.diagnostics.errorsAndWorse == 0, $d.diagnostics
-  doAssert d.file.revision == SegyRevision(major: 2, minor: 1) and d.file.format == sfFloat32
+  doAssert d.log.errorsAndWorse == 0, $d.log
+  doAssert d.file.revision == SegyRevision(major: 2, minor: 1) and d.file.format == some(sfFloat32)
   doAssert d.file.text.card(1).startsWith("C 1 CONVERTED FROM SEG-D REV 2.0")
   let s = readSegd(src)
   let t = d.traces[0]
@@ -48,7 +51,7 @@ block segd_rev3_to_segy_with_coordinates:
   let src = exampleDir / "inova_rev30_5traces.sgd"
   doAssert convertFile(src, tmp / "inova.sgy").errorsAndWorse == 0
   let d = readSegy(tmp / "inova.sgy")
-  doAssert d.diagnostics.errorsAndWorse == 0, $d.diagnostics
+  doAssert d.log.errorsAndWorse == 0, $d.log
   let s = readSegd(src)
   doAssert d.traces.len == 5
   for i in 0..4:
@@ -69,7 +72,7 @@ block segd_to_segy_rev1_and_descale:
   doAssert log.errorsAndWorse == 0 and log.noted("no field for SEG-D receiver/source line")
   let d = readSegy(tmp / "63r1.sgy")
   doAssert d.file.revision.major == 1 and not d.traces[0].hasExt1
-  doAssert d.diagnostics.errorsAndWorse == 0
+  doAssert d.log.errorsAndWorse == 0
   doAssert d.file.text.card(39).strip == "C39 SEG Y REV1" and d.traces[0].header.fieldRecord == 63
   # Descaled: recorded value × 2^MP.
   let s = readSegd(src)
@@ -95,7 +98,7 @@ block lossless_format_choice:
   sink.close()
   doAssert convertFile(tmp / "i32.sgd", tmp / "i32.sgy").errorsAndWorse == 0
   let y = readSegy(tmp / "i32.sgy")
-  doAssert y.file.format == sfInt32
+  doAssert y.file.format == some(sfInt32)
   var raw = newSeq[float64](1000)
   decodeSamples(sfInt32, y.traces[0].samples, raw)
   doAssert raw == vals
@@ -112,7 +115,7 @@ block segy_revision_and_byte_order_changes:
     ConvertOptions(revision: SegyRevision(major: 1), format: 5))
   doAssert log.errorsAndWorse == 0, $log
   let b = readSegy(tmp / "ing_r1.sgy")
-  doAssert b.file.revision.major == 1 and b.file.format == sfFloat32
+  doAssert b.file.revision.major == 1 and b.file.format == some(sfFloat32)
   doAssert b.traces.len == 200 and b.samples == a.samples
   doAssert b.file.extended.recordCount == a.file.extended.recordCount
   doAssert b.traces[57].header == a.traces[57].header

@@ -97,10 +97,11 @@ func checkTarget(opts: ConvertOptions, err: var string): bool =
     err = "target revision " & $r & " is not 0, 1, 2.0 or 2.1"
     return false
   if opts.format != 0:
-    var f: SampleFormat
-    if not toSampleFormat(opts.format, f):
+    let code = toSampleFormat(opts.format)
+    if code.isNone:
       err = "target format " & $opts.format & " is not a writable SEG-Y format"
       return false
+    let f = code.get
     if f.isRev2Format and r.major < 2:
       err = "format " & $opts.format & " needs SEG-Y Rev 2"
       return false
@@ -159,7 +160,7 @@ proc reorderProprietary(lay: TraceLayout, blocks: var seq[byte], src, dst: ByteO
     for e in lay.entries:
       if e.extension.len > 0 and cmpIgnoreCase(e.extension, name) == 0:
         described = true
-        let p = e.byte - 1
+        let p = e.bytePos - 1
         let parts = if e.kind == ltScale6: @[(p, 4), (p + 4, 2)] else: @[(p, e.kind.size)]
         for (q, n) in parts:
           if q >= 0 and q + n <= TraceHeaderSize and q notin done:
@@ -188,8 +189,9 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
   var seen: set[0..63]
   let fromRev = f.revision
   let rev = opts.revision
-  var outFmt = f.format
-  if opts.format != 0: discard toSampleFormat(opts.format, outFmt)
+  let inFmt = f.format.get # known: else the read is fatal
+  let outFmt = if opts.format != 0: toSampleFormat(opts.format).get # checked above
+               else: inFmt
   if outFmt.isRev2Format and rev.major < 2:
     result.add r.log
     result.report(sevFatal, dcUnsupportedFormat, "the input format " & $ord(outFmt) &
@@ -247,8 +249,7 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
       if f.extended.recordCount > 0 and not f.extended.hasEndText:
         f.extended.addEndText()
         f.binary.numExtTextHeaders = int16(f.extended.recordCount)
-  let inFmt = f.format
-  f.format = outFmt
+  f.format = some(outFmt)
   var w: SegyWriter
   try:
     w = openSegyWriter(sink, f, SegyWriteOptions(byteOrder: opts.byteOrder, lenient: true))
@@ -517,8 +518,8 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
                  elif rec.formatKnown:
                    losslessFormat(rec.format, rev, opts.applyDescale, opts.byteOrder)
                  else: sfFloat32
-        if opts.format != 0: discard toSampleFormat(opts.format, outFmt) # checked above
-        var f = SegyFile(byteOrder: opts.byteOrder, format: outFmt, formatKnown: true,
+        if opts.format != 0: outFmt = toSampleFormat(opts.format).get # checked above
+        var f = SegyFile(byteOrder: opts.byteOrder, format: some(outFmt),
           revision: rev, extended: initExtendedTextHeader(), trailer: initExtendedTextHeader())
         f.text = initTextHeader(opts.textEncoding)
         let cards = [

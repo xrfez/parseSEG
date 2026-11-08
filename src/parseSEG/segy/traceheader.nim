@@ -186,10 +186,10 @@ type
 const
   traceHeaderExt1Fields* = fieldTable(SegyTraceHeaderExt1)
     ## Layout of Trace Header Extension 1.
-  LastInEnsemble* = 1'u16 ## `lastTraceFlag` bits.
-  LastInLine* = 2'u16
-  LastInFile* = 4'u16
-  LastInSurvey* = 8'u16
+  LastInEnsemble* = 1'u16 ## `lastTraceFlag` bit: last trace of its ensemble.
+  LastInLine* = 2'u16 ## `lastTraceFlag` bit: last trace of its line.
+  LastInFile* = 4'u16 ## `lastTraceFlag` bit: last trace of the file (readers stop here).
+  LastInSurvey* = 8'u16 ## `lastTraceFlag` bit: last trace of the survey.
 
 func decodeTraceHeaderExt1*(b: openArray[byte], order: ByteOrder): SegyTraceHeaderExt1 =
   ## Decodes Extension 1 from the first 240 bytes of `b`.

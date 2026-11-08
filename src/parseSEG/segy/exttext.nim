@@ -65,6 +65,11 @@ type
       ## Data bytes actually inside the records (less than `blockSize` when
       ## the block overruns the header or trailer; set by `finish`).
 
+  UserDataItem* = object
+    ## One attachment for `addUserData`: its description and its bytes.
+    desc*: UserDataBlock ## `blockSize` and the offsets are set by `addUserData`.
+    data*: seq[byte]
+
   ExtTextIssue* = object
     ## Something malformed found while walking the records.
     pos*: int    ## Stream offset.
@@ -102,7 +107,9 @@ func `streamLimit=`*(h: var ExtendedTextHeader, limit: int64) =
   ## are reported as corrupt instead of swallowing the rest of the file.
   h.streamLimit = int(min(limit, int64(high(int))))
 
-func recordCount*(h: ExtendedTextHeader): int {.inline.} = h.records
+func recordCount*(h: ExtendedTextHeader): int {.inline.} =
+  ## Records added, whether retained in `data` or only indexed.
+  h.records
 
 func isComplete*(h: ExtendedTextHeader): bool {.inline.} =
   ## True when `data` holds every record (nothing was dropped by `maxRetained`).
@@ -128,9 +135,13 @@ func key*(s: Stanza): string =
   ## Normalized `COMPANY:NAME`, e.g. `SEG:ENDTEXT` or `SEG:LOCATIONDATAVER1.0`.
   normalizeStanzaName(s.company & ":" & s.name)
 
-func isEndText*(s: Stanza): bool {.inline.} = s.key == "SEG:ENDTEXT"
+func isEndText*(s: Stanza): bool {.inline.} =
+  ## True for the `((SEG:EndText))` stanza.
+  s.key == "SEG:ENDTEXT"
 
-func isBinary*(s: Stanza): bool {.inline.} = s.byteCount >= 0
+func isBinary*(s: Stanza): bool {.inline.} =
+  ## True for a binary stanza (its header declares a byte count).
+  s.byteCount >= 0
 
 func isUserData*(s: Stanza): bool =
   ## A D-9 User Data stanza (any of the spellings the spec uses).
@@ -242,22 +253,11 @@ proc endChain(h: var ExtendedTextHeader, pos: int) =
     h.skipUntil = max(h.skipUntil, h.udLimit)
     h.udLimit = high(int)
 
-proc walkChain(h: var ExtendedTextHeader, rec: openArray[byte], s0, p: int,
+proc walkDesc(h: var ExtendedTextHeader, buf: openArray[byte], base, q, e, s0: int,
     recOffset: int64): int =
-  # Continues a User Data chain at stream offset p inside the record starting
-  # at stream offset s0. Returns where scanning stops: the end of the record,
-  # or the start of a data block (which the caller skips).
-  let e = s0 + rec.len
-  # Work on carry & rec when a description block is split across records.
-  var buf: seq[byte]
-  var base = s0
-  if h.carry.len > 0:
-    buf = h.carry
-    buf.add rec
-    base = h.carryStart
-  else:
-    buf = @rec
-  var q = if h.carry.len > 0: 0 else: skipBlanks(buf, p - base)
+  # Reads the description block at index q of `buf`, whose index 0 is at
+  # stream offset `base`; `e` is the end of the current record (which starts
+  # at s0). Returns where scanning stops, as `walkChain`.
   if base + q >= e:
     return e
   if base + q >= h.udLimit or buf[q] == 0:
@@ -301,6 +301,19 @@ proc walkChain(h: var ExtendedTextHeader, rec: openArray[byte], s0, p: int,
   h.stanzas[^1].dataEnd = h.skipUntil
   h.userData.add b
   result = b.dataStart
+
+proc walkChain(h: var ExtendedTextHeader, rec: openArray[byte], s0, p: int,
+    recOffset: int64): int =
+  # Continues a User Data chain at stream offset p inside the record starting
+  # at stream offset s0. Returns where scanning stops: the end of the record,
+  # or the start of a data block (which the caller skips).
+  if h.carry.len > 0:
+    # A description block split across records: read it from carry & rec.
+    var buf = move h.carry
+    buf.add rec
+    result = h.walkDesc(buf, h.carryStart, 0, s0 + rec.len, s0, recOffset)
+  else:
+    result = h.walkDesc(rec, s0, skipBlanks(rec, p - s0), s0 + rec.len, s0, recOffset)
 
 func lineStarts(h: ExtendedTextHeader, rec: openArray[byte]): seq[int] =
   # Indexes in `rec` where a stanza header may begin.
@@ -493,17 +506,17 @@ func toDescXml*(b: UserDataBlock): string =
   tag("compression", b.compression)
   result.add DescClose
 
-proc addUserData*(h: var ExtendedTextHeader, items: openArray[(UserDataBlock, seq[byte])],
+proc addUserData*(h: var ExtendedTextHeader, items: openArray[UserDataItem],
     stanzaName = "UserData") =
-  ## Appends a User Data stanza holding `items` (description, data). Each
+  ## Appends a User Data stanza holding `items`. Each description's
   ## `blockSize` is set from its data. The stanza starts on a new record and
   ## the last record is padded with zeros.
   var rec = encodeText("((SEG:" & stanzaName & "))", teAscii)
-  for (desc, data) in items:
-    var d = desc
-    d.blockSize = data.len
+  for it in items:
+    var d = it.desc
+    d.blockSize = it.data.len
     rec.add encodeText(toDescXml(d), teAscii)
-    rec.add data
+    rec.add it.data
   while rec.len mod TextHeaderSize != 0: rec.add 0
   for i in countup(0, rec.len - 1, TextHeaderSize):
     h.add rec.toOpenArray(i, i + TextHeaderSize - 1)

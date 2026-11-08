@@ -1,6 +1,7 @@
 ## SEG-Y trace header layouts and named values (task 3.4d).
 
-import std/[assertions, os, math]
+import std/[assertions, os, math, sequtils]
+import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader, writer, fields]
 
@@ -15,44 +16,45 @@ proc write(d: SegyData, path: string) =
   w.close()
   sink.close()
 
+proc named(lay: TraceLayout, name: string): seq[LayoutEntry] = toSeq(lay.entriesFor(name))
+
 block standard_layouts:
   let r0 = standardLayout(SegyRevision(major: 0))
   let r1 = standardLayout(SegyRevision(major: 1))
   let r2 = standardLayout(SegyRevision(major: 2, minor: 1))
   doAssert r2.entries.len == 112 and r1.entries.len == 88
-  for e in r0.entries: doAssert e.byte < 181 and e.kind != ltTime2 and e.extension == ""
+  for e in r0.entries: doAssert e.bytePos < 181 and e.kind != ltTime2 and e.extension == ""
   for e in r1.entries: doAssert e.extension == ""
   # Within each header, standard entries never overlap.
   for lay in [r1, r2]:
     for i, a in lay.entries:
       for b in lay.entries[i + 1 .. ^1]:
         if a.extension == b.extension:
-          doAssert a.byte + a.kind.size <= b.byte or b.byte + b.kind.size <= a.byte,
+          doAssert a.bytePos + a.kind.size <= b.bytePos or b.bytePos + b.kind.size <= a.bytePos,
             a.name & " overlaps " & b.name
-  doAssert r2.find("inline").len == 1 and r2.find("iline")[0].byte == 189
-  doAssert r2.find("sht_x").len == 2 and r2.find("sht_x")[1].ifNonZero
+  doAssert r2.named("inline").len == 1 and r2.named("iline")[0].bytePos == 189
+  doAssert r2.named("sht_x").len == 2 and r2.named("sht_x")[1].ifNonZero
 
 block inglewood_layout_stanza:
   let d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
-  doAssert d.diagnostics.len == 0
+  doAssert d.log.len == 0
   let lay = d.file.layout
-  doAssert lay.find("iline")[^1].byte == 13 and lay.find("cdp_x")[^1].byte == 73
-  doAssert lay.find("sht_x").len == 1 # the standard byte 73 entry is dropped
+  doAssert lay.named("iline")[^1].bytePos == 13 and lay.named("cdp_x")[^1].bytePos == 73
+  doAssert lay.named("sht_x").len == 1 # the standard byte 73 entry is dropped
   for k in 0..<200:
     let g = d.file.geometry(d.traces[k])
     doAssert g.inline == 1001.0 and g.crossline == float64(k + 1)
     doAssert g.cdpX == float64(d.traces[k].header.sourceX) # stored at byte 73
     doAssert g.receiverElevation == float64(d.traces[k].header.groupY) # byte 85
     doAssert g.sourceX.isNaN and g.channel.isNaN
-  var v: float64
-  doAssert d.file.fieldValue(d.traces[5], "INLINE", v) and v == 1001.0
-  doAssert not d.file.fieldValue(d.traces[5], "no_such_entry", v)
+  doAssert d.file.fieldValue(d.traces[5], "INLINE") == some(1001.0)
+  doAssert d.file.fieldValue(d.traces[5], "no_such_entry").isNone
 
 block standard_values_with_scalars_and_ext1:
   # A Rev 2.1 file without a Layout stanza: standard bytes, scalars, Ext1.
   var d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   var f = SegyFile(text: d.file.text, binary: d.file.binary, byteOrder: boBig,
-    format: d.file.format, formatKnown: true, extended: initExtendedTextHeader(),
+    format: d.file.format, extended: initExtendedTextHeader(),
     trailer: initExtendedTextHeader())
   f.binary.numExtTextHeaders = 0
   f.binary.maxAddlTraceHeaders = 1
@@ -72,12 +74,11 @@ block standard_values_with_scalars_and_ext1:
   let g = f.geometry(t)
   doAssert g.sourceX == 1234.56 and g.sourceY == 98765.4321
   doAssert g.receiverElevation == 250.0 and g.shotpoint == 101.5
-  var delay: float64
-  doAssert f.fieldValue(t, "delay", delay) and delay == 12.5
+  doAssert f.fieldValue(t, "delay") == some(12.5)
   # Rev 0: time fields are unscaled and bytes 181-240 undefined.
   f.binary.segyMajor = 0
   f.binary.segyMinor = 0
-  doAssert f.fieldValue(t, "delay", delay) and delay == 125.0
+  doAssert f.fieldValue(t, "delay") == some(125.0)
   doAssert f.geometry(t).inline.isNaN
 
 block layout_stanza_with_proprietary_extension:
@@ -110,10 +111,9 @@ block layout_stanza_with_proprietary_extension:
   let path = tmp / "acme.sgy"
   d.write(path)
   let e = readSegy(path)
-  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
-  var v: float64
-  doAssert e.file.fieldValue(e.traces[3], "gun_depth", v) and v == 7.5
-  doAssert e.file.fieldValue(e.traces[3], "gun_pressure", v) and abs(v - 200.0) < 1e-9
+  doAssert e.log.len == 0, $e.log[0]
+  doAssert e.file.fieldValue(e.traces[3], "gun_depth") == some(7.5)
+  doAssert abs(e.file.fieldValue(e.traces[3], "gun_pressure").get - 200.0) < 1e-9
   doAssert e.file.geometry(e.traces[3]).inline == 503.0
 
 block malformed_layout_falls_back:
@@ -131,5 +131,5 @@ block malformed_layout_falls_back:
   let path = tmp / "badlayout.sgy"
   d.write(path)
   let e = readSegy(path)
-  doAssert e.diagnostics.len == 1 and e.diagnostics[0].loc.field == "extended.layout"
-  doAssert e.file.layout.find("iline")[^1].byte == 189 # standard layout
+  doAssert e.log.len == 1 and e.log[0].loc.field == "extended.layout"
+  doAssert e.file.layout.named("iline")[^1].bytePos == 189 # standard layout

@@ -174,8 +174,8 @@ func detectKind*(head: openArray[byte], kind: var SeismicKind): bool =
 proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
   var r = openSegy(src, headersOnly = true)
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
-  result.codecs.add TraceCodec(kind: skSegy, known: r.file.formatKnown,
-    segyFormat: r.file.format, order: r.file.byteOrder)
+  result.codecs.add TraceCodec(kind: skSegy, known: r.file.format.isSome,
+    segyFormat: r.file.format.get(default(SampleFormat)), order: r.file.byteOrder)
   let gr = if keys: initGeometryReader(r.file) else: GeometryReader()
   var t: SegyTrace
   while r.readTrace(t):

@@ -2,7 +2,7 @@
 ## finding, numbered as in the review).
 
 import std/[assertions, os, strutils]
-import parseSEG/common/errors
+import parseSEG/common/[errors, diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader, writer, fields]
 
@@ -31,7 +31,7 @@ proc strict(d: SegyData): SegyWriteOptions = initSegyWriteOptions(d.file)
 proc lenient(d: SegyData): SegyWriteOptions = initSegyWriteOptions(d.file, lenient = true)
 
 proc makeFile(ext, trailer: ExtendedTextHeader, nExt: int16, nTrailer: int32): SegyData =
-  var f = SegyFile(byteOrder: boBig, format: sfInt16, formatKnown: true)
+  var f = SegyFile(byteOrder: boBig, format: some(sfInt16))
   f.text = initTextHeader(teAscii)
   f.binary = SegyBinaryHeader(segyMajor: 2, segyMinor: 1, formatCode: 3, sampleInterval: 500,
     samplesPerTrace: 4, fixedLengthTraces: 1, numExtTextHeaders: nExt,
@@ -60,7 +60,7 @@ block f1_hostile_layout_entities:
   let path = tmp / "hostile.sgy"
   discard makeFile(ext, initExtendedTextHeader(), -1, 0).write(path, SegyWriteOptions())
   let d = readSegy(path)
-  doAssert d.traces.len == 3 and d.diagnostics.warned("invalid character reference")
+  doAssert d.traces.len == 3 and d.log.warned("invalid character reference")
 
 block f2_format_code_edit_is_refused:
   var d = readSegy(exampleDir / "Sweep0.sgy")
@@ -147,7 +147,7 @@ block f6_user_data_overrun_is_reported:
   discard makeFile(ext, initExtendedTextHeader(), 2, 0).write(path, SegyWriteOptions(lenient: true))
   let d = readSegy(path)
   doAssert d.traces.len == 3
-  doAssert d.diagnostics.warned("runs into the final ((SEG:EndText))")
+  doAssert d.log.warned("runs into the final ((SEG:EndText))")
   let b = d.file.extended.userData[0]
   doAssert b.blockSize == 4000 and b.available < 4000
   doAssertRaises ValueError: discard d.file.extended.userDataBytes(b)
@@ -162,7 +162,7 @@ block f7_corrupt_lengths_do_not_swallow_traces:
   let path = tmp / "hugebytes.sgy"
   discard makeFile(ext, initExtendedTextHeader(), -1, 0).write(path, SegyWriteOptions(lenient: true))
   let d = readSegy(path)
-  doAssert d.traces.len == 3 and d.diagnostics.warned("beyond the end of the file")
+  doAssert d.traces.len == 3 and d.log.warned("beyond the end of the file")
   # An unterminated description block followed by EndText and traces.
   var ext2 = initExtendedTextHeader()
   var r2 = toBytes("((SEG:UserData))")
@@ -173,7 +173,7 @@ block f7_corrupt_lengths_do_not_swallow_traces:
   let path2 = tmp / "unclosed.sgy"
   discard makeFile(ext2, initExtendedTextHeader(), -1, 0).write(path2, SegyWriteOptions(lenient: true))
   let d2 = readSegy(path2)
-  doAssert d2.traces.len == 3 and not d2.diagnostics.isFatal
+  doAssert d2.traces.len == 3 and not d2.log.isFatal
 
 block f8_wide_scalar_is_not_wrapped:
   var d = readSegy(ingle)
@@ -188,15 +188,14 @@ block f8_wide_scalar_is_not_wrapped:
   let path = tmp / "widescalar.sgy"
   discard d.write(path, d.strict)
   let e = readSegy(path)
-  var v: float64
-  doAssert e.file.fieldValue(e.traces[0], "sht_x", v)
-  doAssert v == float64(e.traces[0].header.sourceX) # scalar ignored, not wrapped
+  # scalar ignored, not wrapped
+  doAssert e.file.fieldValue(e.traces[0], "sht_x") == some(float64(e.traces[0].header.sourceX))
 
 block f10_long_first_description_block:
   var desc = UserDataBlock(version: "1", dataFormat: "text-x", dataLabel: "Long",
     description: repeat("a", 5000), creator: "t")
   var tr = initExtendedTextHeader()
-  tr.addUserData(@[(desc, toBytes("payload"))])
+  tr.addUserData(@[UserDataItem(desc: desc, data: toBytes("payload"))])
   var ext = initExtendedTextHeader()
   ext.addEndText()
   let path = tmp / "longdesc.sgy"
@@ -209,3 +208,38 @@ block f11_extension_names_ignore_case:
   let lay = parseLayout("""<segy-layout><extension name="acme0001">
 <entry name="x" byte="1" type="int4"/></extension></segy-layout>""")
   doAssert lay.entries[0].extension == "ACME0001"
+
+block undefined_format_needs_its_own_byte_order:
+  # 12.3: a lenient writer copies samples of an undefined format, but cannot
+  # reorder them (their width is unknown).
+  var d = makeFile(initExtendedTextHeader(), initExtendedTextHeader(), 0, 0)
+  d.file.format = none(SampleFormat)
+  d.file.binary.formatCode = 13
+  let same = d.write(tmp / "fmt13.sgy", d.lenient)
+  doAssert same.len > 0 and not same.hasErrors
+  var le = d.lenient
+  le.byteOrder = boLittle
+  doAssertRaises SegFormatError: discard d.write(tmp / "fmt13le.sgy", le)
+
+block writer_reuses_its_record_buffer:
+  # Traces of different sizes in a row: each record has exactly its own bytes.
+  var d = makeFile(initExtendedTextHeader(), initExtendedTextHeader(), 0, 0)
+  d.file.binary.fixedLengthTraces = 0
+  for k, n in [6, 2, 4]:
+    d.traces[k].numSamples = n
+    d.traces[k].header.numSamples = uint16(n)
+    d.traces[k].samples = newSeq[byte](2 * n)
+    for i in 0..<2 * n: d.traces[k].samples[i] = byte(16 * k + i)
+  for order in [boBig, boLittle]:
+    var opts = d.strict
+    opts.byteOrder = order
+    let path = tmp / ("sizes_" & $order & ".sgy")
+    discard d.write(path, opts)
+    let e = readSegy(path)
+    doAssert e.traces.len == 3 and not e.log.hasErrors
+    for k in 0..2:
+      doAssert e.traces[k].numSamples == d.traces[k].numSamples
+      var want = d.traces[k].samples
+      if order == boLittle:
+        for i in countup(0, want.len - 2, 2): swap(want[i], want[i + 1])
+      doAssert e.traces[k].samples == want

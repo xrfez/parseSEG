@@ -17,10 +17,10 @@ proc sumAbs(t: Tensor[float32], row: int): float64 =
   for j in 0..<t.shape[1]: result += abs(float64(t[row, j]))
 
 block format_codes:
-  var f: SampleFormat
-  doAssert toSampleFormat(5, f) and f == sfFloat32 and sampleSize(f) == 4
-  doAssert toSampleFormat(15, f) and sampleSize(f) == 3 and f.isRev2Format
-  doAssert not toSampleFormat(13, f) and not toSampleFormat(0, f)
+  doAssert toSampleFormat(5) == some(sfFloat32) and sampleSize(sfFloat32) == 4
+  let f = toSampleFormat(15).get
+  doAssert sampleSize(f) == 3 and f.isRev2Format
+  doAssert toSampleFormat(13).isNone and toSampleFormat(0).isNone
   doAssert sfFloat64.prefersFloat64 and not sfIbm32.isRev2Format
 
 block every_format_round_trips_in_every_order:

@@ -37,7 +37,7 @@ proc recordAs(f: SegdSampleFormat, vals: seq[float64], fileNo: int): SegdRecordD
 
 proc decoded(y: SegyData, i: int): seq[float64] =
   result = newSeq[float64](y.traces[i].numSamples)
-  decodeSamples(y.file.format, y.traces[i].samples, result, y.file.byteOrder)
+  decodeSamples(y.file.format.get, y.traces[i].samples, result, y.file.byteOrder)
 
 block b1_records_in_different_formats_convert_exactly:
   var ints, floats = newSeq[float64](1000)
@@ -53,7 +53,7 @@ block b1_records_in_different_formats_convert_exactly:
     let log = convertFile(tmp / "mixed.sgd", tmp / "mixed.sgy")
     doAssert log.errorsAndWorse == 0 and not log.warned("could not be written exactly")
     let y = readSegy(tmp / "mixed.sgy")
-    doAssert y.file.format == sfFloat64 # one format that holds both
+    doAssert y.file.format == some(sfFloat64) # one format that holds both
     for k, (f, v) in order: doAssert y.decoded(k) == v
   # Without the header scan (e.g. from tape) the first record decides, and
   # the loss is reported instead of silent.
@@ -120,7 +120,7 @@ block b5_8036_to_pair_swapped_stays_exact:
   let log = convertFile(tmp / "i24.sgd", tmp / "i24.sgy", ConvertOptions(byteOrder: boPairSwapped))
   doAssert log.errorsAndWorse == 0, $log
   let y = readSegy(tmp / "i24.sgy")
-  doAssert y.file.format == sfInt32 and y.decoded(0) == vals
+  doAssert y.file.format == some(sfInt32) and y.decoded(0) == vals
   doAssert convertFile(tmp / "i24.sgd", tmp / "x.sgy",
     ConvertOptions(byteOrder: boPairSwapped, format: 7)).isFatal
 
@@ -135,7 +135,7 @@ block b6_losses_are_reported_and_ibm_is_copied:
   doAssert convertFile(tmp / "d.sgd", tmp / "d.sgy", ConvertOptions(applyDescale: true)).
     errorsAndWorse == 0
   let y = readSegy(tmp / "d.sgy")
-  doAssert y.file.format == sfFloat64
+  doAssert y.file.format == some(sfFloat64)
   for j, v in y.decoded(0): doAssert v == ints[j] * pow(2.0, mp)
   # A forced integer format that rounds is reported.
   var fr = newSeq[float64](1000)
@@ -162,7 +162,7 @@ block b6_losses_are_reported_and_ibm_is_copied:
     doAssert convertFile(tmp / "ibm.sgd", tmp / "ibm.sgy", ConvertOptions(byteOrder: order)).
       errorsAndWorse == 0
     let z = readSegy(tmp / "ibm.sgy")
-    doAssert z.file.format == sfIbm32
+    doAssert z.file.format == some(sfIbm32)
     for j in 0..<1000:
       doAssert getNum[uint32](z.traces[0].samples, 4 * j, order) ==
         getNum[uint32](words, 4 * j, boBig)
@@ -175,16 +175,15 @@ block b7_rev1_fractional_interval_is_rounded_in_the_binary_header:
     ConvertOptions(revision: SegyRevision(major: 1))).errorsAndWorse == 0
   let y = readSegy(tmp / "625.sgy")
   doAssert y.file.binary.sampleInterval == 62 or y.file.binary.sampleInterval == 63
-  doAssert not y.diagnostics.warned("sample interval is 0")
+  doAssert not y.log.warned("sample interval is 0")
 
 block b8_station_header_survives_a_byte_order_change:
   doAssert convertFile(exampleDir / "63.sgd", tmp / "st_be.sgy").errorsAndWorse == 0
   let log = convertFile(tmp / "st_be.sgy", tmp / "st_le.sgy", ConvertOptions(byteOrder: boLittle))
   doAssert log.errorsAndWorse == 0 and not log.warned("no known layout")
   let y = readSegy(tmp / "st_le.sgy")
-  var v: float64
-  doAssert y.file.fieldValue(y.traces[0], "rec_line", v) and v == 13
-  doAssert y.file.fieldValue(y.traces[0], "sht_point", v) and v == 99.5
+  doAssert y.file.fieldValue(y.traces[0], "rec_line") == some(13.0)
+  doAssert y.file.fieldValue(y.traces[0], "sht_point") == some(99.5)
 
 block b9_converting_a_file_onto_itself_is_refused:
   copyFile(exampleDir / "Sweep0.sgy", tmp / "self.sgy")

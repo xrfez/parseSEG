@@ -36,7 +36,7 @@ import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio]
 import ../model/tensors
 import ./[textheader, binheader, traceheader, samples, exttext, layout]
-export textheader, binheader, traceheader, samples, exttext, layout, diagnostics, endians, tensors
+export textheader, binheader, traceheader, samples, exttext, layout
 
 const
   TapeLabelSize* = 128 ## Bytes in a SEG-Y tape label.
@@ -66,8 +66,7 @@ type
     trailer*: ExtendedTextHeader    ## Rev 2 data trailer records.
     byteOrder*: ByteOrder           ## Byte order of binary fields and samples.
     byteOrderDeclared*: bool        ## The Rev 2 marker declared `byteOrder`.
-    format*: SampleFormat           ## Valid when `formatKnown`.
-    formatKnown*: bool
+    format*: Option[SampleFormat]   ## None when the format code is undefined.
     firstTraceOffset*: int64        ## Medium offset of the first trace.
     layout*: TraceLayout
       ## Effective trace header layout: the revision's standard layout with
@@ -101,6 +100,7 @@ type
     cursor: RecordCursor
     pending: seq[byte]   ## Bytes read ahead and pushed back (`unread`).
     pendingPos: int
+    lookahead: seq[byte] ## Reused buffer of `trailerStartsHere`.
     name: string
     tracesRead: int
     lastTraceSeen: bool
@@ -110,7 +110,8 @@ type
     mediumSize: int64    ## File size for disk sources, -1 if unknown.
     done: bool
     headersOnly: bool    ## Skip sample bytes (`SegyTrace.samples` stays empty).
-    fixedMismatches: int ## Fixed-length traces whose own ns/dt disagree (logged up to `MaxRepeats`).
+    fixedMismatches: int
+      ## Fixed-length traces whose own ns/dt disagree (logged up to `MaxRepeats`).
     zeroSampleTraces: int ## Rev 0 traces sized from the binary header (logged up to `MaxRepeats`).
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
@@ -142,11 +143,22 @@ proc readAvail(r: var SegyReader, dst: var openArray[byte]): int =
     result += r.cursor.read(dst.toOpenArray(result, dst.len - 1))
 
 proc unread(r: var SegyReader, data: openArray[byte]) =
-  # Pushes `data` (just read) back in front of the unread bytes.
-  var rest = r.pending[r.pendingPos..^1]
-  r.pending = @data
-  r.pending.add rest
-  r.pendingPos = 0
+  # Pushes `data` (just read) back in front of the unread bytes. The bytes
+  # before `pendingPos` are consumed, so `data` usually fits there (it was
+  # read from the push-back buffer) or the buffer is empty and is reused.
+  if data.len <= r.pendingPos:
+    r.pendingPos -= data.len
+    for i, b in data: r.pending[r.pendingPos + i] = b
+  elif r.pendingPos == r.pending.len:
+    r.pending.setLen data.len
+    for i, b in data: r.pending[i] = b
+    r.pendingPos = 0
+  else:
+    var rest = r.pending[r.pendingPos..^1]
+    r.pending.setLen data.len
+    for i, b in data: r.pending[i] = b
+    r.pending.add rest
+    r.pendingPos = 0
 
 proc atData(r: var SegyReader): bool =
   r.pendingPos < r.pending.len or r.cursor.stoppedAt == rkData
@@ -193,7 +205,7 @@ proc readExtendedHeader(r: var SegyReader, count: int, checkText: bool) =
     let got = r.readAvail(rec)
     if got < TextHeaderSize:
       raiseTruncated("extended textual record " & $f.extended.recordCount & " has " & $got &
-        " of 3200 bytes", r.offset)
+        " of " & $TextHeaderSize & " bytes", r.offset)
     if checkText and not f.extended.inBinaryStanza and not startsStanza(rec) and
         not f.extended.continuesUserData(rec) and not looksLikeText(rec):
       r.unread(rec)
@@ -254,11 +266,9 @@ proc readFileHeaders(r: var SegyReader) =
       " (no byte-order marker)", o, l)
   f.binary.validate(r.log, sevWarning, r.loc(), binOffset)
 
-  var fmt: SampleFormat
-  if toSampleFormat(int(f.binary.formatCode), fmt):
-    f.format = fmt
-    f.formatKnown = true
-    if f.byteOrder == boPairSwapped and sampleSize(fmt) == 3:
+  f.format = toSampleFormat(int(f.binary.formatCode))
+  if f.format.isSome:
+    if f.byteOrder == boPairSwapped and sampleSize(f.format.get) == 3:
       let (o, l) = binLoc(3225, "formatCode")
       r.log.report(sevError, dcUnsupportedFormat, "3-byte samples cannot be pair-swapped; " &
         "samples are kept raw", o, l)
@@ -325,10 +335,11 @@ func isBinaryAsRead*(f: SegyFile): bool =
     f.binary.encode(b, f.byteOrder)
     result = b == f.binaryAsRead
 
-func layoutOf*(f: SegyFile): TraceLayout =
+func layoutOf*(f: SegyFile): lent TraceLayout =
   ## The file's effective layout, or the standard one of its revision for a
   ## file built in memory.
-  if f.layout.entries.len > 0: f.layout else: standardLayout(f.binary.rulesRevision)
+  if f.layout.entries.len > 0: result = f.layout
+  else: result = standardLayout(f.binary.rulesRevision)
 
 func binaryAsRead*(f: SegyFile): lent seq[byte] {.inline.} =
   ## The raw binary header bytes as read (in `byteOrder`); empty for files
@@ -385,7 +396,7 @@ proc readTrailer(r: var SegyReader) =
       let got = r.readAvail(rec)
       if got < TextHeaderSize:
         raiseTruncated("trailer record " & $r.file.trailer.recordCount & " has " & $got &
-          " of 3200 bytes", r.offset)
+          " of " & $TextHeaderSize & " bytes", r.offset)
       r.file.trailer.add(rec, if r.byteStream: at else: -1)
   finally:
     r.file.trailer.finish()
@@ -399,14 +410,16 @@ proc readTrailer(r: var SegyReader) =
 proc trailerStartsHere(r: var SegyReader): bool =
   # Looks ahead one record: a trailer record starts with a stanza header and
   # is text. Trace data (whatever its first bytes) is pushed back.
-  var rec = newSeq[byte](TextHeaderSize)
+  var rec = move r.lookahead
+  rec.setLen TextHeaderSize
   let got = r.readAvail(rec)
   result = got == TextHeaderSize and startsStanzaRecord(rec)
   r.unread(rec.toOpenArray(0, got - 1))
+  r.lookahead = move rec
 
 proc checkEnd(r: var SegyReader) =
   # Called once the traces have ended: checks the declared counts.
-  let b = r.file.binary
+  template b: untyped = r.file.binary
   if r.file.revision.major >= 2:
     if b.numTraces != 0 and uint64(r.tracesRead) < b.numTraces:
       r.log.report(sevWarning, dcInconsistent, "the binary header declares " & $b.numTraces &
@@ -497,7 +510,7 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   else:
     t.numSamples = traceNs
     t.sampleInterval = traceDt
-  let nbytes = int64(t.numSamples) * sampleSize(f.format)
+  let nbytes = int64(t.numSamples) * sampleSize(f.format.get) # known: else the read is fatal
   if r.headersOnly:
     t.samples.setLen 0
     r.skipExactly(nbytes)
@@ -506,7 +519,7 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   inc r.tracesRead
 
 proc nextTrace(r: var SegyReader, t: var SegyTrace): bool =
-  let b = r.file.binary
+  template b: untyped = r.file.binary
   let rev2 = r.file.revision.major >= 2
   if r.lastTraceSeen or (rev2 and b.numTraces != 0 and uint64(r.tracesRead) >= b.numTraces):
     if rev2 and b.numTrailerRecords != 0: r.readTrailer()
@@ -537,20 +550,28 @@ proc readTrace*(r: var SegyReader, t: var SegyTrace): bool =
     r.summarize()
     result = false
 
-func isDone*(r: SegyReader): bool {.inline.} = r.done
-func headersOnly*(r: SegyReader): bool {.inline.} = r.headersOnly
-func tracesRead*(r: SegyReader): int {.inline.} = r.tracesRead
+func isDone*(r: SegyReader): bool {.inline.} =
+  ## True once `readTrace` has returned false (or the headers could not be read).
+  r.done
+
+func headersOnly*(r: SegyReader): bool {.inline.} =
+  ## True when the reader skips sample bytes (see `openSegy`).
+  r.headersOnly
+
+func tracesRead*(r: SegyReader): int {.inline.} =
+  ## Traces read so far.
+  r.tracesRead
 
 proc decodeInto*[T: SampleType](file: SegyFile, trace: SegyTrace, t: var Tensor[T],
     row: int) =
   ## Decodes the trace's samples into row `row` of `t`. Raises like
   ## `decodeSamples` (`SegFormatError` for an undecodable format).
-  if not file.formatKnown:
+  if file.format.isNone:
     raiseFormat("format code " & $file.binary.formatCode & " is undefined")
-  if trace.samples.len < trace.numSamples * sampleSize(file.format):
+  let fmt = file.format.get
+  if trace.samples.len < trace.numSamples * sampleSize(fmt):
     raiseFormat("trace " & $trace.index & " holds no samples (read with headersOnly)")
-  t.decodeTrace(row, file.format, trace.samples, min(trace.numSamples, t.shape[1]),
-    file.byteOrder)
+  t.decodeTrace(row, fmt, trace.samples, min(trace.numSamples, t.shape[1]), file.byteOrder)
 
 # ---------------------------------------------------------------------------
 # Whole-file convenience.
@@ -563,7 +584,7 @@ type
     samples*: Tensor[float32]
       ## `[traces, maxSamples]`; shorter traces are zero-padded and
       ## undecodable ones stay zero (each has a diagnostic).
-    diagnostics*: DiagLog
+    log*: DiagLog ## The reader's diagnostics.
 
 proc readSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
     headersOnly = false): SegyData =
@@ -582,16 +603,16 @@ proc readSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
     result.traces.add t
   result.samples = newTraceTensor[float32](result.traces.len, if headersOnly: 0 else: maxNs)
   if not headersOnly:
-    for i, tr in result.traces:
-      discard r.log.tryRecord(r.loc(i), r.file.decodeInto(tr, result.samples, i))
-  result.file = r.file
-  result.diagnostics = r.log
+    for i in 0..<result.traces.len:
+      discard r.log.tryRecord(r.loc(i), r.file.decodeInto(result.traces[i], result.samples, i))
+  result.file = move r.file
+  result.log = move r.log
 
 proc readSegy*(path: string, maxRetained = DefaultMaxRetained, headersOnly = false): SegyData =
   ## Reads a SEG-Y disk file into memory; see `readSegy(RecordSource)`. A file
   ## that cannot be opened gives a fatal diagnostic.
   var src: RecordSource
-  if result.diagnostics.tryRecord(Location(file: path), (src = openDiskSource(path))):
+  if result.log.tryRecord(Location(file: path), (src = openDiskSource(path))):
     try:
       result = readSegy(src, maxRetained, headersOnly)
     finally:

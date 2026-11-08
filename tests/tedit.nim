@@ -1,6 +1,7 @@
 ## In-place header edits with an undo journal (task 6.6).
 
 import std/[assertions, os, strutils]
+import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, writer as segywriter]
 import parseSEG/segd/[reader as segdreader]
@@ -36,7 +37,7 @@ proc segyWithExt1(path: string) =
   ## A Rev 2.1 SEG-Y file whose traces carry Trace Header Extension 1.
   var d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   var f = SegyFile(text: d.file.text, binary: d.file.binary, byteOrder: boBig,
-    format: d.file.format, formatKnown: true, extended: initExtendedTextHeader(),
+    format: d.file.format, extended: initExtendedTextHeader(),
     trailer: initExtendedTextHeader())
   f.binary.numExtTextHeaders = 0
   f.binary.maxAddlTraceHeaders = 1
@@ -68,7 +69,7 @@ block segy_trace_and_binary_edits_and_rollback:
   doAssert diffCount(original, edited) <= 4 + 2 + 4 + 8
   doAssert editLines(journal) == 4
   let d = readSegy(path)
-  doAssert d.diagnostics.len == 0
+  doAssert d.log.len == 0
   doAssert d.traces[5].header.sourceX == 1_700_000 and d.traces[7].header.groupStatic == -12
   doAssert d.file.binary.jobId == 4242 and d.traces[0].header.headerNameText == "ABC     "
   # Undo, twice (the second finds nothing to do), then redo.

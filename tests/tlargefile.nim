@@ -6,6 +6,7 @@
 ## take 4.3 GB each), and off POSIX systems.
 
 import std/[assertions, os, strutils]
+import parseSEG/common/[diagnostics, endians]
 import parseSEG/segy/[reader as segyreader]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, prefetch, edit]

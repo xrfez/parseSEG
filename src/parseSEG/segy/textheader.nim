@@ -18,7 +18,7 @@ type
     teEbcdic = "ebcdic" ## IBM code page 037 (the traditional encoding).
     teAscii = "ascii"   ## ASCII / Latin-1 (allowed since Rev 1).
 
-  CardNumber* = range[1..CardCount]
+  CardNumber* = range[1..CardCount] ## A 1-based card image number.
 
   SegyTextHeader* = object
     ## A 3200-byte textual file header.
@@ -96,7 +96,7 @@ func encode*(h: SegyTextHeader, b: var openArray[byte]) =
   for i in 0..<TextHeaderSize:
     b[i] = h.data[i]
 
-proc setText*(h: var SegyTextHeader, text: openArray[char]) =
+proc `text=`*(h: var SegyTextHeader, text: openArray[char]) =
   ## Replaces the whole header with `text` in `h.encoding`, truncated or padded
   ## with blanks to 3200 characters. No card prefixes are added.
   let blank = encodeText([' '], h.encoding)[0]
@@ -113,7 +113,7 @@ func initTextHeader*(encoding = teEbcdic): SegyTextHeader =
     let prefix = cardPrefix(n)
     text.add prefix
     for _ in prefix.len..<CardWidth: text.add ' '
-  result.setText(text)
+  result.text = text
 
 func text*(h: SegyTextHeader): string =
   ## The whole header decoded to a 3200-character Latin-1 string.

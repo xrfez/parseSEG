@@ -22,10 +22,12 @@
 
 import ../common/[endians, errors, diagnostics]
 import ../io/records
-import ./[binheader, traceheader, samples, exttext, reader]
+import ./[textheader, binheader, traceheader, samples, exttext, reader]
 
 type
   SegyWriteOptions* = object
+    ## Output settings of `openSegyWriter`; `initSegyWriteOptions` keeps the
+    ## file's byte order.
     byteOrder*: ByteOrder ## Output byte order; set it from the file to keep the input order.
     lenient*: bool        ## Log validation problems instead of refusing to write.
 
@@ -41,6 +43,7 @@ type
     lastFlagged: bool    ## A trace flagged "last in file" was written.
     log*: DiagLog
     tracesWritten: int
+    rec: seq[byte]       ## Reused trace record buffer.
 
 func initSegyWriteOptions*(file: SegyFile, lenient = false): SegyWriteOptions =
   ## Options that keep `file`'s byte order.
@@ -80,8 +83,8 @@ func dependencies(field: string): seq[(int, int)] =
     if field == "binary.maxAddlTraceHeaders": result.add (3507, 4)
 
 proc checkFile(w: var SegyWriter) =
-  let f = w.file
-  let b = f.binary
+  template f: untyped = w.file
+  template b: untyped = w.file.binary
   let rev = w.rev
   let loc = Location(file: w.sink.name)
   if f.tapeLabel.len notin [0, TapeLabelSize]:
@@ -92,7 +95,7 @@ proc checkFile(w: var SegyWriter) =
   let extAsRead = f.isExtendedAsRead
   # Readable but spec-invalid values: a warning when every byte the finding
   # depends on is as read, else an error.
-  let headerOffset = int64(3200 + f.tapeLabel.len)
+  let headerOffset = int64(TextHeaderSize + f.tapeLabel.len)
   var found: DiagLog
   b.validate(found, sevError, loc, headerOffset)
   var newProblems = 0
@@ -111,8 +114,7 @@ proc checkFile(w: var SegyWriter) =
   if not f.extended.isComplete or not f.trailer.isComplete:
     raiseFormat("the extended header or trailer was only indexed, not held in memory " &
       "(retention limit); read the file with a larger maxRetained to rewrite it")
-  var fmt: SampleFormat
-  if not f.formatKnown or not toSampleFormat(int(b.formatCode), fmt) or fmt != f.format:
+  if f.format.isNone or toSampleFormat(int(b.formatCode)) != f.format:
     w.problem("the binary header format code " & $b.formatCode & " does not match the " &
       "file's sample format (set both `binary.formatCode` and `format`)", "binary.formatCode")
   if not (b.segyMajor == 2 and b.segyMinor == 0) and b.maxAddlTraceHeaders > high(uint16):
@@ -146,11 +148,13 @@ proc checkFile(w: var SegyWriter) =
       asRead = countAsRead)
   if count != 0:
     for s in f.extended.stanzas:
-      if s.isEndText and s.headerStart div 3200 < n - 1:
+      if s.isEndText and s.headerStart div TextHeaderSize < n - 1:
         w.problem("((SEG:EndText)) must be the last extended record, but record " &
-          $(s.headerStart div 3200) & " of " & $n & " is one", "extended", asRead = countAsRead)
+          $(s.headerStart div TextHeaderSize) & " of " & $n & " is one", "extended",
+          asRead = countAsRead)
   if rev.major >= 2 and b.firstTraceOffset != 0 and
-      b.firstTraceOffset != uint64(3600 + f.tapeLabel.len + n * 3200):
+      b.firstTraceOffset !=
+        uint64(TextHeaderSize + BinaryHeaderSize + f.tapeLabel.len + n * TextHeaderSize):
     w.problem("the first trace offset " & $b.firstTraceOffset & " does not match the " &
       $n & " extended records", "binary.firstTraceOffset", asRead = countAsRead)
   let t = f.trailer.recordCount
@@ -172,18 +176,17 @@ proc openSegyWriter*(sink: RecordSink, file: SegyFile, opts: SegyWriteOptions): 
   result.checkFile()
   if file.tapeLabel.len > 0:
     sink.writeRecord(file.tapeLabel)
-  var text = newSeq[byte](3200)
-  file.text.encode(text)
-  sink.writeRecord(text)
+  sink.writeRecord(file.text.data)
   var bin = newSeq[byte](BinaryHeaderSize)
   file.binary.encode(bin, opts.byteOrder)
   sink.writeRecord(bin)
-  for i in countup(0, file.extended.data.len - 1, 3200):
-    sink.writeRecord(file.extended.data.toOpenArray(i, i + 3199))
+  for i in countup(0, file.extended.data.len - 1, TextHeaderSize):
+    sink.writeRecord(file.extended.data.toOpenArray(i, i + TextHeaderSize - 1))
 
-func reorderSamples(src: openArray[byte], width: int, srcOrder, dstOrder: ByteOrder): seq[byte] =
-  # Converts samples between byte orders without decoding them.
-  result = newSeq[byte](src.len)
+func reorderSamples(src: openArray[byte], width: int, srcOrder, dstOrder: ByteOrder,
+    result: var openArray[byte]) =
+  # Converts samples between byte orders without decoding them into
+  # `result`, which has `src.len` bytes.
   for i in countup(0, src.len - width, width):
     case width
     of 1: result[i] = src[i]
@@ -201,7 +204,7 @@ func reorderSamples(src: openArray[byte], width: int, srcOrder, dstOrder: ByteOr
 
 proc checkTrace(w: var SegyWriter, t: SegyTrace) =
   # The reader must recover exactly this trace from what is written.
-  let b = w.file.binary
+  template b: untyped = w.file.binary
   var extNs = 0'u32
   if w.rev.major >= 2 and b.maxAddlTraceHeaders > 0:
     if not t.hasExt1:
@@ -233,10 +236,11 @@ proc checkTrace(w: var SegyWriter, t: SegyTrace) =
     if declared != t.numSamples:
       w.problem("the trace header declares " & $declared & " samples, the trace has " &
         $t.numSamples, "trace.numSamples", t.index)
-  let size = sampleSize(w.file.format)
-  if t.samples.len != t.numSamples * size:
-    w.problem("the trace has " & $t.samples.len & " sample bytes, " &
-      $(t.numSamples * size) & " expected", "trace.samples", t.index)
+  if w.file.format.isSome:
+    let size = sampleSize(w.file.format.get)
+    if t.samples.len != t.numSamples * size:
+      w.problem("the trace has " & $t.samples.len & " sample bytes, " &
+        $(t.numSamples * size) & " expected", "trace.samples", t.index)
   if t.proprietary.len > 0 and w.order != w.file.byteOrder:
     w.problem("proprietary trace headers have no known layout, so they cannot be converted " &
       "to " & $w.order & " byte order (they are copied unchanged)", "trace.proprietary", t.index)
@@ -250,16 +254,24 @@ proc writeTrace*(w: var SegyWriter, t: SegyTrace) =
     w.problem("a trace follows one flagged last in file (Ext1 bytes 159-160); readers " &
       "stop at the flag", "ext1.lastTraceFlag", t.index)
   if t.hasExt1 and (t.ext1.lastTraceFlag and LastInFile) != 0: w.lastFlagged = true
-  var rec = newSeq[byte](TraceHeaderSize * (if t.hasExt1: 2 else: 1))
-  t.header.encode(rec, w.order)
+  let headers = TraceHeaderSize * (if t.hasExt1: 2 else: 1) + t.proprietary.len
+  w.rec.setLen headers + t.samples.len
+  t.header.encode(w.rec, w.order)
   if t.hasExt1:
-    t.ext1.encode(rec.toOpenArray(TraceHeaderSize, 2 * TraceHeaderSize - 1), w.order)
-  rec.add t.proprietary
-  if w.order == w.file.byteOrder:
-    rec.add t.samples
+    t.ext1.encode(w.rec.toOpenArray(TraceHeaderSize, 2 * TraceHeaderSize - 1), w.order)
+  if t.proprietary.len > 0:
+    copyMem(addr w.rec[headers - t.proprietary.len], addr t.proprietary[0], t.proprietary.len)
+  if t.samples.len == 0:
+    discard
+  elif w.order == w.file.byteOrder:
+    copyMem(addr w.rec[headers], addr t.samples[0], t.samples.len)
+  elif w.file.format.isNone:
+    raiseFormat("samples of an undefined format cannot be converted to " & $w.order &
+      " byte order")
   else:
-    rec.add reorderSamples(t.samples, sampleSize(w.file.format), w.file.byteOrder, w.order)
-  w.sink.writeRecord(rec)
+    reorderSamples(t.samples, sampleSize(w.file.format.get), w.file.byteOrder, w.order,
+      w.rec.toOpenArray(headers, w.rec.high))
+  w.sink.writeRecord(w.rec)
   inc w.tracesWritten
 
 proc close*(w: var SegyWriter, endOfData = true) =
@@ -271,8 +283,10 @@ proc close*(w: var SegyWriter, endOfData = true) =
   if w.rev.major >= 2 and declared != 0 and declared != uint64(w.tracesWritten):
     w.problem("the binary header declares " & $declared & " traces, " & $w.tracesWritten &
       " were written", "binary.numTraces", asRead = w.unchanged([RevisionBytes, (3513, 8)]))
-  for i in countup(0, w.file.trailer.data.len - 1, 3200):
-    w.sink.writeRecord(w.file.trailer.data.toOpenArray(i, i + 3199))
+  for i in countup(0, w.file.trailer.data.len - 1, TextHeaderSize):
+    w.sink.writeRecord(w.file.trailer.data.toOpenArray(i, i + TextHeaderSize - 1))
   w.sink.writeTapeMark(if endOfData: 2 else: 1)
 
-func tracesWritten*(w: SegyWriter): int {.inline.} = w.tracesWritten
+func tracesWritten*(w: SegyWriter): int {.inline.} =
+  ## Traces written so far.
+  w.tracesWritten

@@ -82,20 +82,26 @@ const
     ## Layout of the `at` fields. 3507-3510 are handled separately.
 
 func revision*(h: SegyBinaryHeader): SegyRevision {.inline.} =
+  ## The revision as stored at bytes 3501-3502, whatever it says; see
+  ## `rulesRevision` for the one whose rules apply.
   SegyRevision(major: h.segyMajor, minor: h.segyMinor)
 
 func `revision=`*(h: var SegyBinaryHeader, r: SegyRevision) {.inline.} =
+  ## Sets bytes 3501-3502.
   h.segyMajor = r.major
   h.segyMinor = r.minor
 
-func `==`*(a, b: SegyRevision): bool {.inline.} = a.major == b.major and a.minor == b.minor
-
 func `<`*(a, b: SegyRevision): bool {.inline.} =
+  ## Orders revisions by major, then minor number.
   a.major < b.major or (a.major == b.major and a.minor < b.minor)
 
-func `<=`*(a, b: SegyRevision): bool {.inline.} = not (b < a)
+func `<=`*(a, b: SegyRevision): bool {.inline.} =
+  ## Orders revisions by major, then minor number.
+  not (b < a)
 
-func `$`*(r: SegyRevision): string = $r.major & "." & $r.minor
+func `$`*(r: SegyRevision): string =
+  ## `major.minor`, e.g. `2.1`.
+  $r.major & "." & $r.minor
 
 func claimedRevision(h: SegyBinaryHeader): SegyRevision =
   ## The revision the bytes at 3501-3502 name, with byte-order slips fixed.
@@ -175,18 +181,23 @@ func effectiveSampleInterval*(h: SegyBinaryHeader): float64 =
   override(h, h.extSampleInterval, h.sampleInterval)
 
 func effectiveSamplesPerTraceOrig*(h: SegyBinaryHeader): uint32 =
+  ## Samples per trace of the original field recording.
   override(h, h.extSamplesPerTraceOrig, h.samplesPerTraceOrig)
 
 func effectiveSampleIntervalOrig*(h: SegyBinaryHeader): float64 =
+  ## Sample interval of the original field recording.
   override(h, h.extSampleIntervalOrig, h.sampleIntervalOrig)
 
 func effectiveDataTracesPerEnsemble*(h: SegyBinaryHeader): int64 =
+  ## Data traces per ensemble.
   override(h, int64(h.extDataTracesPerEnsemble), h.dataTracesPerEnsemble)
 
 func effectiveAuxTracesPerEnsemble*(h: SegyBinaryHeader): int64 =
+  ## Auxiliary traces per ensemble.
   override(h, int64(h.extAuxTracesPerEnsemble), h.auxTracesPerEnsemble)
 
 func effectiveEnsembleFold*(h: SegyBinaryHeader): int64 =
+  ## Ensemble fold.
   override(h, int64(h.extEnsembleFold), h.ensembleFold)
 
 func bytesPerSample*(formatCode: int, rev: SegyRevision): int =
@@ -274,8 +285,8 @@ func detectByteOrder*(b: openArray[byte]): ByteOrderDetection =
   ## the plausibility of the format code, sample count and interval and other
   ## fields, and big-endian wins ties, then little-endian. Without the marker,
   ## pair-swapping is only recognized when the Rev 2 extended sample count is
-  ## set, since it matches little-endian on every 16-bit field. `plausible` is false when even the best
-  ## order has an undefined format code.
+  ## set, since it matches little-endian on every 16-bit field. `plausible` is
+  ## false when even the best order has an undefined format code.
   doAssert b.len >= BinaryHeaderSize, "binary header needs 400 bytes"
   let m = 3297 - BinaryHeaderFirstByte
   let marker = [b[m], b[m+1], b[m+2], b[m+3]]
