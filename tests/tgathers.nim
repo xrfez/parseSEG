@@ -215,3 +215,18 @@ block external_geometry_joins_on_stations:
     let gm = d.file.geometry(d.traces[i]) # Inglewood's Layout maps cdp_x to byte 73
     doAssert y.index.keys[i].cmpX == gm.cdpX and y.index.keys[i].cmpY == gm.cdpY
   y.close()
+
+block component_group_ids_match_the_groups:
+  # Task 13.2 (review R2-3): ids come from one table, not from the groups;
+  # they must still number the groups in order of first appearance.
+  for name in ["inova_rev30_5traces.sgd", "BO_3D-Inglewood_rev21_v7.sgy", "63.sgd"]:
+    let p = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles" / name
+    var f = openSeismic(p, keys = true)
+    for span in [0 ..< f.len, (f.len div 2) ..< f.len, 0 .. -1]:
+      let groups = f.componentGroups(span)
+      var want = newSeq[int](span.len)
+      for k in 0 ..< want.len: want[k] = -1
+      for g, grp in groups:
+        for i in grp.traces: want[i - span.a] = g
+      doAssert f.componentGroupIds(span) == want, name
+    f.close()
