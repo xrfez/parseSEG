@@ -167,9 +167,9 @@ proc scaffold*(path: string, reg: VendorRegistry): Scaffold =
   ## `reg` already decodes are left out). Raises `IOError` if `path` cannot
   ## be read and `ValueError` if it is neither standard.
   var head = newString(8192)
-  var fh = open(path, fmRead)
-  head.setLen fh.readBuffer(addr head[0], head.len)
-  fh.close()
+  let fh = open(path, fmRead)
+  try: head.setLen fh.readBuffer(addr head[0], head.len)
+  finally: fh.close()
   var kind: SeismicKind
   if not detectKind(head.toOpenArrayByte(0, head.len - 1), kind):
     raise newException(ValueError, path & " is neither SEG-Y nor SEG-D")

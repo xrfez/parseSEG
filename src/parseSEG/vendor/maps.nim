@@ -497,7 +497,9 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
   let roots = parseNif(nif)
   var found = -1
   for i, n in roots:
-    if n.tag == "vendormap": found = i
+    if n.tag == "vendormap":
+      if found >= 0: mapError("a map file holds one (vendormap ...); found a second", n.line)
+      found = i
   if found < 0: mapError("no (vendormap ...) in the file")
   let m = roots[found]
   result = VendorMap(name: m.textAtom, source: source,

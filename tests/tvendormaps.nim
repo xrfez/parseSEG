@@ -141,7 +141,9 @@ block malformed_maps_are_diagnostics:
       ("(vendormap \"a\" (target (kind block) (field x (at 1) (enc u8) (when (y 1)))))", "not supported"),
       ("(vendormap \"a\" (target (kind block) (field x (at 1) (enc u8))", "unbalanced"),
       ("(vendormap \"a\")", "no target"),
-      ("(something)", "no (vendormap")]:
+      ("(something)", "no (vendormap"),
+      ("(vendormap \"a\" (target (kind block)))\n(vendormap \"b\" (target (kind block)))",
+        "found a second")]:
     try:
       discard loadVendorMap("(.nif27)\n" & bad)
       doAssert false, "accepted: " & bad
