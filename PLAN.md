@@ -824,7 +824,7 @@ high-performance viewer. Then `seg-library` is merged into `main`.
 
       Results go in `docs/benchmarks.md`, with the machine described. Bottlenecks get fixed
       (each with a test), or listed with a proposed fix.
-- [ ] 13.3 Multi-agent review of `seg-library` (read-only, fresh reviewers), along these
+- [x] 13.3 Multi-agent review of `seg-library` (read-only, fresh reviewers), along these
       dimensions:
       - correctness of the Phase 4.7/6.8-6.10/10.5/11 code;
       - performance and concurrency for HPC and the viewer;
@@ -832,6 +832,75 @@ high-performance viewer. Then `seg-library` is merged into `main`.
       - robustness against malformed or hostile input in release (`-d:danger`) builds.
 
       Output: a ranked findings list in this file. Public API changes need owner approval.
+
+      **Findings (2026-11-08).** Four read-only reviewers: R1 correctness, R2 performance and
+      concurrency, R3 API and boundary, R4 fuzzing (about 750k cases under checked, danger and
+      ASan builds). Their full condensed reports are in the session scratchpad.
+      - Holds up:
+        - readers and index under hostile bytes: no out-of-bounds reads, hangs or Defects;
+        - multiplexed temp-copy lifetime and journal safety;
+        - parallel reads from one file scale: 2.3 → 11.2 G samples/s at 1 → 8 threads in danger
+          builds. The GIL is released and DLPack/numpy lifetimes are right.
+
+      Group I (internal, no public API change). These must be fixed before the merge:
+      - Critical and high:
+        - R3-1/R4-5: a Defect at the C boundary poisons the thread, and later calls return
+          SEG_OK and do nothing. Trigger: the `copyBytes` overflow at `traceindex.nim:530`. Fix
+          the arithmetic, and map `Defect` in `segGuard` to SEG_ERR_INTERNAL.
+        - R4-1: the SEG-2 sample count is not bounded by the file size. A 4 KB file makes
+          `readTraces`/`convertFile` allocate 4-134 GB and abort.
+        - R4-2: Rev 3 → Rev 3 conversion pre-allocates 32 × the GH#2 trailer block count (up to
+          137 GB), at `revconvert.nim:591`.
+        - R4-3: a heap use-after-free at `segd/reader.nim:680` (`starts.add ... starts[^1]`), on
+          ordinary multiplexed data.
+        - R2-1: the decode loops keep bounds checks in the shipped `-d:release` builds, which
+          decode 6-10x slower than danger.
+        - R2-2: two fields of one trace in a batch cause one fsync per trace.
+        - R2-3: `componentGroupIds` at 10M traces takes 6.9 s and +2.4 GB.
+      - Medium:
+        - R4-4: converting `X.tmp` to `X` destroys the input. The fixed `.tmp` name is shared and
+          follows symlinks.
+        - R1-1: the SEG-2 summary format code is off by one.
+        - R1-2: SEG-Y → SEG-2 DELAY and statics ignore the time scalar.
+        - R1-3: SEG-D → SEG-2 dates get the wrong century. The century pivots are inconsistent
+          (50/70/80), so unify them on `fullYear`.
+        - R2-6: IBM float uses `ldexp`.
+        - R2-7: little-endian loads double-swap.
+        - R2-8: no reserve in the index. The keys are 144 B, not the documented ~100 B.
+        - R3-7: `copyBytes` allocates even with cap 0, and Python's `_bytes`/`_seq` call twice.
+        - R3-8: the generated wrappers lock only the first handle, and the prefetcher's `next`
+          holds the handle lock while it waits.
+      - Low:
+        - R1-4: SEG-2 → SEG-D Rev 2 can produce an empty output reported as a success.
+        - R1-5: the `GeometryChanges` counts are overstated when a sync fails.
+        - R1-6: doc and labeling details.
+        - R2-9: `pow` per sample for 8022/8024/8042/8044.
+        - R2-10: tensors zero-filled before an overwrite.
+        - R3-10: Python's 4 KB value buffer; NUL bytes in strings accepted; numpy `copy=`
+          ignored.
+        - R3-11: `*out` not zeroed on SEG_NOT_READY/SEG_END.
+
+      Group II (public API, additive; needs owner approval):
+      - R3-2: progress and cancellation for open, index, convert and export. A callback and
+        SEG_ERR_CANCELLED; optionally an index sidecar cache.
+      - R3-3: a trace write path for processing: `openSeismicWriter(path, like = f)` and
+        `writeTrace(src, trace, samples)`, which carries the headers over and encodes. In C,
+        `seg_writer_*`.
+      - R3-4: editing from C/Python:
+        - export batch begin/end;
+        - `importHeaders` and applying a patch;
+        - `openEditor(f: SeismicFile)` reusing the viewer's index.
+      - R3-5: viewer reads:
+        - the SEG-Y textual header as text;
+        - sample windows in `readTracesInto`;
+        - `sortTraces(f, keys)`;
+        - a DiagLog out from `read_traces_into`.
+      - R3-6/R2-4: bulk keys and header columns (`traceKeysInto`, `traceFieldColumn`), and numpy
+        int64 trace lists. Today it is 4 µs per trace from Python, so 40 s for 10M traces.
+      - R3-9: prefetcher chunk recycling (`recycle` / `nextInto`).
+      - R2-5: the Nim `Prefetcher` uses freed memory after `f.close()` (SIGSEGV, proved). Fix it
+        by sharing the map owner (close defers the unmap), or by having close raise.
+      - R3-11b: `struct_size` first in the option structs, for ABI growth.
 - [ ] 13.4 Apply the 13.3 findings (and 13.2 fixes not yet applied); full suite green.
 - [ ] 13.5 Merge `seg-library` into `main` (owner asked, 2026-11-08), after 13.1-13.4. Do not
       push unless the owner asks.
