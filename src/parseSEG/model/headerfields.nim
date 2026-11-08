@@ -409,18 +409,16 @@ proc blockStrings(f: SeismicFile, b: BlockRef): seq[Seg2String] =
     blockStrings(f.unsafeMemory.toOpenArray(0, int(f.mappedSize) - 1), a + Seg2FixedSize,
       a + b.size, f.index.seg2)
 
-proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
-  ## **Internal.** Reads `field` of the located block from the mapped bytes;
-  ## `error` says why it cannot. A SEG-2 block also has its keyword strings
-  ## as fields.
+proc readField(f: SeismicFile, b: BlockRef, field: string, bytes: openArray[byte],
+    fromMap: bool): FieldRead =
   let err = f.checkBlock(b)
   if err.len > 0: return FieldRead(error: err)
-  let mem = f.unsafeMemory
   let a = int(b.offset)
   var v = none(FieldValue)
   withBlockType(b.kind):
     var h: BlockT
-    decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
+    if fromMap: decodeFields(h, f.unsafeMemory.toOpenArray(a, a + b.size - 1), firstByte, b.order)
+    else: decodeFields(h, bytes, firstByte, b.order)
     v = fieldByName(h, field)
   if v.isNone and b.kind in {hbSeg2File, hbSeg2Trace}:
     let strs = f.blockStrings(b)
@@ -431,6 +429,18 @@ proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
         " block nor a keyword string it holds")
   if v.isSome: FieldRead(value: v.get)
   else: FieldRead(error: "is not a field of " & $b.kind)
+
+proc readField*(f: SeismicFile, b: BlockRef, field: string): FieldRead =
+  ## **Internal.** Reads `field` of the located block from the mapped bytes;
+  ## `error` says why it cannot. A SEG-2 block also has its keyword strings
+  ## as fields.
+  f.readField(b, field, [], fromMap = true)
+
+proc readField*(f: SeismicFile, b: BlockRef, field: string, bytes: openArray[byte]): FieldRead =
+  ## **Internal.** As above, decoding the block from `bytes` (its `b.size`
+  ## bytes as edited so far, `HeaderEditor`) instead of the map; SEG-2 keyword
+  ## strings still come from the map.
+  f.readField(b, field, bytes, fromMap = false)
 
 proc readFields*(f: SeismicFile, b: BlockRef, values: var seq[Option[FieldValue]]): string =
   ## **Internal.** Decodes the located block once: `values` gets the value of

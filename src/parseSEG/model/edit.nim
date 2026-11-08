@@ -81,6 +81,9 @@ type
     edits: int
     batch: bool          ## Inside `beginBatch` / `endBatch`.
     pending: seq[PendingWrite] ## Batched writes, journaled but not yet on the map.
+    pendingPages: Table[int64, seq[int32]]
+      ## `pending` indices by the 4 KiB pages their bytes touch, so an edit
+      ## finds the pending writes under its block without a scan.
 
   PendingWrite = object
     at: int64
@@ -183,6 +186,7 @@ proc dropPending(ed: var HeaderEditor) =
     $ed.pending.len & " batched edits were not written", loc = Location(file: ed.file.path))
   ed.edits -= ed.pending.len
   ed.pending.setLen 0
+  ed.pendingPages.clear()
 
 proc flushBatch(ed: var HeaderEditor): bool =
   # One sync for every journaled edit of the batch, then the map writes.
@@ -197,10 +201,39 @@ proc flushBatch(ed: var HeaderEditor): bool =
   for p in ed.pending:
     copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
   ed.pending.setLen 0
+  ed.pendingPages.clear()
+
+const PageShift = 12
+
+proc pendingUnder(ed: HeaderEditor, at: int64, size: int): seq[int32] =
+  # The pending writes overlapping `at ..< at + size`, oldest first.
+  if size <= 0 or ed.pending.len == 0: return
+  for page in (at shr PageShift) .. ((at + size - 1) shr PageShift):
+    for i in ed.pendingPages.getOrDefault(page):
+        let p = ed.pending[i]
+        if at < p.at + p.bytes.len and p.at < at + size and i notin result: result.add i
+  result.sort()
 
 proc overlapsPending(ed: HeaderEditor, at: int64, size: int): bool =
-  for p in ed.pending:
-    if at < p.at + p.bytes.len and p.at < at + size: return true
+  ed.pendingUnder(at, size).len > 0
+
+proc addPending(ed: var HeaderEditor, at: int64, bytes: openArray[byte]) =
+  let i = int32(ed.pending.len)
+  ed.pending.add PendingWrite(at: at, bytes: @bytes)
+  for page in (at shr PageShift) .. ((at + bytes.len - 1) shr PageShift):
+    ed.pendingPages.mgetOrPut(page, @[]).add i
+
+proc currentBytes(ed: HeaderEditor, at: int64, size: int): seq[byte] =
+  # The bytes `at ..< at + size` as edited so far: the map, with the batch's
+  # pending writes laid over it in order.
+  let mem = ed.file.unsafeMemory
+  result = newSeq[byte](size)
+  if size > 0: copyMem(addr result[0], addr mem[at], size)
+  for i in ed.pendingUnder(at, size):
+    let p = ed.pending[i]
+    let a = max(at, p.at)
+    let b = min(at + size, p.at + p.bytes.len)
+    copyMem(addr result[a - at], unsafeAddr p.bytes[a - p.at], b - a)
 
 proc beginBatch*(ed: var HeaderEditor) =
   ## Starts a batch: edits are journaled at once but synced and written to the
@@ -524,27 +557,28 @@ func structural(k: HeaderBlock): seq[string] =
   of hbSeg2File, hbSeg2Trace: @[] # every SEG-2 edit is refused (`editBlock`)
   else: @[] # not reachable by name (listings only)
 
-proc commitSpan(ed: var HeaderEditor, at: int64, buf: openArray[byte], label: string): string =
+proc commitSpan(ed: var HeaderEditor, at: int64, cur, buf: openArray[byte],
+    label: string): string =
   # Journals and writes the bytes of `buf` (meant for `at ..< at + buf.len`,
-  # inside the map) that differ from the map, as one span from the first to
-  # the last changed byte. "" when done (also when nothing differs), else
-  # why nothing changed.
+  # inside the map) that differ from `cur`, the bytes there as edited so far
+  # (`currentBytes`), as one span from the first to the last changed byte.
+  # "" when done (also when nothing differs), else why nothing changed.
   let mem = ed.file.unsafeMemory
   let a = int(at)
   let size = buf.len
   var first = 0
-  while first < size and buf[first] == mem[a + first]: inc first
+  while first < size and buf[first] == cur[first]: inc first
   if first == size: return "" # no change
   var last = size - 1
-  while buf[last] == mem[a + last]: dec last
+  while buf[last] == cur[last]: dec last
   try:
-    ed.journalEdit(at + first, mem.toOpenArray(a + first, a + last),
+    ed.journalEdit(at + first, cur.toOpenArray(first, last),
       buf.toOpenArray(first, last), label)
   except IOError as e:
     return "the journal cannot be written (" & e.msg & "); nothing changed"
   inc ed.edits
   if ed.batch:
-    ed.pending.add PendingWrite(at: at + first, bytes: @(buf.toOpenArray(first, last)))
+    ed.addPending(at + first, buf.toOpenArray(first, last))
     if ed.pending.len >= MaxPending and not ed.flushBatch():
       return "the journal cannot be synced; this batch's pending edits were not written"
   else:
@@ -573,16 +607,14 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
       "convertFile with target SEG-2)"
   if field in structural(b.kind):
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
-  if ed.batch and ed.overlapsPending(at, size) and not ed.flushBatch(): # decode current bytes
-    refuse "the journal cannot be synced; nothing changed"
-  let mem = ed.file.unsafeMemory
-  let a = int(at)
+  # The block as edited so far (a batch's pending writes included), so
+  # several fields of one header in a batch need no flush.
+  let cur = ed.currentBytes(at, size)
   var h: T
-  decodeFields(h, mem.toOpenArray(a, a + size - 1), firstByte, b.order)
+  decodeFields(h, cur, firstByte, b.order)
   var err = ""
   if not setByName(h, field, v, err): refuse err
-  var buf = newSeq[byte](size)
-  copyMem(addr buf[0], addr mem[a], size)
+  var buf = cur
   try:
     encodeChanged(h, buf, firstByte, b.order)
   except SegFormatError as e:
@@ -590,7 +622,7 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
   let label = (if loc.trace >= 0: "trace " & $loc.trace & " "
                elif loc.record >= 0: "record " & $loc.record & " " else: "") &
     b.name & "." & field
-  let failure = ed.commitSpan(at, buf, label)
+  let failure = ed.commitSpan(at, cur, buf, label)
   if failure.len > 0: refuse failure
   true
 
@@ -617,9 +649,7 @@ proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label:
   if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
   if bytes.len == 0: return true
   if at < 0 or at + bytes.len > ed.file.mappedSize: refuse "the bytes lie outside the file"
-  if ed.batch and ed.overlapsPending(at, bytes.len) and not ed.flushBatch():
-    refuse "the journal cannot be synced; nothing changed"
-  let failure = ed.commitSpan(at, bytes, label)
+  let failure = ed.commitSpan(at, ed.currentBytes(at, bytes.len), bytes, label)
   if failure.len > 0: refuse failure
   true
 
@@ -642,19 +672,18 @@ proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
 proc current(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
   let r = ed.file.index.locate(scope, index, name)
   if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
-  if ed.batch and ed.overlapsPending(r.blk.offset, r.blk.size) and not ed.flushBatch():
-    raise newException(IOError, name & ": the journal " & ed.journalPath &
-      " cannot be synced; the batch's pending edits were not written")
-  let v = ed.file.readField(r.blk, r.field)
+  # The block as edited so far: a batch's pending writes laid over the map.
+  let inRange = r.blk.offset >= 0 and r.blk.offset + r.blk.size <= ed.file.mappedSize
+  let v = if ed.batch and inRange and ed.overlapsPending(r.blk.offset, r.blk.size):
+      ed.file.readField(r.blk, r.field, ed.currentBytes(r.blk.offset, r.blk.size))
+    else: ed.file.readField(r.blk, r.field)
   if v.error.len > 0: raise newException(ValueError, name & ": " & v.error)
   v.value
 
 proc currentTraceField*(ed: var HeaderEditor, trace: int, name: string): FieldValue =
   ## Reads `trace.<field>` / `ext1.<field>` of trace `trace` as edited so far
-  ## (batched edits included). Raises `ValueError` like `traceField`, and
-  ## `IOError` when pending batched edits of the header must be written
-  ## first and the journal cannot be synced (they are then dropped, see
-  ## `endBatch`).
+  ## (a batch's pending edits included, without syncing them). Raises
+  ## `ValueError` like `traceField`.
   ed.current(hsTrace, trace, name)
 
 proc currentRecordField*(ed: var HeaderEditor, record: int, name: string): FieldValue =

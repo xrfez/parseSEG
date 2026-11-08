@@ -37,7 +37,7 @@ Conventions that hold throughout:
 ## Opening and indexing (any size, disk)
 | Proc | What |
 |---|---|
-| `openSeismic(path, twosComplement8015 = false, keys = false, writable = false, demuxDir = ""): SeismicFile` | Memory-maps the file, detects SEG-Y, SEG-D or SEG-2, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (about 100 B per trace). Multiplexed SEG-D (formats 0015 ... 0058) is demultiplexed once into a temporary copy in `demuxDir` (default: the OS temp dir; `f.demuxPath`, a warning in `f.log`), which is indexed instead and deleted on `close`; `writable` refuses such a file (`ValueError`). |
+| `openSeismic(path, twosComplement8015 = false, keys = false, writable = false, demuxDir = ""): SeismicFile` | Memory-maps the file, detects SEG-Y, SEG-D or SEG-2, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (`TraceKeys`, 144 B per trace). Multiplexed SEG-D (formats 0015 ... 0058) is demultiplexed once into a temporary copy in `demuxDir` (default: the OS temp dir; `f.demuxPath`, a warning in `f.log`), which is indexed instead and deleted on `close`; `writable` refuses such a file (`ValueError`). |
 | `detectKind(bytes): SeismicKind` | Detection only (`skUnknown` when nothing fits). |
 | `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). SEG-2 needs a `MemFileSource` (`ValueError` otherwise). |
 | `f.len`, `f.kind` (`skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path`, `f.demuxPath` | File facts. |
@@ -116,7 +116,8 @@ entry cannot be synced is refused, and its entry is cut from the journal again (
 fails too, the editor refuses every further edit). `beginBatch` / `endBatch` (false when the
 batch's journal sync fails) share one sync among many edits; `close` raises `IOError` when
 the final batch cannot be journaled. `currentTraceField` (...) read fields as edited so far
-(`IOError` when pending batched edits must be synced first and cannot be). `openEditor`
+(a batch's pending edits included, without a sync). Several fields of one header can be
+edited in one batch without a flush. `openEditor`
 raises `ValueError` when the journal is the file itself.
 `rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them.
 
