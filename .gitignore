@@ -5,3 +5,6 @@ nimcache/
 # Atlas: dependency checkouts are reproducible from atlas.lock
 deps/*
 !deps/atlas.config
+
+# The data set of `nim bench` (bench/specs.nim), unless PARSESEG_BENCH_DIR is set.
+/bench/data/

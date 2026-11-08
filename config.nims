@@ -279,3 +279,28 @@ task fmt, "Format codebase via nimpretty":
 task docs, "Generate HTML documentation":
   ## Emits HTML documentation into htmldocs directory.
   selfExec "doc --project --outdir:htmldocs src/parseSEG.nim"
+
+# ------------------------------------------------------- benchmarks (13.2) --
+
+task bench, "Benchmark suite (bench/, docs/benchmarks.md): data, Nim, C and Python":
+  ## Builds bench/gen and bench/suite with the nimRelease flags (or the
+  ## shipped library's -d:release with PARSESEG_BENCH_BUILD=release), the C
+  ## ABI library, the Python package and bench/capi_bench, writes the
+  ## synthetic files (PARSESEG_BENCH_SCALE=small, the default, about 2.5 GB,
+  ## or full, about 52 GB; into PARSESEG_BENCH_DIR, default bench/data) and
+  ## runs the suite (PARSESEG_BENCH_SECTIONS: a space-separated subset of
+  ## baseline index decode latency threads prefetch write abi).
+  let flags =
+    if getEnv("PARSESEG_BENCH_BUILD") == "release": "c -d:release"
+    else: "c -d:release -d:danger --opt:speed --passC:\"-march=native -mtune=native\""
+  mkDir "bin/bench"
+  selfExec flags & release("benchGen") & "-o:bin/bench/gen bench/gen.nim"
+  selfExec flags & release("benchSuite") & "-o:bin/bench/suite bench/suite.nim"
+  let sections = getEnv("PARSESEG_BENCH_SECTIONS")
+  if sections.len == 0 or "abi" in sections:
+    selfExec "lib"
+    selfExec "pylib"
+    exec "cc -O2 -Iinclude bench/capi_bench.c -Lbin -lparseseg -Wl,-rpath," & thisDir() &
+      "/bin -o bin/bench/capi_bench"
+  exec "bin/bench/gen"
+  exec "bin/bench/suite " & sections
