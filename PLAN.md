@@ -596,7 +596,8 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
         - validate the `segApi` options outside `-d:segCapi`;
         - SEG-Y `decodeVendorAreas` takes no file name (`apply.nim:105,123`).
 
-      **C. Public API changes (need owner approval).** Nim only unless marked C/Py.
+      **C. Public API changes (owner approved all of C1-C12, 2026-11-08).** Nim only
+      unless marked C/Py.
       - C1 Behaviour: make bad caller input consistent with 12.5 (`ValueError`):
         - `sampleIntervalUs` returns NaN (C/Py);
         - `Prefetcher.traceAt` returns -1 (C/Py);
