@@ -20,7 +20,7 @@
 import std/[macros, macrocache]
 
 const segExports* = CacheSeq"parseSEG.segApi"
-  ## One entry per `{.segApi.}` routine: `(signature, overloads, info)`.
+  ## One entry per `{.segApi.}` routine: `(signature, info, overloads)`.
 
 template segHandle*(name = "") {.pragma.}
   ## The type crosses the boundary as a handle; `name` replaces the type's name
@@ -29,9 +29,10 @@ template segHandle*(name = "") {.pragma.}
 template segField*(readonly = false) {.pragma.}
   ## The field crosses the boundary as a property of its handle.
 
-macro segRecord*(sig: typed, info: static string, overloads: varargs[typed]): untyped =
-  ## Stores a routine's typed signature and its overload set for `segFinish`.
-  segExports.add newTree(nnkPar, sig, newLit(info),
+macro segRecord(sig: typed, info: untyped, overloads: varargs[typed]): untyped =
+  ## Stores a routine's typed signature, its `info` tuple (see `segApi`) and
+  ## its overload set for `segFinish`.
+  segExports.add newTree(nnkPar, sig, info,
     if overloads.len > 0: overloads[0] else: newEmptyNode())
   newEmptyNode()
 
@@ -39,20 +40,22 @@ macro segApi*(args: varargs[untyped]): untyped =
   ## Exports the routine; see the module documentation.
   let prc = args[^1]
   expectKind(prc, {nnkProcDef, nnkFuncDef})
+  # The options are checked in every build, so a typo fails without `-d:segCapi` too.
+  let flags = newNimNode(nnkBracket)
+  let hidden = newNimNode(nnkBracket)
+  for a in args[0 ..^ 2]:
+    case a.kind
+    of nnkIdent:
+      if $a notin ["concurrent", "abiOnly", "private"]:
+        error("segApi: unknown flag " & $a, a)
+      flags.add newLit($a)
+    of nnkExprEqExpr, nnkExprColonExpr:
+      if $a[0] != "hide": error("segApi: unknown option " & $a[0], a)
+      hidden.add newLit($a[1])
+    else: error("segApi: unexpected argument", a)
   when not defined(segCapi):
     result = prc
   else:
-    var flags: seq[string]
-    for a in args[0 ..^ 2]:
-      case a.kind
-      of nnkIdent:
-        if $a notin ["concurrent", "abiOnly", "private"]:
-          error("segApi: unknown flag " & $a, a)
-        flags.add $a
-      of nnkExprEqExpr, nnkExprColonExpr:
-        if $a[0] != "hide": error("segApi: unknown option " & $a[0], a)
-        flags.add "hide=" & $a[1]
-      else: error("segApi: unexpected argument", a)
     var doc = ""
     if prc.body.kind == nnkStmtList:
       for n in prc.body:
@@ -65,10 +68,8 @@ macro segApi*(args: varargs[untyped]): untyped =
     sig.add newEmptyNode(), newEmptyNode(), newEmptyNode(), copyNimTree(prc.params),
       newEmptyNode(), newEmptyNode(),
       newStmtList(newCall(ident"raiseAssert", newLit"signature only"))
-    # info: name, kind, file, flags, doc (unit-separated)
-    var flagText = ""
-    for i, f in flags: flagText.add (if i > 0: "," else: "") & f
-    let info = $name & "\x1F" & (if prc.kind == nnkFuncDef: "func" else: "proc") & "\x1F" &
-      prc.lineInfoObj.filename & "\x1F" & flagText & "\x1F" & doc
-    result = newStmtList(prc, newCall(bindSym"segRecord", sig, newLit(info),
+    let info = newTree(nnkPar, newLit($name),
+      newLit(if prc.kind == nnkFuncDef: "func" else: "proc"),
+      newLit(prc.lineInfoObj.filename), newLit(doc), flags, hidden)
+    result = newStmtList(prc, newCall(bindSym"segRecord", sig, info,
       nnkAccQuoted.newTree(ident($name))))

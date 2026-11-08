@@ -40,17 +40,17 @@ type
 
   TensorObj* {.segHandle.} = ref object of AbiHandle
     ## A 2-D sample array `[traces, samples]` owned by the library.
-    dt*: Dtype
-    t32*: Tensor[float32]
-    t64*: Tensor[float64]
-    shape*, strides*: array[2, int64] ## stable storage for DLPack pointers
+    dt: Dtype
+    t32: Tensor[float32]
+    t64: Tensor[float64]
+    shape, strides: array[2, int64] ## the tensor's, set at creation; DLPack points here
 
   PrefetcherObj* {.segHandle.} = ref object of AbiHandle
     ## Read-ahead on a worker thread.
-    file*: Handle[SeismicFile] ## keeps the map alive
-    dt*: Dtype
-    p32*: Prefetcher[float32]
-    p64*: Prefetcher[float64]
+    file: Handle[SeismicFile] ## keeps the map alive
+    dt: Dtype
+    p32: Prefetcher[float32]
+    p64: Prefetcher[float64]
 
   PrefetchChunkObj* = object
     ## One prefetched chunk; `samples` is owned by the caller.
@@ -119,8 +119,12 @@ proc checkTraces(f: SeismicFile, traces: openArray[int]) =
     if t notin 0 ..< f.len: argError("trace " & $t & " lies outside the file")
 
 proc newTensorObj[T](t: sink Tensor[T]): TensorObj =
-  when T is float32: TensorObj(dt: dtF32, t32: t)
-  else: TensorObj(dt: dtF64, t64: t)
+  ## The handle for `t`. The tensor never changes afterwards, so its shape and
+  ## strides are copied once, here.
+  let shape = [int64(t.shape[0]), int64(t.shape[1])]
+  let strides = [int64(t.strides[0]), int64(t.strides[1])]
+  when T is float32: TensorObj(dt: dtF32, t32: t, shape: shape, strides: strides)
+  else: TensorObj(dt: dtF64, t64: t, shape: shape, strides: strides)
 
 template withTensor(to: TensorObj, t, body: untyped) =
   if to.dt == dtF32:
@@ -130,13 +134,7 @@ template withTensor(to: TensorObj, t, body: untyped) =
     template t: untyped = to.t64
     body
 
-proc refreshShape(to: TensorObj) =
-  withTensor(to, t):
-    for d in 0..1:
-      to.shape[d] = int64(t.shape[d])
-      to.strides[d] = int64(t.strides[d])
-
-proc dataPointer(to: TensorObj): pointer =
+func dataPointer(to: TensorObj): pointer =
   withTensor(to, t):
     result = if t.size > 0: cast[pointer](t.unsafe_raw_offset()) else: nil
 
@@ -236,9 +234,7 @@ proc readTracesInto*(f: Handle[SeismicFile], traces: openArray[int], dst: Tensor
 func view*(t: TensorObj): TensorView {.segApi(abiOnly).} =
   ## The samples' memory: pointer, dtype, rank (2), shape and strides in
   ## elements. Valid while the tensor is held.
-  {.cast(noSideEffect).}:
-    t.refreshShape()
-    TensorView(data: t.dataPointer, dtype: t.dt, rank: 2, shape: t.shape, strides: t.strides)
+  TensorView(data: t.dataPointer, dtype: t.dt, rank: 2, shape: t.shape, strides: t.strides)
 
 func dtype*(t: TensorObj): Dtype {.segApi(abiOnly).} =
   ## "float32" or "float64".
@@ -247,7 +243,6 @@ func dtype*(t: TensorObj): Dtype {.segApi(abiOnly).} =
 proc toDlpack*(t: TensorObj): pointer {.segApi(abiOnly, private).} =
   ## A DLManagedTensor sharing the samples; it holds the tensor until the
   ## consumer calls its deleter.
-  t.refreshShape()
   let m = create(DLManagedTensor)
   m.dlTensor = DLTensor(data: t.dataPointer, device: DLDevice(deviceType: 1, deviceId: 0),
     ndim: 2, dtype: DLDataType(code: 2, bits: uint8(8 * elemSize(t.dt)), lanes: 1),
@@ -259,7 +254,7 @@ proc toDlpack*(t: TensorObj): pointer {.segApi(abiOnly, private).} =
 
 # --------------------------------------------------------------- prefetch --
 
-proc checkRing(f: SeismicFile, chunkTraces, depth, cols, width: int, dtype: Dtype) =
+proc checkRing(f: SeismicFile, chunkTraces, depth, width: int, dtype: Dtype) =
   if chunkTraces > MaxChunkTraces or depth > MaxDepth:
     argError("need chunkTraces <= 2^24 and depth <= 1024")
   let rows = max(1, min(chunkTraces, f.len))
@@ -270,7 +265,7 @@ proc newPrefetcher*(f: Handle[SeismicFile], traces: Slice[int], chunkTraces = 25
   ## Decodes `traces` ahead on a worker thread, `chunkTraces` rows at a time,
   ## at most `depth` chunks buffered.
   f.v.checkTraces(traces)
-  f.v.checkRing(chunkTraces, depth, cols,
+  f.v.checkRing(chunkTraces, depth,
     if cols >= 0: cols else: f.v.maxSamples(traces), dtype)
   result = PrefetcherObj(file: f, dt: dtype)
   if dtype == dtF32:
@@ -283,7 +278,7 @@ proc newPrefetcher*(f: Handle[SeismicFile], traces: openArray[int], chunkTraces 
   ## Read-ahead over a list of traces, in list order (positions index the
   ## list).
   f.v.checkTraces(traces)
-  f.v.checkRing(chunkTraces, depth, cols,
+  f.v.checkRing(chunkTraces, depth,
     if cols >= 0: cols else: f.v.maxSamples(traces), dtype)
   result = PrefetcherObj(file: f, dt: dtype)
   if dtype == dtF32:
@@ -313,8 +308,7 @@ proc tryNext*(p: PrefetcherObj): PrefetchChunkObj {.segApi.} =
 
 func atEnd*(p: PrefetcherObj): bool {.segApi.} =
   ## True once every chunk has been taken.
-  {.cast(noSideEffect).}:
-    if p.dt == dtF32: p.p32.atEnd else: p.p64.atEnd
+  if p.dt == dtF32: p.p32.atEnd else: p.p64.atEnd
 
 func positions*(p: PrefetcherObj): int {.segApi.} =
   ## Positions `seek` accepts: the file's trace count, or the list's length.

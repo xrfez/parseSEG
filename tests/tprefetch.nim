@@ -66,12 +66,15 @@ block subrange_seek_and_float64:
   doAssert p.next(c) and c.first == 150
   doAssert c.samples == all[150..159, 0..<50]
   p.seek(195 ..< 197)
-  doAssert p.next(c) and c.first == 195 and c.count == 2 and not p.next(c)
+  doAssert not p.atEnd # atEnd follows seeks and takes without the lock
+  doAssert p.next(c) and c.first == 195 and c.count == 2 and p.atEnd and not p.next(c)
   p.seek(200 ..< p.positions) # an empty range
   doAssert p.atEnd and not p.next(c)
   p.seek(0 ..< 3)
-  doAssert p.next(c) and c.count == 3
+  doAssert not p.atEnd
+  doAssert p.next(c) and c.count == 3 and p.atEnd
   p.close()
+  doAssert p.atEnd
   p.close() # idempotent
   f.close()
 
@@ -134,11 +137,12 @@ block selections:
   var p = newPrefetcher[float32](f, sel, chunkTraces = 7, depth = 2)
   var c: PrefetchChunk[float32]
   var pos = 0
+  doAssert not p.atEnd
   while p.next(c):
     doAssert c.first == pos and c.samples == want[pos ..< pos + c.count, _]
     doAssert p.traceAt(pos) == sel[pos]
     pos += c.count
-  doAssert pos == sel.len
+  doAssert pos == sel.len and p.atEnd
   p.seek(60 ..< p.positions)
   doAssert p.next(c) and c.first == 60 and c.samples[0, _] == all[sel[60], _]
   p.close()

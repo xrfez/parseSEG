@@ -65,6 +65,8 @@ type
     tensors: seq[Tensor[T]] # slot storage, consumer side
     last: int               # end of the whole range (exclusive)
     selection: seq[int]     # selection mode: the trace list (fixed for the prefetcher's life)
+    untaken: int            # chunks of the range not yet taken: `sh.chunkCount - sh.takeChunk`,
+                            # kept by the consumer so `atEnd` needs no lock
 
   PrefetchChunk*[T: SampleType] = object
     first*: int
@@ -168,12 +170,12 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   sh.mem = f.unsafeMemory
   sh.size = f.mappedSize
   if f.len > 0:
-    sh.entries = cast[ptr UncheckedArray[TraceEntry]](unsafeAddr f.index.entries[0])
-    sh.codecs = cast[ptr UncheckedArray[TraceCodec]](unsafeAddr f.index.codecs[0])
+    sh.entries = cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0])
+    sh.codecs = cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0])
   initLock(sh.lock)
   initCond(sh.work)
   initCond(sh.ready)
-  result = Prefetcher[T](sh: sh, last: f.len)
+  result = Prefetcher[T](sh: sh, last: f.len, untaken: sh.chunkCount)
   for i in 0..<depth:
     result.tensors.add newTensorUninit[T](rows, width)
     sh.slots[i].data = rawData(result.tensors[i])
@@ -198,6 +200,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkT
   if result.selection.len > 0:
     sh.sel = cast[ptr UncheckedArray[int]](addr result.selection[0])
   sh.stop = result.selection.len
+  result.untaken = sh.chunkCount
   signal(sh.work)
   release(sh.lock)
 
@@ -233,6 +236,7 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
   s.data = rawData(p.tensors[i])
   s.state = ssFree
   inc sh.takeChunk
+  dec p.untaken
   signal(sh.work)
   release(sh.lock)
 
@@ -242,12 +246,9 @@ proc headReady[T](sh: ptr Shared[T]): bool {.inline.} =
   let s = addr sh.slots[sh.takeChunk mod sh.depth]
   s.state == ssReady and s.chunk == sh.takeChunk and s.gen == sh.gen
 
-proc atEnd*[T](p: Prefetcher[T]): bool =
+func atEnd*[T](p: Prefetcher[T]): bool {.inline.} =
   ## True when every chunk of the range has been taken (or after `close`).
-  if p.sh == nil: return true
-  acquire(p.sh.lock)
-  result = p.sh.takeChunk >= p.sh.chunkCount
-  release(p.sh.lock)
+  p.sh == nil or p.untaken <= 0
 
 proc tryNext*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   ## Takes the next chunk if it is decoded; never blocks. False if it is not
@@ -288,6 +289,7 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   sh.stop = stop
   sh.nextChunk = 0
   sh.takeChunk = 0
+  p.untaken = sh.chunkCount
   for i in 0..<sh.depth:
     if sh.slots[i].state == ssReady: sh.slots[i].state = ssFree
   signal(sh.work)

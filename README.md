@@ -40,7 +40,8 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
   area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `survey`, `abi`), plus `cli.nim`
   and `bindings.nim` (the shared library). Every C and Python function is one
   `{.segApi.}` proc in `abi/api.nim`; the pragma (`abi/segapi.nim`) generates the C
-  exports, the header and the Python module.
+  exports, the header and the Python module, and `abi/runtime.nim` holds what the
+  generated exports call at run time.
 - `include/parseseg.h`, `python/parseseg/__init__.py`: the generated C header and Python
   (ctypes) module, rewritten by `nim lib` and committed.
 - `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI and build targets
