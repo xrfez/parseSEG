@@ -113,9 +113,10 @@ patch through the editor, in place or into a copy.
   `headerBytes`, `findChannelSet` (an `Option[SegdChannelSetRef]`), and per trace
   `channelType`, `sampleIntervalUs`, `startTimeMs`, `descaleFactor`. The reader's `record`,
   `label`, `log` and `toc` are read-only.
-- Vendor maps: `loadVendorMaps`, `registerVendorDecoder`, `decode`, `applies`,
-  `decodeVendorAreas`; `scaffold(path, reg)` / `toNif` write a skeleton map for every area no
-  map decodes.
+- Vendor maps: `loadVendorMaps`, `registerVendorDecoder`, `decode` (an
+  `Option[VendorBlock]`; `blk["field"]` reads a value), `applies`, `vendorContext(rec or
+  file)`, `decodeVendorAreas`; `scaffoldVendorMap(path, reg)` / `toNif` write a skeleton map
+  for every area no map decodes.
 - Media: `openDiskSource`/`openDiskSink`, `openMemFileSource`,
   `openTapeImageSource`/`openTapeImageSink`, `newDeviceSource`/`newDeviceSink` over a
   `TapeDevice` (Linux `st`, Windows tape, `MemoryTape`). A custom drive overrides

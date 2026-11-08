@@ -58,7 +58,8 @@ maps match, the most specific one wins. Ties raise a diagnostic.
 - **Search path:** the built-in `vendormaps/` directory in the repo, then the
   `PARSESEG_VENDOR_PATH` directories (colon-separated), then paths passed to `loadVendorMaps()`.
 - **Lossless:** raw bytes are always kept. Decoded vendor fields appear beside them as
-  `VendorBlock(mapName, name, fields: seq[(name, VendorValue)])`, and writers re-emit the raw bytes.
+  `VendorBlock(mapName, name, fields: seq[VendorField])` (each a `name` and a `VendorValue`),
+  and writers re-emit the raw bytes.
 - **Never fatal:** a malformed map, an out-of-range field or an unmatched block all become
   diagnostics (NIF log) and the raw block is kept.
 - **Precedence:** a code decoder registered via `registerVendorDecoder` beats a declarative map

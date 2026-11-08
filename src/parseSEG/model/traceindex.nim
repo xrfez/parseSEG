@@ -20,21 +20,16 @@
 ## buffer (`decodeEntry`), with no intermediate copy. The OS pages the file
 ## in on demand, and all offsets are 64-bit, so files larger than RAM work.
 
-import ../common/[endians, errors, diagnostics, bcd]
+import ../common/[endians, errors, diagnostics, bcd, seismickind]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
 import ./[tensors, keys]
 import ../abi/pragmas
 
-export memsource, tensors, diagnostics, keys
+export memsource, tensors, diagnostics, keys, seismickind
 
 type
-  SeismicKind* = enum
-    skUnknown = "unknown" ## Neither format was recognized (see the log).
-    skSegy = "SEG-Y"
-    skSegd = "SEG-D"
-
   TraceEntry* = object
     ## Where one trace lives (24 bytes).
     offset*: int64       ## Medium offset of the trace header.

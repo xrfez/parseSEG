@@ -613,10 +613,8 @@ func `$`(v: VendorValue): string =
 proc printBlocks(indent: string, blocks: seq[VendorBlock]) =
   for b in blocks:
     stdout.write indent, "(block ", nifStr(b.mapName), " ", b.name
-    for (n, v) in b.fields: stdout.write "\n", indent, "  (f ", n, " ", $v, ")"
+    for f in b.fields: stdout.write "\n", indent, "  (f ", f.name, " ", $f.value, ")"
     stdout.write ")\n"
-
-func contextOf(rec: SegdRecord): VendorContext = segdContext(rec)
 
 proc vendormap(a: Args): int =
   if a.pos.len == 0: usage("expected vendormap check|list|apply|scaffold ...")
@@ -648,10 +646,10 @@ proc vendormap(a: Args): int =
       defer: f.close()
       if f.kind == skSegd:
         if f.index.segdRecords.len > 0:
-          ctx = contextOf(f.index.segdRecords[0])
+          ctx = vendorContext(f.index.segdRecords[0])
           haveCtx = true
       else:
-        ctx = segyContext(f.index.segy)
+        ctx = vendorContext(f.index.segy)
         haveCtx = true
     if reg.maps.len == 0:
       var paths = vendorSearchPath()
@@ -696,11 +694,11 @@ proc vendormap(a: Args): int =
           echo " )"
       else:
         var r = openSegy(src)
-        printBlocks(" ", decodeVendorAreas(reg, r.file, log))
+        printBlocks(" ", decodeVendorAreas(reg, r.file, log, path))
         var t: SegyTrace
         while r.readTrace(t):
           if k < n and want[k]:
-            let blocks = decodeVendorAreas(reg, r.file, t, log)
+            let blocks = decodeVendorAreas(reg, r.file, t, log, path)
             if blocks.len > 0:
               echo " (trace ", k
               printBlocks("  ", blocks)
@@ -720,7 +718,7 @@ proc vendormap(a: Args): int =
     var log: DiagLog
     let reg = loadRegistry(a, log)
     printLog(log, sevWarning)
-    let s = scaffold(a.pos[1], reg)
+    let s = scaffoldVendorMap(a.pos[1], reg)
     if s.len == 0:
       echo "no unmapped vendor areas", (if outPath.len > 0: "; " & outPath & " not written" else: "")
     elif outPath.len == 0: stdout.write s.toNif(a.get("name"))

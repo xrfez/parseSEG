@@ -23,6 +23,7 @@ import ../common/[endians, ibmfloat, errors]
 
 type
   SegdSampleFormat* = enum
+    ## A demultiplexed sample format, by its code (GH#1 bytes 3-4).
     sd8015 = 8015, sd8022 = 8022, sd8024 = 8024, sd8036 = 8036, sd8038 = 8038,
     sd8042 = 8042, sd8044 = 8044, sd8048 = 8048, sd8058 = 8058, sd8080 = 8080,
     sd9036 = 9036, sd9038 = 9038, sd9058 = 9058, sd9080 = 9080
@@ -103,7 +104,7 @@ proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[b
         if i + k < n:
           let e = if k mod 2 == 0: src[g + k div 2] shr 4 else: src[g + k div 2] and 0xF
           let w = uint32(beU16(src, g + 2 + 2 * k))
-          let m = if twosComplement8015: int(cast[int16](uint16(w)))
+          let m = if twosComplement8015: int(beI16(src, g + 2 + 2 * k))
                   else: onesFraction(w and 0x7FFF, 0x7FFF, (w and 0x8000) != 0)
           dst[i + k] = T(float64(m) / 32768.0 * float64(1 shl e))
       i += 4

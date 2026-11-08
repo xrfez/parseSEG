@@ -33,9 +33,9 @@
 ## that do not fit the data become diagnostics, and raw bytes are always kept
 ## by the format readers.
 
-import std/[strutils, os, math, parseutils]
-import ../common/[endians, ibmfloat, ebcdic, bcd, diagnostics]
-export diagnostics, endians
+import std/[strutils, os, math, options]
+import ../common/[endians, ibmfloat, ebcdic, bcd, diagnostics, seismickind]
+export diagnostics, endians, options, seismickind
 
 type
   VendorTargetKind* = enum
@@ -51,39 +51,54 @@ type
     vtTraceHeaderBlock = "traceHeaderBlock"   ## SEG-Y proprietary 240-byte trace header.
     vtStanza = "stanza"                   ## SEG-Y extended text / trailer stanza.
 
-  VendorEnc* = enum
+  VendorEncoding* = enum
+    ## How a field's bytes are encoded (`(enc ...)`).
     veU8 = "u8", veU16 = "u16", veU24 = "u24", veU32 = "u32", veU64 = "u64",
     veI8 = "i8", veI16 = "i16", veI24 = "i24", veI32 = "i32", veI64 = "i64",
     veF32 = "f32", veF64 = "f64", veIbm32 = "ibm32", veBcd = "bcd", veFixedPt = "fixedpt",
     veAscii = "ascii", veEbcdic = "ebcdic", veRaw = "raw"
 
-  FieldPlan* = object
+  VendorTrim* = enum
+    ## Which blanks a text field drops (`(trim ...)`).
+    trimNone = "none", trimLeft = "left", trimRight = "right", trimBoth = "both"
+
+  VendorEnumLabel* = object
+    ## One `(enum ...)` entry: the label of a raw value.
+    value*: int64
+    label*: string
+
+  VendorBitFlag* = object
+    ## One `(bits ...)` entry: the name of a bit (0 = least significant).
+    bit*: int
+    name*: string
+
+  VendorFieldPlan* = object
     ## A compiled field.
     name*: string
     byteOff*: int       ## 0-based byte offset within the target (or repeat element).
     lowNibble*: bool    ## Starts at the low nibble of `byteOff`.
     len*: int           ## Bytes (nibbles for `bcd` given in nibbles; see `nibbles`).
-    nibbles*: int       ## Length in nibbles for nibble-addressed fields, else 0.
-    enc*: VendorEnc
-    hasOrder*: bool
-    order*: ByteOrder
-    scale*, offset*: float64
+    nibbles*: int       ## Length in nibbles (2 per byte for byte-sized fields).
+    enc*: VendorEncoding
+    order*: Option[ByteOrder] ## The field's own byte order; none: the file's.
+    scale*, offset*: float64 ## Value = raw × scale + offset, when `scaled`.
     scaled*: bool
     unit*: string
-    enums*: seq[(int64, string)]
-    bits*: seq[(int, string)]
-    hasSentinel*: bool
-    sentinel*: int64
-    trim*: string
+    enums*: seq[VendorEnumLabel]
+    bits*: seq[VendorBitFlag]
+    sentinel*: Option[int64] ## A raw value meaning "absent".
+    trim*: VendorTrim   ## Text fields only.
 
-  RepeatPlan* = object
+  VendorRepeatPlan* = object
+    ## A compiled `(repeat ...)` group.
     count*: int          ## Fixed count, or -1 when `countRef` names a field.
-    countRef*: string
-    stride*: int
+    countRef*: string    ## The field holding the count, or "".
+    stride*: int         ## Bytes per element.
     byteOff*: int        ## 0-based offset of element 0.
-    fields*: seq[FieldPlan]
+    fields*: seq[VendorFieldPlan] ## Offsets within an element.
 
   VendorTarget* = object
+    ## A compiled `(target ...)`: where the data is and its fields.
     kind*: VendorTargetKind
     name*: string        ## Name of the decoded block.
     blockIndex*: int     ## 1-based block within the area; -1 (omitted) = the whole area.
@@ -92,22 +107,24 @@ type
     headerName*: string  ## SEG-Y proprietary trace header name; "" = any.
     stanza*: string      ## SEG-Y stanza `COMPANY:NAME`; "" = any.
     extIndex*: int       ## SEG-D trace header extension number k; -1 = any.
-    fields*: seq[FieldPlan]
-    repeats*: seq[RepeatPlan]
+    fields*: seq[VendorFieldPlan]
+    repeats*: seq[VendorRepeatPlan]
 
   VendorRevision* = object
     ## A revision as major.minor (minor 10 is not 1.0 more than 9).
     major*, minor*: int
 
   VendorMatch* = object
-    format*: string      ## `segd`, `segy`, "" = any.
+    ## A map's `(match ...)`: the files it applies to.
+    format*: Option[SeismicKind] ## `skSegd` or `skSegy`; none = any.
     hasRev*: bool
     revMin*, revMax*: VendorRevision ## Inclusive, when `hasRev`.
-    manufacturers*: seq[int]
+    manufacturers*: seq[int] ## SEG-D manufacturer codes; empty = any.
     serialMin*, serialMax*: int64 ## -1 = unbounded.
-    textContains*: seq[string]
+    textContains*: seq[string] ## Texts the SEG-Y textual header must hold.
 
   VendorMap* = object
+    ## A loaded vendor map.
     name*: string
     version*: int
     doc*: string
@@ -117,7 +134,7 @@ type
 
   VendorContext* = object
     ## Facts about a file that maps are matched against.
-    format*: string      ## `segd` or `segy`.
+    format*: SeismicKind ## `skSegd` or `skSegy`.
     revision*: VendorRevision ## e.g. 2.1.
     manufacturer*: int   ## SEG-D GH#1 manufacturer code; -1 if unknown.
     serial*: int64       ## Manufacturer serial number; -1 if unknown.
@@ -128,15 +145,18 @@ type
     ## A vendor area handed to `decode`.
     kind*: VendorTargetKind
     blockIndex*: int     ## 1-based block within the area, -1 for the whole area.
-    blockType*: int
-    where*: string
-    headerName*: string
-    stanza*: string
-    extIndex*: int
+    blockType*: int      ## SEG-D 3.x block type byte, -1 if none.
+    where*: string       ## SEG-D 3.x: `generalHeader` or `traceHeader`.
+    headerName*: string  ## SEG-Y proprietary trace header name.
+    stanza*: string      ## SEG-Y stanza `COMPANY:NAME`.
+    extIndex*: int       ## SEG-D trace header extension number k, -1 if none.
 
-  VendorValueKind* = enum vvInt, vvFloat, vvText, vvBytes
+  VendorValueKind* = enum
+    ## The kind of a decoded value.
+    vvInt, vvFloat, vvText, vvBytes
 
   VendorValue* = object
+    ## A decoded field value.
     case kind*: VendorValueKind
     of vvInt: intVal*: int64
     of vvFloat: floatVal*: float64
@@ -146,15 +166,22 @@ type
     label*: string        ## Enum label, if the value has one.
     flags*: seq[string]   ## Names of set bits, for `bits` fields.
 
+  VendorField* = object
+    ## One decoded field of a `VendorBlock`.
+    name*: string        ## The field's name (`name[i]` inside a repeat).
+    value*: VendorValue
+
   VendorBlock* = object
     ## Decoded vendor data, beside the raw bytes the readers keep.
-    mapName*: string
-    name*: string
-    fields*: seq[(string, VendorValue)]
+    mapName*: string     ## The map (or code decoder) that decoded it.
+    name*: string        ## The target's name.
+    fields*: seq[VendorField]
 
-  VendorDecoder* = proc (bytes: openArray[byte], area: VendorArea, ctx: VendorContext,
-    blk: var VendorBlock): bool {.nimcall, raises: [CatchableError].}
-    ## A code decoder; returns false if it does not handle these bytes.
+  VendorDecoder* = proc (bytes: openArray[byte], area: VendorArea,
+    ctx: VendorContext): Option[VendorBlock] {.nimcall, raises: [CatchableError].}
+    ## A code decoder: the decoded block (its `mapName` is set to the name
+    ## the decoder was registered under), or none if it does not handle these
+    ## bytes.
 
   CodeDecoder = object
     manufacturer: int    ## -1 = any.
@@ -298,27 +325,35 @@ func atoms(n: NNode): seq[NNode] =
   for k in n.kids:
     if k.kind != nkTree: result.add k
 
+iterator trees(n: NNode): lent NNode =
+  # The tree children of `n` (its clauses).
+  for k in n.kids:
+    if k.kind == nkTree: yield k
+
 func child(n: NNode, tag: string): int =
   result = -1
   for i, k in n.kids:
     if k.kind == nkTree and k.tag == tag: return i
 
-proc intAtom(n: NNode, i = 0): int64 =
-  ## The i-th integer of a tree's atoms (a string "0xB0" counts too).
-  var k = 0
+proc intAtoms(n: NNode): seq[int64] =
+  ## The integers among a tree's atoms (a string "0xB0" counts too).
   for a in n.atoms:
     var x = a
     if a.kind in {nkStr, nkIdent}:
       var p: NNode
       if parseNumber(a.s, a.line, p) and p.kind == nkInt: x = p
-    if x.kind == nkInt:
-      if k == i: return x.i
-      inc k
-  mapError("(" & n.tag & ") needs an integer", n.line)
+    if x.kind == nkInt: result.add x.i
+
+proc intAtom(n: NNode, i = 0): int64 =
+  ## The i-th integer of a tree's atoms.
+  let ints = n.intAtoms
+  if i >= ints.len: mapError("(" & n.tag & ") needs an integer", n.line)
+  ints[i]
 
 proc boundedAtom(n: NNode, lo: int64, i = 0): int =
   let v = n.intAtom(i)
-  if v < lo or v > MaxOffset: mapError("(" & n.tag & ") must be " & $lo & ".." & $MaxOffset, n.line)
+  if v < lo or v > MaxOffset:
+    mapError("(" & n.tag & ") must be " & $lo & ".." & $MaxOffset, n.line)
   int(v)
 
 proc tagInt(n: NNode): int64 =
@@ -358,7 +393,7 @@ proc textAtom(n: NNode): string =
 
 # ---------------------------------------------------------------- compile --
 
-func encWidth(e: VendorEnc): int =
+func encWidth(e: VendorEncoding): int =
   case e
   of veU8, veI8: 1
   of veU16, veI16: 2
@@ -368,12 +403,18 @@ func encWidth(e: VendorEnc): int =
   of veFixedPt: 5
   of veBcd, veAscii, veEbcdic, veRaw: 0
 
-proc compileField(n: NNode): FieldPlan =
-  result = FieldPlan(name: n.textAtom, scale: 1.0)
+proc seismicKindAtom(n: NNode): SeismicKind =
+  # `(format segd)` or `(format segy)`.
+  case n.textAtom.toLowerAscii
+  of "segd": skSegd
+  of "segy": skSegy
+  else: mapError("(format) is segd or segy, not " & n.textAtom, n.line)
+
+proc compileField(n: NNode): VendorFieldPlan =
+  result = VendorFieldPlan(name: n.textAtom, scale: 1.0)
   var atSeen, encSeen = false
   var lenBytes, lenNibbles = 0
-  for k in n.kids:
-    if k.kind != nkTree: continue
+  for k in n.trees:
     case k.tag
     of "at":
       result.byteOff = k.boundedAtom(1) - 1
@@ -389,14 +430,14 @@ proc compileField(n: NNode): FieldPlan =
         if a.kind == nkIdent and a.s == "n": nib = true
       if nib: lenNibbles = v else: lenBytes = v
     of "enc":
-      try: result.enc = parseEnum[VendorEnc](k.textAtom)
-      except ValueError: mapError("field " & result.name & ": unknown encoding " & k.textAtom, k.line)
+      try: result.enc = parseEnum[VendorEncoding](k.textAtom)
+      except ValueError:
+        mapError("field " & result.name & ": unknown encoding " & k.textAtom, k.line)
       encSeen = true
     of "byteOrder":
-      result.hasOrder = true
       case k.textAtom.toLowerAscii
-      of "big": result.order = boBig
-      of "little": result.order = boLittle
+      of "big": result.order = some(boBig)
+      of "little": result.order = some(boLittle)
       else: mapError("(byteOrder) is big or little", k.line)
     of "scale":
       result.scale = k.floatAtom
@@ -405,20 +446,17 @@ proc compileField(n: NNode): FieldPlan =
       result.offset = k.floatAtom
       result.scaled = true
     of "unit": result.unit = k.textAtom
-    of "trim": result.trim = k.textAtom.toLowerAscii
-    of "sentinel":
-      result.hasSentinel = true
-      result.sentinel = k.intAtom
+    of "trim":
+      try: result.trim = parseEnum[VendorTrim](k.textAtom.toLowerAscii)
+      except ValueError: mapError("(trim) is left, right, both or none", k.line)
+    of "sentinel": result.sentinel = some(k.intAtom)
     of "enum":
-      for e in k.kids:
-        if e.kind == nkTree:
-          result.enums.add (e.tagInt, e.textAtom)
+      for e in k.trees: result.enums.add VendorEnumLabel(value: e.tagInt, label: e.textAtom)
     of "bits":
-      for e in k.kids:
-        if e.kind == nkTree:
-          let b = e.tagInt
-          if b < 0 or b > 63: mapError("bit numbers are 0..63", e.line)
-          result.bits.add (int(b), e.textAtom)
+      for e in k.trees:
+        let b = e.tagInt
+        if b < 0 or b > 63: mapError("bit numbers are 0..63", e.line)
+        result.bits.add VendorBitFlag(bit: int(b), name: e.textAtom)
     of "when":
       mapError("field " & result.name & ": (when) conditions are not supported yet", k.line)
     else:
@@ -436,15 +474,15 @@ proc compileField(n: NNode): FieldPlan =
     if result.lowNibble: mapError("only bcd fields may start at a low nibble", n.line)
     result.len = w
   else:
-    if lenBytes == 0: mapError("field " & result.name & " (" & $result.enc & ") needs (len)", n.line)
+    if lenBytes == 0:
+      mapError("field " & result.name & " (" & $result.enc & ") needs (len)", n.line)
     if result.lowNibble: mapError("only bcd fields may start at a low nibble", n.line)
     result.len = lenBytes
   if result.nibbles == 0: result.nibbles = 2 * result.len
 
-proc compileRepeat(n: NNode): RepeatPlan =
-  result = RepeatPlan(count: -1)
-  for k in n.kids:
-    if k.kind != nkTree: continue
+proc compileRepeat(n: NNode): VendorRepeatPlan =
+  result = VendorRepeatPlan(count: -1)
+  for k in n.trees:
     case k.tag
     of "count":
       let r = k.child("ref")
@@ -464,8 +502,7 @@ proc compileRepeat(n: NNode): RepeatPlan =
 proc compileTarget(n: NNode): VendorTarget =
   result = VendorTarget(blockIndex: -1, blockType: -1, extIndex: -1)
   var kindSeen = false
-  for k in n.kids:
-    if k.kind != nkTree: continue
+  for k in n.trees:
     case k.tag
     of "kind":
       try: result.kind = parseEnum[VendorTargetKind](k.textAtom)
@@ -485,7 +522,8 @@ proc compileTarget(n: NNode): VendorTarget =
   if result.name.len == 0: result.name = $result.kind
   var names: seq[string]
   for f in result.fields:
-    if f.name in names: mapError("duplicate field " & f.name & " in target " & result.name, n.line)
+    if f.name in names:
+      mapError("duplicate field " & f.name & " in target " & result.name, n.line)
     names.add f.name
   for r in result.repeats:
     if r.countRef.len > 0 and r.countRef notin names:
@@ -504,16 +542,14 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
   let m = roots[found]
   result = VendorMap(name: m.textAtom, source: source,
     match: VendorMatch(serialMin: -1, serialMax: -1))
-  for k in m.kids:
-    if k.kind != nkTree: continue
+  for k in m.trees:
     case k.tag
     of "version": result.version = k.boundedAtom(0)
     of "doc": result.doc = k.textAtom
     of "match":
-      for c in k.kids:
-        if c.kind != nkTree: continue
+      for c in k.trees:
         case c.tag
-        of "format": result.match.format = c.textAtom.toLowerAscii
+        of "format": result.match.format = some(c.seismicKindAtom)
         of "rev":
           if not c.revAtom(0, result.match.revMin): mapError("(rev) needs a revision", c.line)
           if not c.revAtom(1, result.match.revMax): result.match.revMax = result.match.revMin
@@ -522,8 +558,10 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
           for a in c.atoms:
             if a.kind == nkInt: result.match.manufacturers.add int(a.i)
         of "serial":
-          result.match.serialMin = c.intAtom(0)
-          result.match.serialMax = try: c.intAtom(1) except ValueError: result.match.serialMin
+          let bounds = c.intAtoms
+          if bounds.len == 0: mapError("(serial) needs a number", c.line)
+          result.match.serialMin = bounds[0]
+          result.match.serialMax = if bounds.len > 1: bounds[1] else: bounds[0]
         of "textContains": result.match.textContains.add c.textAtom
         else: mapError("unknown match clause (" & c.tag & ")", c.line)
     of "target": result.targets.add compileTarget(k)
@@ -552,6 +590,7 @@ proc vendorSearchPath*(): seq[string] =
     if d.len > 0: result.add d
 
 proc addMap*(reg: var VendorRegistry, m: sink VendorMap) =
+  ## Adds a loaded map to the registry.
   reg.maps.add m
 
 proc loadVendorMaps*(reg: var VendorRegistry, paths: openArray[string], log: var DiagLog) =
@@ -583,8 +622,8 @@ proc registerVendorDecoder*(reg: var VendorRegistry, manufacturer: int,
 func specificity(m: VendorMatch, ctx: VendorContext): int =
   # -1 if the map does not apply, else the number of clauses that hold.
   result = 0
-  if m.format.len > 0:
-    if m.format != ctx.format: return -1
+  if m.format.isSome:
+    if m.format.get != ctx.format: return -1
     inc result
   if m.hasRev:
     let r = (ctx.revision.major, ctx.revision.minor)
@@ -611,25 +650,26 @@ func targetMatches(t: VendorTarget, a: VendorArea): bool =
     (t.where.len == 0 or cmpIgnoreCase(t.where, a.where) == 0) and
     (t.headerName.len == 0 or
       cmpIgnoreCase(headerKey(t.headerName), headerKey(a.headerName)) == 0) and
-    (t.stanza.len == 0 or cmpIgnoreCase(t.stanza.replace(" ", ""), a.stanza.replace(" ", "")) == 0) and
+    (t.stanza.len == 0 or
+      cmpIgnoreCase(t.stanza.replace(" ", ""), a.stanza.replace(" ", "")) == 0) and
     (t.extIndex < 0 or t.extIndex == a.extIndex)
 
 # ----------------------------------------------------------------- decode --
 
-func trimText(s, how: string): string =
+func trimText(s: string, how: VendorTrim): string =
   case how
-  of "left": s.strip(trailing = false)
-  of "right": s.strip(leading = false)
-  of "both": s.strip
-  else: s
+  of trimNone: s
+  of trimLeft: s.strip(trailing = false)
+  of trimRight: s.strip(leading = false)
+  of trimBoth: s.strip
 
-proc decodeField(f: FieldPlan, b: openArray[byte], base: int, order: ByteOrder,
-    v: var VendorValue): bool =
-  # False when the field does not fit `b` or holds its sentinel.
+proc decodeField(f: VendorFieldPlan, b: openArray[byte], base: int,
+    order: ByteOrder): Option[VendorValue] =
+  # None when the field does not fit `b` or holds its sentinel.
   let pos = base + f.byteOff
   if pos < 0 or pos * 2 + ord(f.lowNibble) + f.nibbles > 2 * b.len:
-    return false
-  let o = if f.hasOrder: f.order else: order
+    return none(VendorValue)
+  let o = f.order.get(order)
   var iv: int64
   var isInt = true
   var fv: float64
@@ -639,7 +679,8 @@ proc decodeField(f: FieldPlan, b: openArray[byte], base: int, order: ByteOrder,
   of veU16: iv = int64(getNum[uint16](b, pos, o))
   of veI16: iv = int64(getNum[int16](b, pos, o))
   of veU24, veI24:
-    let u = if o == boLittle: (uint32(b[pos+2]) shl 16) or (uint32(b[pos+1]) shl 8) or uint32(b[pos])
+    let u = if o == boLittle:
+              (uint32(b[pos + 2]) shl 16) or (uint32(b[pos + 1]) shl 8) or uint32(b[pos])
             else: beU24(b, pos)
     iv = if f.enc == veI24: int64(cast[int32](u shl 8) shr 8) else: int64(u)
   of veU32: iv = int64(getNum[uint32](b, pos, o))
@@ -666,37 +707,34 @@ proc decodeField(f: FieldPlan, b: openArray[byte], base: int, order: ByteOrder,
     for n in first ..< first + f.nibbles:
       let d = nibble(b, n)
       if d > 9:
-        v = VendorValue(kind: vvBytes, bytes: b[pos ..< pos + (f.nibbles + ord(f.lowNibble) + 1) div 2],
-          unit: f.unit, label: "invalid BCD")
-        return true
+        let last = pos + (f.nibbles + ord(f.lowNibble) + 1) div 2
+        return some VendorValue(kind: vvBytes, bytes: b[pos ..< last], unit: f.unit,
+          label: "invalid BCD")
       iv = iv * 10 + int64(d)
   of veAscii, veEbcdic:
     var s = newString(f.len)
     for i in 0..<f.len:
       s[i] = if f.enc == veAscii: char(b[pos + i]) else: char(ebcdicToLatin1[b[pos + i]])
-    v = VendorValue(kind: vvText, text: trimText(s, f.trim), unit: f.unit)
-    return true
+    return some VendorValue(kind: vvText, text: trimText(s, f.trim), unit: f.unit)
   of veRaw:
-    v = VendorValue(kind: vvBytes, bytes: b[pos ..< pos + f.len], unit: f.unit)
-    return true
-  if isInt:
-    if f.hasSentinel:
-      # Compare the raw bit pattern: (sentinel 0xFFFFFF) matches an i24 of -1.
-      let w = encWidth(f.enc)
-      let mask = if f.enc == veBcd or w >= 8: not 0'u64 else: (1'u64 shl (8 * w)) - 1
-      if (cast[uint64](iv) and mask) == (cast[uint64](f.sentinel) and mask): return false
-    if f.scaled:
-      v = VendorValue(kind: vvFloat, floatVal: float64(iv) * f.scale + f.offset, unit: f.unit)
-    else:
-      v = VendorValue(kind: vvInt, intVal: iv, unit: f.unit)
-    for (code, label) in f.enums:
-      if code == iv: v.label = label
-    for (bit, name) in f.bits:
-      if ((cast[uint64](iv) shr bit) and 1) != 0: v.flags.add name
-  else:
-    v = VendorValue(kind: vvFloat, floatVal: (if f.scaled: fv * f.scale + f.offset else: fv),
-      unit: f.unit)
-  result = true
+    return some VendorValue(kind: vvBytes, bytes: b[pos ..< pos + f.len], unit: f.unit)
+  if not isInt:
+    return some VendorValue(kind: vvFloat,
+      floatVal: (if f.scaled: fv * f.scale + f.offset else: fv), unit: f.unit)
+  if f.sentinel.isSome:
+    # Compare the raw bit pattern: (sentinel 0xFFFFFF) matches an i24 of -1.
+    let w = encWidth(f.enc)
+    let mask = if f.enc == veBcd or w >= 8: not 0'u64 else: (1'u64 shl (8 * w)) - 1
+    if (cast[uint64](iv) and mask) == (cast[uint64](f.sentinel.get) and mask):
+      return none(VendorValue)
+  var v = if f.scaled:
+            VendorValue(kind: vvFloat, floatVal: float64(iv) * f.scale + f.offset, unit: f.unit)
+          else: VendorValue(kind: vvInt, intVal: iv, unit: f.unit)
+  for e in f.enums:
+    if e.value == iv: v.label = e.label
+  for b in f.bits:
+    if ((cast[uint64](iv) shr b.bit) and 1) != 0: v.flags.add b.name
+  some(v)
 
 proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
     blk: var VendorBlock, problems: var seq[string]) =
@@ -704,18 +742,18 @@ proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
   ## listed in `problems` (sentinel values are simply absent).
   blk.name = t.name
   for f in t.fields:
-    var v: VendorValue
-    if decodeField(f, b, 0, order, v):
-      blk.fields.add (f.name, v)
+    let v = decodeField(f, b, 0, order)
+    if v.isSome:
+      blk.fields.add VendorField(name: f.name, value: v.get)
     elif f.byteOff + (f.nibbles + 1) div 2 > b.len:
       problems.add "field " & f.name & " lies beyond the " & $b.len & "-byte area"
   for r in t.repeats:
     var count = r.count
     if r.countRef.len > 0:
       count = -1
-      for (n, v) in blk.fields:
-        if n == r.countRef and v.kind == vvInt:
-          count = int(max(min(v.intVal, 1_000_000), -2))
+      for f in blk.fields:
+        if f.name == r.countRef and f.value.kind == vvInt:
+          count = int(max(min(f.value.intVal, 1_000_000), -2))
       if count == -1:
         problems.add "repeat count field " & r.countRef & " is missing"
         count = 0
@@ -728,27 +766,26 @@ proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
       count = fit
     for i in 0..<count:
       for f in r.fields:
-        var v: VendorValue
-        if decodeField(f, b, r.byteOff + i * r.stride, order, v):
-          blk.fields.add (f.name & "[" & $i & "]", v)
+        let v = decodeField(f, b, r.byteOff + i * r.stride, order)
+        if v.isSome: blk.fields.add VendorField(name: f.name & "[" & $i & "]", value: v.get)
 
 func applies*(m: VendorMap, ctx: VendorContext): bool =
   ## True when every clause of the map's `match` holds for `ctx`.
   specificity(m.match, ctx) >= 0
 
 proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: openArray[byte],
-    blk: var VendorBlock, log: var DiagLog, loc = Location()): bool =
+    log: var DiagLog, loc = Location()): Option[VendorBlock] =
   ## Decodes a vendor area: a registered code decoder for (manufacturer,
   ## kind) first, then the most specific matching map with a target for the
-  ## area. Returns false when nothing applies (the caller keeps the raw bytes
-  ## and may report `dcVendorBlock`). Problems become diagnostics.
+  ## area. None when nothing applies (the caller keeps the raw bytes and may
+  ## report `dcVendorBlock`). Problems become diagnostics.
   for d in reg.decoders:
     if d.kind == area.kind and (d.manufacturer < 0 or d.manufacturer == ctx.manufacturer):
       try:
-        var b = VendorBlock(mapName: d.name)
-        if d.decoder(bytes, area, ctx, b):
-          blk = b
-          return true
+        var b = d.decoder(bytes, area, ctx)
+        if b.isSome:
+          b.get.mapName = d.name
+          return b
       except CatchableError as e:
         log.report(sevWarning, dcVendorMap, "vendor decoder " & d.name & " failed: " & e.msg,
           loc = loc)
@@ -769,29 +806,30 @@ proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: o
         elif s == bestSpec:
           tie = true
   if best < 0:
-    return false
-  let m = reg.maps[best]
+    return none(VendorBlock)
+  template m: untyped = reg.maps[best]
   if tie:
     log.report(sevWarning, dcVendorMap, "several vendor maps match this " & $area.kind &
       " equally; using " & m.name, loc = loc)
-  blk = VendorBlock(mapName: m.name)
+  var blk = VendorBlock(mapName: m.name)
   var problems: seq[string]
   for t in m.targets:
     if targetMatches(t, area):
       t.decodeTarget(bytes, ctx.byteOrder, blk, problems)
   for p in problems:
     log.report(sevWarning, dcVendorMap, m.name & ": " & p, loc = loc)
-  result = true
+  some(blk)
 
-func get*(blk: VendorBlock, name: string): VendorValue =
-  ## The value of field `name`. Raises `KeyError` if absent.
-  for (n, v) in blk.fields:
-    if n == name: return v
+func `[]`*(blk: VendorBlock, name: string): lent VendorValue =
+  ## The value of field `name`. Raises `KeyError` if it was not decoded.
+  for f in blk.fields:
+    if f.name == name: return f.value
   raise newException(KeyError, "vendor field '" & name & "' not decoded")
 
 func contains*(blk: VendorBlock, name: string): bool =
-  for (n, _) in blk.fields:
-    if n == name: return true
+  ## True when field `name` was decoded (`name in blk`).
+  for f in blk.fields:
+    if f.name == name: return true
 
 func toFloat*(v: VendorValue): float64 =
   ## A numeric value as float64; NaN for text and bytes.

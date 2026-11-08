@@ -123,7 +123,7 @@ block scaffold_escapes_and_ranges:
   b[3200 + 340] = '\x07'
   writeFile(p, b)
   let reg = VendorRegistry()
-  let s = scaffold(p, reg)
+  let s = scaffoldVendorMap(p, reg)
   doAssert s.len == 2, $s.len
   let nif = s.toNif(name = "my \"map\" é")
   writeFile(tmp / "sc.nif", nif)
@@ -131,8 +131,8 @@ block scaffold_escapes_and_ranges:
   doAssert m.name == "my \"map\" é" and m.targets.len == 2
   var reg2 = VendorRegistry()
   reg2.addMap m
-  doAssert scaffold(p, reg2).len == 0
+  doAssert scaffoldVendorMap(p, reg2).len == 0
   doAssert "(at 333)" in nif and "(at 101)" in nif # 3533-3600 and 3301-3500, 1-based in 400
-  doAssert scaffold(ex / "BO_3D-Inglewood_rev21_v7.sgy", reg).toNif == ""
+  doAssert scaffoldVendorMap(ex / "BO_3D-Inglewood_rev21_v7.sgy", reg).toNif == ""
 
 echo "theadernif: ok"
