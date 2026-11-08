@@ -554,6 +554,76 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
         is set. IC fails in this container even on a one-line program (the bundled `nifler`
         is musl-linked, and a source build reports "modules stopped for imports discovered
         during sem"), so it stays opt-in.
+- [ ] 12.5 Boundary names from the core (owner, 2026-11-08; do this before 12.1). "The names
+      should be derived from the core, and if necessary rename the core. This is a Nim library
+      first, everything else second, but it should not appear completely foreign outside of
+      Nim, and the maintenance should be negligible with Nim's metaprogramming." 12.2's
+      `api.nim` re-listed the library under its own names (`openFile`, `read`, `traceCount`),
+      so the C, Python and Nim names drifted apart.
+
+      Design:
+      - **Annotate the core itself.** `{.segApi.}` goes on the public core procs
+        (`traceindex`, `headerfields`, `gathers`, `edit`, `join`, `diagnostics`, `convert`,
+        `revconvert`); `{.segHandle.}` on the core types that cross as handles (`SeismicFile`,
+        `HeaderEditor`, `SurveyGeometry`, `DiagLog`); `{.segField.}` /
+        `{.segField(readonly).}` on public fields to expose. The pragmas live in
+        `abi/pragmas.nim` (std only, no cycles). Without `-d:segCapi` they do nothing. With
+        it, they record the resolved signature in a `macrocache` table, and `segFinish` in
+        `abi/api.nim` generates every wrapper, the header and the Python module. The doc
+        comments come from the core procs, so they are written once.
+      - **`api.nim` keeps only what the core cannot say:** the dtype-erased handles for the
+        generic `Tensor[T]` and `Prefetcher[T]`, the reads that build them, DLPack, and
+        `abiVersion`/`version`/`statusName`. Each of these adapters must overload a core
+        routine with the same name and parameter names, checked at compile time. A
+        `typedesc`/generic `T` becomes `dtype`; core `var` out-parameters and trailing
+        defaulted ones may be dropped. When the adapter has no doc, it inherits the core
+        routine's. `abiOnly` marks the few with no core counterpart.
+      - **Names, all mechanical:**
+        - Python: the type name, or snake_case of the proc name.
+        - C: `seg_<snake type>_<snake proc>` for methods (first parameter a handle),
+          `seg_<snake proc>` for free procs.
+        - Constructors: `initX`/`newX` → Python `X(...)`, C `seg_<x>_new`.
+        - Protocols: `len` → `__len__`; `[]` → `__getitem__` (IndexError, negative indices)
+          plus `__iter__`; `next` → the iterator protocol too.
+        - A `func` with only the receiver, or a `segField`, becomes a Python property;
+          procs are methods.
+        - Enums: `SEG_<SNAKE TYPE>_<SNAKE $value>`. Structs: `Seg<Type>`.
+        - No `c=`/`py=` overrides. The one exception is the C/Python name of the two
+          dtype-erased handles (`Tensor`, `Prefetcher`).
+      - **Overloads.** C cannot overload. Only a `Slice[int]` / `openArray[int]` pair at the
+        same parameter is allowed: C gets `<name>` (list) and `<name>_range`
+        (`<p>_first, <p>_last`, inclusive like Nim); Python gets one function that takes a
+        `range` or a sequence. Any other overload of an exported name is a compile error.
+      - **Structs** get a generated C mirror type and conversions. `int` → `int64_t`,
+        enum → `int32_t` (checked on input), `Slice[int]` → `SegSlice {a, b}`, nested
+        objects nest, and `string` → `const char*`, which is allowed only in `lent`
+        results, borrowed from the receiver. So core types keep any Nim layout.
+        - Object parameters: C passes a pointer (NULL = `T()`), with
+          `seg_init_<snake T>(T*)` for its defaults. Python passes a dict of the fields to
+          change (nested: a dict or a tuple).
+      - **Errors:**
+        - Public core entry points raise `ValueError` on bad caller input (indices,
+          ranges, missing keys) instead of asserting. The C boundary must not crash, and
+          `-d:danger` release builds drop bound checks.
+        - A `DiagLog` result that `isFatal` fails with the log attached (`SEG_ERR_IO` for
+          `dcIo`, else `SEG_ERR_FORMAT`).
+        - A `bool` result stays a bool (e.g. a refused edit).
+      - **Core renames and additions** (public API change, approved by this request):
+        - Trace ranges are `Slice[int]` everywhere, and lists are `openArray[int]`, both
+          named `traces`: `readTraces`, `readTracesInto`, `newPrefetcher`, `maxSamples`,
+          `componentGroups`. `Prefetcher.seek(span)`.
+        - `SeismicFile` gains `maxSamples()`, `recordCount`, `traceEntry`, `traceKeys`,
+          `gathers`, `componentGroupIds`, `applySurvey`, and raising
+          `traceField`/`recordField`/`fileField` overloads (the `bool` + `var` forms stay).
+          `SeismicKind` gains `skUnknown`.
+        - `HeaderEditor`: `setField` → `setTraceField` / `setFileField` (with
+          `setRecordField`), and `currentField` → `currentTraceField`.
+        - `SurveyGeometry` absorbs `LineNames` (`lineNames`, `trailingDigits`) and gains
+          `initSurveyGeometry`, `addSource`/`addReceiver`, `mapLine`,
+          `addSps(path)`/`addP1(path)`, `sourceCount`/`receiverCount`.
+        - `DiagLog` gains `[]`.
+      - ABI version 3. `abi_test.c`, `test_pyapi.py`, the `ttargets` host and the docs
+        follow the new names.
 - [ ] 12.3 Apply the approved 12.1 findings, one module per commit, tests green after each.
 - [ ] 12.4 Review by an agent; fix its findings.
 
