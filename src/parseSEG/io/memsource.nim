@@ -46,7 +46,7 @@ proc flush*(s: MemFileSource) =
 method readRecordImpl*(s: MemFileSource; buf: var seq[byte]; maxLen: int): RecordKind {.
     raises: [CatchableError].} =
   let n = int(max(0'i64, min(int64(min(maxLen, s.chunk)), s.size - s.offset)))
-  buf.setLen n
+  buf.setLenUninit n # overwritten by the copy
   if n > 0: copyMem(addr buf[0], addr s.memory[s.offset], n)
   s.dataOffset = s.offset
   s.offset += n

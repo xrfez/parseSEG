@@ -43,7 +43,7 @@ proc unread*(p: var PushbackInput, data: openArray[byte]) =
   else:
     let rest = p.pending.len - p.pendingPos
     if rest == 0:
-      p.pending.setLen data.len
+      p.pending.setLenUninit data.len # filled below
     else:
       var grown = newSeqUninit[byte](data.len + rest)
       copyMem(addr grown[data.len], addr p.pending[p.pendingPos], rest)
@@ -79,7 +79,7 @@ proc readInto*(p: var PushbackInput, buf: var seq[byte], n: int64) =
   var got = 0
   while got < n:
     let step = int(min(n - got, ReadChunk))
-    buf.setLen got + step
+    buf.setLenUninit got + step # filled by readAvail
     let k = p.readAvail(buf.toOpenArray(got, got + step - 1))
     got += k
     if k < step:

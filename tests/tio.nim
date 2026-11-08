@@ -3,7 +3,7 @@
 
 import std/[assertions, os]
 import parseSEG/common/[errors, diagnostics]
-import parseSEG/io/[records, diskio, tapeimage, tapedevice, pushback]
+import parseSEG/io/[records, diskio, tapeimage, tapedevice, pushback, memsource]
 
 let tmp = getTempDir() / "parseseg_tio"
 createDir tmp
@@ -255,3 +255,34 @@ block memory_tape_head_is_clamped:
   tape.pos = 99
   tape.spaceFiles(-1)
   doAssert tape.pos == 1
+
+block reused_buffers_hold_exactly_the_bytes_read:
+  # Task 13.2: sources size their buffers uninitialized (zeroing a 1 MB
+  # buffer per read cost more than the read); a reused buffer full of old
+  # bytes must still come back holding exactly the medium's bytes.
+  createDir tmp
+  let path = tmp / "reuse.bin"
+  let data = bytes(3 * 1024 + 17, 5)
+  var s = newString(data.len)
+  for i, c in data: s[i] = char(c)
+  writeFile(path, s)
+  for src in [RecordSource(openDiskSource(path)), RecordSource(openMemFileSource(path))]:
+    var buf = newSeq[byte](1 shl 16)
+    for b in buf.mitems: b = 0xEE
+    var got: seq[byte]
+    while src.readRecord(buf, 1000) == rkData:
+      doAssert buf.len <= 1000
+      got.add buf
+    doAssert got == data
+    src.close()
+  var src2: RecordSource = openDiskSource(path)
+  var p = initPushbackInput(src2)
+  var buf = newSeq[byte](64)
+  for b in buf.mitems: b = 0xEE
+  p.readInto(buf, 2000)
+  doAssert buf == data[0 ..< 2000]
+  p.unread(buf.toOpenArray(1990, 1999))
+  var tail: seq[byte]
+  p.readInto(tail, 10 + data.len - 2000)
+  doAssert tail == data[1990 .. ^1]
+  src2.close()

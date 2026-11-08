@@ -84,7 +84,7 @@ proc device*(s: DeviceSource): TapeDevice {.inline.} =
 
 method readRecordImpl*(s: DeviceSource; buf: var seq[byte]; maxLen: int): RecordKind {.
     raises: [CatchableError].} =
-  buf.setLen max(s.maxBlock, maxLen)
+  buf.setLenUninit max(s.maxBlock, maxLen) # filled by readBlock
   var n = 0
   result = s.dev.readBlock(buf, n)
   buf.setLen n

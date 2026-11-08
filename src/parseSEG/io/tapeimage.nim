@@ -71,7 +71,7 @@ method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): Rec
         " (bad or private record) is not supported", start)
     else:
       let n = int(word)
-      buf.setLen n
+      buf.setLenUninit n # filled by the read
       s.dataOffset = s.offset
       if readBuffer(s.f, addr buf[0], n) < n:
         raiseTruncated("tape image ends inside a " & $n & "-byte record", s.dataOffset)

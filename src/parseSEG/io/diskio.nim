@@ -51,7 +51,7 @@ method readRecordImpl*(s: DiskSource; buf: var seq[byte]; maxLen: int): RecordKi
   let want =
     if s.size >= 0: int(max(0'i64, min(int64(maxLen), s.size - s.offset)))
     else: maxLen
-  buf.setLen want
+  buf.setLenUninit want # filled by the read (zeroing it cost more than the copy)
   let n = if want > 0: readBuffer(s.f, addr buf[0], want) else: 0
   buf.setLen n
   s.dataOffset = s.offset
