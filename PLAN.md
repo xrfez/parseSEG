@@ -492,10 +492,186 @@ Text formats, so no sample files are needed (owner, 2026-11-07; real samples wil
 ### Phase 12: Idiomatic Nim pass (owner, 2026-11-07)
 Go through the project and make it read like idiomatic Nim, guided by the nim-* skills
 (style guide, API design, code organization, error handling, doc comments).
-- [ ] 12.1 Audit by an agent, module by module, against those skills. Output: a findings list
+- [x] 12.1 Audit by an agent, module by module, against those skills. Output: a findings list
       in this file, ranked. Each finding is marked either:
       - internal: no API change;
       - public API change: needs owner approval, since it breaks callers.
+
+      **Findings (2026-11-08).** Four read-only agents (common/io/abi, segy/convert,
+      segd/vendor, model/survey/cli) did the audit. The high-impact claims were re-checked
+      against the code. Ranked within each group. "C/Py" means the change also reaches the C ABI
+      and the Python module (through the `segApi` names).
+
+      **A. Bugs found by the audit (internal; fix first in 12.3)**
+      - A1 (high) Accidental deep copy of the whole `TraceIndex`:
+        - `headerfields.nim:329` `let ix = f.index` in `sampleIntervalUs` (`expandArc` shows
+          `=copy`); the CLI (`cli.nim:269`) calls it once per trace.
+        - The same copy at `headerfields.nim:188` (a `segdRecords[...]` copy on every
+          record-field read) and `cli.nim:249,252`.
+        - Fix: read through `f.index` directly, or bind with a `template`.
+      - A2 `SegdSourceDescription` accessors (`rev3.nim:415-425`: `phaseAngle`, `vibratorType`,
+        `phaseControl`, `depth`, `size`) read `s.raw`, not the decoded `typeSpecific15/28`
+        fields, so they go stale after an edit. Use `beI16`, not `cast[int16](beU16 ...)`.
+      - A3 Three version strings: `cli.nim:12` and `convert.nim:56` say 0.2.0, while
+        `api.nim:27` and the nimble file say 0.3.0. Keep one const and derive the rest
+        (`-d:NimblePkgVersion` with a fallback).
+      - A4 `maps.nim:499`: the loader takes the *last* `(vendormap)` root, not the first.
+      - A5 File handles leak on exceptions: `convert.nim:692` and `scaffold.nim:170`. Use
+        `try/finally` or `defer`.
+      - A6 `segy/writer.nim:169`: a `doAssert` on the user-settable `tapeLabel` length. Move it
+        to `checkFile` as a `problem` (validate first; no Defect for user input).
+      - A7 `tapeimage.nim:65`: prints decimal after "0x". Use `toHex`.
+      - A8 The C boundary relies on catching Defects:
+        - `DiagLog.[]` raises `IndexDefect` itself (`diagnostics.nim:122`);
+        - the generated wrappers catch `IndexDefect` and bare `Exception` (`segapi.nim:196-198`),
+          so `--panics:on` would abort the host;
+        - check `0 ..< len` in the wrapper and catch `CatchableError` only.
+        - Same rule for the bare `Exception` catches in `dlpackDeleter` (`api.nim:144`),
+          `segRelease_*` (`segapi.nim:501`) and `=destroy(MapOwner)` (`traceindex.nim:267`).
+
+      **B. Internal improvements (no API change), ranked**
+      - B1 Hot-path copies:
+        - `join.addSps`: a nested `line` captures `f`, so the whole `SpsFile` is copied, and
+          `mgetOrPut` copies the runs (O(n²) per record).
+        - `segy/writer.writeTrace` allocates per trace; `segy/reader.trailerStartsHere` does
+          `newSeq(3200)` per trace; `exttext.nim:259` copies `@rec`.
+        - `fieldValue` copies the layout through `layoutOf`.
+        - `scaffold.nim:56` re-hashes and builds string keys per byte.
+        - `revconvert.nim:664` `var o = t`; `segd/writer.nim:73` reslices `pending`.
+        - `pushback.unread/readAvail` copy; `MemoryTape.usedBytes` is O(n) per block
+          (O(n²) writes).
+      - B2 Make the Rev 2/3 and SEG-Y/SEG-D duplication one code path:
+        - `convert.finishOutput` vs `revconvert.nim:703-733` vs the tmp-then-rename writers in
+          sps/p1 → one `common/outputfile.nim`;
+        - the segd reader's trace read, format resolution and count checks (rev 2 vs 3);
+        - the segd writer's `checkRecord` vs `checkRev3Record`;
+        - three trimmed-text helpers; NIF escaping four times (edit, headernif, cli, scaffold);
+        - the keys-required check four times, the slice check three times, `rowPtr` twice,
+          `fit` twice;
+        - nine copies of the `splitName` + `locate*` boilerplate (`headerfields`, `edit`).
+      - B3 Split the long procs: `convertSegdToSegy` (~200 lines; repeated `isRev3` dispatch;
+        `clampI32`) and `convertSegdRevision` (~145 lines → `convertRecord`). Use `std/times`
+        in `fillTime`.
+      - B4 Closed sets as enums: the magic note ids in `convert.nim:86` and `revconvert.nim:86`
+        (`set[0..63]`); `gathers` `by: int`; the `scaffold` kind string; the CLI scope `char`
+        (`HeaderScope` exists). Rename `Losses.count` to `add`.
+      - B5 `segapi.nim` (1397 lines):
+        - split the runtime C helpers (`abi/runtime.nim`) from the generator;
+        - pass one `Bindings` state object instead of 17 compile-time globals;
+        - make `pyMode` an enum, not `\x02` strings, and the record info a `nnkPar`, not `\x1F`
+          strings;
+        - drop the dead branch (`:1136`) and unused params (`checkRing.cols`,
+          `stringArg.name`).
+      - B6 Purity lies: `{.cast(noSideEffect).}` in the `func`s `api.view` and `atEnd`. Keep
+        `shape` current at creation and add a pure prefetcher query; they stay `func` (Python
+        properties).
+      - B7 Error handling:
+        - give `convertFile` `{.raises: [].}`, since it is documented as "never raises";
+        - merge the identical `XmlError`/`CatchableError` branches (`layout.nim:233`);
+        - stop using exceptions as control flow (`maps.nim:524`);
+        - rename `SkipRecord` to `SkipRecordError`;
+        - `prefetch.decodeChunk` should catch `SegError`, not `CatchableError`.
+      - B8 `ptr` and `addr` used to dodge `var`: `Ctx.f: ptr SpsFile/P1File` (sps/p1) and
+        `headernif.nim:465`.
+      - B9 CLI:
+        - `quit` from helpers → raise, and let `run` map it to an exit status;
+        - dead forward declarations (291-292); unused `std/tables`; use `CountTable`;
+        - the no-op `contextOf`; the vendor search path built twice.
+      - B10 Make the `api.nim` adapter fields private (`dt`, `t32`, ..., `file`). Not
+        re-exported.
+      - B11 Doc comments:
+        - add `##` to the undocumented exported symbols the reports list (diagnostics, io,
+          segapi runtime, segy binheader/exttext/reader/writer, segd headers/rev3/reader,
+          maps, keys, traceindex, gathers, headerfields, edit, sps/p1);
+        - fix the stale docs: `segd/reader.nim:24`, `segd/writer.nim:1`, `p1.nim:16`
+          (`auAuto`), and the broken wrap at `traceindex.nim:285`.
+      - B12 Local polish:
+        - `unsafeAddr` → `addr` (7 places);
+        - `var` → `let`; `x != x` → `isNaN`;
+        - `3200`/`32` → `TextHeaderSize`/`SegdBlockSize`;
+        - flag loops → early return; `continue`;
+        - lines over 100 characters;
+        - `{.inline.}` on multi-statement generics (`fieldlayout`);
+        - cryptic private names (`Ak`, `TInfo`, ...);
+        - validate the `segApi` options outside `-d:segCapi`;
+        - SEG-Y `decodeVendorAreas` takes no file name (`apply.nim:105,123`).
+
+      **C. Public API changes (need owner approval).** Nim only unless marked C/Py.
+      - C1 Behaviour: make bad caller input consistent with 12.5 (`ValueError`):
+        - `sampleIntervalUs` returns NaN (C/Py);
+        - `Prefetcher.traceAt` returns -1 (C/Py);
+        - `maxSamples(traces)` raises an `IndexDefect`;
+        - `IOError` is raised for caller mistakes (`headernif.nim:139`, `edit.nim:377`, C/Py
+          via `openEditor`);
+        - `doAssert` in `sps.encode(spsAuto)`.
+      - C2 Behaviour: `HeaderEditor` is documented as "never raises", but `syncJournal`'s
+        fsync raises `IOError` through the `segApi` setters (C/Py). Recommended: turn it into a
+        refusal plus an error diagnostic, which makes the doc true.
+      - C3 Silent diagnostics:
+        - the log-less `readTracesInto` overloads are `{.discardable.}` and discard their log;
+        - `readTraces` uses them, so an undecodable trace becomes a zero row with no record;
+        - `PrefetchChunk` only counts failures.
+        - Proposal: no `discardable`; a `readTraces(..., log: var DiagLog)` overload; failed
+          rows with their messages in `PrefetchChunk`.
+      - C4 Out-parameter lookups → `Option[T]` or a returned value. Keep the raising forms as
+        the "required" path:
+        - `toSampleFormat`, `toSegdFormat`, `fieldValue`, `maps.decode`, `findChannelSet`
+          (→ object);
+        - the `bool`+`var` `traceField`/`recordField`/`fileField` and `current*Field`;
+        - `resolveLine`, `relation`, `parseFortranFloat/Int`;
+        - `detectKind` → returns `SeismicKind` (`skUnknown` exists).
+      - C5 Trim the umbrella surface (move to non-re-exported modules, or `export ... except`):
+        - textrec card helpers (`col`, `rjust`/`ljust` → `strutils.align`, ...);
+        - headerfields `splitName`/`getByName`/`locate*` and the templates `withBlockType`/
+          `isLayoutField`;
+        - traceindex `decodeEntry` (raw `ptr`), `readTracesRaw`, `mappedSize`, `flush`;
+        - `convert.finishOutput`;
+        - the bare `encode` in sps/p1 → `encodeSps`/`encodeP1`;
+        - the redundant re-exports in `rev3.nim:16` and `segy/reader.nim:39`.
+      - C6 Data model: `SegdRecord`/`SegdTrace` hold Rev 2 and Rev 3 fields side by side
+        (`gh2`/`gh2r3`, `descriptors`/`descriptors3`, `trailer`/`trailerBytes`, `ext1`/`ext1r3`),
+        switched by `isRev3`. The `hasX`/`formatKnown` flag pairs (both readers,
+        `openSegdWriter`) have the same shape.
+        - Proposal: a `case` variant on the layout, and `Option[T]` for the optional values.
+        - Largest change in the list; it touches the reader, writer, revconvert, convert and
+          the index.
+      - C7 Closed sets typed as strings, ints or chars:
+        - the vendor `format: "segd"/"segy"` → `SeismicKind`;
+        - `FieldPlan.trim` string → enum;
+        - `SpsPoint.kind: char` → enum;
+        - `SegdConvertOptions.format: int` with 0 = keep → an enum or `Option` (C/Py).
+      - C8 Renames:
+        - `ebcdicToAscii`/`asciiToEbcdic` (they are Latin-1) → `decodeEbcdic`/`encodeEbcdic`;
+        - `layout.find` (returns a seq) → `entriesFor`;
+        - `LayoutEntry.byte` (shadows the type) → `bytePos`;
+        - `setText` → `text=`;
+        - `VendorBlock.get` → `[]`;
+        - merge `decodeRev3` into `decodeBlock`;
+        - `SegdChannelSetDescriptor3` → `...Rev3`, and `gh2r3`/`ext1r3`/`descriptors3` with C6;
+        - `RecordScan`/`scanRecords` → `SegdRecordScan`/`scanSegdRecords`;
+        - `VendorEnc` → `VendorEncoding`; `scaffold` → `scaffoldVendorMap`;
+        - `segdContext`/`segyContext` → `vendorContext`;
+        - `getByName` → `fieldByName`;
+        - `SegyData.diagnostics` vs `.log` elsewhere → `log`;
+        - drop `EditValue`/`toEditValue` (aliases of `FieldValue`);
+        - `FieldValue.i/f/s` → descriptive names (C/Py; see `segapi.nim:547`);
+        - `Prefetcher.positions` → `len` (C/Py);
+        - drop the redundant `SegyRevision.==`.
+      - C9 Public tuples → named objects: `addUserData` items, `VendorBlock.fields`,
+        `FieldPlan.enums`/`bits`, and the `spsText`/`p1Text` results. `spsText` also becomes
+        a `proc` (it uses a `cast(noSideEffect)`).
+      - C10 Mutable bookkeeping fields → private with read accessors:
+        - `RecordSource/Sink.recordIndex`/`fileIndex`;
+        - `SegdReader.record`/`label`/`hasLabel`/`log` (→ `lent` accessors).
+      - C11 Backend contract: `TapeDevice.readBlock` returns a sentinel int (>0 / 0 = mark /
+        -1 = end) → `RecordKind` + `var` length. This affects custom tape backends.
+      - C12 `SegUnlocatableError.diagCode: int` → `DiagCode`. Move `Severity`/`DiagCode` into a
+        small `diagcodes.nim` to break the cycle.
+
+      Agent summary: the codecs, headers and I/O layers are clean and idiomatic, and the
+      architecture follows the owner decisions. The debt is in hot-path copies, Rev 2/3
+      duplication, `bool`+`var` lookups, an over-wide umbrella surface, `convert.nim` and
+      `segapi.nim`.
 - [x] 12.2 Bindings from one declaration (owner, 2026-11-07: do this first, before 12.1).
       Every boundary function is written **once**: an ordinary exported Nim proc in
       `src/parseSEG/abi/api.nim` carrying `{.segApi.}`. The macro (`abi/segapi.nim`) generates
@@ -1024,3 +1200,4 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
     - Missing keys is `SEG_ERR_ARGUMENT`, and `SEG_ERR_STATE` stays reserved for Python's closed objects.
   - Found by the new tests: `componentGroupIds` allocated before checking its range, and hostile C ranges (`INT64_MAX`) overflowed `Slice.len`. Both are fixed.
   - Tests: new `tcoreapi`; `abi_test.c`, `test_pyapi.py` and the `ttargets` host were rewritten for v3. Docs `c_abi.md`, `python.md` and `api.md` were updated.
+- 2026-11-08: Task 12.1 done: an idiomatic-Nim audit by 4 read-only agents. The findings are in the 12.1 entry: A, 8 bugs to fix first (an index deep copy per `sampleIntervalUs` call, stale Source Description accessors, stale version strings, a vendormap last-root bug, handle leaks, a writer `doAssert`, a hex message, Defect catching at the C boundary); B, 12 internal groups; C, 12 public API groups awaiting owner approval. Next: the owner approves or rejects C1-C12, then 12.3 (A, then B, then the approved C, one module per commit).
