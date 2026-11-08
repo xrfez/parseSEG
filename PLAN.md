@@ -554,7 +554,7 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
         is set. IC fails in this container even on a one-line program (the bundled `nifler`
         is musl-linked, and a source build reports "modules stopped for imports discovered
         during sem"), so it stays opt-in.
-- [ ] 12.5 Boundary names from the core (owner, 2026-11-08; do this before 12.1). "The names
+- [x] 12.5 Boundary names from the core (owner, 2026-11-08; do this before 12.1). "The names
       should be derived from the core, and if necessary rename the core. This is a Nim library
       first, everything else second, but it should not appear completely foreign outside of
       Nim, and the maintenance should be negligible with Nim's metaprogramming." 12.2's
@@ -1007,3 +1007,20 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
   - Tests: `tcapi` checks the committed generated files against a fresh build, and `abi_test.c` was rewritten for v2 (adds serialized same-handle calls from 4 threads). CI runs `git diff --exit-code` on the generated files after building every target.
   - Build: entry `src/parseSEG/bindings.nim`; `nim pylib` makes `bin/python/parseseg/`; release tasks use a fresh `nimcache/release-<task>` with `--ic:off`; `PARSESEG_IC=1` gives dev builds `--ic:on`. IC is not usable in this container.
   - Found while porting: an invalid enum in a C struct argument (`SegSampleBuffer.dtype = 9`) was read as float64. Struct enum fields are now checked.
+- 2026-11-08 — Task 12.5 done (ABI v3, package 0.3.0): the C and Python names derive from the Nim core.
+  - Owner: names come from the core, renaming the core where needed; Nim first. Asked whether nimpy/genny duplicate this: genny lists exports in its own DSL, catches one exception type, makes duplicate names for overloads, and has no locking or zero-copy; nimpy is Python-only and keeps the GIL. The owner chose to keep the generator (option 1).
+  - `{.segApi.}` / `{.segHandle.}` / `{.segField.}` (`abi/pragmas.nim`, std-only) now sit on the core. They record typed signatures in a `macrocache` table (`varargs[typed]` yields the overload set), and `segFinish` in `api.nim` generates everything. `api.nim` keeps only the dtype-erased `Tensor`/`Prefetcher` adapters, the reads, DLPack and the version and status calls. A compile-time check ties every adapter to a core routine with the same parameter names, and the adapter takes that routine's doc.
+  - Structs are generated C mirrors with `toC`/`fromC`, so core layouts are free. `seg_init_<struct>` and Python default dicts are generated only for structs that are parameters.
+  - Core changes:
+    - `Slice[int]` ranges named `traces` everywhere;
+    - `setTraceField`/`setFileField`/`currentTraceField`;
+    - `SurveyGeometry` absorbs `LineNames` (`lineNames`, `trailingDigits`, `mapLine`, `addSps(path)`, `addP1(path)`, counts);
+    - `SeismicFile` accessors (`recordCount`, `maxSamples()`, `traceEntry`, `traceKeys`, `hasKeys`, `gathers`, `componentGroupIds`, `applySurvey`), raising `traceField`/`recordField`/`fileField`, and `skUnknown`;
+    - `ValueError` instead of `doAssert` for bad input at public entry points, with Slice checks safe against overflow;
+    - `DiagLog[]` checks its index.
+  - Departures from the design:
+    - `SeismicFile.close` is not exported: a prefetcher shares the map, and exporting it crashed the Python test (release unmaps).
+    - Refused edits are `false` results, as in Nim, so `SEG_ERR_REFUSED`/`RefusedError` are gone.
+    - Missing keys is `SEG_ERR_ARGUMENT`, and `SEG_ERR_STATE` stays reserved for Python's closed objects.
+  - Found by the new tests: `componentGroupIds` allocated before checking its range, and hostile C ranges (`INT64_MAX`) overflowed `Slice.len`. Both are fixed.
+  - Tests: new `tcoreapi`; `abi_test.c`, `test_pyapi.py` and the `ttargets` host were rewritten for v3. Docs `c_abi.md`, `python.md` and `api.md` were updated.

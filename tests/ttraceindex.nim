@@ -90,11 +90,11 @@ block index_matches_full_read_segy:
     doAssert f.readTraces(0..<f.len) == full.samples
     # Narrower and wider tensors, at a row offset.
     var narrow = newTraceTensor[float32](5, 10)
-    doAssert f.readTracesInto(0, 1, narrow, row = 3) == 0
+    doAssert f.readTracesInto(0..0, narrow, row = 3) == 0
     for j in 0..<10: doAssert narrow[3, j] == full.samples[0, j] and narrow[0, j] == 0
     var wide = newTraceTensor[float64](1, f.index.maxSamples + 7)
     for j in 0..<wide.shape[1]: wide[0, j] = 99.0
-    f.readTracesInto(f.len - 1, 1, wide)
+    f.readTracesInto(f.len - 1 .. f.len - 1, wide)
     doAssert wide[0, f.index.maxSamples + 6] == 0.0
     doAssert float32(wide[0, 0]) == full.samples[f.len - 1, 0]
     f.close()
@@ -165,7 +165,7 @@ block range_read_of_damaged_trace_is_logged:
   var t = newTraceTensor[float32](1, 5)
   t[0, 0] = 7
   var log: DiagLog
-  doAssert f.readTracesInto(0, 1, t, 0, log) == 1
+  doAssert f.readTracesInto(0..0, t, 0, log) == 1
   doAssert t[0, 0] == 0 and log.len == 1 and log.count(sevError) == 1
   f.close()
 

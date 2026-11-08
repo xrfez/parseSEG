@@ -18,6 +18,7 @@ import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ./traceindex
+import ../abi/pragmas
 
 type
   FieldValueKind* = enum fvInt, fvFloat, fvText
@@ -294,9 +295,31 @@ proc fileField*(f: SeismicFile, name: string, v: var FieldValue): bool =
   var err: string
   f.fileField(name, v, err)
 
+proc raiseField(name, err: string) {.noinline, noreturn.} =
+  raise newException(ValueError, name & ": " & err)
+
+proc traceField*(f: SeismicFile, trace: int, name: string): FieldValue {.segApi.} =
+  ## A trace header field by name, e.g. "trace.sourceX" or
+  ## "ext1.receiverLine". Raises `ValueError` for an unknown field or a trace
+  ## out of range.
+  var err: string
+  if not f.traceField(trace, name, result, err): raiseField(name, err)
+
+proc recordField*(f: SeismicFile, record: int, name: string): FieldValue {.segApi.} =
+  ## A SEG-D record (general header) field by name, e.g. "gh1.formatCode".
+  ## Raises `ValueError` for an unknown field or record.
+  var err: string
+  if not f.recordField(record, name, result, err): raiseField(name, err)
+
+proc fileField*(f: SeismicFile, name: string): FieldValue {.segApi.} =
+  ## A file-level field by name, e.g. "binary.formatCode". Raises
+  ## `ValueError` for an unknown field.
+  var err: string
+  if not f.fileField(name, result, err): raiseField(name, err)
+
 # ---------------------------------------------------------- sample timing --
 
-proc sampleIntervalUs*(f: SeismicFile, trace: int): float64 =
+proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
   ## The trace's sample interval in µs (Hz or m/ft for SEG-Y non-time
   ## data), resolved as the readers do. SEG-Y: Ext1 bytes 145-152 when
   ## non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the

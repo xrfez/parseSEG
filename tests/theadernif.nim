@@ -63,7 +63,7 @@ block last_entry_wins_and_exact_floats:
   doAssert r.applied == 0
   # -0.0 and 0.0 differ (by bit pattern).
   var e = openEditor(p, p & ".j.nif")
-  doAssert e.setField(0, "ext1.extReceiverLineNumber", 0.0)
+  doAssert e.setTraceField(0, "ext1.extReceiverLineNumber", 0.0)
   e.close()
   writeFile(tmp / "z.nif", "(headers (trace 0 (block ext1 (f extReceiverLineNumber -0.0))))")
   r = importHeaders(p, tmp / "z.nif", ImportOptions(dryRun: true))

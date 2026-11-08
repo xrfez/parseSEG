@@ -57,6 +57,7 @@ import std/[math, os, strutils]
 import ../common/[errors, diagnostics, endians]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer, rev3]
+import ../abi/pragmas
 
 type
   SegdConvertOptions* = object
@@ -695,7 +696,8 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
   for d in c.log: result.add d
   for d in w.log: result.add d
 
-proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions()): DiagLog =
+proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions()): DiagLog {.
+    segApi.} =
   ## Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
   ## version). Never raises: problems, including I/O failures, are in the result.
   try:

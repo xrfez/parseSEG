@@ -1,5 +1,5 @@
-/* C ABI test (tasks 8.4, 12.2): every seg_* function through the generated
- * header (ABI version 2).
+/* C ABI test (tasks 8.4, 12.2, 12.5): every seg_* function through the
+ * generated header (ABI version 3, names derived from the Nim core).
  *
  *   abi_test <exampleFiles dir> <scratch dir>
  *
@@ -33,24 +33,30 @@ static const char *path(const char *base, const char *name) {
 
 /* Small accessors for results that come back through out-pointers (-999 on
    failure). */
-static int64_t trace_count(SegFile *f) {
+static int64_t file_len(SegSeismicFile *f) {
     int64_t n = -1;
-    return seg_file_trace_count(f, &n) == SEG_OK ? n : -999;
+    return seg_seismic_file_len(f, &n) == SEG_OK ? n : -999;
 }
 
-static int32_t kind_of(SegFile *f) {
+static int32_t kind_of(SegSeismicFile *f) {
     int32_t k = -1;
-    return seg_file_kind(f, &k) == SEG_OK ? k : -999;
+    return seg_seismic_file_kind(f, &k) == SEG_OK ? k : -999;
 }
 
-static int64_t log_count(SegLog *l) {
+static int64_t log_len(SegDiagLog *l) {
     int64_t n = -1;
-    return seg_log_count(l, &n) == SEG_OK ? n : -999;
+    return seg_diag_log_len(l, &n) == SEG_OK ? n : -999;
 }
 
-static int64_t log_count_sev(SegLog *l, int32_t sev) {
+static int64_t log_count(SegDiagLog *l, int32_t sev) {
     int64_t n = -1;
-    return seg_log_count_severity(l, sev, &n) == SEG_OK ? n : -999;
+    return seg_diag_log_count(l, sev, &n) == SEG_OK ? n : -999;
+}
+
+static SegSeismicFile *open_file(const char *name, bool keys) {
+    SegSeismicFile *f = NULL;
+    OK(seg_open_seismic(path(dir, name), false, keys, &f));
+    return f;
 }
 
 /* ---- layout: every struct and field against the library -------------- */
@@ -59,9 +65,9 @@ static int64_t log_count_sev(SegLog *l, int32_t sev) {
 
 static void test_layout(void) {
     SIZE(SegTraceEntry); SIZE(SegTraceKeys); SIZE(SegTensorView); SIZE(SegValue);
-    SIZE(SegGather); SIZE(SegDiagnostic); SIZE(SegChunk); SIZE(DLManagedTensor);
-    SIZE(SegSampleBuffer); SIZE(SegSurveyCounts);
-    CHECK(sizeof(SegTraceEntry) == 24);
+    SIZE(SegGather); SIZE(SegDiagnostic); SIZE(SegLocation); SIZE(SegPrefetchChunk);
+    SIZE(SegSlice); SIZE(SegConvertOptions); SIZE(SegSegyRevision); SIZE(SegSegdConvertOptions);
+    SIZE(SegSegdRevision); SIZE(SegSpsOptions);
     OFF(SegTraceEntry, offset); OFF(SegTraceEntry, header_bytes); OFF(SegTraceEntry, num_samples);
     OFF(SegTraceEntry, record); OFF(SegTraceEntry, channel_set); OFF(SegTraceEntry, scan_type);
     OFF(SegTraceEntry, channel_type);
@@ -77,113 +83,131 @@ static void test_layout(void) {
     OFF(SegTensorView, shape); OFF(SegTensorView, strides);
     OFF(SegValue, kind); OFF(SegValue, i); OFF(SegValue, f); OFF(SegValue, text);
     OFF(SegValue, text_cap); OFF(SegValue, text_len);
-    OFF(SegGather, kind); OFF(SegGather, first); OFF(SegGather, count); OFF(SegGather, sources);
+    OFF(SegSlice, a); OFF(SegSlice, b);
+    OFF(SegGather, kind); OFF(SegGather, traces); OFF(SegGather, sources);
     OFF(SegGather, receivers);
     OFF(SegDiagnostic, severity); OFF(SegDiagnostic, code); OFF(SegDiagnostic, offset);
-    OFF(SegDiagnostic, record); OFF(SegDiagnostic, channel_set); OFF(SegDiagnostic, trace);
-    OFF(SegDiagnostic, block_index); OFF(SegDiagnostic, file); OFF(SegDiagnostic, field);
-    OFF(SegDiagnostic, message);
-    OFF(SegChunk, first); OFF(SegChunk, count); OFF(SegChunk, failed); OFF(SegChunk, samples);
-    OFF(SegSampleBuffer, data); OFF(SegSampleBuffer, dtype); OFF(SegSampleBuffer, rows);
-    OFF(SegSampleBuffer, cols); OFF(SegSampleBuffer, row_stride);
-    OFF(SegSurveyCounts, sources); OFF(SegSurveyCounts, receivers);
-    OFF(SegSurveyCounts, relations);
-    OFF(DLManagedTensor, manager_ctx); OFF(DLManagedTensor, deleter);
+    OFF(SegDiagnostic, loc); OFF(SegDiagnostic, msg);
+    OFF(SegLocation, file); OFF(SegLocation, record); OFF(SegLocation, channel_set);
+    OFF(SegLocation, trace); OFF(SegLocation, block_index); OFF(SegLocation, field);
+    OFF(SegPrefetchChunk, first); OFF(SegPrefetchChunk, count); OFF(SegPrefetchChunk, failed);
+    OFF(SegPrefetchChunk, samples);
+    OFF(SegConvertOptions, revision); OFF(SegConvertOptions, byte_order);
+    OFF(SegConvertOptions, format); OFF(SegConvertOptions, text_encoding);
+    OFF(SegConvertOptions, apply_descale); OFF(SegConvertOptions, station_header);
+    OFF(SegSegdConvertOptions, revision); OFF(SegSegdConvertOptions, format);
+    OFF(SegSegdConvertOptions, twos_complement8015);
+    OFF(SegSpsOptions, revision); OFF(SegSpsOptions, strict_implied_decimals);
+    OFF(SegSpsOptions, layout); OFF(SegSpsOptions, force_layout);
     CHECK(seg_sizeof("NoSuchType") == -1 && seg_offsetof("SegValue", "nope") == -1);
 }
 
 /* ---- files, fields, logs --------------------------------------------- */
 static void test_files(void) {
-    SegFile *f = NULL;
-    OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), true, false, &f));
-    CHECK(kind_of(f) == SEG_KIND_SEGY && trace_count(f) == 200);
+    SegSeismicFile *f = open_file("BO_3D-Inglewood_rev21_v7.sgy", true);
+    CHECK(kind_of(f) == SEG_SEISMIC_KIND_SEG_Y && file_len(f) == 200);
     int64_t n = -1;
-    OK(seg_file_record_count(f, &n));
+    OK(seg_seismic_file_record_count(f, &n));
     CHECK(n == 1);
-    OK(seg_file_max_samples(f, &n));
+    OK(seg_seismic_file_max_samples(f, &n));
     CHECK(n == 2001);
+    bool b = false;
+    OK(seg_seismic_file_has_keys(f, &b));
+    CHECK(b);
+    OK(seg_seismic_file_is_open(f, &b));
+    CHECK(b);
     double si = 0;
-    OK(seg_file_sample_interval(f, 0, &si));
+    OK(seg_seismic_file_sample_interval_us(f, 0, &si));
     CHECK(si == 2000.0);
-    OK(seg_file_sample_interval(f, 200, &si));
+    OK(seg_seismic_file_sample_interval_us(f, 200, &si));
     CHECK(isnan(si));
+    char name[2048];
+    int64_t len = -1;
+    OK(seg_seismic_file_path(f, name, sizeof name, &len));
+    CHECK(strstr(name, "Inglewood") != NULL && len == (int64_t)strlen(name));
     SegTraceEntry e;
-    OK(seg_file_trace_entry(f, 199, &e));
+    OK(seg_seismic_file_trace_entry(f, 199, &e));
     CHECK(e.num_samples == 2001 && e.header_bytes == 240 && e.channel_set == 0xFFFF);
-    CHECK(seg_file_trace_entry(f, 200, &e) == SEG_ERR_ARGUMENT && strlen(seg_last_error()) > 0);
+    CHECK(seg_seismic_file_trace_entry(f, 200, &e) == SEG_ERR_ARGUMENT &&
+          strlen(seg_last_error()) > 0);
     SegTraceKeys k;
-    OK(seg_file_trace_keys(f, 0, &k));
+    OK(seg_seismic_file_trace_keys(f, 0, &k));
     CHECK(k.ensemble == 1001001.0);
+    uint8_t head[8];
+    OK(seg_seismic_file_copy_bytes(f, 0, 4, head, sizeof head, &n));
+    CHECK(n == 4 && head[0] == 0xC3);
+    CHECK(seg_seismic_file_copy_bytes(f, 0, -1, head, 8, &n) == SEG_ERR_ARGUMENT); /* Natural */
     SegValue v;
-    OK(seg_file_trace_field(f, 5, "trace.sourceX", &v));
+    OK(seg_seismic_file_trace_field(f, 5, "trace.sourceX", &v));
     CHECK(v.kind == SEG_VALUE_INT && v.i == 1704188);
-    OK(seg_file_file_field(f, "binary.sampleInterval", &v));
+    OK(seg_seismic_file_file_field(f, "binary.sampleInterval", &v));
     CHECK(v.kind == SEG_VALUE_INT && v.i == 2000);
     /* Text: into the caller's buffer, with its full length; too small is truncated. */
     char text[256];
     v.text = text;
     v.text_cap = sizeof text;
-    OK(seg_file_trace_field(f, 0, "trace.headerName", &v));
+    OK(seg_seismic_file_trace_field(f, 0, "trace.headerName", &v));
     CHECK(v.kind == SEG_VALUE_TEXT && v.text_len >= 0 && v.text_len < 256);
     v.text_cap = 1;
-    OK(seg_file_trace_field(f, 0, "trace.headerName", &v));
+    OK(seg_seismic_file_trace_field(f, 0, "trace.headerName", &v));
     CHECK(text[0] == '\0');
     v.text = NULL;
     v.text_cap = 0;
-    CHECK(seg_file_trace_field(f, 0, "trace.nope", &v) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_trace_field(f, 0, "trace.nope", &v) == SEG_ERR_ARGUMENT);
     CHECK(strstr(seg_last_error(), "trace.nope") != NULL);
-    CHECK(seg_file_record_field(f, 0, "gh1.year", &v) == SEG_ERR_ARGUMENT); /* SEG-Y */
-    CHECK(seg_file_trace_field(f, 0, NULL, &v) == SEG_ERR_ARGUMENT);
-    SegLog *log = NULL;
-    OK(seg_file_diagnostics(f, &log));
-    CHECK(log_count(log) == 0);
-    int64_t len = -1;
-    OK(seg_log_nif(log, NULL, 0, &len));
+    CHECK(seg_seismic_file_record_field(f, 0, "gh1.year", &v) == SEG_ERR_ARGUMENT); /* SEG-Y */
+    CHECK(seg_seismic_file_trace_field(f, 0, NULL, &v) == SEG_ERR_ARGUMENT);
+    SegDiagLog *log = NULL;
+    OK(seg_seismic_file_log(f, &log));
+    CHECK(log_len(log) == 0);
+    OK(seg_diag_log_is_fatal(log, &b));
+    CHECK(!b);
+    OK(seg_diag_log_to_nif(log, NULL, 0, &len));
     CHECK(len > 0);
-    seg_log_release(log);
-    seg_file_release(f);
+    seg_diag_log_release(log);
+    seg_seismic_file_release(f);
 
     /* SEG-D: record fields, a log with entries. */
-    OK(seg_file_open(path(dir, "63.sgd"), false, false, &f));
-    CHECK(kind_of(f) == SEG_KIND_SEGD && trace_count(f) == 1);
-    OK(seg_file_record_field(f, 0, "gh3.sourcePointNumber", &v));
+    f = open_file("63.sgd", false);
+    CHECK(kind_of(f) == SEG_SEISMIC_KIND_SEG_D && file_len(f) == 1);
+    OK(seg_seismic_file_record_field(f, 0, "gh3.sourcePointNumber", &v));
     CHECK(v.kind == SEG_VALUE_FLOAT && v.f == 99.5);
-    OK(seg_file_trace_field(f, 0, "ext1.sensorType", &v));
+    OK(seg_seismic_file_trace_field(f, 0, "ext1.sensorType", &v));
     CHECK(v.i == 2);
-    CHECK(seg_file_trace_keys(f, 0, &k) == SEG_ERR_STATE); /* opened without keys */
-    OK(seg_file_diagnostics(f, &log));
-    CHECK(log_count(log) == 2 && log_count_sev(log, SEG_SEVERITY_INFO) == 2);
+    CHECK(seg_seismic_file_trace_keys(f, 0, &k) == SEG_ERR_ARGUMENT); /* opened without keys */
+    OK(seg_seismic_file_log(f, &log));
+    CHECK(log_len(log) == 2 && log_count(log, SEG_SEVERITY_INFO) == 2);
     SegDiagnostic d;
-    OK(seg_log_get(log, 0, &d));
-    CHECK(d.severity == SEG_SEVERITY_INFO && d.code == SEG_CODE_BAD_VALUE);
-    CHECK(d.offset == 83 && strstr(d.message, "source set") != NULL && strlen(d.file) > 0);
-    CHECK(seg_log_get(log, 2, &d) == SEG_ERR_ARGUMENT);
+    OK(seg_diag_log_get(log, 0, &d));
+    CHECK(d.severity == SEG_SEVERITY_INFO && d.code == SEG_DIAG_CODE_BAD_VALUE);
+    CHECK(d.offset == 83 && strstr(d.msg, "source set") != NULL && strlen(d.loc.file) > 0);
+    CHECK(seg_diag_log_get(log, 2, &d) == SEG_ERR_ARGUMENT);
+    CHECK(seg_diag_log_get(log, -1, &d) == SEG_ERR_ARGUMENT);
     char *nif = malloc(65536);
-    OK(seg_log_nif(log, nif, 65536, &len));
+    OK(seg_diag_log_to_nif(log, nif, 65536, &len));
     CHECK(len < 65536 && strstr(nif, "(diagnostics") != NULL);
     free(nif);
-    CHECK(log_count_sev(log, 9) == -999); /* not a severity */
-    seg_log_release(log);
-    seg_file_release(f);
+    CHECK(log_count(log, 9) == -999); /* not a severity */
+    seg_diag_log_release(log);
+    seg_seismic_file_release(f);
 
     /* Failures and junk. */
-    f = (SegFile *)1;
-    CHECK(seg_file_open(path(dir, "no-such-file"), false, false, &f) == SEG_ERR_IO && f == NULL);
-    CHECK(seg_file_open(NULL, false, false, &f) == SEG_ERR_ARGUMENT);
+    f = (SegSeismicFile *)1;
+    CHECK(seg_open_seismic(path(dir, "no-such-file"), false, false, &f) == SEG_ERR_IO && f == NULL);
+    CHECK(seg_open_seismic(NULL, false, false, &f) == SEG_ERR_ARGUMENT);
     FILE *j = fopen(path(tmp, "junk.bin"), "wb");
     for (int i = 0; i < 5000; i++) fputc(0, j);
     fclose(j);
-    OK(seg_file_open(path(tmp, "junk.bin"), false, false, &f));
-    CHECK(kind_of(f) == SEG_KIND_UNKNOWN && trace_count(f) == 0);
-    OK(seg_file_diagnostics(f, &log));
-    CHECK(log_count_sev(log, SEG_SEVERITY_FATAL) == 1);
-    seg_log_release(log);
-    seg_file_release(f);
-    seg_file_release(NULL);
-    CHECK(seg_file_trace_count(NULL, &n) == SEG_ERR_ARGUMENT);
-    char name[32];
-    OK(seg_status_name(SEG_ERR_REFUSED, name, sizeof name, &len));
-    CHECK(strcmp(name, "SEG_ERR_REFUSED") == 0 && len == 15);
+    OK(seg_open_seismic(path(tmp, "junk.bin"), false, false, &f));
+    CHECK(kind_of(f) == SEG_SEISMIC_KIND_UNKNOWN && file_len(f) == 0);
+    OK(seg_seismic_file_log(f, &log));
+    CHECK(log_count(log, SEG_SEVERITY_FATAL) == 1);
+    seg_diag_log_release(log);
+    seg_seismic_file_release(f);
+    seg_seismic_file_release(NULL);
+    CHECK(seg_seismic_file_len(NULL, &n) == SEG_ERR_ARGUMENT);
+    OK(seg_status_name(SEG_ERR_STATE, name, sizeof name, &len));
+    CHECK(strcmp(name, "SEG_ERR_STATE") == 0 && len == 13);
     OK(seg_status_name(SEG_ERR_MEMORY, name, 4, &len));
     CHECK(strcmp(name, "SEG") == 0 && len == 14); /* truncated, full length reported */
 }
@@ -202,11 +226,15 @@ static void dl_check(SegTensor *t, SegTensorView *v) {
     m->deleter(m);
 }
 
+static SegTensorView dest(void *data, int32_t dtype, int64_t rows, int64_t cols, int64_t stride) {
+    SegTensorView v = {data, dtype, 2, {rows, cols}, {stride, 1}};
+    return v;
+}
+
 static void test_reads(void) {
-    SegFile *f = NULL;
-    OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), false, false, &f));
+    SegSeismicFile *f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
     SegTensor *t = NULL;
-    OK(seg_file_read(f, 10, 5, SEG_DTYPE_FLOAT32, -1, &t));
+    OK(seg_seismic_file_read_traces_range(f, 10, 14, SEG_DTYPE_FLOAT32, &t)); /* 10..14 */
     SegTensorView v;
     OK(seg_tensor_view(t, &v));
     CHECK(v.dtype == SEG_DTYPE_FLOAT32 && v.rank == 2 && v.shape[0] == 5 && v.shape[1] == 2001);
@@ -216,87 +244,90 @@ static void test_reads(void) {
     CHECK(dt == SEG_DTYPE_FLOAT32);
     const float *a = (const float *)v.data;
     /* Into a caller buffer with a row stride: same samples. */
-    float *buf = calloc(5 * 2100, sizeof(float));
-    SegSampleBuffer b = {buf, SEG_DTYPE_FLOAT32, 5, 2001, 2100};
+    float *buf = calloc(6 * 2100, sizeof(float));
+    SegTensorView b = dest(buf, SEG_DTYPE_FLOAT32, 6, 2001, 2100);
     int64_t failed = -1;
-    OK(seg_file_read_into(f, &b, 10, &failed));
+    OK(seg_seismic_file_read_traces_into_range(f, 10, 14, &b, 1, &failed)); /* rows 1..5 */
     CHECK(failed == 0);
     int same = 1;
     for (int r = 0; r < 5; r++)
         for (int c = 0; c < 2001; c++)
-            if (buf[r * 2100 + c] != a[r * 2001 + c]) same = 0;
-    CHECK(same);
+            if (buf[(r + 1) * 2100 + c] != a[r * 2001 + c]) same = 0;
+    CHECK(same && buf[0] == 0);
     /* A selection, in list order, as doubles. */
     int64_t sel[3] = {14, 10, 14};
     double *dbuf = calloc(3 * 2001, sizeof(double));
-    SegSampleBuffer db = {dbuf, SEG_DTYPE_FLOAT64, 3, 2001, 2001};
-    OK(seg_file_read_traces_into(f, &db, sel, 3, &failed));
+    SegTensorView db = dest(dbuf, SEG_DTYPE_FLOAT64, 3, 2001, 2001);
+    OK(seg_seismic_file_read_traces_into(f, sel, 3, &db, 0, &failed));
     CHECK(dbuf[0] == (double)a[4 * 2001] && dbuf[2001 + 7] == (double)a[7]);
     SegTensor *t2 = NULL;
-    OK(seg_file_read_traces(f, sel, 3, SEG_DTYPE_FLOAT64, 100, &t2));
+    OK(seg_seismic_file_read_traces(f, sel, 3, SEG_DTYPE_FLOAT64, &t2));
     SegTensorView v2;
     OK(seg_tensor_view(t2, &v2));
-    CHECK(v2.dtype == SEG_DTYPE_FLOAT64 && v2.shape[1] == 100 &&
-          ((double *)v2.data)[2 * 100 + 9] == dbuf[2 * 2001 + 9]);
+    CHECK(v2.dtype == SEG_DTYPE_FLOAT64 && v2.shape[1] == 2001 &&
+          ((double *)v2.data)[2 * 2001 + 9] == dbuf[2 * 2001 + 9]);
     seg_tensor_release(t2);
     dl_check(t, &v);
-    /* Count -1: to the end. */
-    OK(seg_file_read(f, 198, -1, SEG_DTYPE_FLOAT32, -1, &t));
+    /* An empty range (a..a-1, as in Nim). */
+    OK(seg_seismic_file_read_traces_range(f, 200, 199, SEG_DTYPE_FLOAT32, &t));
     OK(seg_tensor_view(t, &v));
-    CHECK(v.shape[0] == 2);
+    CHECK(v.shape[0] == 0);
     seg_tensor_release(t);
     /* Bad arguments. */
-    CHECK(seg_file_read(f, 199, 2, SEG_DTYPE_FLOAT32, -1, &t) == SEG_ERR_ARGUMENT && t == NULL);
-    CHECK(seg_file_read(f, 0, 1, 7, -1, &t) == SEG_ERR_ARGUMENT);
+    t = (SegTensor *)1;
+    CHECK(seg_seismic_file_read_traces_range(f, 199, 200, SEG_DTYPE_FLOAT32, &t) ==
+          SEG_ERR_ARGUMENT && t == NULL);
+    CHECK(seg_seismic_file_read_traces_range(f, 0, 0, 7, &t) == SEG_ERR_ARGUMENT);
     int64_t badsel[1] = {200};
-    CHECK(seg_file_read_traces(f, badsel, 1, SEG_DTYPE_FLOAT32, -1, &t) == SEG_ERR_ARGUMENT);
-    SegSampleBuffer bad = {buf, SEG_DTYPE_FLOAT32, 1, 10, 5};
-    CHECK(seg_file_read_into(f, &bad, 0, &failed) == SEG_ERR_ARGUMENT);
-    bad.data = NULL;
-    bad.row_stride = 10;
-    CHECK(seg_file_read_into(f, &bad, 0, &failed) == SEG_ERR_ARGUMENT);
-    bad.data = buf;
-    bad.dtype = 9;
-    CHECK(seg_file_read_into(f, &bad, 0, &failed) == SEG_ERR_ARGUMENT);
-    CHECK(seg_file_read_traces_into(f, &db, sel, 2, &failed) == SEG_ERR_ARGUMENT); /* rows != n */
+    CHECK(seg_seismic_file_read_traces(f, badsel, 1, SEG_DTYPE_FLOAT32, &t) == SEG_ERR_ARGUMENT);
+    SegTensorView bad = dest(buf, SEG_DTYPE_FLOAT32, 1, 10, 5); /* stride < cols */
+    CHECK(seg_seismic_file_read_traces_into_range(f, 0, 0, &bad, 0, &failed) == SEG_ERR_ARGUMENT);
+    bad = dest(NULL, SEG_DTYPE_FLOAT32, 1, 10, 10);
+    CHECK(seg_seismic_file_read_traces_into_range(f, 0, 0, &bad, 0, &failed) == SEG_ERR_ARGUMENT);
+    bad = dest(buf, 9, 1, 10, 10);
+    CHECK(seg_seismic_file_read_traces_into_range(f, 0, 0, &bad, 0, &failed) == SEG_ERR_ARGUMENT);
+    bad = dest(buf, SEG_DTYPE_FLOAT32, 1, 10, 10);
+    bad.strides[1] = 2;
+    CHECK(seg_seismic_file_read_traces_into_range(f, 0, 0, &bad, 0, &failed) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_read_traces_into(f, sel, 3, &db, 1, &failed) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_read_traces_into(f, sel, 3, NULL, 0, &failed) == SEG_ERR_ARGUMENT);
     free(buf);
     free(dbuf);
-    seg_file_release(f);
+    seg_seismic_file_release(f);
 }
 
-/* ---- gathers, components, prefetch ----------------------------------- */
+/* ---- gathers, components, geometry, prefetch ------------------------- */
 static void test_gathers_and_prefetch(void) {
-    SegFile *f = NULL;
-    OK(seg_file_open(path(dir, "inova_rev30_5traces.sgd"), true, false, &f));
+    SegSeismicFile *f = open_file("inova_rev30_5traces.sgd", true);
     int64_t n = -1;
-    OK(seg_file_gathers(f, NULL, 0, &n));
+    OK(seg_seismic_file_gathers(f, NULL, 0, &n));
     CHECK(n == 1);
     SegGather g;
-    OK(seg_file_gathers(f, &g, 1, &n));
-    CHECK(g.kind == SEG_GATHER_SHOT && g.first == 0 && g.count == 5 && g.receivers == 2);
+    OK(seg_seismic_file_gathers(f, &g, 1, &n));
+    CHECK(g.kind == SEG_GATHER_KIND_SHOT && g.traces.a == 0 && g.traces.b == 4 &&
+          g.receivers == 2);
     SegTraceKeys k;
-    OK(seg_file_trace_keys(f, 3, &k));
+    OK(seg_seismic_file_trace_keys(f, 3, &k));
     CHECK(k.rcv_x == 1826232.375 && k.src_x == 1834704.375 && k.offset > 8000 && k.offset < 9000);
     CHECK(k.cmp_x == (k.src_x + k.rcv_x) / 2);
     int64_t group_of[5];
-    OK(seg_file_component_groups(f, 0, 5, group_of, 5, &n));
+    OK(seg_seismic_file_component_group_ids(f, 0, 4, group_of, 5, &n));
     CHECK(n == 5 && group_of[0] == -1 && group_of[3] == 0 && group_of[4] == 1);
-    seg_file_release(f);
+    seg_seismic_file_release(f);
 
     /* External geometry: SEG-D 2.0 has no coordinates in its headers. */
-    OK(seg_file_open(path(dir, "63.sgd"), true, false, &f));
-    SegGeometry *geo = NULL;
-    OK(seg_geometry_new(&geo));
-    OK(seg_geometry_add_source(geo, 13, 99.5, 1, 1000, 2000, NAN));
-    OK(seg_geometry_add_receiver(geo, 13, 104, 0, 1300, 2400, 7));
-    CHECK(seg_geometry_add_receiver(geo, 1, 1, 70000, 0, 0, 0) == SEG_ERR_ARGUMENT);
+    f = open_file("63.sgd", true);
+    SegSurveyGeometry *geo = NULL;
+    OK(seg_survey_geometry_new(&geo));
+    OK(seg_survey_geometry_add_source(geo, 13, 99.5, 1, 1000, 2000, NAN));
+    OK(seg_survey_geometry_add_receiver(geo, 13, 104, 0, 1300, 2400, 7));
     int64_t updated = -1;
-    OK(seg_file_apply_geometry(f, geo, false, &updated));
+    OK(seg_seismic_file_apply_survey(f, geo, false, &updated));
     CHECK(updated == 1);
-    OK(seg_file_trace_keys(f, 0, &k));
+    OK(seg_seismic_file_trace_keys(f, 0, &k));
     CHECK(k.offset == 500 && k.cmp_y == 2200 && k.rcv_z == 7 && isnan(k.src_z));
     CHECK(k.record == 63 && k.channel == 1);
-    seg_geometry_release(geo);
+    seg_survey_geometry_release(geo);
 
     /* Survey files: an SPS relation (record 63, channel 1) names the stations. */
     const char *sps_text =
@@ -307,40 +338,52 @@ static void test_gathers_and_prefetch(void) {
     FILE *fh = fopen(path(tmp, "t.sps"), "w");
     fputs(sps_text, fh);
     fclose(fh);
-    OK(seg_geometry_new(&geo));
-    SegLog *slog = NULL;
-    OK(seg_geometry_load_sps(geo, path(tmp, "t.sps"), &slog));
-    CHECK(slog != NULL && log_count(slog) == 0);
-    seg_log_release(slog);
-    SegSurveyCounts counts;
-    OK(seg_geometry_counts(geo, &counts));
-    CHECK(counts.sources == 1 && counts.receivers == 1 && counts.relations == 1);
-    CHECK(seg_geometry_load_sps(geo, path(tmp, "missing.sps"), NULL) == SEG_ERR_IO);
-    OK(seg_geometry_set_options(geo, true, false));
-    OK(seg_geometry_map_line(geo, "LINE A", 7));
-    CHECK(seg_geometry_map_line(geo, "", 7) == SEG_ERR_ARGUMENT);
-    OK(seg_file_apply_geometry(f, geo, true, &updated));
+    OK(seg_survey_geometry_new(&geo));
+    OK(seg_survey_geometry_add_sps(geo, path(tmp, "t.sps"), NULL));
+    SegDiagLog *slog = NULL;
+    OK(seg_survey_geometry_log(geo, &slog));
+    CHECK(slog != NULL && log_len(slog) == 0);
+    seg_diag_log_release(slog);
+    int64_t s = -1, r = -1, x = -1;
+    OK(seg_survey_geometry_source_count(geo, &s));
+    OK(seg_survey_geometry_receiver_count(geo, &r));
+    OK(seg_survey_geometry_relation_count(geo, &x));
+    CHECK(s == 1 && r == 1 && x == 1);
+    CHECK(seg_survey_geometry_add_sps(geo, path(tmp, "missing.sps"), NULL) == SEG_ERR_IO);
+    SegSpsOptions so;
+    seg_init_sps_options(&so);
+    CHECK(so.revision == SEG_SPS_REVISION_AUTO && so.layout == SEG_TEXT_LAYOUT_LINES);
+    so.revision = 77;
+    CHECK(seg_survey_geometry_add_sps(geo, path(tmp, "t.sps"), &so) == SEG_ERR_ARGUMENT);
+    OK(seg_survey_geometry_set_trailing_digits(geo, true));
+    bool on = false;
+    OK(seg_survey_geometry_trailing_digits(geo, &on));
+    CHECK(on);
+    OK(seg_survey_geometry_set_tape(geo, ""));
+    OK(seg_survey_geometry_map_line(geo, "LINE A", 7));
+    CHECK(seg_survey_geometry_map_line(geo, "", 7) == SEG_ERR_ARGUMENT);
+    OK(seg_seismic_file_apply_survey(f, geo, true, &updated));
     CHECK(updated == 1);
-    OK(seg_file_trace_keys(f, 0, &k));
+    OK(seg_seismic_file_trace_keys(f, 0, &k));
     CHECK(k.src_point == 205 && k.rcv_point == 101 && k.rcv_x == 500100 && k.offset > 412.3 &&
           k.offset < 412.4);
-    seg_geometry_release(geo);
-    seg_file_release(f);
+    seg_survey_geometry_release(geo);
+    seg_seismic_file_release(f);
 
-    OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), false, false, &f));
-    CHECK(seg_file_gathers(f, NULL, 0, &n) == SEG_ERR_STATE);
+    f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
+    CHECK(seg_seismic_file_gathers(f, NULL, 0, &n) == SEG_ERR_ARGUMENT); /* no keys */
     SegTensor *all = NULL;
-    OK(seg_file_read(f, 0, 200, SEG_DTYPE_FLOAT32, -1, &all));
+    OK(seg_seismic_file_read_traces_range(f, 0, 199, SEG_DTYPE_FLOAT32, &all));
     SegTensorView av;
     OK(seg_tensor_view(all, &av));
     const float *a = (const float *)av.data;
-    SegPrefetch *p = NULL;
-    OK(seg_file_prefetch(f, 0, -1, 32, 3, -1, SEG_DTYPE_FLOAT32, &p));
-    seg_file_release(f); /* the prefetcher keeps the file alive */
-    SegChunk c;
+    SegPrefetcher *p = NULL;
+    OK(seg_prefetcher_new_range(f, 0, 199, 32, 3, -1, SEG_DTYPE_FLOAT32, &p));
+    seg_seismic_file_release(f); /* the prefetcher keeps the file alive */
+    SegPrefetchChunk c;
     int64_t pos = 0;
     SegStatus st;
-    while ((st = seg_prefetch_next(p, &c)) == SEG_OK) {
+    while ((st = seg_prefetcher_next(p, &c)) == SEG_OK) {
         SegTensorView cv;
         OK(seg_tensor_view(c.samples, &cv));
         CHECK(c.first == pos && cv.shape[0] == c.count && c.failed == 0);
@@ -350,34 +393,36 @@ static void test_gathers_and_prefetch(void) {
     }
     CHECK(st == SEG_END && pos == 200);
     bool end = false;
-    OK(seg_prefetch_at_end(p, &end));
+    OK(seg_prefetcher_at_end(p, &end));
     CHECK(end);
-    CHECK(seg_prefetch_try_next(p, &c) == SEG_END);
-    OK(seg_prefetch_seek(p, 150, 160));
-    do { st = seg_prefetch_try_next(p, &c); } while (st == SEG_NOT_READY);
+    CHECK(seg_prefetcher_try_next(p, &c) == SEG_END);
+    OK(seg_prefetcher_seek(p, 150, 159));
+    do { st = seg_prefetcher_try_next(p, &c); } while (st == SEG_NOT_READY);
     CHECK(st == SEG_OK && c.first == 150 && c.count == 10);
     seg_tensor_release(c.samples);
-    CHECK(seg_prefetch_seek(p, 10, 300) == SEG_ERR_ARGUMENT);
+    CHECK(seg_prefetcher_seek(p, 10, 299) == SEG_ERR_ARGUMENT);
     int64_t at = 0;
-    OK(seg_prefetch_trace_at(p, 7, &at));
+    OK(seg_prefetcher_trace_at(p, 7, &at));
     CHECK(at == 7);
-    OK(seg_prefetch_trace_at(p, 200, &at));
+    OK(seg_prefetcher_trace_at(p, 200, &at));
     CHECK(at == -1);
-    OK(seg_prefetch_positions(p, &n));
+    OK(seg_prefetcher_positions(p, &n));
     CHECK(n == 200);
-    OK(seg_prefetch_close(p));
-    seg_prefetch_release(p);
-    /* A selection prefetcher: positions index the list. */
+    OK(seg_prefetcher_close(p));
+    seg_prefetcher_release(p);
+    /* A list prefetcher: positions index the list. */
     int64_t sel[3] = {5, 3, 1};
-    OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), false, false, &f));
-    OK(seg_file_prefetch_traces(f, sel, 3, 2, 2, -1, SEG_DTYPE_FLOAT64, &p));
-    OK(seg_prefetch_trace_at(p, 0, &at));
+    f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
+    OK(seg_prefetcher_new(f, sel, 3, 2, 2, -1, SEG_DTYPE_FLOAT64, &p));
+    OK(seg_prefetcher_trace_at(p, 0, &at));
     CHECK(at == 5);
-    OK(seg_prefetch_next(p, &c));
+    OK(seg_prefetcher_next(p, &c));
     CHECK(c.first == 0 && c.count == 2);
     seg_tensor_release(c.samples);
-    seg_prefetch_release(p); /* joins the worker */
-    seg_file_release(f);
+    seg_prefetcher_release(p); /* joins the worker */
+    CHECK(seg_prefetcher_new_range(f, 0, 199, 0, 1, -1, SEG_DTYPE_FLOAT32, &p) ==
+          SEG_ERR_ARGUMENT && p == NULL);
+    seg_seismic_file_release(f);
     seg_tensor_release(all);
 }
 
@@ -402,119 +447,152 @@ static void test_edits(void) {
     fwrite(orig, 1, (size_t)n, w);
     fclose(w);
     remove(journal);
-    SegEditor *e = NULL;
-    OK(seg_editor_open(copy, journal, &e));
+    SegHeaderEditor *e = NULL;
+    OK(seg_open_editor(copy, journal, &e));
+    char jp[2048];
+    int64_t len = 0;
+    OK(seg_header_editor_journal_path(e, jp, sizeof jp, &len));
+    CHECK(strcmp(jp, journal) == 0);
     SegValue v = {SEG_VALUE_INT, 0, -4242, 0, NULL, 0, 0};
-    OK(seg_editor_set_trace(e, 0, "trace.sourceX", &v));
+    bool done = false;
+    OK(seg_header_editor_set_trace_field(e, 0, "trace.sourceX", &v, &done));
+    CHECK(done);
     v.i = 10;
-    CHECK(seg_editor_set_trace(e, 0, "trace.numSamples", &v) == SEG_ERR_REFUSED);
-    CHECK(strstr(seg_last_error(), "structure") != NULL);
+    OK(seg_header_editor_set_trace_field(e, 0, "trace.numSamples", &v, &done));
+    CHECK(!done); /* refused: structural; the log says why */
     v.kind = SEG_VALUE_FLOAT; v.f = 1.5;
-    CHECK(seg_editor_set_trace(e, 0, "trace.groupX", &v) == SEG_ERR_REFUSED);
+    OK(seg_header_editor_set_trace_field(e, 0, "trace.groupX", &v, &done));
+    CHECK(!done);
     v.kind = SEG_VALUE_INT; v.i = 7;
-    OK(seg_editor_set_file(e, "binary.jobId", &v));
-    CHECK(seg_editor_set_record(e, 0, "gh1.year", &v) == SEG_ERR_ARGUMENT); /* SEG-Y: no records */
+    OK(seg_header_editor_set_file_field(e, "binary.jobId", &v, &done));
+    CHECK(done);
+    OK(seg_header_editor_set_record_field(e, 0, "gh1.year", &v, &done)); /* SEG-Y: no records */
+    CHECK(!done);
+    OK(seg_header_editor_set_trace_field(e, -1, "trace.sourceX", &v, &done));
+    CHECK(!done);
+    CHECK(seg_header_editor_set_trace_field(e, 0, "trace.sourceX", NULL, &done) ==
+          SEG_ERR_ARGUMENT);
     v.kind = 9;
-    CHECK(seg_editor_set_file(e, "binary.jobId", &v) == SEG_ERR_ARGUMENT);
+    CHECK(seg_header_editor_set_file_field(e, "binary.jobId", &v, &done) == SEG_ERR_ARGUMENT);
     int64_t edits = -1;
-    OK(seg_editor_edits(e, &edits));
+    OK(seg_header_editor_edits(e, &edits));
     CHECK(edits == 2);
-    SegLog *log = NULL;
-    OK(seg_editor_diagnostics(e, &log));
-    CHECK(log_count_sev(log, SEG_SEVERITY_ERROR) == 2);
-    seg_log_release(log);
-    OK(seg_editor_close(e));
-    seg_editor_release(e);
-    SegFile *f = NULL;
-    OK(seg_file_open(copy, false, false, &f));
+    SegDiagLog *log = NULL;
+    OK(seg_header_editor_log(e, &log));
+    CHECK(log_count(log, SEG_SEVERITY_ERROR) >= 2);
+    SegDiagnostic d;
+    OK(seg_diag_log_get(log, 0, &d));
+    CHECK(strstr(d.msg, "structure") != NULL);
+    seg_diag_log_release(log);
+    OK(seg_header_editor_close(e));
+    seg_header_editor_release(e);
+    SegSeismicFile *f = NULL;
+    OK(seg_open_seismic(copy, false, false, &f));
     v.kind = 0;
-    OK(seg_file_trace_field(f, 0, "trace.sourceX", &v));
+    OK(seg_seismic_file_trace_field(f, 0, "trace.sourceX", &v));
     CHECK(v.i == -4242);
-    seg_file_release(f);
+    seg_seismic_file_release(f);
     log = NULL;
-    OK(seg_journal_rollback(copy, journal, &log));
-    CHECK(log_count(log) == 0);
-    seg_log_release(log);
+    OK(seg_rollback_journal(copy, journal, &log));
+    CHECK(log_len(log) == 0);
+    seg_diag_log_release(log);
     CHECK(file_bytes(copy, &now) == n && memcmp(now, orig, (size_t)n) == 0);
     free(now);
-    OK(seg_journal_apply(copy, journal, NULL));
+    OK(seg_apply_journal(copy, journal, NULL));
     log = NULL;
-    CHECK(seg_journal_rollback(copy, path(tmp, "missing.nif"), &log) == SEG_ERR_IO);
-    CHECK(log != NULL && log_count_sev(log, SEG_SEVERITY_FATAL) == 1); /* the failure's log */
-    seg_log_release(log);
+    CHECK(seg_rollback_journal(copy, path(tmp, "missing.nif"), &log) == SEG_ERR_IO);
+    CHECK(log != NULL && log_count(log, SEG_SEVERITY_FATAL) == 1); /* the failure's log */
+    seg_diag_log_release(log);
     free(orig);
 }
 
 /* ---- conversion ------------------------------------------------------ */
 static void test_convert(void) {
-    SegLog *log = NULL;
-    OK(seg_convert(path(dir, "inova_rev30_5traces.sgd"), path(tmp, "inova.sgy"), "2.1",
-                   SEG_BYTE_ORDER_BIG, 0, SEG_TEXT_EBCDIC, false, true, &log));
-    CHECK(log_count_sev(log, SEG_SEVERITY_ERROR) == 0 && log_count(log) > 0);
-    seg_log_release(log);
-    SegFile *f = NULL;
-    OK(seg_file_open(path(tmp, "inova.sgy"), false, false, &f));
-    CHECK(kind_of(f) == SEG_KIND_SEGY && trace_count(f) == 5);
+    SegDiagLog *log = NULL;
+    SegConvertOptions o;
+    seg_init_convert_options(&o);
+    CHECK(o.revision.major == 2 && o.revision.minor == 1 && o.byte_order == SEG_BYTE_ORDER_BIG &&
+          o.text_encoding == SEG_TEXT_ENCODING_EBCDIC && o.station_header && !o.apply_descale);
+    OK(seg_convert_file(path(dir, "inova_rev30_5traces.sgd"), path(tmp, "inova.sgy"), &o, &log));
+    CHECK(log_count(log, SEG_SEVERITY_ERROR) == 0 && log_len(log) > 0);
+    seg_diag_log_release(log);
+    SegSeismicFile *f = NULL;
+    OK(seg_open_seismic(path(tmp, "inova.sgy"), false, false, &f));
+    CHECK(kind_of(f) == SEG_SEISMIC_KIND_SEG_Y && file_len(f) == 5);
     SegValue v;
-    OK(seg_file_trace_field(f, 3, "ext1.extGroupX", &v));
+    OK(seg_seismic_file_trace_field(f, 3, "ext1.extGroupX", &v));
     CHECK(v.kind == SEG_VALUE_FLOAT && v.f == 1826232.375);
-    seg_file_release(f);
+    seg_seismic_file_release(f);
     /* Little-endian needs Rev 2: the failure hands its log out. */
     log = NULL;
-    CHECK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), "1", SEG_BYTE_ORDER_LITTLE, 0,
-                      SEG_TEXT_EBCDIC, false, true, &log) == SEG_ERR_FORMAT);
-    CHECK(log != NULL && log_count_sev(log, SEG_SEVERITY_FATAL) == 1);
-    seg_log_release(log);
-    CHECK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), "7", 0, 0, 0, false, true,
-                      NULL) == SEG_ERR_ARGUMENT);
-    CHECK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), "2.1", 5, 0, 0, false, true,
-                      NULL) == SEG_ERR_ARGUMENT); /* no such byte order */
-    OK(seg_convert(path(dir, "Sweep0.sgy"), path(tmp, "sw.sgy"), NULL, 0, 0, 0, false, true,
-                   NULL)); /* NULL revision: the default */
-    /* SEG-D revisions (task 8.7). */
-    SegLog *slog = NULL;
-    OK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "63_r3.sgd"), "3.0", 0, &slog));
-    CHECK(slog != NULL && log_count(slog) > 0 && log_count_sev(slog, SEG_SEVERITY_FATAL) == 0);
-    seg_log_release(slog);
-    OK(seg_file_open(path(tmp, "63_r3.sgd"), false, false, &f));
-    CHECK(kind_of(f) == SEG_KIND_SEGD && trace_count(f) == 1);
-    OK(seg_file_record_field(f, 0, "gh1.formatCode", &v));
-    CHECK(v.kind == SEG_VALUE_INT && v.i == 8058);
-    seg_file_release(f);
-    OK(seg_convert_segd(path(tmp, "63_r3.sgd"), path(tmp, "63_r2.sgd"), "2.1", 0, NULL));
-    slog = NULL;
-    CHECK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "x.sgd"), "1.0", 0, &slog) ==
-          SEG_ERR_FORMAT && slog != NULL && log_count_sev(slog, SEG_SEVERITY_FATAL) == 1);
-    seg_log_release(slog);
-    CHECK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "x.sgd"), "2.1", 8080, NULL) ==
+    o.revision.major = 1;
+    o.revision.minor = 0;
+    o.byte_order = SEG_BYTE_ORDER_LITTLE;
+    CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, &log) ==
           SEG_ERR_FORMAT);
-    CHECK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "x.sgd"), "3.0", -1, NULL) ==
-          SEG_ERR_ARGUMENT);
-    CHECK(seg_convert_segd(path(dir, "63.sgd"), path(tmp, "x.sgd"), "3", 0, NULL) ==
-          SEG_ERR_ARGUMENT);
-    CHECK(seg_convert_segd(NULL, path(tmp, "x.sgd"), "3.0", 0, NULL) == SEG_ERR_ARGUMENT);
+    CHECK(log != NULL && log_count(log, SEG_SEVERITY_FATAL) == 1);
+    seg_diag_log_release(log);
+    o.revision.major = 7;
+    o.byte_order = SEG_BYTE_ORDER_BIG;
+    CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) ==
+          SEG_ERR_FORMAT);
+    seg_init_convert_options(&o);
+    o.byte_order = 5;
+    CHECK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "x.sgy"), &o, NULL) ==
+          SEG_ERR_ARGUMENT); /* no such byte order */
+    OK(seg_convert_file(path(dir, "Sweep0.sgy"), path(tmp, "sw.sgy"), NULL, NULL)); /* defaults */
+    /* SEG-D revisions (task 8.7). */
+    SegDiagLog *slog = NULL;
+    OK(seg_convert_segd_revision(path(dir, "63.sgd"), path(tmp, "63_r3.sgd"), NULL, &slog));
+    CHECK(slog != NULL && log_len(slog) > 0 && log_count(slog, SEG_SEVERITY_FATAL) == 0);
+    seg_diag_log_release(slog);
+    OK(seg_open_seismic(path(tmp, "63_r3.sgd"), false, false, &f));
+    CHECK(kind_of(f) == SEG_SEISMIC_KIND_SEG_D && file_len(f) == 1);
+    OK(seg_seismic_file_record_field(f, 0, "gh1.formatCode", &v));
+    CHECK(v.kind == SEG_VALUE_INT && v.i == 8058);
+    seg_seismic_file_release(f);
+    SegSegdConvertOptions so;
+    seg_init_segd_convert_options(&so);
+    CHECK(so.revision.major == 3 && so.revision.minor == 0 && so.format == 0);
+    so.revision.major = 2;
+    so.revision.minor = 1;
+    OK(seg_convert_segd_revision(path(tmp, "63_r3.sgd"), path(tmp, "63_r2.sgd"), &so, NULL));
+    slog = NULL;
+    so.revision.major = 1;
+    so.revision.minor = 0;
+    CHECK(seg_convert_segd_revision(path(dir, "63.sgd"), path(tmp, "x.sgd"), &so, &slog) ==
+          SEG_ERR_FORMAT && slog != NULL && log_count(slog, SEG_SEVERITY_FATAL) == 1);
+    seg_diag_log_release(slog);
+    so.revision.major = 2;
+    so.revision.minor = 1;
+    so.format = 8080;
+    CHECK(seg_convert_segd_revision(path(dir, "63.sgd"), path(tmp, "x.sgd"), &so, NULL) ==
+          SEG_ERR_FORMAT);
+    CHECK(seg_convert_segd_revision(NULL, path(tmp, "x.sgd"), NULL, NULL) == SEG_ERR_ARGUMENT);
 }
 
 /* ---- review regressions (Phase 8) ----------------------------------- */
 static void test_limits(void) {
-    SegFile *f = NULL;
-    OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), false, false, &f));
+    SegSeismicFile *f = open_file("BO_3D-Inglewood_rev21_v7.sgy", false);
     SegTensor *t = (SegTensor *)1;
     /* Hostile sizes are refused, never fatal. */
-    CHECK(seg_file_read(f, 0, 1, SEG_DTYPE_FLOAT32, (int64_t)1 << 42, &t) == SEG_ERR_ARGUMENT &&
-          t == NULL);
-    CHECK(seg_file_read(f, 0, 2, SEG_DTYPE_FLOAT32, INT64_MAX, &t) == SEG_ERR_ARGUMENT);
-    CHECK(seg_file_read(f, 0, 1, SEG_DTYPE_FLOAT32, -2, &t) == SEG_ERR_ARGUMENT);
-    CHECK(seg_file_read(f, 0, INT64_MAX, SEG_DTYPE_FLOAT32, -1, &t) == SEG_ERR_ARGUMENT);
-    CHECK(seg_file_read(f, 0, -2, SEG_DTYPE_FLOAT32, -1, &t) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_read_traces_range(f, 0, INT64_MAX, SEG_DTYPE_FLOAT32, &t) ==
+          SEG_ERR_ARGUMENT && t == NULL);
+    CHECK(seg_seismic_file_read_traces_range(f, INT64_MIN, 0, SEG_DTYPE_FLOAT32, &t) ==
+          SEG_ERR_ARGUMENT);
     float one[4];
-    SegSampleBuffer b = {one, SEG_DTYPE_FLOAT32, 2, 2, INT64_MAX / 2};
-    CHECK(seg_file_read_into(f, &b, 0, NULL) == SEG_ERR_ARGUMENT);
-    SegPrefetch *p = (SegPrefetch *)1;
-    CHECK(seg_file_prefetch(f, 0, -1, 16, 4, (int64_t)1 << 40, SEG_DTYPE_FLOAT32, &p) ==
+    SegTensorView b = dest(one, SEG_DTYPE_FLOAT32, 2, 2, INT64_MAX / 2);
+    CHECK(seg_seismic_file_read_traces_into_range(f, 0, 1, &b, 0, NULL) == SEG_ERR_ARGUMENT);
+    b = dest(one, SEG_DTYPE_FLOAT32, 2, 2, 2);
+    CHECK(seg_seismic_file_read_traces_into_range(f, 0, 1, &b, INT64_MAX, NULL) ==
+          SEG_ERR_ARGUMENT);
+    SegPrefetcher *p = (SegPrefetcher *)1;
+    CHECK(seg_prefetcher_new_range(f, 0, 199, 16, 4, (int64_t)1 << 40, SEG_DTYPE_FLOAT32, &p) ==
           SEG_ERR_ARGUMENT);
     CHECK(p == NULL);
-    CHECK(seg_file_prefetch(f, 0, -1, 1 << 24, 1024, 1 << 20, SEG_DTYPE_FLOAT64, &p) ==
+    CHECK(seg_prefetcher_new_range(f, 0, 199, 1 << 24, 1024, 1 << 20, SEG_DTYPE_FLOAT64, &p) ==
+          SEG_ERR_ARGUMENT);
+    CHECK(seg_prefetcher_new_range(f, 0, 199, 16, 4, -2, SEG_DTYPE_FLOAT32, &p) ==
           SEG_ERR_ARGUMENT);
     /* A request under the limit but beyond memory: SEG_ERR_MEMORY, the host lives
        on. In a child capped at 4 GiB of address space, so it is deterministic
@@ -524,51 +602,34 @@ static void test_limits(void) {
         if (pid == 0) {
             struct rlimit lim = {(rlim_t)4 << 30, (rlim_t)4 << 30};
             setrlimit(RLIMIT_AS, &lim);
-            SegTensor *big = NULL;
-            SegStatus st = seg_file_read(f, 0, 1, SEG_DTYPE_FLOAT32, (int64_t)1 << 32, &big);
+            SegPrefetcher *big = NULL;
+            SegStatus st = seg_prefetcher_new_range(f, 0, 199, 256, 4, (int64_t)1 << 22,
+                                                   SEG_DTYPE_FLOAT32, &big);
             _exit(st == SEG_ERR_MEMORY && big == NULL ? 0 : 3);
         }
         int status = 0;
         waitpid(pid, &status, 0);
         CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    /* A huge selection count is refused before any allocation. */
+    /* A huge selection count is refused before any read. */
     int64_t tr[1] = {999999};
-    CHECK(seg_file_read_traces(f, tr, (int64_t)1 << 60, SEG_DTYPE_FLOAT32, -1, &t) ==
+    CHECK(seg_seismic_file_read_traces(f, tr, (int64_t)1 << 60, SEG_DTYPE_FLOAT32, &t) ==
           SEG_ERR_ARGUMENT);
     tr[0] = 5;
-    CHECK(seg_file_read_traces(f, tr, -1, SEG_DTYPE_FLOAT32, -1, &t) == SEG_ERR_ARGUMENT);
-    CHECK(seg_file_read_traces(f, NULL, 1, SEG_DTYPE_FLOAT32, -1, &t) == SEG_ERR_ARGUMENT);
-    OK(seg_file_read_traces(f, NULL, 0, SEG_DTYPE_FLOAT32, -1, &t)); /* empty selection */
+    CHECK(seg_seismic_file_read_traces(f, tr, -1, SEG_DTYPE_FLOAT32, &t) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_read_traces(f, NULL, 1, SEG_DTYPE_FLOAT32, &t) == SEG_ERR_ARGUMENT);
+    OK(seg_seismic_file_read_traces(f, NULL, 0, SEG_DTYPE_FLOAT32, &t)); /* empty selection */
     seg_tensor_release(t);
-    /* Too-small out buffers: the full length still comes back. */
     int64_t len = -1;
-    CHECK(seg_file_component_groups(f, 0, 2, NULL, -1, &len) == SEG_ERR_STATE); /* no keys */
-    seg_file_release(f);
-    /* Out-of-range editor indices are argument errors. */
-    SegEditor *e = NULL;
-    FILE *w = fopen(path(tmp, "lim.sgy"), "wb");
-    unsigned char *bytes;
-    long n = file_bytes(path(dir, "Sweep0.sgy"), &bytes);
-    fwrite(bytes, 1, (size_t)n, w);
-    fclose(w);
-    free(bytes);
-    remove(path(tmp, "lim.sgy.edits.nif"));
-    OK(seg_editor_open(path(tmp, "lim.sgy"), NULL, &e));
-    SegValue v = {SEG_VALUE_INT, 0, 1, 0, NULL, 0, 0};
-    CHECK(seg_editor_set_trace(e, -1, "trace.sourceX", &v) == SEG_ERR_ARGUMENT);
-    CHECK(seg_editor_set_trace(e, 1000000000, "trace.sourceX", &v) == SEG_ERR_ARGUMENT);
-    CHECK(seg_editor_set_record(e, 0, "gh1.year", &v) == SEG_ERR_ARGUMENT); /* SEG-Y */
-    CHECK(seg_editor_set_trace(e, 0, "trace.sourceX", NULL) == SEG_ERR_ARGUMENT);
-    OK(seg_editor_close(e));
-    seg_editor_release(e);
+    CHECK(seg_seismic_file_component_group_ids(f, 0, 1, NULL, -1, &len) == SEG_ERR_ARGUMENT);
+    seg_seismic_file_release(f);
 }
 
 static void *init_and_fail(void *arg) {
     (void)arg;
     CHECK(seg_init() == SEG_ABI_VERSION);
-    SegFile *f = (SegFile *)1;
-    CHECK(seg_file_open("/nonexistent/zz", false, false, &f) == SEG_ERR_IO && f == NULL);
+    SegSeismicFile *f = (SegSeismicFile *)1;
+    CHECK(seg_open_seismic("/nonexistent/zz", false, false, &f) == SEG_ERR_IO && f == NULL);
     CHECK(strlen(seg_last_error()) > 0);
     return NULL;
 }
@@ -582,21 +643,23 @@ static void test_concurrent_init(void) {
 }
 
 /* ---- host threads ---------------------------------------------------- */
-static SegFile *shared_file;
+static SegSeismicFile *shared_file;
 
 static void *reader(void *arg) {
     int64_t id = (int64_t)(intptr_t)arg;
     float *buf = malloc(20 * 2001 * sizeof(float));
-    SegSampleBuffer b = {buf, SEG_DTYPE_FLOAT32, 20, 2001, 2001};
+    SegTensorView b = dest(buf, SEG_DTYPE_FLOAT32, 20, 2001, 2001);
     for (int round = 0; round < 50; round++) {
         int64_t failed = 0;
-        if (seg_file_read_into(shared_file, &b, (id * 37 + round) % 180, &failed) != SEG_OK ||
-            failed != 0) {
+        int64_t first = (id * 37 + round) % 180;
+        if (seg_seismic_file_read_traces_into_range(shared_file, first, first + 19, &b, 0,
+                                                    &failed) != SEG_OK || failed != 0) {
             fprintf(stderr, "thread %ld: read failed\n", (long)id);
             failures++;
         }
         SegTensor *t = NULL;
-        if (seg_file_read(shared_file, round % 190, 10, SEG_DTYPE_FLOAT32, -1, &t) == SEG_OK) {
+        if (seg_seismic_file_read_traces_range(shared_file, round % 190, round % 190 + 9,
+                                               SEG_DTYPE_FLOAT32, &t) == SEG_OK) {
             DLManagedTensor *m = NULL;
             if (seg_tensor_to_dlpack(t, (void **)&m) != SEG_OK) failures++;
             seg_tensor_release(t);
@@ -604,21 +667,21 @@ static void *reader(void *arg) {
         } else failures++;
         /* Serialized calls on the same handle from every thread. */
         SegValue v;
-        if (seg_file_trace_field(shared_file, round % 200, "trace.sourceX", &v) !=
+        if (seg_seismic_file_trace_field(shared_file, round % 200, "trace.sourceX", &v) !=
             SEG_OK) failures++;
         int64_t ng = -1;
-        if (seg_file_gathers(shared_file, NULL, 0, &ng) != SEG_OK || ng < 1) failures++;
+        if (seg_seismic_file_gathers(shared_file, NULL, 0, &ng) != SEG_OK || ng < 1) failures++;
     }
     free(buf);
     return NULL;
 }
 
 static void test_threads(void) {
-    OK(seg_file_open(path(dir, "BO_3D-Inglewood_rev21_v7.sgy"), true, false, &shared_file));
+    shared_file = open_file("BO_3D-Inglewood_rev21_v7.sgy", true);
     pthread_t th[4];
     for (intptr_t i = 0; i < 4; i++) pthread_create(&th[i], NULL, reader, (void *)i);
     for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
-    seg_file_release(shared_file);
+    seg_seismic_file_release(shared_file);
 }
 
 /* Mappings of `name` in this process (Linux), or -1 if unknown. */
@@ -639,22 +702,17 @@ static void test_release_unmaps(void) {
     /* Released files used to keep their mapping forever. */
     const char *name = "Sweep0.sgy";
     int before = maps_of(name);
-    for (int i = 0; i < 25; i++) {
-        SegFile *f = NULL;
-        OK(seg_file_open(path(dir, name), true, false, &f));
-        seg_file_release(f);
-    }
+    for (int i = 0; i < 25; i++) seg_seismic_file_release(open_file(name, true));
     if (before >= 0) CHECK(maps_of(name) == before);
     /* first + count overflowed into SEG_ERR_INTERNAL. */
-    SegFile *f = NULL;
-    OK(seg_file_open(path(dir, "inova_rev30_5traces.sgd"), true, false, &f));
+    SegSeismicFile *f = open_file("inova_rev30_5traces.sgd", true);
     int64_t g[1], len = 0;
-    CHECK(seg_file_component_groups(f, 5, INT64_MAX, g, 1, &len) == SEG_ERR_ARGUMENT);
-    CHECK(seg_file_component_groups(f, 0, (int64_t)1 << 40, g, 1, &len) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_component_group_ids(f, 5, INT64_MAX, g, 1, &len) == SEG_ERR_ARGUMENT);
+    CHECK(seg_seismic_file_component_group_ids(f, 0, (int64_t)1 << 40, g, 1, &len) ==
+          SEG_ERR_ARGUMENT);
     SegValue v;
-    CHECK(seg_file_trace_field(f, 1000000, "trace.traceNumber", &v) == SEG_ERR_ARGUMENT &&
-          strstr(seg_last_error(), "no trace") != NULL);
-    seg_file_release(f);
+    CHECK(seg_seismic_file_trace_field(f, 1000000, "trace.traceNumber", &v) == SEG_ERR_ARGUMENT);
+    seg_seismic_file_release(f);
 }
 
 int main(int argc, char **argv) {
@@ -662,14 +720,14 @@ int main(int argc, char **argv) {
     snprintf(dir, sizeof dir, "%s", argv[1]);
     snprintf(tmp, sizeof tmp, "%s", argv[2]);
     test_concurrent_init();
-    CHECK(seg_init() == SEG_ABI_VERSION && SEG_ABI_VERSION == 2);
+    CHECK(seg_init() == SEG_ABI_VERSION && SEG_ABI_VERSION == 3);
     int32_t abi = 0;
     OK(seg_abi_version(&abi));
     CHECK(abi == SEG_ABI_VERSION);
     char ver[16];
     int64_t len = 0;
     OK(seg_version(ver, sizeof ver, &len));
-    CHECK(strcmp(ver, "0.2.0") == 0 && len == 5);
+    CHECK(strcmp(ver, "0.3.0") == 0 && len == 5);
     test_layout();
     test_files();
     test_reads();

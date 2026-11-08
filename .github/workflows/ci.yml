@@ -122,8 +122,8 @@ jobs:
         shell: bash
         run: >
           python -I -c "import sys; sys.path.insert(0, 'bin/python'); import parseseg;
-          f = parseseg.open('SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy');
-          assert f.trace_count() == 200 and f.read(0, 2).shape() == (2, 2001); print('ok')"
+          f = parseseg.open_seismic('SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy');
+          assert len(f) == 200 and f.read_traces(range(2)).shape == (2, 2001); print('ok')"
 
       - name: CLI smoke test
         shell: bash

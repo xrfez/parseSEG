@@ -83,7 +83,7 @@ block names_errors_and_edits:
   copyFile(exampleDir / "Sweep0.sgy", path)
   if fileExists(path & ".edits.nif"): removeFile(path & ".edits.nif")
   var ed = openEditor(path)
-  doAssert ed.setField(0, "trace.groupX", 4321)
+  doAssert ed.setTraceField(0, "trace.groupX", 4321)
   doAssert ed.file.traceField(0, "trace.groupX", v) and v.i == 4321
   ed.close()
 

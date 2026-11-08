@@ -8,7 +8,7 @@
 ##
 ## ```nim
 ## var f = openSeismic("survey.sgd")
-## var p = newPrefetcher[float32](f, chunkTraces = 512, depth = 4)
+## var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 512, depth = 4)
 ## var c: PrefetchChunk[float32]
 ## while p.next(c):
 ##   show(c.first, c.samples)      # [c.count, cols] tensor, owned by the caller
@@ -137,17 +137,24 @@ proc worker[T](sh: ptr Shared[T]) {.thread.} =
 proc rawData[T](t: Tensor[T]): ptr UncheckedArray[T] {.inline.} =
   cast[ptr UncheckedArray[T]](t.unsafe_raw_offset())
 
-proc newPrefetcher*[T: SampleType](f: SeismicFile, first = 0, last = -1, chunkTraces = 256,
+proc raiseArg(msg: string) {.noinline, noreturn.} =
+  raise newException(ValueError, msg)
+
+proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTraces = 256,
     depth = 4, cols = -1): Prefetcher[T] =
-  ## Starts decoding traces `first ..< last` (`last = -1`: to the end) on a
-  ## worker thread, `chunkTraces` at a time, at most `depth` chunks ahead.
-  ## Rows have `cols` samples (default: the range's largest trace). `f` must
-  ## stay open, its index unchanged, until `close`.
-  doAssert f.isOpen or f.len == 0, "the file is closed"
-  doAssert f.index.contiguous, "prefetch needs a plain disk file"
-  doAssert chunkTraces > 0 and depth > 0
-  let stop = if last < 0: f.len else: last
-  doAssert first >= 0 and first <= stop and stop <= f.len, "trace range out of bounds"
+  ## Starts decoding `traces` on a worker thread, `chunkTraces` at a time, at
+  ## most `depth` chunks ahead. Rows have `cols` samples (-1: the range's
+  ## largest trace). `f` must stay open, its index unchanged, until `close`.
+  ## Raises `ValueError` for traces outside the file, a closed or tape file,
+  ## or a non-positive chunk size or depth.
+  if not f.isOpen and f.len > 0: raiseArg("the file is closed")
+  if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
+  if chunkTraces <= 0 or depth <= 0 or cols < -1:
+    raiseArg("need chunkTraces > 0, depth > 0 and cols >= -1")
+  let first = traces.a
+  if first < 0 or first > f.len or traces.b >= f.len:
+    raiseArg("traces " & $traces & " lie outside the file")
+  let stop = if traces.b >= first: traces.b + 1 else: first
   let width = if cols >= 0: cols elif first < stop: f.maxSamples(first..<stop) else: 0
   # No range (even after a seek) holds more traces than the file.
   let rows = max(1, min(chunkTraces, f.len))
@@ -172,19 +179,19 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, first = 0, last = -1, chunkTr
     sh.slots[i].data = rawData(result.tensors[i])
   createThread(sh.thread, worker[T], sh)
 
-proc newPrefetcher*[T: SampleType](f: SeismicFile, selection: sink seq[int], chunkTraces = 256,
+proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
     depth = 4, cols = -1): Prefetcher[T] =
   ## Read-ahead over a list of trace indices (a gather, a component group, a
-  ## sort order), decoded in list order. Positions (`first`, `seek`) index
-  ## the list; `traceAt` maps them to traces. The list is fixed for the
-  ## prefetcher's life (for another list, make another prefetcher).
-  for i in selection:
-    doAssert i >= 0 and i < f.len, "trace " & $i & " is out of bounds"
-  let width = if cols >= 0: cols else: f.maxSamples(selection)
+  ## sort order), decoded in list order. Positions (`seek`) index the list;
+  ## `traceAt` maps them to traces. The list is fixed for the prefetcher's
+  ## life (for another list, make another prefetcher).
+  for i in traces:
+    if i notin 0 ..< f.len: raiseArg("trace " & $i & " lies outside the file")
+  let width = if cols >= 0: cols else: f.maxSamples(traces)
   # Build in range mode over positions, then switch the worker to the list
   # before it can run: the lock orders the hand-over.
-  result = newPrefetcher[T](f, 0, 0, chunkTraces, depth, width)
-  result.selection = selection
+  result = newPrefetcher[T](f, 0 .. -1, chunkTraces, depth, width)
+  result.selection = traces
   result.last = result.selection.len
   let sh = result.sh
   acquire(sh.lock)
@@ -199,8 +206,11 @@ func positions*[T](p: Prefetcher[T]): int {.inline.} =
   p.last
 
 proc traceAt*[T](p: Prefetcher[T], pos: int): int =
-  ## The trace index at position `pos` (the position itself in range mode).
-  if p.selection.len > 0: p.selection[pos] else: pos
+  ## The trace index at position `pos` (the position itself in range mode);
+  ## -1 for a position out of range.
+  if pos notin 0 ..< p.last: -1
+  elif p.selection.len > 0: p.selection[pos]
+  else: pos
 
 proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
   # Called with the head slot ready; hands its tensor over and gives the slot
@@ -261,15 +271,16 @@ proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   if more: p.take(c)
   more
 
-proc seek*[T](p: var Prefetcher[T], first: int, last = -1) =
-  ## Restarts read-ahead at trace `first` (to `last`, exclusive; -1 = the end
-  ## of the file; any negative value means the end). Chunks decoded for the old position are
-  ## dropped; one being
-  ## decoded finishes in the background and is discarded. A no-op after
-  ## `close`.
+proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
+  ## Restarts read-ahead over the positions `span` (traces in range mode).
+  ## Chunks decoded for the old positions are dropped; one being decoded
+  ## finishes in the background and is discarded. A no-op after `close`.
+  ## Raises `ValueError` for positions out of range.
   if p.sh == nil: return
-  let stop = if last < 0: p.last else: last
-  doAssert first >= 0 and first <= stop and stop <= p.last, "trace range out of bounds"
+  let first = span.a
+  if first < 0 or first > p.last or span.b >= p.last:
+    raiseArg("positions " & $span & " are out of range")
+  let stop = if span.b >= first: span.b + 1 else: first
   let sh = p.sh
   acquire(sh.lock)
   inc sh.gen

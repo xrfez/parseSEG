@@ -44,7 +44,7 @@ proc bench(path: string) =
   let tRange = best:
     discard probe.readTraces(0..<traces)
   let tPrefetch = best:
-    var p = newPrefetcher[float32](probe, chunkTraces = 256, depth = 4)
+    var p = newPrefetcher[float32](probe, 0 ..< probe.len, chunkTraces = 256, depth = 4)
     var c: PrefetchChunk[float32]
     var n = 0
     while p.next(c): n += c.count

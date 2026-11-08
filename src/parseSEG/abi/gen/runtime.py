@@ -45,11 +45,7 @@ class IOError(Error, OSError):  # noqa: A001 - parseseg.IOError, also an OSError
 
 
 class StateError(Error, RuntimeError):
-    """Not possible in this state (e.g. a closed handle, keys not collected)."""
-
-
-class RefusedError(Error):
-    """An edit was refused; the editor's diagnostics say why."""
+    """Not possible in this state (a closed object)."""
 
 
 class InternalError(Error, RuntimeError):
@@ -57,7 +53,7 @@ class InternalError(Error, RuntimeError):
 
 
 _STATUS = {-1: ArgumentError, -2: IOError, -3: FormatError, -4: StateError,
-           -5: RefusedError, -6: InternalError, -7: MemoryError}
+           -6: InternalError, -7: MemoryError}
 
 
 def _raise(st, diagnostics=None):
@@ -79,21 +75,22 @@ def _dec(b):
     return None if b is None else b.decode("utf-8", "replace")
 
 
-def _i64(x, name):
+def _int(x, name, lo=-(1 << 63), hi=(1 << 63) - 1):
+    # Checked here: ctypes would wrap an out-of-range value silently.
     try:
         v = operator.index(x)
     except TypeError:
         raise ArgumentError(f"{name} must be an integer, not {type(x).__name__}") from None
-    if not -(1 << 63) <= v < (1 << 63):
-        raise ArgumentError(f"{name} out of range")
+    if not lo <= v <= hi:
+        raise ArgumentError(f"{name} must be in {lo}..{hi}, not {v}")
     return v
 
 
-def _i32(x, name):
-    v = _i64(x, name)
-    if not -(1 << 31) <= v < (1 << 31):
-        raise ArgumentError(f"{name} out of range")
-    return v
+def _range_arg(x, name):
+    # A Python range (step 1) is a Nim Slice: range(a, b) is a..b-1.
+    if not isinstance(x, range) or x.step != 1:
+        raise TypeError(f"{name} must be a range with step 1")
+    return _int(x.start, name), _int(x.stop - 1, name)
 
 
 def _f64(x, name):
@@ -122,7 +119,7 @@ def _enum(table, x, name):
 
 
 def _ids(xs, name):
-    vals = [_i64(x, name) for x in xs]
+    vals = [_int(x, name) for x in xs]
     return (ctypes.c_int64 * len(vals))(*vals), len(vals)
 
 
@@ -133,16 +130,28 @@ def _handle(x, cls, name):
 
 
 def _struct_arg(cls, x, name):
+    # A struct from a dict of the fields to change (or a tuple of all of
+    # them), the others keeping their Nim defaults; None: all defaults.
     hook = globals().get("_to_" + cls.__name__)
     if hook is not None:
         return hook(x, name)
     if isinstance(x, cls):
         return x
-    return cls(**x)
+    vals = dict(cls._defaults)
+    if isinstance(x, (tuple, list)):
+        x = dict(zip([f[0] for f in cls._fields_], x))
+    if x is not None:
+        if not isinstance(x, dict):
+            raise TypeError(f"{name} must be a dict, not {type(x).__name__}")
+        for k, v in x.items():
+            if k not in cls._in:
+                raise ArgumentError(f"{name} has no field {k!r} (fields: {', '.join(cls._in)})")
+            vals[k] = v
+    return cls(**{k: cls._in[k](v, f"{name}.{k}") for k, v in vals.items()})
 
 
 def _struct_dict(s):
-    return {k: f(getattr(s, k)) for k, f in type(s)._conv}
+    return {k: f(getattr(s, k)) for k, f in type(s)._out}
 
 
 def _text(fn):
@@ -154,6 +163,14 @@ def _text(fn):
         if n.value < cap:
             return buf.raw[:n.value].decode("utf-8", "replace")
         cap = n.value + 1
+
+
+def _bytes(fn):
+    n = ctypes.c_int64()
+    fn(None, 0, ctypes.byref(n))
+    buf = (ctypes.c_uint8 * max(n.value, 1))()
+    fn(buf, n.value, ctypes.byref(n))
+    return bytes(buf[:n.value])
 
 
 def _seq(fn, ctype, conv):
@@ -190,7 +207,7 @@ def _value_in(x, name):
             except (TypeError, ValueError):
                 raise ArgumentError(f"{name} must be an int, float or str") from None
         else:
-            v.kind, v.i = 1, _i64(i, name)
+            v.kind, v.i = 1, _int(i, name)
     return v
 
 
@@ -287,18 +304,9 @@ class _Handle:
         self._free()
 
 
-def _log_list(ptr):
-    if not ptr:
-        return None
-    log = _wrap(Log, ptr)
-    try:
-        return [log.get(i) for i in range(log.count())]
-    finally:
-        log._free()
-
-
 def _logged(st, out):
-    diags = _log_list(out.value)
+    # A DiagLog result; a failure carries it as `e.diagnostics`.
+    log = _wrap(DiagLog, out.value)
     if st < 0:
-        _raise(st, diags)
-    return diags
+        _raise(st, log)
+    return log

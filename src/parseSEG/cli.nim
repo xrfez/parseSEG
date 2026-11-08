@@ -207,7 +207,7 @@ proc wantsSurvey(a: Args): bool =
 
 proc loadSurvey(a: Args, log: var DiagLog): SurveyGeometry =
   ## The survey geometry named by the SURVEY options.
-  var names = LineNames(trailingDigits: a.has("trailing-digits"))
+  result.trailingDigits = a.has("trailing-digits")
   if a.has("line-map"):
     for item in a.get("line-map").split(','):
       let kv = item.split('=')
@@ -215,7 +215,7 @@ proc loadSurvey(a: Args, log: var DiagLog): SurveyGeometry =
       let v = try: parseFloat(kv[1].strip)
               except ValueError: usage("--line-map: '" & kv[1] & "' is not a number")
       if v.isNaN or v.classify in {fcInf, fcNegInf}: usage("--line-map: '" & kv[1] & "' is not finite")
-      names.names[kv[0].strip] = v
+      result.mapLine(kv[0], v)
   result.multiComponent = a.has("multi-component")
   let (grid, depth) = parseDecimals(a)
   for path in a.get("sps").split(','):
@@ -223,13 +223,13 @@ proc loadSurvey(a: Args, log: var DiagLog): SurveyGeometry =
       checkInput(path)
       let f = readSps(path)
       log.add f.log
-      result.addSps(f, names)
+      result.addSps(f)
   for path in a.get("p1").split(','):
     if path.len > 0:
       checkInput(path)
       let f = readP1(path, P1Options(gridDecimals: grid, depthDecimals: depth))
       log.add f.log
-      result.addP1(f, names, a.has("elevation"))
+      result.addP1(f, a.has("elevation"))
   log.add result.log
 
 proc joinSurvey(a: Args, f: var SeismicFile): DiagLog =
@@ -515,9 +515,9 @@ proc edit(a: Args): int =
     for x in plan:
       var ok = true
       case x.scope
-      of 'f': ok = ed.setField(x.name, x.value)
+      of 'f': ok = ed.setFileField(x.name, x.value)
       of 't':
-        for i in x.targets: ok = ed.setField(i, x.name, x.value) and ok
+        for i in x.targets: ok = ed.setTraceField(i, x.name, x.value) and ok
       else:
         for i in x.targets: ok = ed.setRecordField(i, x.name, x.value) and ok
       if not ok: inc refused

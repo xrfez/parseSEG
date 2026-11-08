@@ -36,6 +36,7 @@
 
 import std/[tables, math]
 import ./[traceindex, keys]
+import ../abi/pragmas
 
 type
   GatherKind* = enum
@@ -87,7 +88,7 @@ func isSeismic*(ix: TraceIndex, i: int): bool =
   else: e.channelType == 1
 
 proc requireKeys(ix: TraceIndex) =
-  doAssert ix.keys.len == ix.entries.len, "build the index with keys = true"
+  if ix.keys.len != ix.entries.len: raise newException(ValueError, "open the file with keys = true")
 
 proc classify*(ix: TraceIndex, s: Slice[int]): Gather =
   ## Counts the distinct sources and receivers of the seismic traces in `s`
@@ -165,13 +166,16 @@ proc gathers*(ix: TraceIndex): seq[Gather] =
         result.add g
         first = i
 
-proc componentGroups*(ix: TraceIndex, s: Slice[int]): seq[ComponentGroup] =
-  ## Groups the seismic traces of `s` by (source, receiver station, depth
-  ## index, reshoot index), in order of first appearance. Needs an index
-  ## built with `keys = true`.
+proc componentGroups*(ix: TraceIndex, traces: Slice[int]): seq[ComponentGroup] =
+  ## Groups the seismic traces of `traces` by (source, receiver station,
+  ## depth index, reshoot index), in order of first appearance. Raises
+  ## `ValueError` for traces outside the index or an index built without
+  ## `keys = true`.
   ix.requireKeys()
+  if traces.b >= traces.a and (traces.a < 0 or traces.b >= ix.len):
+    raise newException(ValueError, "traces " & $traces & " lie outside the file")
   var at: Table[(StationId, StationId, uint8, uint8), int]
-  for i in s:
+  for i in traces:
     if ix.isSeismic(i):
       let k = ix.keys[i]
       let key = (sourceId(k), receiverId(k), k.depthIndex, k.reshootIndex)
@@ -187,3 +191,21 @@ func isMultiComponent*(g: ComponentGroup): bool =
   ## True when the group holds more than one distinct component.
   for c in g.components:
     if c != g.components[0]: return true
+
+proc gathers*(f: SeismicFile): seq[Gather] {.segApi.} =
+  ## The file's gathers: `f.index.gathers`.
+  f.index.gathers
+
+proc componentGroups*(f: SeismicFile, traces: Slice[int]): seq[ComponentGroup] {.inline.} =
+  ## `f.index.componentGroups(traces)`.
+  f.index.componentGroups(traces)
+
+proc componentGroupIds*(f: SeismicFile, traces: Slice[int]): seq[int] {.segApi.} =
+  ## The component group of each trace of `traces` (see `componentGroups`),
+  ## numbered from 0 in order of first appearance; -1 for a trace in none
+  ## (an auxiliary trace).
+  let groups = f.index.componentGroups(traces) # checks the range first
+  result = newSeq[int]((if traces.b < traces.a: 0 else: traces.len))
+  for k in 0 ..< result.len: result[k] = -1
+  for g, grp in groups:
+    for i in grp.traces: result[i - traces.a] = g

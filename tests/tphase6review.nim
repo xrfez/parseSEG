@@ -101,14 +101,14 @@ block a6_closed_maps_fail_cleanly:
   doAssert not compiles(`=copy`(g, f)) # a copy could outlive `close`
   f.close()
   var t = newTraceTensor[float32](1, 10)
-  doAssert f.readTracesInto(0, 0, t) == 0 and not f.isOpen
+  doAssert f.readTracesInto(0 .. -1, t) == 0 and not f.isOpen
 
 block b1_edits_refused_on_files_that_are_not_seismic:
   writeFile(tmp / "junk.bin", repeat('\xEE', 8000))
   if fileExists(tmp / "junk.bin.edits.nif"): removeFile(tmp / "junk.bin.edits.nif")
   var ed = openEditor(tmp / "junk.bin")
-  doAssert not ed.setField("binary.jobId", 5)
-  doAssert not ed.setField(0, "trace.sourceX", 5)
+  doAssert not ed.setFileField("binary.jobId", 5)
+  doAssert not ed.setTraceField(0, "trace.sourceX", 5)
   ed.close()
   doAssert readFile(tmp / "junk.bin") == repeat('\xEE', 8000)
 
@@ -116,8 +116,8 @@ block b2_repeated_rollback_with_overlapping_spans:
   let (path, journal) = copySample("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
-  doAssert ed.setField(3, "trace.sourceX", 0x0100_0001) # 4 bytes change
-  doAssert ed.setField(3, "trace.sourceX", 1)           # then only 1 byte
+  doAssert ed.setTraceField(3, "trace.sourceX", 0x0100_0001) # 4 bytes change
+  doAssert ed.setTraceField(3, "trace.sourceX", 1)           # then only 1 byte
   ed.close()
   let edited = readBytes(path)
   for _ in 1..2:
@@ -131,8 +131,8 @@ block b3_field_edited_twice_has_no_spurious_conflicts:
   let (path, journal) = copySample("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
-  doAssert ed.setField(5, "trace.sourceX", 111)
-  doAssert ed.setField(5, "trace.sourceX", 222)
+  doAssert ed.setTraceField(5, "trace.sourceX", 111)
+  doAssert ed.setTraceField(5, "trace.sourceX", 222)
   ed.close()
   let edited = readBytes(path)
   doAssert rollbackJournal(path, journal).len == 0 and rollbackJournal(path, journal).len == 0
@@ -174,7 +174,7 @@ block b5_huge_general_header_numbers_are_refused:
 block b6_prefetch_of_zero_width_chunks:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   for i in 0..<10: f.index.entries[i].numSamples = 0
-  var p = newPrefetcher[float32](f, first = 0, last = 10, chunkTraces = 7, depth = 2)
+  var p = newPrefetcher[float32](f, 0 ..< 10, chunkTraces = 7, depth = 2)
   var c: PrefetchChunk[float32]
   var n = 0
   while p.next(c):
@@ -186,12 +186,12 @@ block b6_prefetch_of_zero_width_chunks:
 
 block b7_prefetch_after_close:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
-  var p = newPrefetcher[float32](f, chunkTraces = 100_000) # slots capped at the file's 200
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 100_000) # slots capped at the file's 200
   var c: PrefetchChunk[float32]
   doAssert p.next(c) and c.count == 200
   p.close()
   doAssert p.atEnd and not p.tryNext(c) and not p.next(c)
-  p.seek(0)
+  p.seek(0 ..< p.positions)
   var q: Prefetcher[float32] # never started
   doAssert q.atEnd and not q.tryNext(c)
   f.close()

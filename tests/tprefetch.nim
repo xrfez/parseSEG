@@ -16,7 +16,7 @@ block sequential_reads_match_range_reads:
       var f = openSeismic(exampleDir / n)
       let all = f.readTraces(0..<f.len)
       for (chunk, depth) in [(1, 1), (7, 3), (64, 2), (100_000, 4)]:
-        var p = newPrefetcher[float32](f, chunkTraces = chunk, depth = depth)
+        var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth)
         var c: PrefetchChunk[float32]
         var expect = 0
         while p.next(c):
@@ -31,7 +31,7 @@ block sequential_reads_match_range_reads:
 block polling_never_blocks:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let all = f.readTraces(0..<f.len)
-  var p = newPrefetcher[float32](f, chunkTraces = 10, depth = 3)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 10, depth = 3)
   var c: PrefetchChunk[float32]
   var got, polls = 0
   while not p.atEnd:
@@ -46,7 +46,7 @@ block polling_never_blocks:
 block taken_chunks_are_never_overwritten:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let all = f.readTraces(0..<f.len)
-  var p = newPrefetcher[float32](f, chunkTraces = 8, depth = 2)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, depth = 2)
   var kept: seq[PrefetchChunk[float32]]
   var c: PrefetchChunk[float32]
   while p.next(c): kept.add c
@@ -57,19 +57,19 @@ block taken_chunks_are_never_overwritten:
 block subrange_seek_and_float64:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let all = f.readTraces(0..<f.len, float64)
-  var p = newPrefetcher[float64](f, first = 20, last = 45, chunkTraces = 10, depth = 2,
+  var p = newPrefetcher[float64](f, 20 ..< 45, chunkTraces = 10, depth = 2,
     cols = 50)
   var c: PrefetchChunk[float64]
   doAssert p.next(c) and c.first == 20 and c.count == 10 and c.samples.shape[1] == 50
   doAssert c.samples == all[20..29, 0..<50]
-  p.seek(150) # to the end of the file
+  p.seek(150 ..< p.positions) # to the end of the file
   doAssert p.next(c) and c.first == 150
   doAssert c.samples == all[150..159, 0..<50]
-  p.seek(195, 197)
+  p.seek(195 ..< 197)
   doAssert p.next(c) and c.first == 195 and c.count == 2 and not p.next(c)
-  p.seek(200) # an empty range
+  p.seek(200 ..< p.positions) # an empty range
   doAssert p.atEnd and not p.next(c)
-  p.seek(0, 3)
+  p.seek(0 ..< 3)
   doAssert p.next(c) and c.count == 3
   p.close()
   p.close() # idempotent
@@ -78,7 +78,7 @@ block subrange_seek_and_float64:
 block undecodable_traces_are_counted:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   f.index.entries[3].numSamples = 1_000_000_000 # points past the end of the file
-  var p = newPrefetcher[float32](f, first = 0, last = 5, chunkTraces = 5, cols = 10)
+  var p = newPrefetcher[float32](f, 0 ..< 5, chunkTraces = 5, cols = 10)
   var c: PrefetchChunk[float32]
   doAssert p.next(c) and c.failed == 1
   for j in 0..<10: doAssert c.samples[3, j] == 0
@@ -88,7 +88,7 @@ block undecodable_traces_are_counted:
 block destroyed_without_close:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   for _ in 0..<20:
-    var p = newPrefetcher[float32](f, chunkTraces = 3, depth = 4)
+    var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 3, depth = 4)
     var c: PrefetchChunk[float32]
     discard p.tryNext(c) # leaves the worker busy; `=destroy` must join it
   f.close()
@@ -98,7 +98,7 @@ block random_seeks_and_polls:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let all = f.readTraces(0..<f.len)
   var rng = initRand(42)
-  var p = newPrefetcher[float32](f, chunkTraces = 9, depth = 3)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 9, depth = 3)
   var c: PrefetchChunk[float32]
   var start = 0
   var expect = 0
@@ -107,7 +107,7 @@ block random_seeks_and_polls:
     of 0:
       start = rng.rand(f.len)
       expect = start
-      p.seek(start)
+      p.seek(start ..< p.positions)
     of 1..4:
       if p.tryNext(c):
         doAssert c.first == expect and c.samples == all.rows(c.first, c.count)
@@ -139,7 +139,7 @@ block selections:
     doAssert p.traceAt(pos) == sel[pos]
     pos += c.count
   doAssert pos == sel.len
-  p.seek(60)
+  p.seek(60 ..< p.positions)
   doAssert p.next(c) and c.first == 60 and c.samples[0, _] == all[sel[60], _]
   p.close()
   # Raw decode into a caller buffer with a row stride (the C ABI path).

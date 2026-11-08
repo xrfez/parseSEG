@@ -477,7 +477,7 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
                       case scope
                       of hsFile: ed.currentFileField(name, cur, err)
                       of hsRecord: ed.currentRecordField(i, name, cur, err)
-                      of hsTrace: ed.currentField(i, name, cur, err)
+                      of hsTrace: ed.currentTraceField(i, name, cur, err)
         if not found:
           inc entryErrors
           if entryErrors <= MaxLoggedErrors:
@@ -490,9 +490,9 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
             var ok = true
             if not opts.dryRun:
               ok = case scope
-                of hsFile: ed.setField(name, nv)
+                of hsFile: ed.setFileField(name, nv)
                 of hsRecord: ed.setRecordField(i, name, nv)
-                of hsTrace: ed.setField(i, name, nv)
+                of hsTrace: ed.setTraceField(i, name, nv)
             if ok:
               inc result.applied
               if opts.onChange != nil: opts.onChange(c)

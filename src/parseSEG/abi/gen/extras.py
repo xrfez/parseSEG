@@ -38,7 +38,11 @@ class _HeldBuffer:
         _api.PyBuffer_Release(ctypes.byref(self.view))
 
 
-def _to_SegSampleBuffer(x, name):  # noqa: N802 - named after the C struct
+def _to_SegTensorView(x, name):  # noqa: N802 - named after the C struct
+    # A writable 2-D buffer (a numpy array, ...) as a destination; a
+    # SegTensorView passes through.
+    if isinstance(x, SegTensorView):
+        return x
     held = _HeldBuffer(x)  # TypeError / BufferError for non-buffers and read-only ones
     v = held.view
     if v.ndim != 2:
@@ -56,8 +60,8 @@ def _to_SegSampleBuffer(x, name):  # noqa: N802 - named after the C struct
     es = v.itemsize
     if v.strides[1] != es or v.strides[0] % es or v.strides[0] < cols * es:
         raise ArgumentError(f"{name} rows must be contiguous (C order)")
-    s = SegSampleBuffer(data=v.buf, dtype=dtype, rows=rows, cols=cols,
-                        row_stride=v.strides[0] // es)
+    s = SegTensorView(data=v.buf, dtype=dtype, rank=2, shape=(rows, cols),
+                      strides=(v.strides[0] // es, 1))
     s._held = held
     return s
 
@@ -84,21 +88,22 @@ def _capsule_destructor(capsule):
                 m.deleter(p)
 
 
-class _SamplesExtras:
-    """Python protocols of `Samples` (numpy, DLPack, lists, bytes)."""
+class _TensorExtras:
+    """Python protocols of `Tensor` (numpy, DLPack, lists, bytes)."""
 
+    @property
     def shape(self):
         """`(traces, samples)`."""
-        return tuple(self.view()["shape"])
+        return tuple(self.view["shape"])
 
     def __repr__(self):
         if self.closed():
-            return "<parseseg.Samples empty>"
-        v = self.view()
-        return f"<parseseg.Samples {v['shape'][0]}x{v['shape'][1]} {v['dtype']}>"
+            return "<parseseg.Tensor closed>"
+        v = self.view
+        return f"<parseseg.Tensor {v['shape'][0]}x{v['shape'][1]} {v['dtype']}>"
 
     def _rows(self):
-        v = self.view()
+        v = self.view
         rows, cols = v["shape"]
         ctype = ctypes.c_float if v["dtype"] == "float32" else ctypes.c_double
         if rows == 0 or cols == 0:
@@ -152,5 +157,4 @@ class _SeismicFileExtras:
     def __repr__(self):
         if self.closed():
             return "<parseseg.SeismicFile closed>"
-        kind = {"segy": "SEG-Y", "segd": "SEG-D"}.get(self.kind(), "unknown")
-        return f"<parseseg.SeismicFile {kind}, {self.trace_count()} traces>"
+        return f"<parseseg.SeismicFile {self.kind}, {len(self)} traces>"

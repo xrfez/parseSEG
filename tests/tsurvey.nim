@@ -254,15 +254,16 @@ block join_line_names:
   var g: SurveyGeometry
   g.addSps(f)
   doAssert g.table.receivers.len == 0 and g.log.count(sevWarning) == 1
-  var g2: SurveyGeometry
-  g2.addSps(f, LineNames(names: {"91LW1124": 1124.0}.toTable))
+  var g2 = initSurveyGeometry()
+  g2.mapLine("91LW1124", 1124.0)
+  g2.addSps(f)
   doAssert stationKey(1124, 225, 1) in g2.table.receivers
-  var g3: SurveyGeometry
-  g3.addSps(f, LineNames(trailingDigits: true))
+  var g3 = SurveyGeometry(trailingDigits: true)
+  g3.addSps(f)
   doAssert stationKey(1124, 225, 1) in g3.table.receivers
   # P1: reshoot codes become point indices.
-  var g4: SurveyGeometry
-  g4.addP1(parseP1(["H X", p1a].join("\n")), LineNames(trailingDigits: true), elevation = true)
+  var g4 = SurveyGeometry(trailingDigits: true)
+  g4.addP1(parseP1(["H X", p1a].join("\n")), elevation = true)
   doAssert stationKey(4960, 12340, 3) in g4.table.sources
   doAssert g4.table.sources[stationKey(4960, 12340, 3)].z == 857
 

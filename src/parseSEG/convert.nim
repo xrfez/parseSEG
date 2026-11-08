@@ -50,6 +50,7 @@ import ./segd/[reader as segdreader]
 import ./model/[traceindex, keys]
 import ./segy/layout
 import ./io/memsource
+import ./abi/pragmas
 
 const
   ConverterName = "parseSEG 0.2.0"
@@ -682,7 +683,7 @@ proc finishOutput*(tmp, dstPath: string, log: var DiagLog) =
     log.report(sevFatal, dcIo, "cannot move the output into place: " & e.msg,
       loc = Location(file: dstPath))
 
-proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog =
+proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.segApi.} =
   ## Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
   ## file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
   ## problems, including I/O failures, are in the result.

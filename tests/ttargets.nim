@@ -78,12 +78,12 @@ when defined(linux):
 int main(int argc, char **argv) {
     (void)argc;
     if (seg_init() != SEG_ABI_VERSION) return 3;
-    SegFile *f = NULL;
-    if (seg_file_open(argv[1], false, false, &f) != SEG_OK) return 4;
+    SegSeismicFile *f = NULL;
+    if (seg_open_seismic(argv[1], false, false, &f) != SEG_OK) return 4;
     int64_t n = -1;
-    if (seg_file_trace_count(f, &n) != SEG_OK) return 5;
+    if (seg_seismic_file_len(f, &n) != SEG_OK) return 5;
     printf("traces %lld\n", (long long)n);
-    seg_file_release(f);
+    seg_seismic_file_release(f);
     return 0;
 }
 """)
@@ -104,8 +104,8 @@ int main(int argc, char **argv) {
     else:
       task "pylib"
       mustRun(py & " -I -c " & quoteShell("import sys; sys.path.insert(0, sys.argv[1]); " &
-        "import parseseg; f = parseseg.open(sys.argv[2]); " &
-        "assert f.read(0, 2, dtype='float64').shape() == (2, 2001)") & " " &
+        "import parseseg; f = parseseg.open_seismic(sys.argv[2]); " &
+        "assert f.read_traces(range(2), dtype='float64').shape == (2, 2001)") & " " &
         quoteShell(root / "bin" / "python") & " " &
         quoteShell(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"))
       echo "ttargets: the release Python module works"

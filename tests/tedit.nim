@@ -56,11 +56,11 @@ block segy_trace_and_binary_edits_and_rollback:
   let original = readBytes(path)
   var ed = openEditor(path)
   doAssert ed.journalPath == journal
-  doAssert ed.setField(5, "trace.sourceX", 1_700_000)
-  doAssert ed.setField(5, "trace.sourceX", 1_700_000) # a no-op writes nothing
-  doAssert ed.setField(7, "trace.groupStatic", -12)
-  doAssert ed.setField("binary.jobId", 4242)
-  doAssert ed.setField(0, "trace.headerName", "ABC") # text, space padded
+  doAssert ed.setTraceField(5, "trace.sourceX", 1_700_000)
+  doAssert ed.setTraceField(5, "trace.sourceX", 1_700_000) # a no-op writes nothing
+  doAssert ed.setTraceField(7, "trace.groupStatic", -12)
+  doAssert ed.setFileField("binary.jobId", 4242)
+  doAssert ed.setTraceField(0, "trace.headerName", "ABC") # text, space padded
   doAssert ed.edits == 4 and ed.log.len == 0
   doAssert ed.file.index.segy.binary.jobId == 4242 # cached copy refreshed
   ed.close()
@@ -84,18 +84,18 @@ block refused_edits_change_nothing:
   let original = readBytes(path)
   var ed = openEditor(path)
   let refused = [
-    ed.setField(0, "trace.numSamples", 10),           # structural
-    ed.setField("binary.formatCode", 5),              # structural
-    ed.setField("binary.maxAddlTraceHeaders", 1),     # structural, revision dependent
-    ed.setField(0, "trace.traceIdCode", 40000),       # int16 overflow
-    ed.setField(0, "trace.sourceX", 1.5),             # not an integer
-    ed.setField(0, "trace.sourceX", "east"),          # text for a number
-    ed.setField(0, "trace.headerName", "TOO LONG!"),  # 9 characters for 8
-    ed.setField(0, "trace.noSuchField", 1),
-    ed.setField(0, "sourceX", 1),                     # no block
-    ed.setField(0, "ext1.extSourceX", 1.0),           # the trace has no Ext1
-    ed.setField(200, "trace.sourceX", 1),             # no such trace
-    ed.setField("binary.unassigned1", "x"),           # raw bytes
+    ed.setTraceField(0, "trace.numSamples", 10),           # structural
+    ed.setFileField("binary.formatCode", 5),              # structural
+    ed.setFileField("binary.maxAddlTraceHeaders", 1),     # structural, revision dependent
+    ed.setTraceField(0, "trace.traceIdCode", 40000),       # int16 overflow
+    ed.setTraceField(0, "trace.sourceX", 1.5),             # not an integer
+    ed.setTraceField(0, "trace.sourceX", "east"),          # text for a number
+    ed.setTraceField(0, "trace.headerName", "TOO LONG!"),  # 9 characters for 8
+    ed.setTraceField(0, "trace.noSuchField", 1),
+    ed.setTraceField(0, "sourceX", 1),                     # no block
+    ed.setTraceField(0, "ext1.extSourceX", 1.0),           # the trace has no Ext1
+    ed.setTraceField(200, "trace.sourceX", 1),             # no such trace
+    ed.setFileField("binary.unassigned1", "x"),           # raw bytes
     ed.setRecordField(0, "gh1.year", 1)]              # SEG-Y has no records
   for r in refused: doAssert not r
   doAssert ed.log.count(sevError) == refused.len and ed.edits == 0
@@ -105,7 +105,7 @@ block refused_edits_change_nothing:
 block segy_little_endian_and_ext1:
   let (path, journal) = fresh("Sweep0.sgy")
   var ed = openEditor(path)
-  doAssert ed.setField(0, "trace.sourceX", -123456)
+  doAssert ed.setTraceField(0, "trace.sourceX", -123456)
   ed.close()
   doAssert readSegy(path).traces[0].header.sourceX == -123456
   doAssert rollbackJournal(path, journal).len == 0
@@ -115,10 +115,10 @@ block segy_little_endian_and_ext1:
   if fileExists(p2 & ".edits.nif"): removeFile(p2 & ".edits.nif")
   var e2 = openEditor(p2)
   doAssert e2.file.len == 4
-  doAssert e2.setField(2, "ext1.extSourceX", 512300.25)
-  doAssert e2.setField(2, "ext1.extTraceSeqLine", 18_000_000_000'i64) # beyond 32 bits
-  doAssert not e2.setField(2, "ext1.numAddlTraceHeaders", 2)
-  doAssert not e2.setField(2, "ext1.extTraceSeqLine", -1)
+  doAssert e2.setTraceField(2, "ext1.extSourceX", 512300.25)
+  doAssert e2.setTraceField(2, "ext1.extTraceSeqLine", 18_000_000_000'i64) # beyond 32 bits
+  doAssert not e2.setTraceField(2, "ext1.numAddlTraceHeaders", 2)
+  doAssert not e2.setTraceField(2, "ext1.extTraceSeqLine", -1)
   e2.close()
   let d = readSegy(p2)
   doAssert d.traces[2].ext1.extSourceX == 512300.25
@@ -128,11 +128,11 @@ block segd_rev2_edits:
   let (path, journal) = fresh("63.sgd")
   let original = readBytes(path)
   var ed = openEditor(path)
-  doAssert ed.setField(0, "ext1.receiverPointNumber", 2050)     # 24-bit
-  doAssert not ed.setField(0, "ext1.receiverPointNumber", 9_000_000)
-  doAssert ed.setField(0, "trace.traceNumber", 77)              # 4 BCD digits
-  doAssert not ed.setField(0, "trace.traceNumber", 12345)
-  doAssert not ed.setField(0, "trace.traceHeaderExtensions", 1) # structural
+  doAssert ed.setTraceField(0, "ext1.receiverPointNumber", 2050)     # 24-bit
+  doAssert not ed.setTraceField(0, "ext1.receiverPointNumber", 9_000_000)
+  doAssert ed.setTraceField(0, "trace.traceNumber", 77)              # 4 BCD digits
+  doAssert not ed.setTraceField(0, "trace.traceNumber", 12345)
+  doAssert not ed.setTraceField(0, "trace.traceHeaderExtensions", 1) # structural
   doAssert ed.setRecordField(0, "gh1.year", 27)                 # 2 BCD digits
   doAssert not ed.setRecordField(0, "gh1.year", 100)
   doAssert not ed.setRecordField(0, "gh1.formatCode", 8048)     # structural
@@ -155,9 +155,9 @@ block segd_rev2_edits:
 block segd_rev3_edits:
   let (path, journal) = fresh("inova_rev30_5traces.sgd")
   var ed = openEditor(path)
-  doAssert ed.setField(4, "ext1.receiverLineNumber", 1234)   # Rev 3 layout
-  doAssert ed.setField(4, "ext1.sensorMoving", 1)            # a Rev 3-only field
-  doAssert not ed.setField(4, "ext1.numSamples", 10)         # structural
+  doAssert ed.setTraceField(4, "ext1.receiverLineNumber", 1234)   # Rev 3 layout
+  doAssert ed.setTraceField(4, "ext1.sensorMoving", 1)            # a Rev 3-only field
+  doAssert not ed.setTraceField(4, "ext1.numSamples", 10)         # structural
   doAssert not ed.setRecordField(0, "gh3.timeZero", 0)       # Rev 3 blocks are not editable
   ed.close()
   let d = readSegd(path)
@@ -171,8 +171,8 @@ block journal_conflicts_crashes_and_damage:
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
-  doAssert ed.setField(1, "trace.sourceX", 11)
-  doAssert ed.setField(2, "trace.sourceX", 22)
+  doAssert ed.setTraceField(1, "trace.sourceX", 11)
+  doAssert ed.setTraceField(2, "trace.sourceX", 22)
   let at1 = int(ed.file.index.entries[1].offset + 72)
   let at2 = ed.file.index.entries[2].offset + 72
   ed.close()
@@ -214,7 +214,7 @@ block edit_through_the_mapped_index:
   # Values written through the editor are what range reads see next.
   let (path, _) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   var ed = openEditor(path)
-  doAssert ed.setField(3, "trace.sourceY", 99)
+  doAssert ed.setTraceField(3, "trace.sourceY", 99)
   let t = ed.file.readTraces(3..3)
   doAssert t.shape == [1, 2001]
   ed.close()

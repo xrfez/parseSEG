@@ -96,7 +96,7 @@ block segy_larger_than_4_gib:
       for j in [0, 1, 4567, YSamples - 1]:
         doAssert t[1, j] == want[j] and t[0, j] == 0
       # Read-ahead near the end.
-      var p = newPrefetcher[float32](f, first = YTraces - 3, chunkTraces = 2, depth = 2)
+      var p = newPrefetcher[float32](f, YTraces - 3 ..< f.len, chunkTraces = 2, depth = 2)
       var c: PrefetchChunk[float32]
       doAssert p.next(c) and c.first == YTraces - 3 and p.next(c) and c.first == YTraces - 1
       doAssert c.samples[0, YSamples - 1] == want[YSamples - 1] and not p.next(c)
@@ -110,7 +110,7 @@ block segy_larger_than_4_gib:
       let journal = path & ".edits.nif"
       if fileExists(journal): removeFile(journal)
       var ed = openEditor(path)
-      doAssert ed.setField(YTraces - 1, "trace.sourceX", -77)
+      doAssert ed.setTraceField(YTraces - 1, "trace.sourceX", -77)
       let at = ed.file.index.entries[^1].offset
       doAssert decodeTraceHeader(ed.file.copyBytes(at, TraceHeaderSize), boBig).sourceX == -77
       ed.close()
@@ -167,7 +167,7 @@ block segd_larger_than_4_gib:
       doAssert last.offset == DSize - DTraceBytes and last.offset > FourGiB
       doAssert last.numSamples == DSamples
       var t = newTraceTensor[float32](2, 1000)
-      doAssert f.readTracesInto(DTraces - 2, 2, t) == 0
+      doAssert f.readTracesInto(DTraces - 2 ..< DTraces, t) == 0
       let want = ramp(1000, float32(DTraces))
       for j in [0, 1, 999]: doAssert t[1, j] == want[j] and t[0, j] == 0
       f.close()
@@ -177,7 +177,7 @@ block segd_larger_than_4_gib:
       let journal = path & ".edits.nif"
       if fileExists(journal): removeFile(journal)
       var ed = openEditor(path)
-      doAssert ed.setField(DTraces - 1, "ext1.receiverPointNumber", 31337)
+      doAssert ed.setTraceField(DTraces - 1, "ext1.receiverPointNumber", 31337)
       ed.close()
       doAssert readSegdHeaders(path).records[0].traces[^1].ext1.receiverPointNumber == 31337
       doAssert rollbackJournal(path, journal).len == 0

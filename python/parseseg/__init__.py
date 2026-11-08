@@ -2,8 +2,8 @@
 """Read, index, edit and convert SEG-Y and SEG-D seismic data.
 
     import parseseg
-    with parseseg.open("line.sgy") as f:
-        samples = f.read(0, 100).numpy()   # zero-copy, float32 [100, ns]"""
+    with parseseg.open_seismic("line.sgy", keys=True) as f:
+        samples = f.read_traces(range(100)).numpy()   # zero-copy, float32 [100, ns]"""
 # ------------------------------------------------------------------ runtime
 # (src/parseSEG/abi/gen/runtime.py, spliced into the generated module)
 import ctypes
@@ -12,7 +12,7 @@ import os
 import sys
 import threading
 
-_ABI_VERSION = 2
+_ABI_VERSION = 3
 _LIB_NAMES = {"win32": "parseseg.dll", "darwin": "libparseseg.dylib"}
 
 
@@ -51,11 +51,7 @@ class IOError(Error, OSError):  # noqa: A001 - parseseg.IOError, also an OSError
 
 
 class StateError(Error, RuntimeError):
-    """Not possible in this state (e.g. a closed handle, keys not collected)."""
-
-
-class RefusedError(Error):
-    """An edit was refused; the editor's diagnostics say why."""
+    """Not possible in this state (a closed object)."""
 
 
 class InternalError(Error, RuntimeError):
@@ -63,7 +59,7 @@ class InternalError(Error, RuntimeError):
 
 
 _STATUS = {-1: ArgumentError, -2: IOError, -3: FormatError, -4: StateError,
-           -5: RefusedError, -6: InternalError, -7: MemoryError}
+           -6: InternalError, -7: MemoryError}
 
 
 def _raise(st, diagnostics=None):
@@ -85,21 +81,22 @@ def _dec(b):
     return None if b is None else b.decode("utf-8", "replace")
 
 
-def _i64(x, name):
+def _int(x, name, lo=-(1 << 63), hi=(1 << 63) - 1):
+    # Checked here: ctypes would wrap an out-of-range value silently.
     try:
         v = operator.index(x)
     except TypeError:
         raise ArgumentError(f"{name} must be an integer, not {type(x).__name__}") from None
-    if not -(1 << 63) <= v < (1 << 63):
-        raise ArgumentError(f"{name} out of range")
+    if not lo <= v <= hi:
+        raise ArgumentError(f"{name} must be in {lo}..{hi}, not {v}")
     return v
 
 
-def _i32(x, name):
-    v = _i64(x, name)
-    if not -(1 << 31) <= v < (1 << 31):
-        raise ArgumentError(f"{name} out of range")
-    return v
+def _range_arg(x, name):
+    # A Python range (step 1) is a Nim Slice: range(a, b) is a..b-1.
+    if not isinstance(x, range) or x.step != 1:
+        raise TypeError(f"{name} must be a range with step 1")
+    return _int(x.start, name), _int(x.stop - 1, name)
 
 
 def _f64(x, name):
@@ -128,7 +125,7 @@ def _enum(table, x, name):
 
 
 def _ids(xs, name):
-    vals = [_i64(x, name) for x in xs]
+    vals = [_int(x, name) for x in xs]
     return (ctypes.c_int64 * len(vals))(*vals), len(vals)
 
 
@@ -139,16 +136,28 @@ def _handle(x, cls, name):
 
 
 def _struct_arg(cls, x, name):
+    # A struct from a dict of the fields to change (or a tuple of all of
+    # them), the others keeping their Nim defaults; None: all defaults.
     hook = globals().get("_to_" + cls.__name__)
     if hook is not None:
         return hook(x, name)
     if isinstance(x, cls):
         return x
-    return cls(**x)
+    vals = dict(cls._defaults)
+    if isinstance(x, (tuple, list)):
+        x = dict(zip([f[0] for f in cls._fields_], x))
+    if x is not None:
+        if not isinstance(x, dict):
+            raise TypeError(f"{name} must be a dict, not {type(x).__name__}")
+        for k, v in x.items():
+            if k not in cls._in:
+                raise ArgumentError(f"{name} has no field {k!r} (fields: {', '.join(cls._in)})")
+            vals[k] = v
+    return cls(**{k: cls._in[k](v, f"{name}.{k}") for k, v in vals.items()})
 
 
 def _struct_dict(s):
-    return {k: f(getattr(s, k)) for k, f in type(s)._conv}
+    return {k: f(getattr(s, k)) for k, f in type(s)._out}
 
 
 def _text(fn):
@@ -160,6 +169,14 @@ def _text(fn):
         if n.value < cap:
             return buf.raw[:n.value].decode("utf-8", "replace")
         cap = n.value + 1
+
+
+def _bytes(fn):
+    n = ctypes.c_int64()
+    fn(None, 0, ctypes.byref(n))
+    buf = (ctypes.c_uint8 * max(n.value, 1))()
+    fn(buf, n.value, ctypes.byref(n))
+    return bytes(buf[:n.value])
 
 
 def _seq(fn, ctype, conv):
@@ -196,7 +213,7 @@ def _value_in(x, name):
             except (TypeError, ValueError):
                 raise ArgumentError(f"{name} must be an int, float or str") from None
         else:
-            v.kind, v.i = 1, _i64(i, name)
+            v.kind, v.i = 1, _int(i, name)
     return v
 
 
@@ -293,30 +310,15 @@ class _Handle:
         self._free()
 
 
-def _log_list(ptr):
-    if not ptr:
-        return None
-    log = _wrap(Log, ptr)
-    try:
-        return [log.get(i) for i in range(log.count())]
-    finally:
-        log._free()
-
-
 def _logged(st, out):
-    diags = _log_list(out.value)
+    # A DiagLog result; a failure carries it as `e.diagnostics`.
+    log = _wrap(DiagLog, out.value)
     if st < 0:
-        _raise(st, diags)
-    return diags
+        _raise(st, log)
+    return log
 
 # ------------------------------------------------------------ enums
 
-_E_FileKind = {"unknown": 0, "segy": 1, "segd": 2, }
-_N_FileKind = {0: "unknown", 1: "segy", 2: "segd", }
-_E_Dtype = {"float32": 1, "float64": 2, }
-_N_Dtype = {1: "float32", 2: "float64", }
-_E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
-_N_GatherKind = {0: "unknown", 1: "shot", 2: "receiver", 3: "cmp", 4: "offset", 5: "other", }
 _E_Severity = {"info": 0, "warning": 1, "error": 2, "fatal": 3, }
 _N_Severity = {0: "info", 1: "warning", 2: "error", 3: "fatal", }
 _E_DiagCode = {"internal": 0, "io": 1, "truncated": 2, "badValue": 3, "badBcd": 4, "inconsistent": 5, "byteOrder": 6, "unsupportedRevision": 7, "unsupportedFormat": 8, "unknownBlock": 9, "vendorBlock": 10, "vendorMap": 11, "tapeLayout": 12, "validation": 13, }
@@ -325,10 +327,80 @@ _E_ByteOrder = {"big": 0, "little": 1, "pairSwapped": 2, }
 _N_ByteOrder = {0: "big", 1: "little", 2: "pairSwapped", }
 _E_TextEncoding = {"ebcdic": 0, "ascii": 1, }
 _N_TextEncoding = {0: "ebcdic", 1: "ascii", }
+_E_GatherKind = {"unknown": 0, "shot": 1, "receiver": 2, "cmp": 3, "offset": 4, "other": 5, }
+_N_GatherKind = {0: "unknown", 1: "shot", 2: "receiver", 3: "cmp", 4: "offset", 5: "other", }
+_E_SpsRevision = {"auto": 0, "1.0": 1, "2.1": 2, }
+_N_SpsRevision = {0: "auto", 1: "1.0", 2: "2.1", }
+_E_TextLayout = {"lines": 0, "fixed80": 1, "ebcdic80": 2, }
+_N_TextLayout = {0: "lines", 1: "fixed80", 2: "ebcdic80", }
+_E_Dtype = {"float32": 1, "float64": 2, }
+_N_Dtype = {1: "float32", 2: "float64", }
+_E_SeismicKind = {"unknown": 0, "SEG-Y": 1, "SEG-D": 2, }
+_N_SeismicKind = {0: "unknown", 1: "SEG-Y", 2: "SEG-D", }
 
 # ---------------------------------------------------------- structs
 
+
+class SegSlice(ctypes.Structure):
+    _fields_ = [("a", ctypes.c_int64), ("b", ctypes.c_int64)]
+    _out = ()
+    _in = {}
+    _defaults = {}
+
+
+class SegLocation(ctypes.Structure):
+    """Where a problem sits: which file, and where in its logical structure. -1 / "" mean "not applicable" or "unknown"."""
+    _fields_ = [
+        ("file", ctypes.c_char_p),
+        ("record", ctypes.c_int64),
+        ("channel_set", ctypes.c_int64),
+        ("trace", ctypes.c_int64),
+        ("block_index", ctypes.c_int64),
+        ("field", ctypes.c_char_p),
+    ]
+    _out = (("file", lambda _v: _dec(_v)), ("record", lambda _v: _v), ("channel_set", lambda _v: _v), ("trace", lambda _v: _v), ("block_index", lambda _v: _v), ("field", lambda _v: _dec(_v)), )
+    _in = {}
+    _defaults = {}
+
+
+class SegDiagnostic(ctypes.Structure):
+    """One problem found while reading or writing."""
+    _fields_ = [
+        ("severity", ctypes.c_int32),
+        ("code", ctypes.c_int32),
+        ("offset", ctypes.c_int64),
+        ("loc", SegLocation),
+        ("msg", ctypes.c_char_p),
+    ]
+    _out = (("severity", lambda _v: _N_Severity.get(_v, _v)), ("code", lambda _v: _N_DiagCode.get(_v, _v)), ("offset", lambda _v: _v), ("loc", lambda _v: _struct_dict(_v)), ("msg", lambda _v: _dec(_v)), )
+    _in = {}
+    _defaults = {}
+
+
+class SegSegdRevision(ctypes.Structure):
+    """From General Header #2 bytes 11-12; 0.0 for Rev 0 records (no GH#2)."""
+    _fields_ = [
+        ("major", ctypes.c_uint8),
+        ("minor", ctypes.c_uint8),
+    ]
+    _out = (("major", lambda _v: _v), ("minor", lambda _v: _v), )
+    _in = {"major": lambda _x, _n: _int(_x, _n, 0, 255), "minor": lambda _x, _n: _int(_x, _n, 0, 255), }
+    _defaults = {}
+
+
+class SegSegdConvertOptions(ctypes.Structure):
+    _fields_ = [
+        ("revision", SegSegdRevision),
+        ("format", ctypes.c_int64),
+        ("twos_complement8015", ctypes.c_bool),
+    ]
+    _out = (("revision", lambda _v: _struct_dict(_v)), ("format", lambda _v: _v), ("twos_complement8015", lambda _v: _v), )
+    _in = {"revision": lambda _x, _n: _struct_arg(SegSegdRevision, _x, _n), "format": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "twos_complement8015": lambda _x, _n: bool(_x), }
+    _defaults = {}
+
+
 class SegTraceEntry(ctypes.Structure):
+    """Where one trace lives (24 bytes)."""
     _fields_ = [
         ("offset", ctypes.c_int64),
         ("header_bytes", ctypes.c_uint32),
@@ -338,9 +410,13 @@ class SegTraceEntry(ctypes.Structure):
         ("scan_type", ctypes.c_int8),
         ("channel_type", ctypes.c_uint8),
     ]
-    _conv = [("offset", lambda _v: _v), ("header_bytes", lambda _v: _v), ("num_samples", lambda _v: _v), ("record", lambda _v: _v), ("channel_set", lambda _v: _v), ("scan_type", lambda _v: _v), ("channel_type", lambda _v: _v), ]
+    _out = (("offset", lambda _v: _v), ("header_bytes", lambda _v: _v), ("num_samples", lambda _v: _v), ("record", lambda _v: _v), ("channel_set", lambda _v: _v), ("scan_type", lambda _v: _v), ("channel_type", lambda _v: _v), )
+    _in = {"offset": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "header_bytes": lambda _x, _n: _int(_x, _n, 0, (1 << 32) - 1), "num_samples": lambda _x, _n: _int(_x, _n, 0, (1 << 32) - 1), "record": lambda _x, _n: _int(_x, _n, 0, (1 << 32) - 1), "channel_set": lambda _x, _n: _int(_x, _n, 0, 65535), "scan_type": lambda _x, _n: _int(_x, _n, -128, 127), "channel_type": lambda _x, _n: _int(_x, _n, 0, 255), }
+    _defaults = {}
+
 
 class SegTraceKeys(ctypes.Structure):
+    """Geometry of one trace (NaN / 0 where unknown)."""
     _fields_ = [
         ("record", ctypes.c_double),
         ("ensemble", ctypes.c_double),
@@ -365,19 +441,63 @@ class SegTraceKeys(ctypes.Structure):
         ("component", ctypes.c_uint8),
         ("channel", ctypes.c_double),
     ]
-    _conv = [("record", lambda _v: _v), ("ensemble", lambda _v: _v), ("offset", lambda _v: _v), ("src_line", lambda _v: _v), ("src_point", lambda _v: _v), ("src_x", lambda _v: _v), ("src_y", lambda _v: _v), ("rcv_line", lambda _v: _v), ("rcv_point", lambda _v: _v), ("rcv_x", lambda _v: _v), ("rcv_y", lambda _v: _v), ("src_z", lambda _v: _v), ("rcv_z", lambda _v: _v), ("cmp_x", lambda _v: _v), ("cmp_y", lambda _v: _v), ("src_index", lambda _v: _v), ("rcv_index", lambda _v: _v), ("depth_index", lambda _v: _v), ("reshoot_index", lambda _v: _v), ("sensor_type", lambda _v: _v), ("component", lambda _v: _v), ("channel", lambda _v: _v), ]
+    _out = (("record", lambda _v: _v), ("ensemble", lambda _v: _v), ("offset", lambda _v: _v), ("src_line", lambda _v: _v), ("src_point", lambda _v: _v), ("src_x", lambda _v: _v), ("src_y", lambda _v: _v), ("rcv_line", lambda _v: _v), ("rcv_point", lambda _v: _v), ("rcv_x", lambda _v: _v), ("rcv_y", lambda _v: _v), ("src_z", lambda _v: _v), ("rcv_z", lambda _v: _v), ("cmp_x", lambda _v: _v), ("cmp_y", lambda _v: _v), ("src_index", lambda _v: _v), ("rcv_index", lambda _v: _v), ("depth_index", lambda _v: _v), ("reshoot_index", lambda _v: _v), ("sensor_type", lambda _v: _v), ("component", lambda _v: _v), ("channel", lambda _v: _v), )
+    _in = {"record": lambda _x, _n: _f64(_x, _n), "ensemble": lambda _x, _n: _f64(_x, _n), "offset": lambda _x, _n: _f64(_x, _n), "src_line": lambda _x, _n: _f64(_x, _n), "src_point": lambda _x, _n: _f64(_x, _n), "src_x": lambda _x, _n: _f64(_x, _n), "src_y": lambda _x, _n: _f64(_x, _n), "rcv_line": lambda _x, _n: _f64(_x, _n), "rcv_point": lambda _x, _n: _f64(_x, _n), "rcv_x": lambda _x, _n: _f64(_x, _n), "rcv_y": lambda _x, _n: _f64(_x, _n), "src_z": lambda _x, _n: _f64(_x, _n), "rcv_z": lambda _x, _n: _f64(_x, _n), "cmp_x": lambda _x, _n: _f64(_x, _n), "cmp_y": lambda _x, _n: _f64(_x, _n), "src_index": lambda _x, _n: _int(_x, _n, -32768, 32767), "rcv_index": lambda _x, _n: _int(_x, _n, -32768, 32767), "depth_index": lambda _x, _n: _int(_x, _n, 0, 255), "reshoot_index": lambda _x, _n: _int(_x, _n, 0, 255), "sensor_type": lambda _x, _n: _int(_x, _n, 0, 255), "component": lambda _x, _n: _int(_x, _n, 0, 255), "channel": lambda _x, _n: _f64(_x, _n), }
+    _defaults = {}
 
-class SegSampleBuffer(ctypes.Structure):
+
+class SegSegyRevision(ctypes.Structure):
+    """SEG-Y revision from bytes 3501 (major) and 3502 (minor). 0.0 is the traditional 1975 format."""
     _fields_ = [
-        ("data", ctypes.c_void_p),
-        ("dtype", ctypes.c_int32),
-        ("rows", ctypes.c_int64),
-        ("cols", ctypes.c_int64),
-        ("row_stride", ctypes.c_int64),
+        ("major", ctypes.c_uint8),
+        ("minor", ctypes.c_uint8),
     ]
-    _conv = [("data", lambda _v: _v), ("dtype", lambda _v: _N_Dtype.get(_v, _v)), ("rows", lambda _v: _v), ("cols", lambda _v: _v), ("row_stride", lambda _v: _v), ]
+    _out = (("major", lambda _v: _v), ("minor", lambda _v: _v), )
+    _in = {"major": lambda _x, _n: _int(_x, _n, 0, 255), "minor": lambda _x, _n: _int(_x, _n, 0, 255), }
+    _defaults = {}
+
+
+class SegConvertOptions(ctypes.Structure):
+    """Target settings. The defaults give SEG-Y Rev 2.1, big-endian, EBCDIC text, a lossless sample format and recorded (not descaled) values."""
+    _fields_ = [
+        ("revision", SegSegyRevision),
+        ("byte_order", ctypes.c_int32),
+        ("format", ctypes.c_int64),
+        ("text_encoding", ctypes.c_int32),
+        ("apply_descale", ctypes.c_bool),
+        ("station_header", ctypes.c_bool),
+    ]
+    _out = (("revision", lambda _v: _struct_dict(_v)), ("byte_order", lambda _v: _N_ByteOrder.get(_v, _v)), ("format", lambda _v: _v), ("text_encoding", lambda _v: _N_TextEncoding.get(_v, _v)), ("apply_descale", lambda _v: _v), ("station_header", lambda _v: _v), )
+    _in = {"revision": lambda _x, _n: _struct_arg(SegSegyRevision, _x, _n), "byte_order": lambda _x, _n: _enum(_E_ByteOrder, _x, _n), "format": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "text_encoding": lambda _x, _n: _enum(_E_TextEncoding, _x, _n), "apply_descale": lambda _x, _n: bool(_x), "station_header": lambda _x, _n: bool(_x), }
+    _defaults = {}
+
+
+class SegGather(ctypes.Structure):
+    _fields_ = [
+        ("kind", ctypes.c_int32),
+        ("traces", SegSlice),
+        ("sources", ctypes.c_int64),
+        ("receivers", ctypes.c_int64),
+    ]
+    _out = (("kind", lambda _v: _N_GatherKind.get(_v, _v)), ("traces", lambda _v: range(_v.a, _v.b + 1)), ("sources", lambda _v: _v), ("receivers", lambda _v: _v), )
+    _in = {"kind": lambda _x, _n: _enum(_E_GatherKind, _x, _n), "traces": lambda _x, _n: SegSlice(*_range_arg(_x, _n)), "sources": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), "receivers": lambda _x, _n: _int(_x, _n, -(1 << 63), (1 << 63) - 1), }
+    _defaults = {}
+
+
+class SegSpsOptions(ctypes.Structure):
+    _fields_ = [
+        ("revision", ctypes.c_int32),
+        ("strict_implied_decimals", ctypes.c_bool),
+        ("layout", ctypes.c_int32),
+        ("force_layout", ctypes.c_bool),
+    ]
+    _out = (("revision", lambda _v: _N_SpsRevision.get(_v, _v)), ("strict_implied_decimals", lambda _v: _v), ("layout", lambda _v: _N_TextLayout.get(_v, _v)), ("force_layout", lambda _v: _v), )
+    _in = {"revision": lambda _x, _n: _enum(_E_SpsRevision, _x, _n), "strict_implied_decimals": lambda _x, _n: bool(_x), "layout": lambda _x, _n: _enum(_E_TextLayout, _x, _n), "force_layout": lambda _x, _n: bool(_x), }
+    _defaults = {}
+
 
 class SegTensorView(ctypes.Structure):
+    """Samples in memory: `data[r * strides[0] + c * strides[1]]` is row r, sample c. As a destination, rows must be contiguous (`strides[1] == 1`)."""
     _fields_ = [
         ("data", ctypes.c_void_p),
         ("dtype", ctypes.c_int32),
@@ -385,180 +505,187 @@ class SegTensorView(ctypes.Structure):
         ("shape", (ctypes.c_int64 * 2)),
         ("strides", (ctypes.c_int64 * 2)),
     ]
-    _conv = [("data", lambda _v: _v), ("dtype", lambda _v: _N_Dtype.get(_v, _v)), ("rank", lambda _v: _v), ("shape", lambda _v: [_x for _x in _v]), ("strides", lambda _v: [_x for _x in _v]), ]
+    _out = (("data", lambda _v: _v), ("dtype", lambda _v: _N_Dtype.get(_v, _v)), ("rank", lambda _v: _v), ("shape", lambda _v: list(_v)), ("strides", lambda _v: list(_v)), )
+    _in = {"data": lambda _x, _n: _x, "dtype": lambda _x, _n: _enum(_E_Dtype, _x, _n), "rank": lambda _x, _n: _int(_x, _n, -(1 << 31), (1 << 31) - 1), "shape": lambda _x, _n: (ctypes.c_int64 * 2)(*_x), "strides": lambda _x, _n: (ctypes.c_int64 * 2)(*_x), }
+    _defaults = {}
 
-class SegGather(ctypes.Structure):
-    _fields_ = [
-        ("kind", ctypes.c_uint8),
-        ("first", ctypes.c_int64),
-        ("count", ctypes.c_int64),
-        ("sources", ctypes.c_int64),
-        ("receivers", ctypes.c_int64),
-    ]
-    _conv = [("kind", lambda _v: _N_GatherKind.get(_v, _v)), ("first", lambda _v: _v), ("count", lambda _v: _v), ("sources", lambda _v: _v), ("receivers", lambda _v: _v), ]
 
-class SegSurveyCounts(ctypes.Structure):
-    _fields_ = [
-        ("sources", ctypes.c_int64),
-        ("receivers", ctypes.c_int64),
-        ("relations", ctypes.c_int64),
-    ]
-    _conv = [("sources", lambda _v: _v), ("receivers", lambda _v: _v), ("relations", lambda _v: _v), ]
-
-class SegChunk(ctypes.Structure):
+class SegPrefetchChunk(ctypes.Structure):
+    """One prefetched chunk; `samples` is owned by the caller."""
     _fields_ = [
         ("first", ctypes.c_int64),
         ("count", ctypes.c_int64),
         ("failed", ctypes.c_int64),
         ("samples", ctypes.c_void_p),
     ]
-    _conv = [("first", lambda _v: _v), ("count", lambda _v: _v), ("failed", lambda _v: _v), ("samples", lambda _v: _wrap(Samples, _v)), ]
-
-class SegDiagnostic(ctypes.Structure):
-    _fields_ = [
-        ("severity", ctypes.c_uint8),
-        ("code", ctypes.c_uint8),
-        ("offset", ctypes.c_int64),
-        ("record", ctypes.c_int64),
-        ("channel_set", ctypes.c_int64),
-        ("trace", ctypes.c_int64),
-        ("block_index", ctypes.c_int64),
-        ("file", ctypes.c_char_p),
-        ("field", ctypes.c_char_p),
-        ("message", ctypes.c_char_p),
-    ]
-    _conv = [("severity", lambda _v: _N_Severity.get(_v, _v)), ("code", lambda _v: _N_DiagCode.get(_v, _v)), ("offset", lambda _v: _v), ("record", lambda _v: _v), ("channel_set", lambda _v: _v), ("trace", lambda _v: _v), ("block_index", lambda _v: _v), ("file", lambda _v: _dec(_v)), ("field", lambda _v: _dec(_v)), ("message", lambda _v: _dec(_v)), ]
+    _out = (("first", lambda _v: _v), ("count", lambda _v: _v), ("failed", lambda _v: _v), ("samples", lambda _v: _wrap(Tensor, _v)), )
+    _in = {}
+    _defaults = {}
+SegSegdRevision._defaults = {"major": 0, "minor": 0}
+SegSegdConvertOptions._defaults = {"revision": {"major": 3, "minor": 0}, "format": 0, "twos_complement8015": False}
+SegSegyRevision._defaults = {"major": 0, "minor": 0}
+SegConvertOptions._defaults = {"revision": {"major": 2, "minor": 1}, "byte_order": "big", "format": 0, "text_encoding": "ebcdic", "apply_descale": False, "station_header": True}
+SegSpsOptions._defaults = {"revision": "auto", "strict_implied_decimals": False, "layout": "lines", "force_layout": False}
+SegTensorView._defaults = {"data": None, "dtype": "Dtype 0", "rank": 0, "shape": None, "strides": None}
 
 # ----------------------------------------------------- declarations
 
-_lib.seg_file_release.argtypes = [ctypes.c_void_p]
-_lib.seg_file_release.restype = None
+_lib.seg_diag_log_release.argtypes = [ctypes.c_void_p]
+_lib.seg_diag_log_release.restype = None
+_lib.seg_seismic_file_release.argtypes = [ctypes.c_void_p]
+_lib.seg_seismic_file_release.restype = None
+_lib.seg_header_editor_release.argtypes = [ctypes.c_void_p]
+_lib.seg_header_editor_release.restype = None
+_lib.seg_survey_geometry_release.argtypes = [ctypes.c_void_p]
+_lib.seg_survey_geometry_release.restype = None
 _lib.seg_tensor_release.argtypes = [ctypes.c_void_p]
 _lib.seg_tensor_release.restype = None
-_lib.seg_prefetch_release.argtypes = [ctypes.c_void_p]
-_lib.seg_prefetch_release.restype = None
-_lib.seg_editor_release.argtypes = [ctypes.c_void_p]
-_lib.seg_editor_release.restype = None
-_lib.seg_geometry_release.argtypes = [ctypes.c_void_p]
-_lib.seg_geometry_release.restype = None
-_lib.seg_log_release.argtypes = [ctypes.c_void_p]
-_lib.seg_log_release.restype = None
+_lib.seg_prefetcher_release.argtypes = [ctypes.c_void_p]
+_lib.seg_prefetcher_release.restype = None
+_lib.seg_diag_log_len.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_diag_log_len.restype = ctypes.c_int32
+_lib.seg_diag_log_get.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegDiagnostic)]
+_lib.seg_diag_log_get.restype = ctypes.c_int32
+_lib.seg_diag_log_count.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_diag_log_count.restype = ctypes.c_int32
+_lib.seg_diag_log_has_errors.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_diag_log_has_errors.restype = ctypes.c_int32
+_lib.seg_diag_log_is_fatal.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_diag_log_is_fatal.restype = ctypes.c_int32
+_lib.seg_diag_log_to_nif.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_diag_log_to_nif.restype = ctypes.c_int32
+_lib.seg_convert_segd_revision.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(SegSegdConvertOptions), ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_convert_segd_revision.restype = ctypes.c_int32
+_lib.seg_open_seismic.argtypes = [ctypes.c_char_p, ctypes.c_bool, ctypes.c_bool, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_open_seismic.restype = ctypes.c_int32
+_lib.seg_seismic_file_len.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_len.restype = ctypes.c_int32
+_lib.seg_seismic_file_kind.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
+_lib.seg_seismic_file_kind.restype = ctypes.c_int32
+_lib.seg_seismic_file_log.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_log.restype = ctypes.c_int32
+_lib.seg_seismic_file_record_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_record_count.restype = ctypes.c_int32
+_lib.seg_seismic_file_max_samples.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_max_samples.restype = ctypes.c_int32
+_lib.seg_seismic_file_trace_entry.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegTraceEntry)]
+_lib.seg_seismic_file_trace_entry.restype = ctypes.c_int32
+_lib.seg_seismic_file_has_keys.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_seismic_file_has_keys.restype = ctypes.c_int32
+_lib.seg_seismic_file_trace_keys.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegTraceKeys)]
+_lib.seg_seismic_file_trace_keys.restype = ctypes.c_int32
+_lib.seg_seismic_file_is_open.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_seismic_file_is_open.restype = ctypes.c_int32
+_lib.seg_seismic_file_copy_bytes.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_copy_bytes.restype = ctypes.c_int32
+_lib.seg_convert_file.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(SegConvertOptions), ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_convert_file.restype = ctypes.c_int32
+_lib.seg_seismic_file_gathers.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegGather), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_gathers.restype = ctypes.c_int32
+_lib.seg_seismic_file_component_group_ids.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_component_group_ids.restype = ctypes.c_int32
+_lib.seg_seismic_file_trace_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
+_lib.seg_seismic_file_trace_field.restype = ctypes.c_int32
+_lib.seg_seismic_file_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
+_lib.seg_seismic_file_record_field.restype = ctypes.c_int32
+_lib.seg_seismic_file_file_field.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(SegValue)]
+_lib.seg_seismic_file_file_field.restype = ctypes.c_int32
+_lib.seg_seismic_file_sample_interval_us.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_double)]
+_lib.seg_seismic_file_sample_interval_us.restype = ctypes.c_int32
+_lib.seg_rollback_journal.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_rollback_journal.restype = ctypes.c_int32
+_lib.seg_apply_journal.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_apply_journal.restype = ctypes.c_int32
+_lib.seg_open_editor.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_open_editor.restype = ctypes.c_int32
+_lib.seg_header_editor_close.argtypes = [ctypes.c_void_p]
+_lib.seg_header_editor_close.restype = ctypes.c_int32
+_lib.seg_header_editor_edits.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_header_editor_edits.restype = ctypes.c_int32
+_lib.seg_header_editor_set_trace_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue), ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_header_editor_set_trace_field.restype = ctypes.c_int32
+_lib.seg_header_editor_set_file_field.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(SegValue), ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_header_editor_set_file_field.restype = ctypes.c_int32
+_lib.seg_header_editor_set_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue), ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_header_editor_set_record_field.restype = ctypes.c_int32
+_lib.seg_survey_geometry_relation_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_survey_geometry_relation_count.restype = ctypes.c_int32
+_lib.seg_survey_geometry_new.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_survey_geometry_new.restype = ctypes.c_int32
+_lib.seg_survey_geometry_source_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_survey_geometry_source_count.restype = ctypes.c_int32
+_lib.seg_survey_geometry_receiver_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_survey_geometry_receiver_count.restype = ctypes.c_int32
+_lib.seg_survey_geometry_add_source.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_int16, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+_lib.seg_survey_geometry_add_source.restype = ctypes.c_int32
+_lib.seg_survey_geometry_add_receiver.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_int16, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+_lib.seg_survey_geometry_add_receiver.restype = ctypes.c_int32
+_lib.seg_survey_geometry_map_line.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_double]
+_lib.seg_survey_geometry_map_line.restype = ctypes.c_int32
+_lib.seg_survey_geometry_add_sps.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(SegSpsOptions)]
+_lib.seg_survey_geometry_add_sps.restype = ctypes.c_int32
+_lib.seg_survey_geometry_add_p1.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_bool]
+_lib.seg_survey_geometry_add_p1.restype = ctypes.c_int32
+_lib.seg_seismic_file_apply_survey.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_apply_survey.restype = ctypes.c_int32
 _lib.seg_abi_version.argtypes = [ctypes.POINTER(ctypes.c_int32)]
 _lib.seg_abi_version.restype = ctypes.c_int32
 _lib.seg_version.argtypes = [ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_version.restype = ctypes.c_int32
 _lib.seg_status_name.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
 _lib.seg_status_name.restype = ctypes.c_int32
-_lib.seg_file_open.argtypes = [ctypes.c_char_p, ctypes.c_bool, ctypes.c_bool, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_file_open.restype = ctypes.c_int32
-_lib.seg_file_kind.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
-_lib.seg_file_kind.restype = ctypes.c_int32
-_lib.seg_file_trace_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_trace_count.restype = ctypes.c_int32
-_lib.seg_file_record_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_record_count.restype = ctypes.c_int32
-_lib.seg_file_max_samples.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_max_samples.restype = ctypes.c_int32
-_lib.seg_file_trace_entry.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegTraceEntry)]
-_lib.seg_file_trace_entry.restype = ctypes.c_int32
-_lib.seg_file_trace_keys.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegTraceKeys)]
-_lib.seg_file_trace_keys.restype = ctypes.c_int32
-_lib.seg_file_sample_interval.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_double)]
-_lib.seg_file_sample_interval.restype = ctypes.c_int32
-_lib.seg_file_diagnostics.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_file_diagnostics.restype = ctypes.c_int32
-_lib.seg_file_log_nif.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_log_nif.restype = ctypes.c_int32
-_lib.seg_file_trace_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
-_lib.seg_file_trace_field.restype = ctypes.c_int32
-_lib.seg_file_record_field.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
-_lib.seg_file_record_field.restype = ctypes.c_int32
-_lib.seg_file_file_field.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(SegValue)]
-_lib.seg_file_file_field.restype = ctypes.c_int32
-_lib.seg_file_read.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32, ctypes.c_int64, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_file_read.restype = ctypes.c_int32
-_lib.seg_file_read_traces.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.c_int32, ctypes.c_int64, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_file_read_traces.restype = ctypes.c_int32
-_lib.seg_file_read_into.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegSampleBuffer), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_read_into.restype = ctypes.c_int32
-_lib.seg_file_read_traces_into.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegSampleBuffer), ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_read_traces_into.restype = ctypes.c_int32
+_lib.seg_seismic_file_read_traces_range.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_read_traces_range.restype = ctypes.c_int32
+_lib.seg_seismic_file_read_traces.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_seismic_file_read_traces.restype = ctypes.c_int32
+_lib.seg_seismic_file_read_traces_into_range.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(SegTensorView), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_read_traces_into_range.restype = ctypes.c_int32
+_lib.seg_seismic_file_read_traces_into.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(SegTensorView), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_read_traces_into.restype = ctypes.c_int32
 _lib.seg_tensor_view.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegTensorView)]
 _lib.seg_tensor_view.restype = ctypes.c_int32
 _lib.seg_tensor_dtype.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
 _lib.seg_tensor_dtype.restype = ctypes.c_int32
 _lib.seg_tensor_to_dlpack.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
 _lib.seg_tensor_to_dlpack.restype = ctypes.c_int32
-_lib.seg_file_gathers.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegGather), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_gathers.restype = ctypes.c_int32
-_lib.seg_file_component_groups.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_component_groups.restype = ctypes.c_int32
-_lib.seg_geometry_new.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_geometry_new.restype = ctypes.c_int32
-_lib.seg_geometry_add_source.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_int32, ctypes.c_double, ctypes.c_double, ctypes.c_double]
-_lib.seg_geometry_add_source.restype = ctypes.c_int32
-_lib.seg_geometry_add_receiver.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_int32, ctypes.c_double, ctypes.c_double, ctypes.c_double]
-_lib.seg_geometry_add_receiver.restype = ctypes.c_int32
-_lib.seg_geometry_load_sps.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_geometry_load_sps.restype = ctypes.c_int32
-_lib.seg_geometry_load_p1.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_bool, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_geometry_load_p1.restype = ctypes.c_int32
-_lib.seg_geometry_map_line.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_double]
-_lib.seg_geometry_map_line.restype = ctypes.c_int32
-_lib.seg_geometry_set_options.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool]
-_lib.seg_geometry_set_options.restype = ctypes.c_int32
-_lib.seg_geometry_counts.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegSurveyCounts)]
-_lib.seg_geometry_counts.restype = ctypes.c_int32
-_lib.seg_file_apply_geometry.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_file_apply_geometry.restype = ctypes.c_int32
-_lib.seg_file_prefetch.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_file_prefetch.restype = ctypes.c_int32
-_lib.seg_file_prefetch_traces.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_file_prefetch_traces.restype = ctypes.c_int32
-_lib.seg_prefetch_next.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegChunk)]
-_lib.seg_prefetch_next.restype = ctypes.c_int32
-_lib.seg_prefetch_try_next.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegChunk)]
-_lib.seg_prefetch_try_next.restype = ctypes.c_int32
-_lib.seg_prefetch_at_end.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
-_lib.seg_prefetch_at_end.restype = ctypes.c_int32
-_lib.seg_prefetch_positions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_prefetch_positions.restype = ctypes.c_int32
-_lib.seg_prefetch_seek.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64]
-_lib.seg_prefetch_seek.restype = ctypes.c_int32
-_lib.seg_prefetch_trace_at.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_prefetch_trace_at.restype = ctypes.c_int32
-_lib.seg_prefetch_close.argtypes = [ctypes.c_void_p]
-_lib.seg_prefetch_close.restype = ctypes.c_int32
-_lib.seg_editor_open.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_editor_open.restype = ctypes.c_int32
-_lib.seg_editor_set_trace.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
-_lib.seg_editor_set_trace.restype = ctypes.c_int32
-_lib.seg_editor_set_record.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_char_p, ctypes.POINTER(SegValue)]
-_lib.seg_editor_set_record.restype = ctypes.c_int32
-_lib.seg_editor_set_file.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(SegValue)]
-_lib.seg_editor_set_file.restype = ctypes.c_int32
-_lib.seg_editor_edits.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_editor_edits.restype = ctypes.c_int32
-_lib.seg_editor_diagnostics.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_editor_diagnostics.restype = ctypes.c_int32
-_lib.seg_editor_close.argtypes = [ctypes.c_void_p]
-_lib.seg_editor_close.restype = ctypes.c_int32
-_lib.seg_journal_apply.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_journal_apply.restype = ctypes.c_int32
-_lib.seg_journal_rollback.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_journal_rollback.restype = ctypes.c_int32
-_lib.seg_log_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_log_count.restype = ctypes.c_int32
-_lib.seg_log_count_severity.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_log_count_severity.restype = ctypes.c_int32
-_lib.seg_log_get.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(SegDiagnostic)]
-_lib.seg_log_get.restype = ctypes.c_int32
-_lib.seg_log_nif.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
-_lib.seg_log_nif.restype = ctypes.c_int32
-_lib.seg_convert.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32, ctypes.c_int64, ctypes.c_int32, ctypes.c_bool, ctypes.c_bool, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_convert.restype = ctypes.c_int32
-_lib.seg_convert_segd.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_void_p)]
-_lib.seg_convert_segd.restype = ctypes.c_int32
+_lib.seg_prefetcher_new_range.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_prefetcher_new_range.restype = ctypes.c_int32
+_lib.seg_prefetcher_new.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_prefetcher_new.restype = ctypes.c_int32
+_lib.seg_prefetcher_next.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegPrefetchChunk)]
+_lib.seg_prefetcher_next.restype = ctypes.c_int32
+_lib.seg_prefetcher_try_next.argtypes = [ctypes.c_void_p, ctypes.POINTER(SegPrefetchChunk)]
+_lib.seg_prefetcher_try_next.restype = ctypes.c_int32
+_lib.seg_prefetcher_at_end.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_prefetcher_at_end.restype = ctypes.c_int32
+_lib.seg_prefetcher_positions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_prefetcher_positions.restype = ctypes.c_int32
+_lib.seg_prefetcher_seek.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64]
+_lib.seg_prefetcher_seek.restype = ctypes.c_int32
+_lib.seg_prefetcher_trace_at.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_prefetcher_trace_at.restype = ctypes.c_int32
+_lib.seg_prefetcher_close.argtypes = [ctypes.c_void_p]
+_lib.seg_prefetcher_close.restype = ctypes.c_int32
+_lib.seg_seismic_file_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_seismic_file_path.restype = ctypes.c_int32
+_lib.seg_header_editor_log.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_header_editor_log.restype = ctypes.c_int32
+_lib.seg_header_editor_journal_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_header_editor_journal_path.restype = ctypes.c_int32
+_lib.seg_survey_geometry_multi_component.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_survey_geometry_multi_component.restype = ctypes.c_int32
+_lib.seg_survey_geometry_set_multi_component.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+_lib.seg_survey_geometry_set_multi_component.restype = ctypes.c_int32
+_lib.seg_survey_geometry_tape.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64)]
+_lib.seg_survey_geometry_tape.restype = ctypes.c_int32
+_lib.seg_survey_geometry_set_tape.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.seg_survey_geometry_set_tape.restype = ctypes.c_int32
+_lib.seg_survey_geometry_trailing_digits.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)]
+_lib.seg_survey_geometry_trailing_digits.restype = ctypes.c_int32
+_lib.seg_survey_geometry_set_trailing_digits.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+_lib.seg_survey_geometry_set_trailing_digits.restype = ctypes.c_int32
+_lib.seg_survey_geometry_log.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+_lib.seg_survey_geometry_log.restype = ctypes.c_int32
 _lib.seg_sizeof.argtypes = [ctypes.c_char_p]
 _lib.seg_sizeof.restype = ctypes.c_int64
 
@@ -604,7 +731,11 @@ class _HeldBuffer:
         _api.PyBuffer_Release(ctypes.byref(self.view))
 
 
-def _to_SegSampleBuffer(x, name):  # noqa: N802 - named after the C struct
+def _to_SegTensorView(x, name):  # noqa: N802 - named after the C struct
+    # A writable 2-D buffer (a numpy array, ...) as a destination; a
+    # SegTensorView passes through.
+    if isinstance(x, SegTensorView):
+        return x
     held = _HeldBuffer(x)  # TypeError / BufferError for non-buffers and read-only ones
     v = held.view
     if v.ndim != 2:
@@ -622,8 +753,8 @@ def _to_SegSampleBuffer(x, name):  # noqa: N802 - named after the C struct
     es = v.itemsize
     if v.strides[1] != es or v.strides[0] % es or v.strides[0] < cols * es:
         raise ArgumentError(f"{name} rows must be contiguous (C order)")
-    s = SegSampleBuffer(data=v.buf, dtype=dtype, rows=rows, cols=cols,
-                        row_stride=v.strides[0] // es)
+    s = SegTensorView(data=v.buf, dtype=dtype, rank=2, shape=(rows, cols),
+                      strides=(v.strides[0] // es, 1))
     s._held = held
     return s
 
@@ -650,21 +781,22 @@ def _capsule_destructor(capsule):
                 m.deleter(p)
 
 
-class _SamplesExtras:
-    """Python protocols of `Samples` (numpy, DLPack, lists, bytes)."""
+class _TensorExtras:
+    """Python protocols of `Tensor` (numpy, DLPack, lists, bytes)."""
 
+    @property
     def shape(self):
         """`(traces, samples)`."""
-        return tuple(self.view()["shape"])
+        return tuple(self.view["shape"])
 
     def __repr__(self):
         if self.closed():
-            return "<parseseg.Samples empty>"
-        v = self.view()
-        return f"<parseseg.Samples {v['shape'][0]}x{v['shape'][1]} {v['dtype']}>"
+            return "<parseseg.Tensor closed>"
+        v = self.view
+        return f"<parseseg.Tensor {v['shape'][0]}x{v['shape'][1]} {v['dtype']}>"
 
     def _rows(self):
-        v = self.view()
+        v = self.view
         rows, cols = v["shape"]
         ctype = ctypes.c_float if v["dtype"] == "float32" else ctypes.c_double
         if rows == 0 or cols == 0:
@@ -718,251 +850,620 @@ class _SeismicFileExtras:
     def __repr__(self):
         if self.closed():
             return "<parseseg.SeismicFile closed>"
-        kind = {"segy": "SEG-Y", "segd": "SEG-D"}.get(self.kind(), "unknown")
-        return f"<parseseg.SeismicFile {kind}, {self.trace_count()} traces>"
+        return f"<parseseg.SeismicFile {self.kind}, {len(self)} traces>"
 
 # ---------------------------------------------------------- classes
 
 
-class SeismicFile(_Handle, _SeismicFileExtras):
-    """a memory-mapped file and its trace index"""
-    _release = _lib.seg_file_release
+class DiagLog(_Handle):
+    """Ordered list of diagnostics with per-severity counts."""
+    _release = _lib.seg_diag_log_release
 
+    def __len__(self):
+        """The number of diagnostics."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_diag_log_len, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def _getitem(self, i):
+        """Diagnostic `i`, oldest first."""
+        _h = self._enter()
+        try:
+            _o = SegDiagnostic()
+            if _call(_lib.seg_diag_log_get, _h, _int(i, "i", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _struct_dict(_o)
+        finally:
+            self._leave()
+
+    def count(self, severity):
+        """Number of entries with exactly `severity`."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_diag_log_count, _h, _enum(_E_Severity, severity, "severity"), ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    @property
+    def has_errors(self):
+        """True if any entry is `sevError` or `sevFatal`."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_diag_log_has_errors, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    @property
+    def is_fatal(self):
+        """True if the operation stopped early."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_diag_log_is_fatal, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def to_nif(self):
+        """Serializes `log` as a NIF document."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_diag_log_to_nif, _h, _b, _c, _n))
+        finally:
+            self._leave()
+    def __getitem__(self, index):
+        i = operator.index(index)
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(f"{type(self).__name__} index out of range")
+        return self._getitem(i)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self._getitem(i)
+
+
+class SeismicFile(_Handle, _SeismicFileExtras):
+    """A memory-mapped disk file with its trace index."""
+    _release = _lib.seg_seismic_file_release
+
+    def __len__(self):
+        """The number of traces."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_seismic_file_len, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    @property
     def kind(self):
-        """What the file is: "segy", "segd" or "unknown" (see the diagnostics)."""
+        """SEG-Y or SEG-D; `skUnknown` when the file was not recognized."""
         _h = self._enter()
         try:
             _o = ctypes.c_int32()
-            if _call(_lib.seg_file_kind, _h, ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_kind, _h, ctypes.byref(_o)) > 0:
                 return None
-            return _N_FileKind[_o.value]
+            return _N_SeismicKind[_o.value]
         finally:
             self._leave()
 
-    def trace_count(self):
-        """Traces in the file."""
+    @property
+    def log(self):
+        """Every problem found while indexing."""
         _h = self._enter()
         try:
-            _o = ctypes.c_int64()
-            if _call(_lib.seg_file_trace_count, _h, ctypes.byref(_o)) > 0:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_log, _h, ctypes.byref(_o)) > 0:
                 return None
-            return _o.value
+            return _wrap(DiagLog, _o.value)
         finally:
             self._leave()
 
+    @property
     def record_count(self):
-        """SEG-D records; 1 for SEG-Y; 0 if neither."""
+        """SEG-D records; 1 for SEG-Y; 0 for an unrecognized file."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_file_record_count, _h, ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_record_count, _h, ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
+    @property
     def max_samples(self):
         """Samples in the longest trace."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_file_max_samples, _h, ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_max_samples, _h, ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
     def trace_entry(self, trace):
-        """Where a trace lives: offset, header_bytes, num_samples, record,
-        channel_set, scan_type, channel_type."""
+        """Where trace `trace` lives: header offset, header bytes, samples, record,
+        channel set, scan type and channel type. Raises `ValueError` for a trace
+        out of range."""
         _h = self._enter()
         try:
             _o = SegTraceEntry()
-            if _call(_lib.seg_file_trace_entry, _h, _i64(trace, "trace"), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_trace_entry, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
             return _struct_dict(_o)
         finally:
             self._leave()
 
-    def trace_keys(self, trace):
-        """A trace's geometry (NaN or 0 where unknown); needs keys."""
+    @property
+    def has_keys(self):
+        """The index holds per-trace geometry (`openSeismic(keys = true)`)."""
         _h = self._enter()
         try:
-            _o = SegTraceKeys()
-            if _call(_lib.seg_file_trace_keys, _h, _i64(trace, "trace"), ctypes.byref(_o)) > 0:
-                return None
-            return _struct_dict(_o)
-        finally:
-            self._leave()
-
-    def sample_interval(self, trace=0):
-        """Microseconds between samples of a trace (Hz or m/ft for SEG-Y non-time
-        data); NaN when unknown or out of range."""
-        _h = self._enter()
-        try:
-            _o = ctypes.c_double()
-            if _call(_lib.seg_file_sample_interval, _h, _i64(trace, "trace"), ctypes.byref(_o)) > 0:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_seismic_file_has_keys, _h, ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
-    def diagnostics(self):
-        """Every problem found while indexing."""
+    def trace_keys(self, trace):
+        """A trace's geometry (NaN or 0 where unknown). Raises `ValueError` for a
+        trace out of range or a file opened without `keys`."""
         _h = self._enter()
         try:
-            _o = ctypes.c_void_p()
-            _st = _lib.seg_file_diagnostics(_h, ctypes.byref(_o))
-            return _logged(_st, _o)
+            _o = SegTraceKeys()
+            if _call(_lib.seg_seismic_file_trace_keys, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
+                return None
+            return _struct_dict(_o)
         finally:
             self._leave()
 
-    def log_nif(self):
-        """The diagnostics as NIF text."""
+    @property
+    def is_open(self):
+        """The file is still mapped (range reads work)."""
         _h = self._enter()
         try:
-            return _text(lambda _b, _c, _n: _call(_lib.seg_file_log_nif, _h, _b, _c, _n))
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_seismic_file_is_open, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def copy_bytes(self, offset, n):
+        """A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
+        hex view). Raises `ValueError` if the file is closed or the range lies
+        outside it. Changing the copy never changes the file."""
+        _h = self._enter()
+        try:
+            return _bytes(lambda _b, _c, _n: _call(_lib.seg_seismic_file_copy_bytes, _h, _int(offset, "offset", -(1 << 63), (1 << 63) - 1), _int(n, "n", 0, 9223372036854775807), _b, _c, _n))
+        finally:
+            self._leave()
+
+    def gathers(self):
+        """The file's gathers: `f.index.gathers`."""
+        _h = self._enter()
+        try:
+            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_gathers, _h, _b, _c, _n), SegGather, _struct_dict)
+        finally:
+            self._leave()
+
+    def component_group_ids(self, traces):
+        """The component group of each trace of `traces` (see `componentGroups`),
+        numbered from 0 in order of first appearance; -1 for a trace in none
+        (an auxiliary trace)."""
+        _h = self._enter()
+        try:
+            return _seq(lambda _b, _c, _n: _call(_lib.seg_seismic_file_component_group_ids, _h, *_range_arg(traces, "traces"), _b, _c, _n), ctypes.c_int64, lambda _v: _v)
         finally:
             self._leave()
 
     def trace_field(self, trace, name):
-        """A trace header field by name, e.g. "trace.sourceX" or "ext1.receiverLine"."""
+        """A trace header field by name, e.g. "trace.sourceX" or
+        "ext1.receiverLine". Raises `ValueError` for an unknown field or a trace
+        out of range."""
         _h = self._enter()
         try:
             _o = _value_out()
-            _call(_lib.seg_file_trace_field, _h, _i64(trace, "trace"), _str(name, "name"), ctypes.byref(_o))
+            _call(_lib.seg_seismic_file_trace_field, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_o))
             return _value(_o)
         finally:
             self._leave()
 
     def record_field(self, record, name):
-        """A SEG-D record (general header) field by name, e.g. "gh1.formatCode"."""
+        """A SEG-D record (general header) field by name, e.g. "gh1.formatCode".
+        Raises `ValueError` for an unknown field or record."""
         _h = self._enter()
         try:
             _o = _value_out()
-            _call(_lib.seg_file_record_field, _h, _i64(record, "record"), _str(name, "name"), ctypes.byref(_o))
+            _call(_lib.seg_seismic_file_record_field, _h, _int(record, "record", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_o))
             return _value(_o)
         finally:
             self._leave()
 
     def file_field(self, name):
-        """A file-level field by name, e.g. "binary.formatCode"."""
+        """A file-level field by name, e.g. "binary.formatCode". Raises
+        `ValueError` for an unknown field."""
         _h = self._enter()
         try:
             _o = _value_out()
-            _call(_lib.seg_file_file_field, _h, _str(name, "name"), ctypes.byref(_o))
+            _call(_lib.seg_seismic_file_file_field, _h, _str(name, "name"), ctypes.byref(_o))
             return _value(_o)
         finally:
             self._leave()
 
-    def read(self, first=0, count=-1, dtype="float32", cols=-1):
-        """Decodes traces first ..< first + count (count -1: to the end) into new
-        samples [count, cols] (cols -1: the longest trace; shorter traces are
-        zero-padded). Reads on one file may run in parallel."""
+    def sample_interval_us(self, trace=0):
+        """The trace's sample interval in µs (Hz or m/ft for SEG-Y non-time
+        data), resolved as the readers do. SEG-Y: Ext1 bytes 145-152 when
+        non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the
+        binary header's. SEG-D: the trace's channel set (Rev 3 CSD sampling
+        interval; Rev 1/2 base scan interval / 2^subscan), else the base scan
+        interval. NaN when unknown (a closed file, an out-of-range trace)."""
         _h = self._enter()
         try:
-            _o = ctypes.c_void_p()
-            if _call(_lib.seg_file_read, _h, _i64(first, "first"), _i64(count, "count"), _enum(_E_Dtype, dtype, "dtype"), _i64(cols, "cols"), ctypes.byref(_o)) > 0:
+            _o = ctypes.c_double()
+            if _call(_lib.seg_seismic_file_sample_interval_us, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
-            return _wrap(Samples, _o.value)
+            return _o.value
         finally:
             self._leave()
 
-    def read_traces(self, traces, dtype="float32", cols=-1):
+    def apply_survey(self, g, overwrite=False):
+        """Fills the trace keys from the survey, in memory only: the file does not
+        change. Returns the traces changed. Raises `ValueError` for a file opened
+        without `keys = true`."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_seismic_file_apply_survey, _h, _handle(g, SurveyGeometry, "g"), bool(overwrite), ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def _read_traces_range(self, traces, dtype="float32"):
+        """Decodes `traces` into new samples `[traces, maxSamples]` (shorter traces
+        are zero-padded, undecodable ones stay zero). Reads on one file may run
+        in parallel."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_void_p()
+            if _call(_lib.seg_seismic_file_read_traces_range, _h, *_range_arg(traces, "traces"), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o)) > 0:
+                return None
+            return _wrap(Tensor, _o.value)
+        finally:
+            self._leave()
+
+    def _read_traces_list(self, traces, dtype="float32"):
         """Decodes the listed traces, in list order, into new samples."""
         _h = self._enter()
         try:
             _o = ctypes.c_void_p()
-            if _call(_lib.seg_file_read_traces, _h, *_ids(traces, "traces"), _enum(_E_Dtype, dtype, "dtype"), _i64(cols, "cols"), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_read_traces, _h, *_ids(traces, "traces"), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o)) > 0:
                 return None
-            return _wrap(Samples, _o.value)
+            return _wrap(Tensor, _o.value)
         finally:
             self._leave()
 
-    def read_into(self, buffer, first=0):
-        """Decodes traces first ..< first + buffer rows straight into the caller's
-        buffer (rows padded or cut to its width); returns how many traces could
-        not be decoded (left zero)."""
+    def _read_traces_into_range(self, traces, dst, row=0):
+        """Decodes `traces` straight into rows `row ..` of the caller's `dst`, each
+        cut or zero-padded to its width. Returns how many traces could not be
+        decoded (left zero)."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_file_read_into, _h, ctypes.byref(_struct_arg(SegSampleBuffer, buffer, "buffer")), _i64(first, "first"), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_read_traces_into_range, _h, *_range_arg(traces, "traces"), ctypes.byref(_struct_arg(SegTensorView, dst, "dst")), _int(row, "row", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
-    def read_traces_into(self, buffer, traces):
-        """Decodes the listed traces into the buffer's rows (one per trace)."""
+    def _read_traces_into_list(self, traces, dst, row=0):
+        """Decodes the listed traces into rows `row ..` of `dst`, one per trace."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_file_read_traces_into, _h, ctypes.byref(_struct_arg(SegSampleBuffer, buffer, "buffer")), *_ids(traces, "traces"), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_seismic_file_read_traces_into, _h, *_ids(traces, "traces"), ctypes.byref(_struct_arg(SegTensorView, dst, "dst")), _int(row, "row", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
-    def gathers(self):
-        """Consecutive gathers: kind ("shot", "receiver", "cmp", "offset", "other",
-        "unknown"), first trace, count, sources and receivers. Needs keys."""
+    def read_traces(self, traces, dtype="float32"):
+        """Decodes the listed traces, in list order, into new samples."""
+        if isinstance(traces, range):
+            return self._read_traces_range(traces, dtype)
+        return self._read_traces_list(traces, dtype)
+
+    def read_traces_into(self, traces, dst, row=0):
+        """Decodes the listed traces into rows `row ..` of `dst`, one per trace."""
+        if isinstance(traces, range):
+            return self._read_traces_into_range(traces, dst, row)
+        return self._read_traces_into_list(traces, dst, row)
+
+    @property
+    def path(self):
+        """The file's path, as opened."""
         _h = self._enter()
         try:
-            return _seq(lambda _b, _c, _n: _call(_lib.seg_file_gathers, _h, _b, _c, _n), SegGather, _struct_dict)
+            return _text(lambda _b, _c, _n: _call(_lib.seg_seismic_file_path, _h, _b, _c, _n))
         finally:
             self._leave()
 
-    def component_groups(self, first=0, count=-1):
-        """The multi-component group of each trace in first ..< first + count
-        (count -1: to the end), numbered from 0; -1 for a trace in none. Needs
-        keys."""
+
+class HeaderEditor(_Handle):
+    """An open file with its journal. Call `close` to flush both."""
+    _release = _lib.seg_header_editor_release
+
+    def _close_native(self):
+        """Ends a batch, flushes the map and the journal and closes both. Both are
+        closed even when the flush fails (the error then propagates)."""
         _h = self._enter()
         try:
-            return _seq(lambda _b, _c, _n: _call(_lib.seg_file_component_groups, _h, _i64(first, "first"), _i64(count, "count"), _b, _c, _n), ctypes.c_int64, lambda _v: _v)
+            _call(_lib.seg_header_editor_close, _h)
         finally:
             self._leave()
 
-    def apply_geometry(self, geometry, overwrite=False):
-        """Fills the trace keys (in memory only; the file is not changed) from the
-        geometry: stations from SPS relations, then coordinates, offsets and
-        midpoints. Returns how many traces changed. Needs keys."""
+    @property
+    def edits(self):
+        """Edits written in this session (no-op edits excluded)."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_file_apply_geometry, _h, _handle(geometry, Geometry, "geometry"), bool(overwrite), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_header_editor_edits, _h, ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
-    def prefetch(self, first=0, last=-1, chunk_traces=256, depth=4, cols=-1, dtype="float32"):
-        """Decodes traces first ..< last (last -1: to the end) ahead, in chunks of
-        chunk_traces rows, on a worker thread with depth chunks buffered."""
+    def set_trace_field(self, trace, name, value):
+        """Sets field `name` (`trace.<field>` or `ext1.<field>`) of trace `trace`.
+        False, with a diagnostic in `log`, if the edit is refused."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_header_editor_set_trace_field, _h, _int(trace, "trace", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_value_in(value, "value")), ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def set_file_field(self, name, value):
+        """Sets a SEG-Y binary header field (`binary.<field>`); the index's copy of
+        the binary header is refreshed."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_header_editor_set_file_field, _h, _str(name, "name"), ctypes.byref(_value_in(value, "value")), ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def set_record_field(self, record, name, value):
+        """Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
+        for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
+        copy of the record's headers is refreshed."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_header_editor_set_record_field, _h, _int(record, "record", -(1 << 63), (1 << 63) - 1), _str(name, "name"), ctypes.byref(_value_in(value, "value")), ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    @property
+    def log(self):
+        """Refused edits and journal problems."""
         _h = self._enter()
         try:
             _o = ctypes.c_void_p()
-            if _call(_lib.seg_file_prefetch, _h, _i64(first, "first"), _i64(last, "last"), _i64(chunk_traces, "chunk_traces"), _i64(depth, "depth"), _i64(cols, "cols"), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_header_editor_log, _h, ctypes.byref(_o)) > 0:
                 return None
-            return _wrap(Prefetch, _o.value)
+            return _wrap(DiagLog, _o.value)
         finally:
             self._leave()
 
-    def prefetch_traces(self, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32"):
-        """Like prefetch, over a trace list (positions index the list)."""
+    @property
+    def journal_path(self):
+        """Where the edits are journaled."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_header_editor_journal_path, _h, _b, _c, _n))
+        finally:
+            self._leave()
+
+
+class SurveyGeometry(_Handle):
+    """Station coordinates and channel relations from survey files."""
+    _release = _lib.seg_survey_geometry_release
+
+    @property
+    def relation_count(self):
+        """The number of X runs loaded."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_survey_geometry_relation_count, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def __init__(self):
+        """An empty geometry: no stations, no relations."""
+        _o = ctypes.c_void_p()
+        _call(_lib.seg_survey_geometry_new, ctypes.byref(_o))
+        self._h = _o.value
+        self._mu = threading.Lock()
+
+    @property
+    def source_count(self):
+        """Source stations held."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_survey_geometry_source_count, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    @property
+    def receiver_count(self):
+        """Receiver stations held."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_int64()
+            if _call(_lib.seg_survey_geometry_receiver_count, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    def add_source(self, line, point, index, x, y, z=float("nan")):
+        """Adds or replaces a source station; index 0 matches any point index."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_add_source, _h, _f64(line, "line"), _f64(point, "point"), _int(index, "index", -32768, 32767), _f64(x, "x"), _f64(y, "y"), _f64(z, "z"))
+        finally:
+            self._leave()
+
+    def add_receiver(self, line, point, index, x, y, z=float("nan")):
+        """Adds or replaces a receiver station; index 0 matches any point index."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_add_receiver, _h, _f64(line, "line"), _f64(point, "point"), _int(index, "index", -32768, 32767), _f64(x, "x"), _f64(y, "y"), _f64(z, "z"))
+        finally:
+            self._leave()
+
+    def map_line(self, name, line):
+        """Maps a text line name (SPS 1.0, P1) to a line number, for the files
+        added later. Raises `ValueError` for an empty name or a NaN line."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_map_line, _h, _str(name, "name"), _f64(line, "line"))
+        finally:
+            self._leave()
+
+    def add_sps(self, path, opts=None):
+        """Reads the SPS file (Rev 1.0 or 2.1) at `path` and adds it; its
+        diagnostics go to `g.log`. Raises `IOError` if it cannot be read."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_add_sps, _h, _str(path, "path"), ctypes.byref(_struct_arg(SegSpsOptions, opts, "opts")))
+        finally:
+            self._leave()
+
+    def add_p1(self, path, grid_decimals=0, depth_decimals=0, elevation=False):
+        """Reads the SEG P1 file at `path` and adds its shotpoints. The decimals are
+        the implicit decimals of the grid and depth/elevation fields (the file's
+        header says); with `elevation`, columns 62-66 are z. Raises `IOError` if
+        the file cannot be read, `ValueError` for decimals outside 0..8."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_add_p1, _h, _str(path, "path"), _int(grid_decimals, "grid_decimals", -(1 << 63), (1 << 63) - 1), _int(depth_decimals, "depth_decimals", -(1 << 63), (1 << 63) - 1), bool(elevation))
+        finally:
+            self._leave()
+
+    @property
+    def multi_component(self):
+        """X records with a channel increment k > 1 cover k consecutive channels per station (components 1..k, SPS 1.0 §"X" note); else only every k-th channel is in the run."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_survey_geometry_multi_component, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    @multi_component.setter
+    def multi_component(self, value):
+        """X records with a channel increment k > 1 cover k consecutive channels per station (components 1..k, SPS 1.0 §"X" note); else only every k-th channel is in the run."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_set_multi_component, _h, bool(value))
+        finally:
+            self._leave()
+
+    @property
+    def tape(self):
+        """Only X records of this field tape ("" = all)."""
+        _h = self._enter()
+        try:
+            return _text(lambda _b, _c, _n: _call(_lib.seg_survey_geometry_tape, _h, _b, _c, _n))
+        finally:
+            self._leave()
+
+    @tape.setter
+    def tape(self, value):
+        """Only X records of this field tape ("" = all)."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_set_tape, _h, _str(value, "value"))
+        finally:
+            self._leave()
+
+    @property
+    def trailing_digits(self):
+        """Unmapped line names use their trailing digits."""
+        _h = self._enter()
+        try:
+            _o = ctypes.c_bool()
+            if _call(_lib.seg_survey_geometry_trailing_digits, _h, ctypes.byref(_o)) > 0:
+                return None
+            return _o.value
+        finally:
+            self._leave()
+
+    @trailing_digits.setter
+    def trailing_digits(self, value):
+        """Unmapped line names use their trailing digits."""
+        _h = self._enter()
+        try:
+            _call(_lib.seg_survey_geometry_set_trailing_digits, _h, bool(value))
+        finally:
+            self._leave()
+
+    @property
+    def log(self):
+        """Problems met while adding survey files."""
         _h = self._enter()
         try:
             _o = ctypes.c_void_p()
-            if _call(_lib.seg_file_prefetch_traces, _h, *_ids(traces, "traces"), _i64(chunk_traces, "chunk_traces"), _i64(depth, "depth"), _i64(cols, "cols"), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_survey_geometry_log, _h, ctypes.byref(_o)) > 0:
                 return None
-            return _wrap(Prefetch, _o.value)
+            return _wrap(DiagLog, _o.value)
         finally:
             self._leave()
 
 
-class Samples(_Handle, _SamplesExtras):
-    """a 2-D sample array owned by the library"""
+class Tensor(_Handle, _TensorExtras):
+    """A 2-D sample array `[traces, samples]` owned by the library."""
     _release = _lib.seg_tensor_release
 
+    @property
     def view(self):
         """The samples' memory: pointer, dtype, rank (2), shape and strides in
         elements. Valid while the tensor is held."""
@@ -975,6 +1476,7 @@ class Samples(_Handle, _SamplesExtras):
         finally:
             self._leave()
 
+    @property
     def dtype(self):
         """"float32" or "float64"."""
         _h = self._enter()
@@ -999,17 +1501,33 @@ class Samples(_Handle, _SamplesExtras):
             self._leave()
 
 
-class Prefetch(_Handle):
-    """read-ahead on a worker thread"""
-    _release = _lib.seg_prefetch_release
+class Prefetcher(_Handle):
+    """Read-ahead on a worker thread."""
+    _release = _lib.seg_prefetcher_release
+
+    def _init_range(self, f, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32"):
+        """Decodes `traces` ahead on a worker thread, `chunkTraces` rows at a time,
+        at most `depth` chunks buffered."""
+        _o = ctypes.c_void_p()
+        _call(_lib.seg_prefetcher_new_range, _handle(f, SeismicFile, "f"), *_range_arg(traces, "traces"), _int(chunk_traces, "chunk_traces", -(1 << 63), (1 << 63) - 1), _int(depth, "depth", -(1 << 63), (1 << 63) - 1), _int(cols, "cols", -(1 << 63), (1 << 63) - 1), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o))
+        self._h = _o.value
+        self._mu = threading.Lock()
+
+    def _init_list(self, f, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32"):
+        """Read-ahead over a list of traces, in list order (positions index the
+        list)."""
+        _o = ctypes.c_void_p()
+        _call(_lib.seg_prefetcher_new, _handle(f, SeismicFile, "f"), *_ids(traces, "traces"), _int(chunk_traces, "chunk_traces", -(1 << 63), (1 << 63) - 1), _int(depth, "depth", -(1 << 63), (1 << 63) - 1), _int(cols, "cols", -(1 << 63), (1 << 63) - 1), _enum(_E_Dtype, dtype, "dtype"), ctypes.byref(_o))
+        self._h = _o.value
+        self._mu = threading.Lock()
 
     def next(self):
         """The next chunk, waiting for it: first (position), count, failed rows
         (left zero) and the samples. SEG_END (Python: None) after the last."""
         _h = self._enter()
         try:
-            _o = SegChunk()
-            if _call(_lib.seg_prefetch_next, _h, ctypes.byref(_o)) > 0:
+            _o = SegPrefetchChunk()
+            if _call(_lib.seg_prefetcher_next, _h, ctypes.byref(_o)) > 0:
                 return None
             return _struct_dict(_o)
         finally:
@@ -1020,50 +1538,55 @@ class Prefetch(_Handle):
         None); SEG_END after the last."""
         _h = self._enter()
         try:
-            _o = SegChunk()
-            if _call(_lib.seg_prefetch_try_next, _h, ctypes.byref(_o)) > 0:
+            _o = SegPrefetchChunk()
+            if _call(_lib.seg_prefetcher_try_next, _h, ctypes.byref(_o)) > 0:
                 return None
             return _struct_dict(_o)
         finally:
             self._leave()
 
+    @property
     def at_end(self):
         """True once every chunk has been taken."""
         _h = self._enter()
         try:
             _o = ctypes.c_bool()
-            if _call(_lib.seg_prefetch_at_end, _h, ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_prefetcher_at_end, _h, ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
+    @property
     def positions(self):
-        """Positions in the prefetcher: traces, or the trace list's length."""
+        """Positions `seek` accepts: the file's trace count, or the list's length."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_prefetch_positions, _h, ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_prefetcher_positions, _h, ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
             self._leave()
 
-    def seek(self, first, last=-1):
-        """Restarts at positions first ..< last (last -1: to the end)."""
+    def seek(self, span):
+        """Restarts read-ahead over the positions `span` (traces in range mode).
+        Chunks decoded for the old positions are dropped; one being decoded
+        finishes in the background and is discarded. A no-op after `close`.
+        Raises `ValueError` for positions out of range."""
         _h = self._enter()
         try:
-            if _call(_lib.seg_prefetch_seek, _h, _i64(first, "first"), _i64(last, "last")) > 0:
-                return None
+            _call(_lib.seg_prefetcher_seek, _h, *_range_arg(span, "span"))
         finally:
             self._leave()
 
-    def trace_at(self, position):
-        """The trace at a position, or -1."""
+    def trace_at(self, pos):
+        """The trace index at position `pos` (the position itself in range mode);
+        -1 for a position out of range."""
         _h = self._enter()
         try:
             _o = ctypes.c_int64()
-            if _call(_lib.seg_prefetch_trace_at, _h, _i64(position, "position"), ctypes.byref(_o)) > 0:
+            if _call(_lib.seg_prefetcher_trace_at, _h, _int(pos, "pos", -(1 << 63), (1 << 63) - 1), ctypes.byref(_o)) > 0:
                 return None
             return _o.value
         finally:
@@ -1073,207 +1596,80 @@ class Prefetch(_Handle):
         """Stops and joins the worker (releasing the handle does too)."""
         _h = self._enter()
         try:
-            if _call(_lib.seg_prefetch_close, _h) > 0:
-                return None
+            _call(_lib.seg_prefetcher_close, _h)
         finally:
             self._leave()
 
+    def __init__(self, f, traces, chunk_traces=256, depth=4, cols=-1, dtype="float32"):
+        """Read-ahead over a list of traces, in list order (positions index the
+        list)."""
+        if isinstance(traces, range):
+            return self._init_range(f, traces, chunk_traces, depth, cols, dtype)
+        return self._init_list(f, traces, chunk_traces, depth, cols, dtype)
+    def __iter__(self):
+        return self
 
-class Editor(_Handle):
-    """in-place header edits with an undo journal"""
-    _release = _lib.seg_editor_release
-
-    def set_trace(self, trace, name, value):
-        """Sets a trace header field; refused (RefusedError) when it cannot be
-        written in place."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_editor_set_trace, _h, _i64(trace, "trace"), _str(name, "name"), ctypes.byref(_value_in(value, "value"))) > 0:
-                return None
-        finally:
-            self._leave()
-
-    def set_record(self, record, name, value):
-        """Sets a SEG-D record (general header) field."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_editor_set_record, _h, _i64(record, "record"), _str(name, "name"), ctypes.byref(_value_in(value, "value"))) > 0:
-                return None
-        finally:
-            self._leave()
-
-    def set_file(self, name, value):
-        """Sets a file-level field (SEG-Y binary header, ...)."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_editor_set_file, _h, _str(name, "name"), ctypes.byref(_value_in(value, "value"))) > 0:
-                return None
-        finally:
-            self._leave()
-
-    def edits(self):
-        """Edits written so far."""
-        _h = self._enter()
-        try:
-            _o = ctypes.c_int64()
-            if _call(_lib.seg_editor_edits, _h, ctypes.byref(_o)) > 0:
-                return None
-            return _o.value
-        finally:
-            self._leave()
-
-    def diagnostics(self):
-        """The editor's log: refused edits and journal problems."""
-        _h = self._enter()
-        try:
-            _o = ctypes.c_void_p()
-            _st = _lib.seg_editor_diagnostics(_h, ctypes.byref(_o))
-            return _logged(_st, _o)
-        finally:
-            self._leave()
-
-    def _close_native(self):
-        """Flushes the journal and closes the file."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_editor_close, _h) > 0:
-                return None
-        finally:
-            self._leave()
-
-
-class Geometry(_Handle):
-    """source/receiver coordinates by station"""
-    _release = _lib.seg_geometry_release
-
-    def __init__(self):
-        """An empty table of source/receiver coordinates by (line, point, index)."""
-        _o = ctypes.c_void_p()
-        if _call(_lib.seg_geometry_new, ctypes.byref(_o)) > 0:
-            return None
-        self._h = _o.value
-        self._mu = threading.Lock()
-
-    def add_source(self, line, point, index, x, y, z=float("nan")):
-        """Adds or replaces a source station; index 0 matches any point index."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_geometry_add_source, _h, _f64(line, "line"), _f64(point, "point"), _i32(index, "index"), _f64(x, "x"), _f64(y, "y"), _f64(z, "z")) > 0:
-                return None
-        finally:
-            self._leave()
-
-    def add_receiver(self, line, point, index, x, y, z=float("nan")):
-        """Adds or replaces a receiver station; index 0 matches any point index."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_geometry_add_receiver, _h, _f64(line, "line"), _f64(point, "point"), _i32(index, "index"), _f64(x, "x"), _f64(y, "y"), _f64(z, "z")) > 0:
-                return None
-        finally:
-            self._leave()
-
-    def load_sps(self, path):
-        """Adds an SPS file (Rev 1.0 or 2.1): R/S stations and X relations. Returns
-        the diagnostics; an unreadable file fails with an I/O error."""
-        _h = self._enter()
-        try:
-            _o = ctypes.c_void_p()
-            _st = _lib.seg_geometry_load_sps(_h, _str(path, "path"), ctypes.byref(_o))
-            return _logged(_st, _o)
-        finally:
-            self._leave()
-
-    def load_p1(self, path, grid_decimals=0, depth_decimals=0, elevation=False):
-        """Adds a SEG P1 (1983) file's shotpoints as sources. The decimals are the
-        implicit decimals of the grid and depth/elevation fields (from the
-        file's header); with `elevation`, columns 62-66 are z."""
-        _h = self._enter()
-        try:
-            _o = ctypes.c_void_p()
-            _st = _lib.seg_geometry_load_p1(_h, _str(path, "path"), _i64(grid_decimals, "grid_decimals"), _i64(depth_decimals, "depth_decimals"), bool(elevation), ctypes.byref(_o))
-            return _logged(_st, _o)
-        finally:
-            self._leave()
-
-    def map_line(self, name, line):
-        """Maps a text line name (SPS 1.0, P1) to a line number, for later loads."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_geometry_map_line, _h, _str(name, "name"), _f64(line, "line")) > 0:
-                return None
-        finally:
-            self._leave()
-
-    def set_options(self, trailing_digits=False, multi_component=False):
-        """`trailing_digits`: unmapped line names use their trailing digits
-        ("CLT4960" -> 4960). `multi_component`: an SPS channel increment k > 1
-        means k components per station. Applies to later loads and joins."""
-        _h = self._enter()
-        try:
-            if _call(_lib.seg_geometry_set_options, _h, bool(trailing_digits), bool(multi_component)) > 0:
-                return None
-        finally:
-            self._leave()
-
-    def counts(self):
-        """The sources, receivers and SPS relation runs held."""
-        _h = self._enter()
-        try:
-            _o = SegSurveyCounts()
-            if _call(_lib.seg_geometry_counts, _h, ctypes.byref(_o)) > 0:
-                return None
-            return _struct_dict(_o)
-        finally:
-            self._leave()
-
-
-class Log(_Handle):
-    """a list of diagnostics"""
-    _release = _lib.seg_log_release
-
-    def count(self):
-        """Entries in the log."""
-        _h = self._enter()
-        try:
-            _o = ctypes.c_int64()
-            if _call(_lib.seg_log_count, _h, ctypes.byref(_o)) > 0:
-                return None
-            return _o.value
-        finally:
-            self._leave()
-
-    def count_severity(self, severity):
-        """Entries of exactly this severity."""
-        _h = self._enter()
-        try:
-            _o = ctypes.c_int64()
-            if _call(_lib.seg_log_count_severity, _h, _enum(_E_Severity, severity, "severity"), ctypes.byref(_o)) > 0:
-                return None
-            return _o.value
-        finally:
-            self._leave()
-
-    def get(self, index):
-        """One entry; its strings live as long as the log."""
-        _h = self._enter()
-        try:
-            _o = SegDiagnostic()
-            if _call(_lib.seg_log_get, _h, _i64(index, "index"), ctypes.byref(_o)) > 0:
-                return None
-            return _struct_dict(_o)
-        finally:
-            self._leave()
-
-    def nif(self):
-        """The whole log as NIF text."""
-        _h = self._enter()
-        try:
-            return _text(lambda _b, _c, _n: _call(_lib.seg_log_nif, _h, _b, _c, _n))
-        finally:
-            self._leave()
+    def __next__(self):
+        c = self.next()
+        if c is None:
+            raise StopIteration
+        return c
 
 # -------------------------------------------------------- functions
 
+def convert_segd_revision(src_path, dst_path, opts=None):
+    """Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
+    version). Never raises: problems, including I/O failures, are in the result."""
+    _o = ctypes.c_void_p()
+    _st = _lib.seg_convert_segd_revision(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegSegdConvertOptions, opts, "opts")), ctypes.byref(_o))
+    return _logged(_st, _o)
+
+def open_seismic(path, twos_complement8015=False, keys=False):
+    """Maps the disk file `path`, detects SEG-Y or SEG-D, and builds the trace
+    index (with per-trace geometry when `keys`). Format problems are in `index.log`; an
+    undetectable file gives a
+    fatal diagnostic and an empty index. Raises `IOError`/`OSError` if the
+    file cannot be opened or mapped. `writable` maps it read-write, for
+    in-place header edits (`model/edit`)."""
+    _o = ctypes.c_void_p()
+    if _call(_lib.seg_open_seismic, _str(path, "path"), bool(twos_complement8015), bool(keys), ctypes.byref(_o)) > 0:
+        return None
+    return _wrap(SeismicFile, _o.value)
+
+def convert_file(src_path, dst_path, opts=None):
+    """Detects whether `srcPath` is SEG-Y or SEG-D and converts it to the SEG-Y
+    file `dstPath` (see `convertSegy` / `convertSegdToSegy`). Never raises:
+    problems, including I/O failures, are in the result."""
+    _o = ctypes.c_void_p()
+    _st = _lib.seg_convert_file(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegConvertOptions, opts, "opts")), ctypes.byref(_o))
+    return _logged(_st, _o)
+
+def rollback_journal(path, journal_path):
+    """Undoes the journal's edits on `path`, newest first. Locations already
+    holding their original bytes are skipped (so a rollback can be
+    repeated); conflicts are logged and left alone."""
+    _o = ctypes.c_void_p()
+    _st = _lib.seg_rollback_journal(_str(path, "path"), _str(journal_path, "journal_path"), ctypes.byref(_o))
+    return _logged(_st, _o)
+
+def apply_journal(path, journal_path):
+    """Replays the journal's edits on `path`, oldest first: redo after a
+    rollback, or the same edits on a copy of the file. Locations already
+    holding the edited bytes are skipped; conflicts are logged and left alone."""
+    _o = ctypes.c_void_p()
+    _st = _lib.seg_apply_journal(_str(path, "path"), _str(journal_path, "journal_path"), ctypes.byref(_o))
+    return _logged(_st, _o)
+
+def open_editor(path, journal_path=""):
+    """Maps `path` read-write, builds its trace index and opens the journal
+    (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
+    if either cannot be opened. Problems reading the file are in
+    `file.index.log`; a file whose index has a fatal problem can still be
+    edited where its headers were located."""
+    _o = ctypes.c_void_p()
+    if _call(_lib.seg_open_editor, _str(path, "path"), _str(journal_path, "journal_path"), ctypes.byref(_o)) > 0:
+        return None
+    return _wrap(HeaderEditor, _o.value)
 
 def abi_version():
     """The library's ABI version (SEG_ABI_VERSION)."""
@@ -1283,58 +1679,9 @@ def abi_version():
     return _o.value
 
 def version():
-    """The package version, e.g. "0.2.0"."""
+    """The package version, e.g. "0.3.0"."""
     return _text(lambda _b, _c, _n: _call(_lib.seg_version, _b, _c, _n))
 
 def status_name(status):
     """The name of a status code ("SEG_OK", "SEG_ERR_IO", ...)."""
-    return _text(lambda _b, _c, _n: _call(_lib.seg_status_name, _i32(status, "status"), _b, _c, _n))
-
-def open(path, keys=True, twos8015=False):
-    """Opens and indexes a SEG-Y or SEG-D disk file (memory-mapped, read-only).
-    `keys` also decodes the per-trace geometry (about 100 bytes per trace),
-    needed by trace_keys, gathers, component_groups and apply_geometry;
-    `twos8015` reads SEG-D format 8015 as two's complement. Problems in the
-    file are diagnostics, not failures."""
-    _o = ctypes.c_void_p()
-    if _call(_lib.seg_file_open, _str(path, "path"), bool(keys), bool(twos8015), ctypes.byref(_o)) > 0:
-        return None
-    return _wrap(SeismicFile, _o.value)
-
-def open_editor(path, journal=""):
-    """Opens a file for in-place, size-preserving header edits, journaled to
-    `journal` (default: path + ".edits.nif") so they can be undone. This
-    changes the file; reading never does."""
-    _o = ctypes.c_void_p()
-    if _call(_lib.seg_editor_open, _str(path, "path"), _str(journal, "journal"), ctypes.byref(_o)) > 0:
-        return None
-    return _wrap(Editor, _o.value)
-
-def journal_apply(path, journal):
-    """Re-applies a journal's edits to a file; returns the diagnostics."""
-    _o = ctypes.c_void_p()
-    _st = _lib.seg_journal_apply(_str(path, "path"), _str(journal, "journal"), ctypes.byref(_o))
-    return _logged(_st, _o)
-
-def journal_rollback(path, journal):
-    """Undoes a journal's edits on a file, newest first; returns the diagnostics."""
-    _o = ctypes.c_void_p()
-    _st = _lib.seg_journal_rollback(_str(path, "path"), _str(journal, "journal"), ctypes.byref(_o))
-    return _logged(_st, _o)
-
-def convert(src, dst, revision="2.1", byte_order="big", format=0, text_encoding="ebcdic", apply_descale=False, station_header=True):
-    """Converts src (SEG-Y or SEG-D) to the SEG-Y file dst: revision "0", "1",
-    "2.0" or "2.1"; format a SEG-Y format code (0: keep or choose
-    losslessly). Returns the diagnostics; a failure carries them."""
-    _o = ctypes.c_void_p()
-    _st = _lib.seg_convert(_str(src, "src"), _str(dst, "dst"), _str(revision, "revision"), _enum(_E_ByteOrder, byte_order, "byte_order"), _i64(format, "format"), _enum(_E_TextEncoding, text_encoding, "text_encoding"), bool(apply_descale), bool(station_header), ctypes.byref(_o))
-    return _logged(_st, _o)
-
-def convert_segd(src, dst, revision="3.0", format=0):
-    """Converts the SEG-D file src to the SEG-D file dst in revision "2.0",
-    "2.1", "3.0" or "3.1". `format` is a SEG-D format code (0: keep; 8080
-    becomes 8058 for Rev 2, and the little-endian 90xx their 80xx twins
-    before 3.1). Returns the diagnostics; a failure carries them."""
-    _o = ctypes.c_void_p()
-    _st = _lib.seg_convert_segd(_str(src, "src"), _str(dst, "dst"), _str(revision, "revision"), _i64(format, "format"), ctypes.byref(_o))
-    return _logged(_st, _o)
+    return _text(lambda _b, _c, _n: _call(_lib.seg_status_name, _int(status, "status", -(1 << 31), (1 << 31) - 1), _b, _c, _n))

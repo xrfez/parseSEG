@@ -15,23 +15,19 @@
 ## record) and channels on `TraceKeys.channel`. Relations are stored as runs
 ## (one per X record), never expanded per channel.
 ##
-## Line names that are not numbers (SPS 1.0, P1) go through `LineNames`: a
-## caller-supplied name → number map, then (opt-in) the trailing digits of
-## the name (`CLT4960` → 4960).
+## Line names that are not numbers (SPS 1.0, P1) go through the geometry's
+## `lineNames` (a caller-supplied name → number map, see `mapLine`), then
+## (with `trailingDigits`) the trailing digits of the name (`CLT4960` → 4960).
 
 import std/[tables, strutils, math, sets]
 import ../common/diagnostics
 import ../model/[keys, traceindex]
 import ./[sps, p1]
+import ../abi/pragmas
 
 export keys
 
 type
-  LineNames* = object
-    ## How text line names become the numeric lines of `StationKey`.
-    names*: Table[string, float64] ## Explicit name → line number.
-    trailingDigits*: bool          ## Else use the name's trailing digits.
-
   RelationRun = object
     fieldTape: string
     fromChannel, toChannel: int64
@@ -40,37 +36,68 @@ type
     rcvLine, fromRcv, toRcv: float64
     rcvIndex: int16
 
-  SurveyGeometry* = object
+  SurveyGeometry* {.segHandle.} = object
     ## Station coordinates and channel relations from survey files.
     table*: GeometryTable
     runs: Table[int64, seq[RelationRun]]
-    multiComponent*: bool
+    multiComponent* {.segField.}: bool
       ## X records with a channel increment k > 1 cover k consecutive
       ## channels per station (components 1..k, SPS 1.0 §"X" note); else
       ## only every k-th channel is in the run.
-    tape*: string ## Only X records of this field tape ("" = all).
-    log*: DiagLog ## Problems met while adding survey files.
+    tape* {.segField.}: string ## Only X records of this field tape ("" = all).
+    lineNames*: Table[string, float64] ## Text line name → line number (see `mapLine`).
+    trailingDigits* {.segField.}: bool ## Unmapped line names use their trailing digits.
+    log* {.segField(readonly = true).}: DiagLog ## Problems met while adding survey files.
 
   StationRelation* = object
     ## The stations one channel of a field record was recorded from.
     source*, receiver*: StationKey
     component*: int ## 1-based within the station (multi-component), else 0.
 
-func relationCount*(g: SurveyGeometry): int =
+func relationCount*(g: SurveyGeometry): int {.segApi.} =
   ## The number of X runs loaded.
   for runs in g.runs.values: result += runs.len
 
-proc resolveLine*(n: LineNames, name: string, numeric: float64, line: var float64): bool =
+func initSurveyGeometry*(): SurveyGeometry {.segApi.} =
+  ## An empty geometry: no stations, no relations.
+  SurveyGeometry()
+
+func sourceCount*(g: SurveyGeometry): int {.inline, segApi.} =
+  ## Source stations held.
+  g.table.sources.len
+
+func receiverCount*(g: SurveyGeometry): int {.inline, segApi.} =
+  ## Receiver stations held.
+  g.table.receivers.len
+
+proc addSource*(g: var SurveyGeometry, line, point: float64, index: int16, x, y: float64,
+    z = NaN) {.inline, segApi.} =
+  ## Adds or replaces a source station; index 0 matches any point index.
+  g.table.addSource(line, point, index, x, y, z)
+
+proc addReceiver*(g: var SurveyGeometry, line, point: float64, index: int16, x, y: float64,
+    z = NaN) {.inline, segApi.} =
+  ## Adds or replaces a receiver station; index 0 matches any point index.
+  g.table.addReceiver(line, point, index, x, y, z)
+
+proc mapLine*(g: var SurveyGeometry, name: string, line: float64) {.segApi.} =
+  ## Maps a text line name (SPS 1.0, P1) to a line number, for the files
+  ## added later. Raises `ValueError` for an empty name or a NaN line.
+  if name.strip.len == 0: raise newException(ValueError, "empty line name")
+  if line.isNaN: raise newException(ValueError, "line number is NaN")
+  g.lineNames[name.strip] = line
+
+proc resolveLine*(g: SurveyGeometry, name: string, numeric: float64, line: var float64): bool =
   ## The numeric line of a line field: its value when numeric, else the
-  ## names map, else (with `trailingDigits`) the trailing digits.
+  ## `lineNames` map, else (with `trailingDigits`) the trailing digits.
   if not numeric.isNaN:
     line = numeric
     return true
   let key = name.strip
-  if key in n.names:
-    line = n.names[key]
+  if key in g.lineNames:
+    line = g.lineNames[key]
     return true
-  if n.trailingDigits:
+  if g.trailingDigits:
     var i = key.len
     while i > 0 and key[i - 1] in Digits: dec i
     if i < key.len:
@@ -86,14 +113,14 @@ func idx(i: int): int16 {.inline.} =
 proc note(g: var SurveyGeometry, sev: Severity, file, msg: string, record = -1) =
   g.log.report(sev, dcBadValue, msg, loc = Location(file: file, record: record))
 
-proc addSps*(g: var SurveyGeometry, f: SpsFile, names = LineNames()) =
+proc addSps*(g: var SurveyGeometry, f: SpsFile) =
   ## Adds the stations (R and S records) and relations (X records) of `f`.
   ## Grid coordinates are taken as they are (units of H20); z is the surface
   ## elevation. Records whose line or point cannot be made numeric are
   ## skipped, with one warning per line name.
   var unresolved: HashSet[string]
   proc line(g: var SurveyGeometry, name: string, v: float64, rec: int, l: var float64): bool =
-    result = names.resolveLine(name, v, l)
+    result = g.resolveLine(name, v, l)
     if not result and name notin unresolved:
       unresolved.incl name
       g.note(sevWarning, f.name, "line '" & name & "' is not a number and has no mapping; " &
@@ -133,7 +160,7 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, names = LineNames()) =
             break
         g.runs[r.fieldRecord].add run
 
-proc addP1*(g: var SurveyGeometry, f: P1File, names = LineNames(), elevation = false) =
+proc addP1*(g: var SurveyGeometry, f: P1File, elevation = false) =
   ## Adds the shotpoints of the P1 logical files in `f` as sources. The
   ## reshoot code is the point index (blank 0 = any, `A` 2, `B` 3, ...).
   ## Columns 62-66 are z only with `elevation` (the header says whether
@@ -148,7 +175,7 @@ proc addP1*(g: var SurveyGeometry, f: P1File, names = LineNames(), elevation = f
         if not parseFortranFloat(r.lineName, 0, numeric) or r.lineName.len == 0:
           numeric = NaN
         if r.lineName.len == 0 and r.point.isNaN: discard # a raw (non-P1) record
-        elif not names.resolveLine(r.lineName, numeric, l):
+        elif not g.resolveLine(r.lineName, numeric, l):
           if r.lineName notin unresolved:
             unresolved.incl r.lineName
             g.note(sevWarning, f.name, "line '" & r.lineName & "' is not a number and has no " &
@@ -161,6 +188,29 @@ proc addP1*(g: var SurveyGeometry, f: P1File, names = LineNames(), elevation = f
   if files > 1:
     g.note(sevInfo, f.name, $files & " P1 logical files merged; each may have its own " &
       "projection (see their headers)")
+
+proc addLog(g: var SurveyGeometry, log: DiagLog) =
+  if log.isFatal: raise newException(IOError, log[log.len - 1].msg)
+  g.log.add log
+
+proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions()) {.segApi.} =
+  ## Reads the SPS file (Rev 1.0 or 2.1) at `path` and adds it; its
+  ## diagnostics go to `g.log`. Raises `IOError` if it cannot be read.
+  let f = readSps(path, opts)
+  g.addLog(f.log)
+  g.addSps(f)
+
+proc addP1*(g: var SurveyGeometry, path: string, gridDecimals = 0, depthDecimals = 0,
+    elevation = false) {.segApi.} =
+  ## Reads the SEG P1 file at `path` and adds its shotpoints. The decimals are
+  ## the implicit decimals of the grid and depth/elevation fields (the file's
+  ## header says); with `elevation`, columns 62-66 are z. Raises `IOError` if
+  ## the file cannot be read, `ValueError` for decimals outside 0..8.
+  if gridDecimals notin 0..8 or depthDecimals notin 0..8:
+    raise newException(ValueError, "decimals must be 0..8")
+  let f = readP1(path, P1Options(gridDecimals: gridDecimals, depthDecimals: depthDecimals))
+  g.addLog(f.log)
+  g.addP1(f, elevation)
 
 proc relation*(g: SurveyGeometry, record, channel: int64, rel: var StationRelation): bool =
   ## The stations channel `channel` of field record `record` was recorded
@@ -201,8 +251,14 @@ proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, overwrite = false): bool 
   if k.applyGeometry(g.table, overwrite): result = true
 
 proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, overwrite = false): int =
-  ## `applySurvey` on every trace; returns the traces changed. Needs an index
-  ## built with `keys = true`.
-  doAssert ix.keys.len == ix.entries.len, "build the index with keys = true"
+  ## `applySurvey` on every trace; returns the traces changed. Raises
+  ## `ValueError` for an index built without `keys = true`.
+  if ix.keys.len != ix.entries.len: raise newException(ValueError, "open the file with keys = true")
   for k in ix.keys.mitems:
     if k.applySurvey(g, overwrite): inc result
+
+proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, overwrite = false): int {.segApi.} =
+  ## Fills the trace keys from the survey, in memory only: the file does not
+  ## change. Returns the traces changed. Raises `ValueError` for a file opened
+  ## without `keys = true`.
+  f.index.applySurvey(g, overwrite)

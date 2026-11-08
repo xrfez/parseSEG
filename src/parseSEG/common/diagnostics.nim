@@ -25,6 +25,7 @@
 import std/strutils
 import nifbuilder, nifreader, nifcore, stringviews
 import errors
+import ../abi/pragmas
 
 type
   Severity* = enum
@@ -70,7 +71,7 @@ type
     loc*: Location
     msg*: string
 
-  DiagLog* = object
+  DiagLog* {.segHandle.} = object
     ## Ordered list of diagnostics with per-severity counts.
     entries: seq[Diagnostic]
     counts: array[Severity, int]
@@ -112,9 +113,15 @@ proc report*(log: var DiagLog; severity: Severity; code: DiagCode; msg: string;
   ## Appends a new diagnostic built from the arguments.
   log.add Diagnostic(severity: severity, code: code, offset: offset, loc: loc, msg: msg)
 
-func len*(log: DiagLog): int {.inline.} = log.entries.len
+func len*(log: DiagLog): int {.inline, segApi.} =
+  ## The number of diagnostics.
+  log.entries.len
 
-func `[]`*(log: DiagLog; i: int): lent Diagnostic {.inline.} = log.entries[i]
+func `[]`*(log: DiagLog; i: int): lent Diagnostic {.inline, segApi.} =
+  ## Diagnostic `i`, oldest first.
+  if i notin 0 ..< log.entries.len:
+    raise newException(IndexDefect, "no diagnostic " & $i & " in a log of " & $log.entries.len)
+  log.entries[i]
 
 iterator items*(log: DiagLog): lent Diagnostic =
   for d in log.entries: yield d
@@ -122,15 +129,15 @@ iterator items*(log: DiagLog): lent Diagnostic =
 iterator pairs*(log: DiagLog): (int, lent Diagnostic) =
   for i, d in log.entries: yield (i, d)
 
-func count*(log: DiagLog; severity: Severity): int {.inline.} =
+func count*(log: DiagLog; severity: Severity): int {.inline, segApi.} =
   ## Number of entries with exactly `severity`.
   log.counts[severity]
 
-func hasErrors*(log: DiagLog): bool {.inline.} =
+func hasErrors*(log: DiagLog): bool {.inline, segApi.} =
   ## True if any entry is `sevError` or `sevFatal`.
   log.counts[sevError] + log.counts[sevFatal] > 0
 
-func isFatal*(log: DiagLog): bool {.inline.} =
+func isFatal*(log: DiagLog): bool {.inline, segApi.} =
   ## True if the operation stopped early.
   log.counts[sevFatal] > 0
 
@@ -199,7 +206,7 @@ proc addNif(b: var Builder; log: DiagLog) =
           b.withTree "field":
             b.addStrLit d.loc.field
 
-proc toNif*(log: DiagLog): string =
+proc toNif*(log: DiagLog): string {.segApi.} =
   ## Serializes `log` as a NIF document.
   var b = nifbuilder.open(64 + 96 * log.len)
   b.addNif log
