@@ -36,6 +36,7 @@
 
 import std/[tables, math]
 import ./[traceindex, keys]
+from ../segd/reader import isRev3
 import ../abi/pragmas
 
 type

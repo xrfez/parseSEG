@@ -12,10 +12,9 @@ proc decode1(f: SegdSampleFormat, b: openArray[byte], n: int): seq[float64] =
   decodeSegdSamples(f, b, result)
 
 block codes:
-  var f: SegdSampleFormat
-  doAssert toSegdFormat(8058, f) and f == sd8058
-  doAssert toSegdFormat(8080, f) and dataBytes(f, 3) == 24
-  doAssert not toSegdFormat(58, f) and not toSegdFormat(8016, f) # multiplexed / undefined
+  doAssert toSegdFormat(8058) == some(sd8058)
+  doAssert dataBytes(toSegdFormat(8080).get, 3) == 24
+  doAssert toSegdFormat(58).isNone and toSegdFormat(8016).isNone # multiplexed / undefined
   doAssert dataBytes(sd8015, 8) == 20 and dataBytes(sd8015, 5) == 20 and dataBytes(sd8036, 2) == 6
 
 block bit_patterns:
@@ -81,8 +80,7 @@ block quantization_is_stable:
 
 block rev31_little_endian:
   # The 90xx formats are the 80xx ones with their bytes reversed.
-  var f: SegdSampleFormat
-  doAssert toSegdFormat(9058, f) and f == sd9058 and f.isLittleEndian
+  doAssert toSegdFormat(9058) == some(sd9058) and sd9058.isLittleEndian
   doAssert bigEndianOf(sd9080) == sd8080 and bigEndianOf(sd8058) == sd8058
   doAssert dataBytes(sd9036, 2) == 6 and dataBytes(sd9080, 1) == 8 and prefersFloat64(sd9038)
   doAssert decode1(sd9036, [0xFE'u8, 0xFF, 0xFF], 1) == @[-2.0]

@@ -135,8 +135,8 @@ block segd_rev2_multicomponent:
   for i in 0..5:
     var t = t0
     t.header.traceNumber = i + 1
-    t.ext1.receiverPointNumber = int32(104 + i div 3)
-    t.ext1.sensorType = uint8(2 + i mod 3)
+    t.ext1.get.receiverPointNumber = int32(104 + i div 3)
+    t.ext1.get.sensorType = uint8(2 + i mod 3)
     rd.traces.add t
   rd.record.scanTypes[0].descriptors[0].channelCount = 6
   rd.record.traceCount = 6
@@ -162,10 +162,12 @@ block segd_rev3_receiver_gather:
       blockType: 0x16)
     let b = src.encoded
     for k in 0..<32: rd.traces[i].extensions[k] = b[k]
-    rd.traces[i].ext1r3.receiverLineNumber = rd.traces[3].ext1r3.receiverLineNumber
-    rd.traces[i].ext1r3.receiverPointNumber = rd.traces[3].ext1r3.receiverPointNumber
-    rd.traces[i].ext1r3.extReceiverLineNumber = rd.traces[3].ext1r3.extReceiverLineNumber
-    rd.traces[i].ext1r3.extReceiverPointNumber = rd.traces[3].ext1r3.extReceiverPointNumber
+    let e3 = rd.traces[3].ext1Rev3.get
+    template e: untyped = rd.traces[i].ext1Rev3.get
+    e.receiverLineNumber = e3.receiverLineNumber
+    e.receiverPointNumber = e3.receiverPointNumber
+    e.extReceiverLineNumber = e3.extReceiverLineNumber
+    e.extReceiverPointNumber = e3.extReceiverPointNumber
   d.records[0] = rd
   writeSegdFile(d, tmp / "rg.sgd")
   var f = openSeismic(tmp / "rg.sgd", keys = true)

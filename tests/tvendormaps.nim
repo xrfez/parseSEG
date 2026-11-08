@@ -280,10 +280,10 @@ block rev3_position_and_trailer_offered:
   # Give the record a trace-edit trailer.
   var desc = SegdTrailerDescription(trailerBlockType: 1, asciiOrBinary: 2, blockSize: 1,
     blockType: 0x70)
-  rec.trailerBytes = @(desc.encoded)
+  rec.trailerRev3 = @(desc.encoded)
   var data = newSeq[byte](32)
   for i, c in "V 1.0": data[i] = byte(c)
-  rec.trailerBytes.add data
+  rec.trailerRev3.add data
   var l: DiagLog
   let bs = r.decodeVendorAreas(rec, l, "fixture")
   doAssert l.len == 0

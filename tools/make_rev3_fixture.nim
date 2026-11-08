@@ -15,19 +15,19 @@ const
   dst = dir / "inova_rev30_5traces.sgd"
 
 var d = readSegd(src)
-doAssert d.diagnostics.len == 0 and d.records.len == 1
+doAssert d.log.len == 0 and d.records.len == 1
 var rd = d.records[0]
 var keep: seq[SegdTrace]
 var seismic = 0
 for t in rd.traces:
-  let c = rd.record.scanTypes[t.scanType].descriptors3[t.channelSet]
+  let c = rd.record.scanTypes[t.scanType].descriptorsRev3[t.channelSet]
   if c.channelType != 0x10:
     keep.add t
   elif seismic < 2:
     keep.add t
     inc seismic
 for i in 0..<keep.len: keep[i].index = i
-rd.record.scanTypes[0].descriptors3[3].channelsInSet = 2
+rd.record.scanTypes[0].descriptorsRev3[3].channelsInSet = 2
 computeRev3Sizes(rd.record, keep)
 rd.traces = keep
 d.records = @[rd]

@@ -86,7 +86,7 @@ block lossless_format_choice:
   # An 8038 (int32) record converts to SEG-Y format 2, exactly.
   var d = readSegd(exampleDir / "63.sgd")
   var rd = d.records[0]
-  rd.record.format = sd8038
+  rd.record.format = some(sd8038)
   rd.record.gh1.formatCode = 8038
   var vals = newSeq[float64](1000)
   for j in 0..<1000: vals[j] = float64(j * 1001 - 500_000)

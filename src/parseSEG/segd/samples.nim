@@ -17,7 +17,8 @@
 ## | 8058 / 8080 | IEEE single / double (8080 from Rev 3.0) | 4 / 8 |
 ## | 9036 / 9038 / 9058 / 9080 | as 80xx, little-endian (Rev 3.1) | 3 / 4 / 4 / 8 |
 
-import std/math
+import std/[math, options]
+export options
 import ../common/[endians, ibmfloat, errors]
 
 type
@@ -26,7 +27,7 @@ type
     sd8042 = 8042, sd8044 = 8044, sd8048 = 8048, sd8058 = 8058, sd8080 = 8080,
     sd9036 = 9036, sd9038 = 9038, sd9058 = 9058, sd9080 = 9080
 
-  SegdSampleType* = float32 | float64
+  SegdSampleType* = float32 | float64 ## Sample types the codecs decode into.
 
 const segdSampleFormats* = [sd8015, sd8022, sd8024, sd8036, sd8038, sd8042, sd8044, sd8048,
   sd8058, sd8080, sd9036, sd9038, sd9058, sd9080]
@@ -46,13 +47,12 @@ func bigEndianOf*(f: SegdSampleFormat): SegdSampleFormat =
   of sd9080: sd8080
   else: f
 
-func toSegdFormat*(code: int, f: var SegdSampleFormat): bool =
-  ## Converts a format code; false for undefined or multiplexed codes.
-  result = false
+func toSegdFormat*(code: int): Option[SegdSampleFormat] =
+  ## The sample format of a format code; none for undefined or multiplexed
+  ## codes.
   for x in segdSampleFormats:
-    if ord(x) == code:
-      f = x
-      result = true
+    if ord(x) == code: return some(x)
+  none(SegdSampleFormat)
 
 func dataBytes*(f: SegdSampleFormat, samples: int): int =
   ## Bytes holding `samples` samples. 8015 packs 4 samples in 10 bytes; a
@@ -152,7 +152,7 @@ proc expFraction(x: float64, base: float64, maxExp, fracBits: int, i: int):
     tuple[e: int, mag: uint32] =
   # The smallest exponent whose fraction fits `fracBits` bits (most
   # precision); clamps at the largest exponent.
-  if x != x:
+  if x.isNaN:
     raiseFormat("sample " & $i & " is NaN, which this format cannot hold")
   let full = float64(1 shl fracBits)
   let a = abs(x)
@@ -215,7 +215,7 @@ proc encodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T
       else: putBeU16(dst, 2 * i, uint16((s shl 15) or (uint32(e) shl 13) or mag))
   of sd8048:
     for i in 0..<n:
-      if src[i] != src[i]:
+      if float64(src[i]).isNaN:
         raiseFormat("sample " & $i & " is NaN, which format 8048 cannot hold")
       var w = float32ToIbm(float32(src[i]))
       if (w and 1) != 0:

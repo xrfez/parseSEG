@@ -62,7 +62,7 @@ block index_matches_full_read_segd:
     var f = openSeismic(exampleDir / n)
     let full = readSegd(exampleDir / n)
     doAssert f.kind == skSegd and f.index.contiguous
-    doAssert f.log.len == full.diagnostics.len
+    doAssert f.log.len == full.log.len
     var k = 0
     for rd in full.records:
       for i, t in rd.traces:
@@ -124,11 +124,15 @@ block headers_only_reads:
         segdToTape(full, tmp / "h.tap")
         var src: RecordSource = openTapeImageSource(tmp / "h.tap")
         try: readSegd(src, headersOnly = true) finally: src.close())]:
-      doAssert h.records.len == full.records.len and h.diagnostics.len == full.diagnostics.len
+      doAssert h.records.len == full.records.len and h.log.len == full.log.len
       for r in 0..<full.records.len:
         doAssert h.records[r].traces.len == full.records[r].traces.len
         doAssert h.records[r].samples.shape[1] == 0
-        doAssert h.records[r].record.trailerBytes == full.records[r].record.trailerBytes
+        template a: untyped = h.records[r].record
+        template b: untyped = full.records[r].record
+        doAssert a.layout == b.layout
+        if a.isRev3: doAssert a.trailerRev3 == b.trailerRev3
+        else: doAssert a.trailer == b.trailer
         for i, t in full.records[r].traces:
           let u = h.records[r].traces[i]
           doAssert u.samples.len == 0 and u.numSamples == t.numSamples

@@ -145,9 +145,9 @@ block segd_rev2_edits:
   doAssert ed.file.index.segdRecords[0].sourceHeaders[0].sourcePointNumber == 101.25
   ed.close()
   let d = readSegd(path)
-  doAssert d.diagnostics.len == readSegd(exampleDir / "63.sgd").diagnostics.len
+  doAssert d.log.len == readSegd(exampleDir / "63.sgd").log.len
   let t = d.records[0].traces[0]
-  doAssert t.ext1.receiverPointNumber == 2050 and t.header.traceNumber == 77
+  doAssert t.ext1.get.receiverPointNumber == 2050 and t.header.traceNumber == 77
   doAssert d.records[0].record.gh1.year == 27
   doAssert d.records[0].record.sourceHeaders[0].sourcePointNumber == 101.25
   doAssert rollbackJournal(path, journal).len == 0
@@ -162,9 +162,9 @@ block segd_rev3_edits:
   doAssert not ed.setRecordField(0, "gh3.timeZero", 0)       # Rev 3 blocks are not editable
   ed.close()
   let d = readSegd(path)
-  doAssert d.diagnostics.len == 0
-  doAssert d.records[0].traces[4].ext1r3.receiverLineNumber == 1234
-  doAssert d.records[0].traces[4].ext1r3.sensorMoving == 1
+  doAssert d.log.len == 0
+  doAssert d.records[0].traces[4].ext1Rev3.get.receiverLineNumber == 1234
+  doAssert d.records[0].traces[4].ext1Rev3.get.sensorMoving == 1
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == readBytes(exampleDir / "inova_rev30_5traces.sgd")
 

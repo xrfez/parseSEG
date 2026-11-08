@@ -1,5 +1,6 @@
-## SEG-D Rev 1 / 2.x writer: emits records read by `segd/reader` (or built in
-## memory) to any `RecordSink`.
+## SEG-D writer for every revision: emits records read by `segd/reader` (or
+## built in memory) to any `RecordSink`, in the record's own layout (Rev 0-2
+## or Rev 3).
 ##
 ## Device structures (spec note `segd_rev2_0.md` §2.2):
 ## - RECORD (the default, and every disk file without a FIXREC label): the
@@ -9,7 +10,8 @@
 ##   is cut into blocks of exactly that size, the last one zero-padded. A trace
 ##   that fits in one block never crosses a block boundary (the rest of the
 ##   block is zero-padded instead), per Rev 2.0 "block boundaries may not
-##   occur within a trace"; readers skip such padding.
+##   occur within a trace"; readers skip such padding. Rev 3 starts the first
+##   trace and the trailer on a block boundary.
 ##
 ## Header blocks keep the bytes they were read from and re-encode only edited
 ## fields, so a stream read and written back is byte-identical.
@@ -22,12 +24,13 @@
 import std/math
 import ../common/[errors, diagnostics, endians]
 import ../io/records
-import ./[headers, samples, reader]
+import ./[samples, reader]
 
 const MaxFixedBlock* = 256 shl 20 ## Largest FIXREC block size the writer accepts.
 
 type
   SegdWriteOptions* = object
+    ## Options of `openSegdWriter`.
     lenient*: bool        ## Log problems instead of refusing to write.
     tapeMarkPerRecord*: bool ## Write a tape mark after each record (tape only).
 
@@ -37,13 +40,18 @@ type
     opts: SegdWriteOptions
     fixedBlock: int       ## FIXREC block size, 0 for RECORD.
     pending: seq[byte]    ## FIXREC: bytes not yet forming a whole block.
+    buf: seq[byte]        ## One trace's bytes, reused.
     record: SegdRecord
     inRecord: bool
     tracesWritten: int
     records: int
     lastWasMark: bool
-    bytesInRecord: int64  ## Rev 3: bytes of the record written so far (no padding).
-    log*: DiagLog
+    bytesInRecord: int64  ## Bytes of the record written so far (no padding).
+    log: DiagLog
+
+func log*(w: SegdWriter): lent DiagLog {.inline.} =
+  ## The problems logged so far (all of them warnings unless a write was refused).
+  w.log
 
 proc problem(w: var SegdWriter, msg: string, field = "", trace = -1) =
   let loc = Location(file: w.sink.name, record: w.records, trace: trace, field: field)
@@ -70,16 +78,21 @@ proc emit(w: var SegdWriter, data: openArray[byte]) =
     while w.pending.len - i >= w.fixedBlock:
       w.sink.writeRecord(w.pending.toOpenArray(i, i + w.fixedBlock - 1))
       i += w.fixedBlock
-    if i > 0: w.pending = w.pending[i..^1]
+    if i > 0:
+      # Keep the rest at the front, in the same buffer.
+      let rest = w.pending.len - i
+      if rest > 0: moveMem(addr w.pending[0], addr w.pending[i], rest)
+      w.pending.setLen rest
   w.lastWasMark = false
 
-proc openSegdWriter*(sink: RecordSink, opts = SegdWriteOptions(), hasLabel = false,
-    label = SegdStorageUnitLabel()): SegdWriter =
-  ## Starts a SEG-D stream; with `hasLabel`, writes the storage unit label
-  ## first (its own block; padded to the block size for FIXREC).
+proc openSegdWriter*(sink: RecordSink, opts = SegdWriteOptions(),
+    label = none(SegdStorageUnitLabel)): SegdWriter =
+  ## Starts a SEG-D stream; with a `label`, writes the storage unit label
+  ## first (its own block; padded to the block size for FIXREC). Raises
+  ## `SegFormatError` for a label readers would not recognize.
   result = SegdWriter(sink: sink, opts: opts)
-  if hasLabel:
-    let raw = label.encoded # from the fields, so FIXREC padding and the label agree
+  if label.isSome:
+    let raw = label.get.encoded # from the fields, so FIXREC padding and the label agree
     let written = decodeLabel(raw)
     if not isStorageUnitLabel(raw):
       raiseFormat("the storage unit label revision '" & written.revision &
@@ -95,124 +108,102 @@ proc openSegdWriter*(sink: RecordSink, opts = SegdWriteOptions(), hasLabel = fal
     else:
       sink.writeRecord(raw)
 
-proc rev3HeaderBytes*(rec: SegdRecord): int64 =
-  ## Bytes of a Rev 3 record's header blocks (GH#3 header size).
-  var n = 3 * 32 + int64(rec.generalBlocks.len) + int64(rec.extended.len) + int64(rec.external.len)
-  for s in rec.scanTypes: n += 96 * int64(s.descriptors3.len) + int64(s.skew.len)
-  n
-
 func trailerGroupsWalk(b: openArray[byte]): bool =
   # True when `b` is exactly a sequence of (description block, data) groups
   # that a reader can walk.
   var i = 0
-  result = true
-  while i < b.len and result:
-    if i + 32 > b.len or b[i + 31] != BtTrailerDescription or b[i + 1] notin {1'u8, 2} or
-        b[i + 2] != 0 or b[i + 3] != 0:
-      result = false
-    else:
-      i += 32 + 32 * int(beU32(b, i + 4))
-  result = result and i == b.len
+  while i < b.len:
+    if i + SegdBlockSize > b.len or b[i + 31] != BlockTypeTrailerDescription or
+        b[i + 1] notin {1'u8, 2} or b[i + 2] != 0 or b[i + 3] != 0:
+      return false
+    i += SegdBlockSize + SegdBlockSize * int(beU32(b, i + 4))
+  i == b.len
 
-proc checkRev3Record(w: var SegdWriter, rec: SegdRecord) =
-  let g1 = rec.gh1
-  let g2 = rec.gh2r3
-  if g2.revisionMajor < 3:
-    w.problem("a Rev 3 record (isRev3) needs revision 3.x in General Header #2", "gh2.revision")
-  let nGh = generalHeaderCount(g1, g2)
-  if rec.generalBlocks.len mod 32 != 0 or 3 + rec.generalBlocks.len div 32 != nGh:
-    w.problem("the general header announces " & $nGh & " blocks, GH#1-3 plus " &
-      $(rec.generalBlocks.len div 32) & " are present", "gh1.additionalGhBlocks")
-  let nST = g1.scanTypesPerRecord
-  let nCS = channelSetsPerScanType(g1, g2)
-  let nSK = skewBlocks(g1, g2)
-  if rec.scanTypes.len != nST:
-    w.problem("General Header #1 announces " & $nST & " scan types, " & $rec.scanTypes.len &
-      " are present", "gh1.scanTypesPerRecord")
-  for i, st in rec.scanTypes:
-    if st.descriptors3.len != nCS:
-      w.problem("scan type " & $(i + 1) & " has " & $st.descriptors3.len &
-        " channel set descriptors, " & $nCS & " announced", "gh1.channelSetsPerScanType")
-    if st.skew.len != 32 * nSK:
-      w.problem("scan type " & $(i + 1) & " has " & $st.skew.len & " skew bytes, " &
-        $(32 * nSK) & " announced", "gh1.skewBlocks")
-  if rec.extended.len != 32 * extendedHeaderBlocks(g1, g2):
-    w.problem("the extended header has " & $rec.extended.len & " bytes, " &
-      $(32 * extendedHeaderBlocks(g1, g2)) & " announced", "gh1.extendedHeaderBlocks")
-  if rec.external.len != 32 * externalHeaderBlocks(g1, g2):
-    w.problem("the external header has " & $rec.external.len & " bytes, " &
-      $(32 * externalHeaderBlocks(g1, g2)) & " announced", "gh1.externalHeaderBlocks")
-  var f: SegdSampleFormat
-  if not rec.formatKnown or not toSegdFormat(g1.formatCode, f) or f != rec.format:
-    w.problem("format code " & $g1.formatCode & " is undefined or does not match the " &
-      "record's sample format", "gh1.formatCode")
-  elif f.isLittleEndian and (rec.gh2r3.revisionMajor < 3 or
-      (rec.gh2r3.revisionMajor == 3 and rec.gh2r3.revisionMinor < 1)):
-    w.problem("format " & $ord(f) & " (little-endian) needs Rev 3.1, the record says " &
-      $rec.gh2r3.revisionMajor & "." & $rec.gh2r3.revisionMinor, "gh1.formatCode")
-  if rec.gh3.headerSize != 0 and int64(rec.gh3.headerSize) != rev3HeaderBytes(rec):
+func headerRevision(rec: SegdRecord): SegdRevision =
+  # The revision General Header #2 gives as written (0.0 without one).
+  case rec.layout
+  of slRev2:
+    if rec.gh2.isSome: SegdRevision(major: rec.gh2.get.revisionMajor,
+      minor: rec.gh2.get.revisionMinor)
+    else: SegdRevision()
+  of slRev3: SegdRevision(major: rec.gh2Rev3.revisionMajor, minor: rec.gh2Rev3.revisionMinor)
+
+proc checkGeneralHeaders(w: var SegdWriter, rec: SegdRecord) =
+  # The general header blocks GH#1 announces are present.
+  let nGh = rec.generalHeaderCount
+  case rec.layout
+  of slRev2:
+    if (nGh >= 2) != rec.gh2.isSome:
+      w.problem("General Header #1 announces " & $nGh & " general headers, but General " &
+        "Header #2 is " & (if rec.gh2.isSome: "present" else: "missing"),
+        "gh1.additionalGhBlocks")
+    if rec.sourceHeaders.len != max(0, nGh - 2):
+      w.problem("General Header #1 announces " & $(nGh - 2) & " headers after #2, " &
+        $rec.sourceHeaders.len & " are present", "gh1.additionalGhBlocks")
+    if rec.gh2.isSome and rec.gh2.get.revisionMajor >= 3:
+      w.problem("Rev 3 records use the Rev 3 layout (slRev3), not slRev2", "gh2.revision")
+  of slRev3:
+    if rec.gh2Rev3.revisionMajor < 3:
+      w.problem("a Rev 3 layout record (slRev3) needs revision 3.x in General Header #2",
+        "gh2.revision")
+    let blocks = rec.generalBlocks.len div SegdBlockSize
+    if rec.generalBlocks.len mod SegdBlockSize != 0 or 3 + blocks != nGh:
+      w.problem("the general header announces " & $nGh & " blocks, GH#1-3 plus " &
+        $blocks & " are present", "gh1.additionalGhBlocks")
+
+proc checkRev3Sizes(w: var SegdWriter, rec: SegdRecord) =
+  # GH#3's header size and GH#2's trailer size agree with the blocks.
+  let g2 = rec.gh2Rev3
+  if rec.gh3.headerSize != 0 and int64(rec.gh3.headerSize) != rec.headerBytes:
     w.problem("General Header #3 header size is " & $rec.gh3.headerSize & ", the header " &
-      "blocks take " & $rev3HeaderBytes(rec) & " bytes", "gh3.headerSize")
-  if rec.trailerBytes.len mod 32 != 0:
+      "blocks take " & $rec.headerBytes & " bytes", "gh3.headerSize")
+  if rec.trailerRev3.len mod SegdBlockSize != 0:
     w.problem("the general trailer is not whole 32-byte blocks", "trailer")
-  if g2.generalTrailerBlocks == 0xFFFF_FFFF'u32 and rec.gh3.recordSize == 0 and
-      not trailerGroupsWalk(rec.trailerBytes):
-    w.problem("with the trailer block count unknown (FFFFFFFF) and no GH#3 record size, " &
-      "readers find the trailer by its description blocks, but this trailer is not a " &
-      "sequence of description-block groups", "gh2.generalTrailerBlocks")
+  if g2.generalTrailerBlocks == UnknownTrailerBlocks:
+    if rec.gh3.recordSize == 0 and not trailerGroupsWalk(rec.trailerRev3):
+      w.problem("with the trailer block count unknown (FFFFFFFF) and no GH#3 record size, " &
+        "readers find the trailer by its description blocks, but this trailer is not a " &
+        "sequence of description-block groups", "gh2.generalTrailerBlocks")
+  elif int64(g2.generalTrailerBlocks) * SegdBlockSize != rec.trailerRev3.len:
+    w.problem("General Header #2 announces " & $g2.generalTrailerBlocks & " trailer blocks, " &
+      $(rec.trailerRev3.len div SegdBlockSize) & " are present", "gh2.generalTrailerBlocks")
+
+proc checkRecord(w: var SegdWriter, rec: SegdRecord) =
   if rec.incomplete:
     raiseFormat("the record was read with parts too large to hold in memory; it cannot " &
       "be rewritten (raise maxHeaderBytes)")
-  if g2.generalTrailerBlocks != 0xFFFF_FFFF'u32 and
-      int64(g2.generalTrailerBlocks) * 32 != rec.trailerBytes.len:
-    w.problem("General Header #2 announces " & $g2.generalTrailerBlocks & " trailer blocks, " &
-      $(rec.trailerBytes.len div 32) & " are present", "gh2.generalTrailerBlocks")
-  if isStorageUnitLabel(rec.gh1.encoded):
-    w.problem("General Header #1 bytes 5-9 read like a storage unit label ('SDn.n'), so " &
-      "readers would take the record for a label", "gh1.generalConstants")
-
-proc checkRecord(w: var SegdWriter, rec: SegdRecord) =
-  if rec.isRev3:
-    w.checkRev3Record(rec)
-    return
-  let g1 = rec.gh1
-  let nGh = g1.generalHeaderCount
-  if (nGh >= 2) != rec.hasGh2:
-    w.problem("General Header #1 announces " & $nGh & " general headers, but General " &
-      "Header #2 is " & (if rec.hasGh2: "present" else: "missing"), "gh1.additionalGhBlocks")
-  if rec.sourceHeaders.len != max(0, nGh - 2):
-    w.problem("General Header #1 announces " & $(nGh - 2) & " headers after #2, " &
-      $rec.sourceHeaders.len & " are present", "gh1.additionalGhBlocks")
-  let nST = g1.scanTypesPerRecord
-  let nCS = if rec.hasGh2: channelSetsPerScanType(g1, rec.gh2) else: g1.channelSetsPerScanType
-  let nSK = g1.skewBlocks
-  let nEC = if rec.hasGh2: extendedHeaderBlocks(g1, rec.gh2) else: g1.extendedHeaderBlocks
-  let nEX = if rec.hasGh2: externalHeaderBlocks(g1, rec.gh2) else: g1.externalHeaderBlocks
+  w.checkGeneralHeaders(rec)
+  let nST = rec.gh1.scanTypesPerRecord
+  let nCS = rec.channelSetsPerScanType
+  let nSK = rec.skewBlocks
   if rec.scanTypes.len != nST:
     w.problem("General Header #1 announces " & $nST & " scan types, " & $rec.scanTypes.len &
       " are present", "gh1.scanTypesPerRecord")
   for i, s in rec.scanTypes:
-    if s.descriptors.len != nCS:
-      w.problem("scan type " & $(i + 1) & " has " & $s.descriptors.len &
+    if s.layout != rec.layout:
+      w.problem("scan type " & $(i + 1) & " has the " & $s.layout & " layout, the record " &
+        $rec.layout, "scanTypes")
+    if s.channelSetCount != nCS:
+      w.problem("scan type " & $(i + 1) & " has " & $s.channelSetCount &
         " channel set descriptors, " & $nCS & " announced", "gh1.channelSetsPerScanType")
-    if s.skew.len != 32 * nSK:
+    if s.skew.len != SegdBlockSize * nSK:
       w.problem("scan type " & $(i + 1) & " has " & $s.skew.len & " skew bytes, " &
-        $(32 * nSK) & " announced", "gh1.skewBlocks")
-  if rec.extended.len != 32 * nEC:
-    w.problem("the extended header has " & $rec.extended.len & " bytes, " & $(32 * nEC) &
-      " announced", "gh1.extendedHeaderBlocks")
-  if rec.external.len != 32 * nEX:
-    w.problem("the external header has " & $rec.external.len & " bytes, " & $(32 * nEX) &
-      " announced", "gh1.externalHeaderBlocks")
-  var f: SegdSampleFormat
-  if not rec.formatKnown or not toSegdFormat(g1.formatCode, f) or f != rec.format:
-    w.problem("format code " & $g1.formatCode & " is undefined or does not match the " &
+        $(SegdBlockSize * nSK) & " announced", "gh1.skewBlocks")
+  for (area, n, field) in [("extended", rec.extended.len, "gh1.extendedHeaderBlocks"),
+      ("external", rec.external.len, "gh1.externalHeaderBlocks")]:
+    let announced = SegdBlockSize * (if area == "extended": rec.extendedHeaderBlocks
+                                     else: rec.externalHeaderBlocks)
+    if n != announced:
+      w.problem("the " & area & " header has " & $n & " bytes, " & $announced &
+        " announced", field)
+  let f = toSegdFormat(rec.gh1.formatCode)
+  if rec.format.isNone or f != rec.format:
+    w.problem("format code " & $rec.gh1.formatCode & " is undefined or does not match the " &
       "record's sample format", "gh1.formatCode")
-  elif f.isLittleEndian:
-    w.problem("format " & $ord(f) & " (little-endian) needs Rev 3.1", "gh1.formatCode")
-  if rec.hasGh2 and rec.gh2.revisionMajor >= 3:
-    w.problem("Rev 3 records use another layout and are not written by this writer",
-      "gh2.revision")
+  elif f.get.isLittleEndian and rec.headerRevision < SegdRevision(major: 3, minor: 1):
+    w.problem("format " & $ord(f.get) & " (little-endian) needs Rev 3.1, the record says " &
+      $rec.headerRevision, "gh1.formatCode")
+  if rec.layout == slRev3: w.checkRev3Sizes(rec)
   if isStorageUnitLabel(rec.gh1.encoded):
     w.problem("General Header #1 bytes 5-9 read like a storage unit label ('SDn.n'), so " &
       "readers would take the record for a label", "gh1.generalConstants")
@@ -223,157 +214,151 @@ proc writeRecordHeaders*(w: var SegdWriter, rec: SegdRecord) =
   ## `endRecord`.
   doAssert not w.inRecord, "call endRecord before starting another record"
   w.checkRecord(rec)
-  if rec.isRev3:
-    var hdr: seq[byte]
-    hdr.add rec.gh1.encoded
-    hdr.add rec.gh2r3.encoded
-    hdr.add rec.gh3.encoded
-    hdr.add rec.generalBlocks
-    for s in rec.scanTypes:
-      for c in s.descriptors3: hdr.add c.encoded
-      hdr.add s.skew
-    hdr.add rec.extended
-    hdr.add rec.external
-    w.emit(hdr)
-    w.bytesInRecord = hdr.len
-    w.record = rec
-    w.record.traceCount = 0
-    for st in rec.scanTypes:
-      for c in st.descriptors3: w.record.traceCount += int(c.channelsInSet)
-    if w.record.traceCount > 0: w.padToBlock() # the first trace starts a device block
-    w.inRecord = true
-    w.tracesWritten = 0
-    return
   var hdr: seq[byte]
   hdr.add rec.gh1.encoded
-  if rec.hasGh2: hdr.add rec.gh2.encoded
-  for g in rec.sourceHeaders: hdr.add g.encoded
+  case rec.layout
+  of slRev2:
+    if rec.gh2.isSome: hdr.add rec.gh2.get.encoded
+    for g in rec.sourceHeaders: hdr.add g.encoded
+  of slRev3:
+    hdr.add rec.gh2Rev3.encoded
+    hdr.add rec.gh3.encoded
+    hdr.add rec.generalBlocks
   for s in rec.scanTypes:
-    for c in s.descriptors: hdr.add c.encoded
+    case s.layout
+    of slRev2:
+      for c in s.descriptors: hdr.add c.encoded
+    of slRev3:
+      for c in s.descriptorsRev3: hdr.add c.encoded
     hdr.add s.skew
   hdr.add rec.extended
   hdr.add rec.external
   w.emit(hdr)
+  w.bytesInRecord = hdr.len
   w.record = rec
   # The trace count the reader will expect, from the descriptors as written.
-  w.record.traceCount = 0
-  for st in rec.scanTypes:
-    for c in st.descriptors:
-      if c.channelCount > 0: w.record.traceCount += c.channelCount
+  w.record.traceCount = rec.announcedTraces
+  if rec.layout == slRev3 and w.record.traceCount > 0:
+    w.padToBlock() # the first trace starts a device block
   w.inRecord = true
   w.tracesWritten = 0
 
+func declaredSamples(rec: SegdRecord, t: SegdTrace, cs: Option[SegdChannelSetRef]): int =
+  # The sample count the reader will give the trace, -1 if none.
+  case t.layout
+  of slRev2:
+    if t.ext1.isSome: return int(t.ext1.get.samplesPerTrace)
+    if cs.isSome:
+      template c: untyped = rec.scanTypes[cs.get.scanType].descriptors[cs.get.channelSet]
+      let si = c.sampleIntervalMs(rec.gh1)
+      if si > 0: return int(round((c.endTimeMs - c.startTimeMs) / si))
+  of slRev3:
+    if t.ext1Rev3.isSome: return int(t.ext1Rev3.get.numSamples)
+    if cs.isSome:
+      return int(rec.scanTypes[cs.get.scanType].descriptorsRev3[cs.get.channelSet].numSamples)
+  -1
+
 proc checkTrace(w: var SegdWriter, t: SegdTrace) =
-  if w.record.isRev3:
-    let the = int(t.header.traceHeaderExtensions)
-    let have = (if t.hasExt1: 1 else: 0) + t.extensions.len div 32
-    if t.extensions.len mod 32 != 0 or have != the or (not t.hasExt1 and t.extensions.len > 0):
-      w.problem("the trace header announces " & $the & " extensions, the trace carries " &
-        $have, "trace.traceHeaderExtensions", t.index)
-    var st, cs: int
-    findChannelSet(w.record, t.header, st, cs)
-    if cs < 0:
-      w.problem("the trace names scan type " & $t.header.scanTypeNumber & ", channel set " &
-        $t.header.channelSetNumber & ", which no descriptor has", "trace.channelSetNumber",
-        t.index)
-    let declared = if t.hasExt1: int(t.ext1r3.numSamples)
-                   elif cs >= 0: int(w.record.scanTypes[st].descriptors3[cs].numSamples)
-                   else: -1
-    if declared != t.numSamples:
-      w.problem("the headers give " & $declared & " samples, the trace has " & $t.numSamples,
-        "trace.numSamples", t.index)
-    if t.samples.len != dataBytes(w.record.format, t.numSamples):
-      w.problem("the trace has " & $t.samples.len & " sample bytes, " &
-        $dataBytes(w.record.format, t.numSamples) & " expected", "trace.samples", t.index)
+  if t.layout != w.record.layout:
+    w.problem("the trace has the " & $t.layout & " layout, the record " & $w.record.layout,
+      "trace", t.index)
     return
+  let hasExt1 = case t.layout
+    of slRev2: t.ext1.isSome
+    of slRev3: t.ext1Rev3.isSome
   let the = int(t.header.traceHeaderExtensions)
-  let have = (if t.hasExt1: 1 else: 0) + t.extensions.len div 32
-  if t.extensions.len mod 32 != 0 or have != the or (not t.hasExt1 and t.extensions.len > 0):
+  let have = ord(hasExt1) + t.extensions.len div SegdBlockSize
+  if t.extensions.len mod SegdBlockSize != 0 or have != the or
+      (not hasExt1 and t.extensions.len > 0):
     w.problem("the trace header announces " & $the & " extensions, the trace carries " &
       $have & " (" & $t.extensions.len & " extra bytes)", "trace.traceHeaderExtensions", t.index)
-  var st, cs: int
-  findChannelSet(w.record, t.header, st, cs)
-  var declared = -1
-  if t.hasExt1:
-    declared = int(t.ext1.samplesPerTrace)
-  elif cs >= 0:
-    let c = w.record.scanTypes[st].descriptors[cs]
-    let si = c.sampleIntervalMs(w.record.gh1)
-    if si > 0: declared = int(round((c.endTimeMs - c.startTimeMs) / si))
+  let cs = w.record.findChannelSet(t.header)
+  if cs.isNone and t.layout == slRev3:
+    w.problem("the trace names scan type " & $t.header.scanTypeNumber & ", channel set " &
+      $t.header.channelSetNumber & ", which no descriptor has", "trace.channelSetNumber",
+      t.index)
+  let declared = declaredSamples(w.record, t, cs)
   if declared != t.numSamples:
     w.problem("the headers give " & $declared & " samples, the trace has " & $t.numSamples,
       "trace.numSamples", t.index)
-  if t.samples.len != dataBytes(w.record.format, t.numSamples):
+  let f = w.record.format.get
+  if t.samples.len != dataBytes(f, t.numSamples):
     w.problem("the trace has " & $t.samples.len & " sample bytes, " &
-      $dataBytes(w.record.format, t.numSamples) & " expected", "trace.samples", t.index)
+      $dataBytes(f, t.numSamples) & " expected", "trace.samples", t.index)
 
 proc writeTrace*(w: var SegdWriter, t: SegdTrace) =
   ## Validates and writes one trace of the current record.
   doAssert w.inRecord, "call writeRecordHeaders first"
   w.checkTrace(t)
-  var b: seq[byte]
   # FIXREC (owner decision): a trace does not cross a block boundary when it
   # fits in one block; the rest of the current block is zero-padded instead.
-  b.add t.header.encoded
-  if t.hasExt1:
-    if w.record.isRev3: b.add t.ext1r3.encoded else: b.add t.ext1.encoded
-  b.add t.extensions
-  b.add t.samples
+  w.buf.setLen 0
+  w.buf.add t.header.encoded
+  case t.layout
+  of slRev2:
+    if t.ext1.isSome: w.buf.add t.ext1.get.encoded
+  of slRev3:
+    if t.ext1Rev3.isSome: w.buf.add t.ext1Rev3.get.encoded
+  w.buf.add t.extensions
+  w.buf.add t.samples
+  let n = w.buf.len
   # A trace header never starts in a block's last 19 bytes, so readers can
   # tell padding from a header.
   if w.fixedBlock > 0 and w.pending.len > 0 and
-      ((w.pending.len + b.len > w.fixedBlock and b.len <= w.fixedBlock) or
+      ((w.pending.len + n > w.fixedBlock and n <= w.fixedBlock) or
        w.fixedBlock - w.pending.len < SegdTraceHeaderSize):
     w.padToBlock()
-  w.emit(b)
-  w.bytesInRecord += b.len
+  w.emit(w.buf)
+  w.bytesInRecord += n
   inc w.tracesWritten
 
-proc setRev3Trailer*(w: var SegdWriter, trailerBytes: seq[byte]) =
-  ## Rev 3: replaces the general trailer of the record in progress, for a
-  ## trailer known only after its traces. GH#2 and GH#3 were written with the
-  ## record headers, so it must have the size they announce (`endRecord`
-  ## checks).
-  doAssert w.inRecord and w.record.isRev3, "setRev3Trailer needs a Rev 3 record in progress"
-  w.record.trailerBytes = trailerBytes
+proc setRev3Trailer*(w: var SegdWriter, trailer: sink seq[byte]) =
+  ## Rev 3: replaces the general trailer (`trailerRev3`) of the record in
+  ## progress, for a trailer known only after its traces. GH#2 and GH#3 were
+  ## written with the record headers, so it must have the size they announce
+  ## (`endRecord` checks).
+  doAssert w.inRecord and w.record.layout == slRev3,
+    "setRev3Trailer needs a Rev 3 record in progress"
+  w.record.trailerRev3 = trailer
 
 proc endRev2Record(w: var SegdWriter, trailer: openArray[SegdTrailerBlock]) =
-  if w.tracesWritten != w.record.traceCount:
-    w.problem("the channel set descriptors announce " & $w.record.traceCount & " traces, " &
-      $w.tracesWritten & " were written", "csd.channelCount")
-  let blocks = if trailer.len > 0: @trailer else: w.record.trailer
-  let nGT = if w.record.hasGh2: int(w.record.gh2.generalTrailerBlocks) else: 0
-  if blocks.len != nGT:
-    w.problem("General Header #2 announces " & $nGT & " trailer blocks, " & $blocks.len &
-      " are present", "gh2.generalTrailerBlocks")
-  if blocks.len > 0:
-    var b: seq[byte]
-    for t in blocks: b.add t.encoded
-    w.emit(b)
+  let nGT = if w.record.gh2.isSome: int(w.record.gh2.get.generalTrailerBlocks) else: 0
+  template check(blocks: openArray[SegdTrailerBlock]) =
+    if blocks.len != nGT:
+      w.problem("General Header #2 announces " & $nGT & " trailer blocks, " & $blocks.len &
+        " are present", "gh2.generalTrailerBlocks")
+    if blocks.len > 0:
+      var b: seq[byte]
+      for t in blocks: b.add t.encoded
+      w.emit(b)
+  if trailer.len > 0: check(trailer) else: check(w.record.trailer)
 
 proc endRev3Record(w: var SegdWriter) =
-  if w.tracesWritten != w.record.traceCount:
-    w.problem("the channel set descriptors announce " & $w.record.traceCount & " traces, " &
-      $w.tracesWritten & " were written", "csd.channelsInSet")
   let g3 = w.record.gh3
   if g3.dataSize != 0 and g3.dataSize != uint64(w.bytesInRecord):
     w.problem("General Header #3 data size is " & $g3.dataSize & ", " & $w.bytesInRecord &
       " bytes of headers and traces were written", "gh3.dataSize")
-  let total = w.bytesInRecord + w.record.trailerBytes.len
+  let total = w.bytesInRecord + w.record.trailerRev3.len
   if g3.recordSize != 0 and g3.recordSize != uint64(total):
     w.problem("General Header #3 record size is " & $g3.recordSize & ", the record has " &
       $total & " bytes", "gh3.recordSize")
-  if w.record.trailerBytes.len > 0:
+  if w.record.trailerRev3.len > 0:
     w.padToBlock() # the first trailer block starts a device block
-    w.emit(w.record.trailerBytes)
+    w.emit(w.record.trailerRev3)
 
 proc endRecord*(w: var SegdWriter, trailer: openArray[SegdTrailerBlock] = []) =
   ## Finishes the record: checks the trace count (and, for Rev 3, the GH#3
-  ## sizes), writes the general trailer (Rev 1/2: `trailer`, or the record's
-  ## own when empty; Rev 3: `record.trailerBytes`), pads a FIXREC block and
-  ## writes a tape mark if `tapeMarkPerRecord`.
+  ## sizes), writes the general trailer (Rev 0-2: `trailer`, or the record's
+  ## own when empty; Rev 3: `trailerRev3`), pads a FIXREC block and writes a
+  ## tape mark if `tapeMarkPerRecord`.
   doAssert w.inRecord, "no record in progress"
-  if w.record.isRev3: w.endRev3Record() else: w.endRev2Record(trailer)
+  if w.tracesWritten != w.record.traceCount:
+    w.problem("the channel set descriptors announce " & $w.record.traceCount & " traces, " &
+      $w.tracesWritten & " were written",
+      if w.record.layout == slRev3: "csd.channelsInSet" else: "csd.channelCount")
+  case w.record.layout
+  of slRev2: w.endRev2Record(trailer)
+  of slRev3: w.endRev3Record()
   w.padToBlock()
   if w.opts.tapeMarkPerRecord:
     w.sink.writeTapeMark()
@@ -385,13 +370,15 @@ proc computeRev3Sizes*(rec: var SegdRecord, traces: openArray[SegdTrace]) =
   ## Sets a Rev 3 record's GH#3 header, data and record sizes and its GH#2
   ## trailer block count from its blocks and `traces` (for records built in
   ## memory).
-  rec.gh3.headerSize = uint32(rev3HeaderBytes(rec))
-  var data = rev3HeaderBytes(rec)
+  let header = rec.headerBytes
+  rec.gh3.headerSize = uint32(header)
+  var data = header
   for t in traces:
-    data += SegdTraceHeaderSize + 32 * int64(t.header.traceHeaderExtensions) + t.samples.len
+    data += SegdTraceHeaderSize + SegdBlockSize * int64(t.header.traceHeaderExtensions) +
+      t.samples.len
   rec.gh3.dataSize = uint64(data)
-  rec.gh3.recordSize = uint64(data + rec.trailerBytes.len)
-  rec.gh2r3.generalTrailerBlocks = uint32(rec.trailerBytes.len div 32)
+  rec.gh3.recordSize = uint64(data + rec.trailerRev3.len)
+  rec.gh2Rev3.generalTrailerBlocks = uint32(rec.trailerRev3.len div SegdBlockSize)
 
 proc close*(w: var SegdWriter) =
   ## Marks the end of data: two tape marks (one if a record just ended with
@@ -401,7 +388,7 @@ proc close*(w: var SegdWriter) =
 
 proc writeSegd*(sink: RecordSink, d: SegdData, opts = SegdWriteOptions()): DiagLog =
   ## Writes a whole in-memory stream (see `readSegd`); returns the writer log.
-  var w = openSegdWriter(sink, opts, d.hasLabel, d.label)
+  var w = openSegdWriter(sink, opts, d.label)
   for r in d.records:
     w.writeRecordHeaders(r.record)
     for t in r.traces: w.writeTrace(t)

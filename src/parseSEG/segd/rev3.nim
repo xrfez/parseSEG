@@ -13,7 +13,6 @@
 import std/[strutils, math]
 import ../common/[endians, fieldlayout]
 import ./headers
-export FieldSpec, FieldKind, BcdAllF, BcdInvalid, fieldTable
 
 type
   SegdGeneralHeader2Rev3* = object
@@ -46,7 +45,7 @@ type
     blockType* {.at: 32.}: uint8              ## 0x03.
     raw*: array[SegdBlockSize, byte]
 
-  SegdChannelSetDescriptor3* = object
+  SegdChannelSetDescriptorRev3* = object
     ## Channel Set Descriptor, Rev 3 (96 bytes: block types 0x30, 0x31, 0x32).
     scanTypeNumber* {.bcdAt(1, 2).}: int
     channelSetNumber* {.at: 2.}: uint16
@@ -227,43 +226,31 @@ type
     blockType* {.at: 32.}: uint8
     raw*: array[SegdBlockSize, byte]
 
-  SegdRev3Block* = SegdGeneralHeader2Rev3 | SegdGeneralHeader3 | SegdChannelSetDescriptor3 |
+  SegdRev3Block* = SegdGeneralHeader2Rev3 | SegdGeneralHeader3 | SegdChannelSetDescriptorRev3 |
     SegdTraceHeaderExt1Rev3 | SegdPositionBlock | SegdSourceDescription |
     SegdAdditionalSourceInfo | SegdSensorInfo | SegdTimestampHeader | SegdSensorCalibration |
     SegdTimeDrift | SegdOrientation | SegdTrailerDescription
+    ## The typed Rev 3 blocks.
 
 const
-  BtGeneralHeader2* = 0x02'u8
-  BtGeneralHeader3* = 0x03'u8
-  BtCsd1* = 0x30'u8
-  BtCsd2* = 0x31'u8
-  BtCsd3* = 0x32'u8
-  BtTraceExt1* = 0x40'u8
-  BtPosition1* = 0x50'u8
-  BtPosition2* = 0x51'u8
-  BtPosition3* = 0x52'u8
-  BtCrs* = 0x55'u8
-  BtTrailerDescription* = 0x70'u8
-  segdGeneralHeader2Rev3Fields* = fieldTable(SegdGeneralHeader2Rev3)
-  segdGeneralHeader3Fields* = fieldTable(SegdGeneralHeader3)
-  segdChannelSetDescriptor3Fields* = fieldTable(SegdChannelSetDescriptor3)
-  segdTraceHeaderExt1Rev3Fields* = fieldTable(SegdTraceHeaderExt1Rev3)
-  segdPositionBlockFields* = fieldTable(SegdPositionBlock)
-
-func decodeRev3*[T: SegdRev3Block](b: openArray[byte]): T =
-  ## Decodes a Rev 3 block from the start of `b` and keeps its bytes.
-  doAssert b.len >= result.raw.len, "SEG-D Rev 3 block too short"
-  for i in 0..<result.raw.len: result.raw[i] = b[i]
-  decodeFields(result, b, 1, boBig)
-
-proc encode*[T: SegdRev3Block](h: T, b: var openArray[byte]) =
-  ## Writes `h`: its raw bytes with every changed field re-encoded.
-  doAssert b.len >= h.raw.len, "SEG-D Rev 3 block buffer too short"
-  for i in 0..<h.raw.len: b[i] = h.raw[i]
-  encodeChanged(h, b.toOpenArray(0, h.raw.len - 1), 1, boBig)
-
-proc encoded*[T: SegdRev3Block](h: T): typeof(h.raw) =
-  h.encode(result)
+  # Block type bytes (byte 32 of a 32-byte block).
+  BlockTypeGeneralHeader2* = 0x02'u8   ## General Header #2.
+  BlockTypeGeneralHeader3* = 0x03'u8   ## General Header #3.
+  BlockTypeChannelSet1* = 0x30'u8      ## First block of a channel set descriptor.
+  BlockTypeChannelSet2* = 0x31'u8      ## Second block of a channel set descriptor.
+  BlockTypeChannelSet3* = 0x32'u8      ## Third block of a channel set descriptor.
+  BlockTypeTraceHeaderExt1* = 0x40'u8  ## Trace Header Extension #1.
+  BlockTypePosition1* = 0x50'u8        ## First block of a Position block.
+  BlockTypePosition2* = 0x51'u8        ## Second block of a Position block.
+  BlockTypePosition3* = 0x52'u8        ## Third block of a Position block.
+  BlockTypeCrs* = 0x55'u8              ## Coordinate Reference System text.
+  BlockTypeTrailerDescription* = 0x70'u8 ## General Trailer Description.
+  segdGeneralHeader2Rev3Fields* = fieldTable(SegdGeneralHeader2Rev3) ## GH#2 (Rev 3) field table.
+  segdGeneralHeader3Fields* = fieldTable(SegdGeneralHeader3) ## GH#3 field table.
+  segdChannelSetDescriptorRev3Fields* = fieldTable(SegdChannelSetDescriptorRev3)
+    ## CSD (Rev 3) field table.
+  segdTraceHeaderExt1Rev3Fields* = fieldTable(SegdTraceHeaderExt1Rev3) ## THE#1 (Rev 3) field table.
+  segdPositionBlockFields* = fieldTable(SegdPositionBlock) ## Position block field table.
 
 # ---------------------------------------------------------------------------
 # Raw 32-byte blocks.
@@ -302,10 +289,13 @@ func blockTypeName*(t: uint8): string =
   of 0xB0..0xFF: "userDefined"
   else: "undefined"
 
-func isUserBlock*(t: uint8): bool {.inline.} = t >= 0xB0
+func isUserBlock*(t: uint8): bool {.inline.} =
   ## Block types 0xB0-0xFF are manufacturer or user defined.
+  t >= 0xB0
 
-func isDefinedBlock*(t: uint8): bool = blockTypeName(t) != "undefined"
+func isDefinedBlock*(t: uint8): bool =
+  ## True for a block type the spec defines (user types included).
+  blockTypeName(t) != "undefined"
 
 iterator blocks*(area: openArray[byte]): (int, uint8) =
   ## The 32-byte blocks of `area` as (byte offset, block type).
@@ -316,28 +306,26 @@ iterator blocks*(area: openArray[byte]): (int, uint8) =
 
 func findBlock*(area: openArray[byte], blockType: uint8, start = 0): int =
   ## Byte offset of the first block of `blockType` at or after `start`, or -1.
-  result = -1
   var i = start - start mod SegdBlockSize
-  while i + SegdBlockSize <= area.len and result < 0:
-    if area[i + SegdBlockSize - 1] == blockType: result = i
+  while i + SegdBlockSize <= area.len:
+    if area[i + SegdBlockSize - 1] == blockType: return i
     i += SegdBlockSize
+  -1
 
 func blockText*(b: openArray[byte], first = 1, last = 31): string =
-  ## ASCII text of bytes `first`..`last` (1-based) of a block, trimmed.
-  for i in first - 1 .. last - 1:
-    if i < b.len and b[i] != 0: result.add char(b[i])
-  result = result.strip
+  ## ASCII text of bytes `first`..`last` (1-based) of a block, NULs dropped
+  ## and trimmed.
+  asciiText(b, first, last)
 
-func descriptionText*(c: SegdChannelSetDescriptor3): string =
-  for ch in c.description:
-    if ch != '\0': result.add ch
-  result = result.strip
+func descriptionText*(c: SegdChannelSetDescriptorRev3): string =
+  ## The descriptor's description (bytes 69-95), NULs dropped and trimmed.
+  asciiText(c.description.toOpenArrayByte(0, c.description.high), 1, c.description.len)
 
 func crsText*(area: openArray[byte]): string =
   ## The Coordinate Reference System text: bytes 1-31 of every 0x55 block of
   ## `area`, concatenated (one Location Data stanza may span many blocks).
   for (i, t) in blocks(area):
-    if t == BtCrs:
+    if t == BlockTypeCrs:
       for k in 0..30: result.add char(area[i + k])
 
 type
@@ -365,17 +353,21 @@ func crsFormat*(text: string): CrsTextFormat =
 # Resolved values.
 
 func channelSetsPerScanType*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): int =
+  ## Channel sets per scan type: GH#1's, or GH#2's extended count when it is `FF`.
   if g1.channelSetsPerScanType == BcdAllF: int(g2.extChannelSetsPerScanType)
   else: g1.channelSetsPerScanType
 
 func skewBlocks*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): int =
+  ## Skew blocks per scan type: GH#1's, or GH#2's extended count when it is `FF`.
   if g1.skewBlocks == BcdAllF: int(g2.extSkewBlocks) else: g1.skewBlocks
 
 func extendedHeaderBlocks*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): int =
+  ## Extended header blocks: GH#1's, or GH#2's extended count when it is `FF`.
   if g1.extendedHeaderBlocks == BcdAllF: int(g2.extExtendedHeaderBlocks)
   else: g1.extendedHeaderBlocks
 
 func externalHeaderBlocks*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): int =
+  ## External header blocks: GH#1's, or GH#2's extended count when it is `FF`.
   if g1.externalHeaderBlocks == BcdAllF: int(g2.extExternalHeaderBlocks)
   else: g1.externalHeaderBlocks
 
@@ -385,6 +377,7 @@ func generalHeaderCount*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): in
        else: int(g1.additionalGhBlocks))
 
 func fileNumber*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): int64 =
+  ## The file number: GH#1's BCD field, or GH#2's extended one when it is `FFFF`.
   if g1.fileNumber == BcdAllF: int64(g2.extFileNumber) else: g1.fileNumber
 
 func baseScanIntervalUs*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): float64 =
@@ -399,15 +392,21 @@ func recordLengthUs*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): float6
   else: float64(g1.recordLength) * 102_400.0
 
 func traceNumber*(t: SegdTraceHeader, e: SegdTraceHeaderExt1Rev3): int64 =
+  ## The trace number: BCD bytes 5-6 of the demux header, or THE#1's
+  ## extended one when they are `FFFF`.
   if t.traceNumber == BcdAllF: int64(e.extTraceNumber) else: t.traceNumber
 
 func receiverLine*(e: SegdTraceHeaderExt1Rev3): float64 =
+  ## Receiver line number, from the extended fixed-point field when bytes 1-3
+  ## are `FFFFFF`.
   if e.receiverLineNumber == -1: e.extReceiverLineNumber else: float64(e.receiverLineNumber)
 
 func receiverPoint*(e: SegdTraceHeaderExt1Rev3): float64 =
+  ## Receiver point number, from the extended fixed-point field when bytes
+  ## 4-6 are `FFFFFF`.
   if e.receiverPointNumber == -1: e.extReceiverPointNumber else: float64(e.receiverPointNumber)
 
-func traceBytes*(c: SegdChannelSetDescriptor3, dataBytes: int): int =
+func traceBytes*(c: SegdChannelSetDescriptorRev3, dataBytes: int): int =
   ## Bytes of one trace of this set, given its sample data size.
   SegdTraceHeaderSize + SegdBlockSize * int(c.traceHeaderExtensions) + dataBytes
 
@@ -499,9 +498,9 @@ func generalHeaderUtc*(g1: SegdGeneralHeader1, century = 2000): float64 =
 # entries, ASCII (spec note `segd_rev3_0_a.md` §2.6).
 
 const
-  TocHeaderSize* = 448
-  TocEntrySize* = 128
-  TocIdentifier* = "SEGD TOC FILE"
+  TocHeaderSize* = 448 ## Bytes in a TOC file header.
+  TocEntrySize* = 128  ## Bytes in a TOC entry.
+  TocIdentifier* = "SEGD TOC FILE" ## The text a TOC file starts with.
 
 type
   SegdTocEntry* = object
@@ -521,44 +520,33 @@ type
 
 func isTocFile*(b: openArray[byte]): bool =
   ## True when `b` starts with `SEGD TOC FILE`.
-  result = b.len >= TocIdentifier.len
+  if b.len < TocIdentifier.len: return false
   for i, c in TocIdentifier:
-    if result and b[i] != byte(c): result = false
-
-func tocText(b: openArray[byte], first, last: int): string =
-  for i in first - 1 .. min(last, b.len) - 1: result.add char(b[i])
-  result = result.strip
+    if b[i] != byte(c): return false
+  true
 
 func tocEntryCount*(header: openArray[byte]): int =
   ## The entry count of a TOC header (bytes 439-448), -1 if not a number.
-  let s = tocText(header, 439, 448)
+  let s = asciiText(header, 439, 448)
   if s.len > 0 and s.len <= 9 and s.allCharsInSet(Digits): parseInt(s) else: -1
 
 func decodeToc*(b: openArray[byte]): SegdToc =
   ## Decodes a TOC file (header plus as many whole entries as `b` holds).
-  result.raw = @b
-  result.revision = tocText(b, 14, 19)
-  result.serialNumber = tocText(b, 20, 31)
-  result.clientId = tocText(b, 32, 63)
-  result.vesselCrewId = tocText(b, 64, 95)
-  result.country = tocText(b, 96, 127)
-  result.region = tocText(b, 128, 159)
-  result.blockName = tocText(b, 160, 191)
-  result.surveyAreaName = tocText(b, 192, 223)
-  result.contractNumber = tocText(b, 224, 255)
-  result.licenseId = tocText(b, 256, 287)
-  result.surveyType = tocText(b, 288, 307)
-  result.acquisitionContractor = tocText(b, 308, 339)
-  result.acquisitionDates = tocText(b, 340, 364)
-  result.jobId = tocText(b, 365, 396)
-  result.mediaSeqInRecordSet = tocText(b, 397, 402)
-  result.dataTypeId = tocText(b, 403, 434)
+  result = SegdToc(raw: @b, revision: asciiText(b, 14, 19),
+    serialNumber: asciiText(b, 20, 31), clientId: asciiText(b, 32, 63),
+    vesselCrewId: asciiText(b, 64, 95), country: asciiText(b, 96, 127),
+    region: asciiText(b, 128, 159), blockName: asciiText(b, 160, 191),
+    surveyAreaName: asciiText(b, 192, 223), contractNumber: asciiText(b, 224, 255),
+    licenseId: asciiText(b, 256, 287), surveyType: asciiText(b, 288, 307),
+    acquisitionContractor: asciiText(b, 308, 339), acquisitionDates: asciiText(b, 340, 364),
+    jobId: asciiText(b, 365, 396), mediaSeqInRecordSet: asciiText(b, 397, 402),
+    dataTypeId: asciiText(b, 403, 434))
   var i = TocHeaderSize
   while i + TocEntrySize <= b.len:
     template e: untyped = b.toOpenArray(i, i + TocEntrySize - 1)
-    result.entries.add SegdTocEntry(mediaFileNumber: tocText(e, 1, 8),
-      recordWithinFile: tocText(e, 9, 15), timeOfShot: tocText(e, 16, 35),
-      segdFileNumber: tocText(e, 36, 45), recordId: tocText(e, 46, 60),
-      recordSetNumber: tocText(e, 61, 70), lineId: tocText(e, 71, 94),
-      userDefined: tocText(e, 95, 128))
+    result.entries.add SegdTocEntry(mediaFileNumber: asciiText(e, 1, 8),
+      recordWithinFile: asciiText(e, 9, 15), timeOfShot: asciiText(e, 16, 35),
+      segdFileNumber: asciiText(e, 36, 45), recordId: asciiText(e, 46, 60),
+      recordSetNumber: asciiText(e, 61, 70), lineId: asciiText(e, 71, 94),
+      userDefined: asciiText(e, 95, 128))
     i += TocEntrySize

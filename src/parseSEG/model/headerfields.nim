@@ -193,7 +193,7 @@ proc locateRecordBlock*(ix: TraceIndex, record: int, blockName: string, b: var B
   elif blockName.len in 3..6 and blockName.startsWith("gh") and
       blockName[2..^1].allCharsInSet(Digits) and blockName[2] != '0':
     let n = parseInt(blockName[2..^1])
-    if rec.isRev3 or not rec.hasGh2:
+    if rec.layout == slRev3 or rec.gh2.isNone:
       err = "only Rev 1/2 records have source blocks gh3, gh4, ... (Rev 3 general header " &
         "blocks after GH#1 are not supported by name yet)"
       false
@@ -339,14 +339,5 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
       return v.toFloat
     if f.traceField(trace, "trace.sampleInterval", v): v.toFloat else: NaN
   else:
-    template rec: untyped = ix.segdRecords[e.record]
-    let cs = e.channelSetIndex
-    if rec.isRev3:
-      if cs >= 0 and int(e.scanType) >= 0:
-        float64(rec.scanTypes[e.scanType].descriptors3[cs].samplingInterval)
-      else:
-        baseScanIntervalUs(rec.gh1, rec.gh2r3)
-    elif cs >= 0 and int(e.scanType) >= 0:
-      rec.scanTypes[e.scanType].descriptors[cs].sampleIntervalMs(rec.gh1) * 1000
-    else:
-      rec.gh1.baseScanIntervalMs * 1000
+    let cs = if int(e.scanType) >= 0: e.channelSetIndex else: -1
+    ix.segdRecords[e.record].sampleIntervalUs(int(e.scanType), cs)

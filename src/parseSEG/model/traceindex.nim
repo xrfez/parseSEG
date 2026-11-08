@@ -52,10 +52,11 @@ type
   TraceCodec* = object
     ## How the samples of one SEG-Y file or SEG-D record are encoded.
     kind*: SeismicKind
-    known*: bool                  ## The format is decodable.
-    segyFormat*: SampleFormat     ## SEG-Y format, when `kind == skSegy`.
+    segyFormat*: Option[SampleFormat]
+      ## SEG-Y format, when `kind == skSegy`; none if not decodable.
     order*: ByteOrder             ## SEG-Y byte order.
-    segdFormat*: SegdSampleFormat ## SEG-D format, when `kind == skSegd`.
+    segdFormat*: Option[SegdSampleFormat]
+      ## SEG-D format, when `kind == skSegd`; none if not decodable.
     twosComplement8015*: bool     ## SEG-D 8015 read as two's complement.
 
   TraceIndex* = object
@@ -68,8 +69,7 @@ type
       ## samples are contiguous there (false for tape images and devices).
     maxSamples*: int          ## Largest `numSamples`.
     segy*: SegyFile           ## SEG-Y file headers, when `kind == skSegy`.
-    segdLabel*: SegdStorageUnitLabel
-    hasSegdLabel*: bool
+    segdLabel*: Option[SegdStorageUnitLabel] ## The SEG-D storage unit label, if any.
     segdRecords*: seq[SegdRecord] ## SEG-D record headers and trailers, by record index.
     segdToc*: seq[SegdToc]    ## SEG-D Rev 3 Table of Contents files met.
     log*: DiagLog             ## Diagnostics of the walk.
@@ -94,11 +94,15 @@ func sampleOffset*(e: TraceEntry): int64 {.inline.} =
   ## Medium offset of the trace's first sample byte.
   e.offset + int64(e.headerBytes)
 
+func known*(c: TraceCodec): bool {.inline.} =
+  ## True when the samples are decodable (the format is known).
+  if c.kind == skSegy: c.segyFormat.isSome else: c.segdFormat.isSome
+
 func dataBytes*(c: TraceCodec, samples: int): int =
   ## Bytes holding `samples` samples (0 for an undecodable format).
   if not c.known: 0
-  elif c.kind == skSegy: samples * sampleSize(c.segyFormat)
-  else: dataBytes(c.segdFormat, samples)
+  elif c.kind == skSegy: samples * sampleSize(c.segyFormat.get)
+  else: dataBytes(c.segdFormat.get, samples)
 
 func dataBytes*(ix: TraceIndex, i: int): int {.inline.} =
   ## Sample bytes of trace `i`.
@@ -107,8 +111,8 @@ func dataBytes*(ix: TraceIndex, i: int): int {.inline.} =
 func prefersFloat64*(ix: TraceIndex): bool =
   ## True when some trace's format would lose precision in float32.
   for c in ix.codecs:
-    if c.known and (if c.kind == skSegy: prefersFloat64(c.segyFormat)
-                    else: prefersFloat64(c.segdFormat)):
+    if c.known and (if c.kind == skSegy: prefersFloat64(c.segyFormat.get)
+                    else: prefersFloat64(c.segdFormat.get)):
       return true
 
 # ------------------------------------------------------------- detection --
@@ -117,7 +121,6 @@ func looksLikeSegdGh1(b: openArray[byte]): bool =
   # General Header #1: BCD file number (or FFFF) in bytes 1-2, a BCD format
   # code 0xxx/8xxx/9xxx in bytes 3-4.
   if b.len < 32: return false
-  var f: SegdSampleFormat
   let fileOk = isAllF(b, 0, 4) or (block:
     var ok = true
     for n in 0..3:
@@ -128,7 +131,7 @@ func looksLikeSegdGh1(b: openArray[byte]): bool =
     let d = int(nibble(b, n))
     if d > 9: return false
     code = code * 10 + d
-  fileOk and (toSegdFormat(code, f) or code in [15, 22, 24, 42, 44, 48, 58, 1015, 1022])
+  fileOk and (toSegdFormat(code).isSome or code in [15, 22, 24, 42, 44, 48, 58, 1015, 1022])
 
 func printable(b: byte, ebcdic: bool): bool {.inline.} =
   if ebcdic:
@@ -174,8 +177,8 @@ func detectKind*(head: openArray[byte], kind: var SeismicKind): bool =
 proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
   var r = openSegy(src, headersOnly = true)
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
-  result.codecs.add TraceCodec(kind: skSegy, known: r.file.format.isSome,
-    segyFormat: r.file.format.get(default(SampleFormat)), order: r.file.byteOrder)
+  result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
+    order: r.file.byteOrder)
   let gr = if keys: initGeometryReader(r.file) else: GeometryReader()
   var t: SegyTrace
   while r.readTrace(t):
@@ -186,11 +189,6 @@ proc indexSegy(src: RecordSource, keys: bool): TraceIndex =
     if keys: result.keys.add gr.traceKeys(t)
   result.segy = r.file
   result.log = r.log
-
-proc channelTypeOf(rec: SegdRecord, t: SegdTrace): uint8 =
-  if t.channelSet < 0: 0'u8
-  elif rec.isRev3: rec.scanTypes[t.scanType].descriptors3[t.channelSet].channelType
-  else: rec.scanTypes[t.scanType].descriptors[t.channelSet].channelType
 
 proc indexSegd(src: RecordSource, twosComplement8015, keys: bool): TraceIndex =
   var r = openSegd(src, twosComplement8015, headersOnly = true)
@@ -204,14 +202,13 @@ proc indexSegd(src: RecordSource, twosComplement8015, keys: bool): TraceIndex =
         headerBytes: uint32(SegdTraceHeaderSize + SegdBlockSize * the),
         numSamples: uint32(t.numSamples), record: ri,
         channelSet: if t.channelSet < 0: NoChannelSet else: uint16(t.channelSet),
-        scanType: int8(t.scanType), channelType: channelTypeOf(r.record, t))
+        scanType: int8(t.scanType), channelType: uint8(r.record.channelType(t)))
       result.maxSamples = max(result.maxSamples, t.numSamples)
       if keys: result.keys.add traceKeys(r.record, t)
-    result.codecs.add TraceCodec(kind: skSegd, known: r.record.formatKnown,
-      segdFormat: r.record.format, twosComplement8015: twosComplement8015)
+    result.codecs.add TraceCodec(kind: skSegd, segdFormat: r.record.format,
+      twosComplement8015: twosComplement8015)
     result.segdRecords.add r.record
   result.segdLabel = r.label
-  result.hasSegdLabel = r.hasLabel
   result.segdToc = r.toc
   result.log = r.log
 
@@ -246,10 +243,10 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: 
   if n > 0:
     let a = int(start)
     if c.kind == skSegy:
-      decodeSamples(c.segyFormat, mem.toOpenArray(a, a + nbytes - 1), dst.toOpenArray(0, n - 1),
+      decodeSamples(c.segyFormat.get, mem.toOpenArray(a, a + nbytes - 1), dst.toOpenArray(0, n - 1),
         c.order)
     else:
-      decodeSegdSamples(c.segdFormat, mem.toOpenArray(a, a + nbytes - 1),
+      decodeSegdSamples(c.segdFormat.get, mem.toOpenArray(a, a + nbytes - 1),
         dst.toOpenArray(0, n - 1), c.twosComplement8015)
   for k in n..<cols: dst[k] = T(0)
 

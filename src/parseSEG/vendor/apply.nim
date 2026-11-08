@@ -38,8 +38,8 @@ proc decodeTypedBlocks(reg: VendorRegistry, ctx: VendorContext, area: openArray[
   var i = 0
   while i + 32 <= area.len:
     let t = area[i + 31]
-    let span = if t == BtPosition1 and i + 96 <= area.len and area[i + 63] == BtPosition2 and
-                  area[i + 95] == BtPosition3: 96 else: 32
+    let span = if t == BlockTypePosition1 and i + 96 <= area.len and area[i + 63] == BlockTypePosition2 and
+                  area[i + 95] == BlockTypePosition3: 96 else: 32
     var b: VendorBlock
     if reg.decode(ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(t), where: where,
         extIndex: -1), area.toOpenArray(i, i + span - 1), b, log, loc):
@@ -58,8 +58,8 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
     decodeTypedBlocks(reg, ctx, rec.generalBlocks, "generalHeader", log, loc, result)
     # The trailer: each description block's data, by trailer block type.
     var i = 0
-    let tb = rec.trailerBytes
-    while i + 32 <= tb.len and tb[i + 31] == BtTrailerDescription:
+    template tb: untyped = rec.trailerRev3
+    while i + 32 <= tb.len and tb[i + 31] == BlockTypeTrailerDescription:
       let n = 32 * int(beU32(tb, i + 4))
       if i + 32 + n > tb.len: break
       var b: VendorBlock
@@ -70,14 +70,15 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
       i += 32 + n
   decodeArea(reg, ctx, vtExtendedHeader, rec.extended, 32, log, loc, result)
   decodeArea(reg, ctx, vtExternalHeader, rec.external, 32, log, loc, result)
-  for i, g in rec.sourceHeaders:
-    var b: VendorBlock
-    if reg.decode(ctx, VendorArea(kind: vtGeneralHeader, blockIndex: i + 3, blockType: -1,
-        extIndex: -1), g.raw, b, log, loc):
-      result.add b
-  var trailer: seq[byte]
-  for t in rec.trailer: trailer.add t.raw
-  decodeArea(reg, ctx, vtTrailer, trailer, 32, log, loc, result)
+  if rec.layout == slRev2:
+    for i, g in rec.sourceHeaders:
+      var b: VendorBlock
+      if reg.decode(ctx, VendorArea(kind: vtGeneralHeader, blockIndex: i + 3, blockType: -1,
+          extIndex: -1), g.raw, b, log, loc):
+        result.add b
+    var trailer: seq[byte]
+    for t in rec.trailer: trailer.add t.raw
+    decodeArea(reg, ctx, vtTrailer, trailer, 32, log, loc, result)
 
 proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
     log: var DiagLog, file = ""): seq[VendorBlock] =

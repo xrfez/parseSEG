@@ -257,10 +257,12 @@ proc info(a: Args): int =
     for r in ix.segdRecords:
       let rv = $r.revision
       if rv notin revs: revs.add rv
-      let fm = if r.formatKnown: $ord(r.format) else: "unknown (" & $r.gh1.formatCode & ")"
+      let fm = if r.format.isSome: $ord(r.format.get)
+               else: "unknown (" & $r.gh1.formatCode & ")"
       if fm notin fmts: fmts.add fm
     echo "standard:    SEG-D rev ", revs.join(", "),
-      (if ix.hasSegdLabel: ", label " & ix.segdLabel.revision & " " & ix.segdLabel.structure
+      (if ix.segdLabel.isSome: ", label " & ix.segdLabel.get.revision & " " &
+        ix.segdLabel.get.structure
        else: "")
     echo "format:      ", fmts.join(", ")
     echo "records:     ", ix.segdRecords.len

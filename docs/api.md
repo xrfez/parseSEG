@@ -104,7 +104,15 @@ patch through the editor, in place or into a copy.
   `initGeometryReader(file).geometry(trace)` the common ones; `layoutOf(file).entriesFor(name)`
   lists the entries.
 - SEG-D: `openSegd(src)` / `nextRecord` / `readTrace`, `readSegd(path)`,
-  `openSegdWriter(sink, opts)`, `writeSegd(sink, data)`.
+  `openSegdWriter(sink, opts, label)`, `writeSegd(sink, data)`. A `SegdRecord`, its
+  `SegdScanType`s and `SegdTrace`s are variant objects on `layout`: `slRev2` (Rev 0, 1, 2.x:
+  `gh2` (an `Option`, none for Rev 0), `sourceHeaders`, `descriptors`, `ext1`, `trailer`) or
+  `slRev3` (`gh2Rev3`, `gh3`, `generalBlocks`, `descriptorsRev3`, `ext1Rev3`,
+  `trailerRev3`). `format`, the label and `ext1`/`ext1Rev3` are `Option`s. Accessors resolve a
+  value for either layout: `fileNumber`, `channelSetsPerScanType`, `baseScanIntervalUs`,
+  `headerBytes`, `findChannelSet` (an `Option[SegdChannelSetRef]`), and per trace
+  `channelType`, `sampleIntervalUs`, `startTimeMs`, `descaleFactor`. The reader's `record`,
+  `label`, `log` and `toc` are read-only.
 - Vendor maps: `loadVendorMaps`, `registerVendorDecoder`, `decode`, `applies`,
   `decodeVendorAreas`; `scaffold(path, reg)` / `toNif` write a skeleton map for every area no
   map decodes.

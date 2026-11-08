@@ -112,7 +112,7 @@ proc positionOf(area: openArray[byte], at: int, x, y, z: var float64): bool =
   # not of bad quality (3), with finite coordinates 1-2 (coordinate 3 may be
   # +Inf for a 2-D CRS). Coordinates are kept in the CRS's axis order.
   if at + 96 > area.len or area[at + 63] != 0x51 or area[at + 95] != 0x52: return false
-  let p = decodeRev3[SegdPositionBlock](area.toOpenArray(at, at + 95))
+  let p = decodeBlock[SegdPositionBlock](area.toOpenArray(at, at + 95))
   template use(c1, c2, c3: float64, valid, quality: uint8) =
     if valid == 1 and quality != 3 and finite(c1) and finite(c2):
       x = c1
@@ -147,7 +147,7 @@ proc sourceFrom(area: openArray[byte], k: var TraceKeys): bool =
   # The first Source Description block of a Rev 3 block area.
   for at, bt in blocks(area):
     if isSourceBlock(bt):
-      let s = decodeRev3[SegdSourceDescription](area.toOpenArray(at, at + SegdBlockSize - 1))
+      let s = decodeBlock[SegdSourceDescription](area.toOpenArray(at, at + SegdBlockSize - 1))
       k.srcLine = s.sourceLineNumber
       k.srcPoint = s.sourcePointNumber
       k.srcIndex = int16(s.sourcePointIndex)
@@ -156,14 +156,12 @@ proc sourceFrom(area: openArray[byte], k: var TraceKeys): bool =
 proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
   ## The keys of a SEG-D trace in record `rec`.
   result = initTraceKeys()
-  result.record = float64(if rec.isRev3: fileNumber(rec.gh1, rec.gh2r3)
-                          elif rec.hasGh2: fileNumber(rec.gh1, rec.gh2)
-                          else: int64(rec.gh1.fileNumber))
+  result.record = float64(rec.fileNumber)
   if t.header.traceNumber != BcdAllF: result.channel = float64(t.header.traceNumber)
   if rec.isRev3:
     if not sourceFrom(t.extensions, result): discard sourceFrom(rec.generalBlocks, result)
-    if t.hasExt1:
-      let e = t.ext1r3
+    if t.ext1Rev3.isSome:
+      let e = t.ext1Rev3.get
       result.rcvLine = e.receiverLine
       result.rcvPoint = e.receiverPoint
       result.rcvIndex = int16(e.receiverPointIndex)
@@ -181,12 +179,13 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
       result.srcLine = s.sourceLineNumber
       result.srcPoint = s.sourcePointNumber
       result.srcIndex = int16(s.sourcePointIndex)
-    if t.hasExt1:
-      result.rcvLine = t.ext1.receiverLine
-      result.rcvPoint = t.ext1.receiverPoint
-      result.rcvIndex = int16(t.ext1.receiverPointIndex)
-      result.sensorType = t.ext1.sensorType
-      result.component = t.ext1.sensorType
+    if t.ext1.isSome:
+      let e = t.ext1.get
+      result.rcvLine = e.receiverLine
+      result.rcvPoint = e.receiverPoint
+      result.rcvIndex = int16(e.receiverPointIndex)
+      result.sensorType = e.sensorType
+      result.component = e.sensorType
 
 proc traceKeys*(f: SegyFile, t: SegyTrace): TraceKeys =
   ## The keys of a SEG-Y trace (resolves the layout on every call).

@@ -10,7 +10,7 @@
 ## and `BcdInvalid` (-2) for a non-decimal nibble.
 
 import std/[math, strutils]
-import ../common/[endians, fieldlayout, errors]
+import ../common/[fieldlayout, errors]
 export FieldSpec, FieldKind, BcdAllF, BcdInvalid, fieldTable
 
 const
@@ -150,17 +150,19 @@ func scansPerBlock*(g: SegdGeneralHeader1): int =
   int(g.unused25) shl int(g.unused24L)
 
 const
-  segdGeneralHeader1Fields* = fieldTable(SegdGeneralHeader1)
-  segdGeneralHeader2Fields* = fieldTable(SegdGeneralHeader2)
-  segdGeneralHeaderNFields* = fieldTable(SegdGeneralHeaderN)
-  segdChannelSetDescriptorFields* = fieldTable(SegdChannelSetDescriptor)
-  segdTraceHeaderFields* = fieldTable(SegdTraceHeader)
-  segdTraceHeaderExt1Fields* = fieldTable(SegdTraceHeaderExt1)
+  # Field tables (name, byte, kind) of each block, for field-by-name access.
+  segdGeneralHeader1Fields* = fieldTable(SegdGeneralHeader1) ## GH#1 field table.
+  segdGeneralHeader2Fields* = fieldTable(SegdGeneralHeader2) ## GH#2 field table.
+  segdGeneralHeaderNFields* = fieldTable(SegdGeneralHeaderN) ## GH#N field table.
+  segdChannelSetDescriptorFields* = fieldTable(SegdChannelSetDescriptor) ## CSD field table.
+  segdTraceHeaderFields* = fieldTable(SegdTraceHeader) ## Demux trace header field table.
+  segdTraceHeaderExt1Fields* = fieldTable(SegdTraceHeaderExt1) ## THE#1 field table.
 
 # ---------------------------------------------------------------------------
 # Resolved values: BCD fields with their extended alternatives, units.
 
 func baseScanIntervalMs*(g1: SegdGeneralHeader1): float64 {.inline.} =
+  ## Base scan interval in ms (byte 23 counts 1/16 ms).
   float64(g1.baseScanInterval16) / 16.0
 
 func generalHeaderCount*(g1: SegdGeneralHeader1): int {.inline.} =
@@ -168,17 +170,21 @@ func generalHeaderCount*(g1: SegdGeneralHeader1): int {.inline.} =
   1 + int(g1.additionalGhBlocks)
 
 func fileNumber*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2): int64 =
+  ## The file number: GH#1's BCD field, or GH#2's extended one when it is `FFFF`.
   if g1.fileNumber == BcdAllF: int64(g2.extFileNumber) else: g1.fileNumber
 
 func channelSetsPerScanType*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2): int =
+  ## Channel sets per scan type: GH#1's, or GH#2's extended count when it is `FF`.
   if g1.channelSetsPerScanType == BcdAllF: int(g2.extChannelSetsPerScanType)
   else: g1.channelSetsPerScanType
 
 func extendedHeaderBlocks*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2): int =
+  ## Extended header blocks: GH#1's, or GH#2's extended count when it is `FF`.
   if g1.extendedHeaderBlocks == BcdAllF: int(g2.extExtendedHeaderBlocks)
   else: g1.extendedHeaderBlocks
 
 func externalHeaderBlocks*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2): int =
+  ## External header blocks: GH#1's, or GH#2's extended count when it is `FF`.
   if g1.externalHeaderBlocks == BcdAllF: int(g2.extExternalHeaderBlocks)
   else: g1.externalHeaderBlocks
 
@@ -202,19 +208,27 @@ func `mpFactor=`*(c: var SegdChannelSetDescriptor, mp: float64) =
   c.mpRaw[1] = byte(mag shr 8) or (if mp < 0 and mag != 0: 0x80'u8 else: 0'u8)
 
 func channelSetNumber*(c: SegdChannelSetDescriptor): int =
+  ## The channel set number: BCD byte 2, or bytes 27-28 when it is `FF`.
   if c.channelSetNumber == BcdAllF: int(c.extChannelSetNumber) else: c.channelSetNumber
 
-func startTimeMs*(c: SegdChannelSetDescriptor): float64 {.inline.} = float64(c.startTime) * 2
-func endTimeMs*(c: SegdChannelSetDescriptor): float64 {.inline.} = float64(c.endTime) * 2
+func startTimeMs*(c: SegdChannelSetDescriptor): float64 {.inline.} =
+  ## Channel set start time in ms.
+  float64(c.startTime) * 2
+
+func endTimeMs*(c: SegdChannelSetDescriptor): float64 {.inline.} =
+  ## Channel set end time in ms.
+  float64(c.endTime) * 2
 
 func sampleIntervalMs*(c: SegdChannelSetDescriptor, g1: SegdGeneralHeader1): float64 =
   ## Base scan interval / 2^subscanExponent.
   g1.baseScanIntervalMs / float64(1 shl max(0, min(c.subscanExponent, 9)))
 
 func fileNumber*(t: SegdTraceHeader): int64 =
+  ## The file number: BCD bytes 1-2, or bytes 18-20 when they are `FFFF`.
   if t.fileNumber == BcdAllF: int64(t.extFileNumber) else: t.fileNumber
 
 func channelSetNumber*(t: SegdTraceHeader): int =
+  ## The channel set number: BCD byte 4, or bytes 16-17 when it is `FF`.
   if t.channelSetNumber == BcdAllF: int(t.extChannelSetNumber) else: t.channelSetNumber
 
 func receiverLine*(e: SegdTraceHeaderExt1): float64 =
@@ -223,6 +237,8 @@ func receiverLine*(e: SegdTraceHeaderExt1): float64 =
   if e.receiverLineNumber == -1: e.extReceiverLineNumber else: float64(e.receiverLineNumber)
 
 func receiverPoint*(e: SegdTraceHeaderExt1): float64 =
+  ## Receiver point number, from the extended fixed-point field when bytes
+  ## 4-6 are `FFFFFF`.
   if e.receiverPointNumber == -1: e.extReceiverPointNumber else: float64(e.receiverPointNumber)
 
 # ---------------------------------------------------------------------------
@@ -258,8 +274,9 @@ type
 
   SegdHeaderBlock* = SegdGeneralHeader1 | SegdGeneralHeader2 | SegdGeneralHeaderN |
     SegdChannelSetDescriptor | SegdTraceHeader | SegdTraceHeaderExt1 | SegdTrailerBlock
+    ## The typed Rev 1/2 blocks (Rev 3 keeps GH#1 and the demux trace header).
 
-const segdTrailerBlockFields* = fieldTable(SegdTrailerBlock)
+const segdTrailerBlockFields* = fieldTable(SegdTrailerBlock) ## Trailer block field table.
 
 func isStorageUnitLabel*(b: openArray[byte]): bool =
   ## True when bytes 5-9 read `SD<digit>.<digit>`: a SEG-D label rather than
@@ -267,29 +284,29 @@ func isStorageUnitLabel*(b: openArray[byte]): bool =
   b.len >= 9 and b[4] == byte('S') and b[5] == byte('D') and b[6] in {0x30'u8..0x39'u8} and
     b[7] == byte('.') and b[8] in {0x30'u8..0x39'u8}
 
+func asciiText*(b: openArray[byte], first, last: int): string =
+  ## The ASCII text of bytes `first`..`last` (1-based, inclusive; bytes past
+  ## the end of `b` are ignored), NULs dropped and blanks trimmed.
+  for i in first - 1 .. min(last, b.len) - 1:
+    if b[i] != 0: result.add char(b[i])
+  result = result.strip
+
 func decodeLabel*(b: openArray[byte]): SegdStorageUnitLabel =
   ## Decodes a 128-byte storage unit label. Text fields are trimmed; a
   ## non-numeric maximum block size reads as -1.
   doAssert b.len >= 128, "storage unit label needs 128 bytes"
+  let mbs = asciiText(b, 20, 29)
+  result = SegdStorageUnitLabel(storageUnitSeqNum: asciiText(b, 1, 4),
+    revision: asciiText(b, 5, 9), structure: asciiText(b, 10, 15),
+    bindingEdition: asciiText(b, 16, 19),
+    maxBlockSize: (if mbs.len == 0: 0
+                   elif mbs.len <= 10 and mbs.allCharsInSet(Digits): parseBiggestInt(mbs)
+                   else: -1),
+    producerOrgCode: asciiText(b, 30, 39), creationDate: asciiText(b, 40, 50),
+    serialNumber: asciiText(b, 51, 62), externalLabelName: asciiText(b, 69, 80),
+    recordingEntityName: asciiText(b, 81, 104), userDefined: asciiText(b, 105, 118),
+    maxShotsPerFieldRecord: asciiText(b, 119, 128))
   for i in 0..127: result.raw[i] = b[i]
-  proc text(b: openArray[byte], first, last: int): string =
-    for i in first - 1 .. last - 1: result.add char(b[i])
-    result = result.strip
-  result.storageUnitSeqNum = text(b, 1, 4)
-  result.revision = text(b, 5, 9)
-  result.structure = text(b, 10, 15)
-  result.bindingEdition = text(b, 16, 19)
-  let mbs = text(b, 20, 29)
-  result.maxBlockSize = if mbs.len == 0: 0
-    elif mbs.len <= 10 and mbs.allCharsInSet(Digits): parseBiggestInt(mbs)
-    else: -1
-  result.producerOrgCode = text(b, 30, 39)
-  result.creationDate = text(b, 40, 50)
-  result.serialNumber = text(b, 51, 62)
-  result.externalLabelName = text(b, 69, 80)
-  result.recordingEntityName = text(b, 81, 104)
-  result.userDefined = text(b, 105, 118)
-  result.maxShotsPerFieldRecord = text(b, 119, 128)
 
 proc encoded*(l: SegdStorageUnitLabel): array[128, byte] =
   ## The label's bytes: `raw` when the fields are unchanged since
@@ -303,7 +320,8 @@ proc encoded*(l: SegdStorageUnitLabel): array[128, byte] =
   for i in 0..127: result[i] = byte(' ')
   proc put(r: var array[128, byte], first, last: int, s: string, right: bool, name: string) =
     let width = last - first + 1
-    if s.len > width: raiseFormat("label " & name & " '" & s & "' exceeds " & $width & " characters")
+    if s.len > width:
+      raiseFormat("label " & name & " '" & s & "' exceeds " & $width & " characters")
     let t = if right: align(s, width) else: alignLeft(s, width)
     for i, c in t: r[first - 1 + i] = byte(c)
   result.put(1, 4, l.storageUnitSeqNum, true, "storageUnitSeqNum")
@@ -323,25 +341,3 @@ func isFixedRecord*(l: SegdStorageUnitLabel): bool {.inline.} =
   ## Device structure C: every shot padded to `maxBlockSize`.
   l.structure == "FIXREC"
 
-func decodeBlock*[T: SegdHeaderBlock](b: openArray[byte]): T =
-  ## Decodes a header block from the start of `b` and keeps its bytes.
-  doAssert b.len >= result.raw.len, "SEG-D header block too short"
-  for i in 0..<result.raw.len: result.raw[i] = b[i]
-  decodeFields(result, b, 1, boBig)
-
-proc encode*[T: SegdHeaderBlock](h: T, b: var openArray[byte]) =
-  ## Writes `h` to the start of `b`: its raw bytes, with every changed field
-  ## re-encoded. Raises `SegFormatError` for a value a field cannot hold.
-  doAssert b.len >= h.raw.len, "SEG-D header block buffer too short"
-  for i in 0..<h.raw.len: b[i] = h.raw[i]
-  encodeChanged(h, b.toOpenArray(0, h.raw.len - 1), 1, boBig)
-
-proc encoded*[T: SegdHeaderBlock](h: T): typeof(h.raw) =
-  ## The block's bytes after `encode`.
-  h.encode(result)
-
-func invalidBcdFields*[T: SegdHeaderBlock](h: T): seq[string] =
-  ## Names of BCD fields holding a non-decimal nibble.
-  for name, v in fieldPairs(h):
-    when v is int:
-      if v == BcdInvalid: result.add name

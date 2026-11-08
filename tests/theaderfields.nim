@@ -56,11 +56,13 @@ block segd_every_field_of_every_trace:
           doAssert f.same(getRec, s, "gh" & $(k + 3)) > 5
       for t in rd.traces:
         let ii = i
-        let get = proc (name: string, v: var FieldValue): bool = f.traceField(ii, name, v)
-        doAssert f.same(get, t.header, "trace") > 8
-        if t.hasExt1:
-          if rd.record.isRev3: doAssert f.same(get, t.ext1r3, "ext1") > 10
-          else: doAssert f.same(get, t.ext1, "ext1") > 5
+        let getField = proc (name: string, v: var FieldValue): bool = f.traceField(ii, name, v)
+        doAssert f.same(getField, t.header, "trace") > 8
+        case t.layout
+        of slRev2:
+          if t.ext1.isSome: doAssert f.same(getField, t.ext1.get, "ext1") > 5
+        of slRev3:
+          if t.ext1Rev3.isSome: doAssert f.same(getField, t.ext1Rev3.get, "ext1") > 10
         inc i
     f.close()
 

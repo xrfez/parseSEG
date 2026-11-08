@@ -20,7 +20,7 @@ proc checkNibbleTiling(fields: openArray[FieldSpec], blockBytes: int) =
 block layouts_tile:
   checkNibbleTiling(segdGeneralHeader2Rev3Fields, 32)
   checkNibbleTiling(segdGeneralHeader3Fields, 32)
-  checkNibbleTiling(segdChannelSetDescriptor3Fields, 96)
+  checkNibbleTiling(segdChannelSetDescriptorRev3Fields, 96)
   checkNibbleTiling(segdTraceHeaderExt1Rev3Fields, 32)
   checkNibbleTiling(segdPositionBlockFields, 96)
   for fields in [fieldTable(SegdSourceDescription), fieldTable(SegdAdditionalSourceInfo),
@@ -70,13 +70,13 @@ block real_rev3_headers:
     let g1 = decodeBlock[SegdGeneralHeader1](b)
     doAssert g1.fileNumber == 151 and g1.formatCode == 8058 and g1.manufacturerCode == 50
     doAssert g1.year == 26 and g1.julianDay == 275 and g1.hour == 16 and g1.second == 47
-    let g2 = decodeRev3[SegdGeneralHeader2Rev3](b.toOpenArray(32, 63))
+    let g2 = decodeBlock[SegdGeneralHeader2Rev3](b.toOpenArray(32, 63))
     doAssert g2.revisionMajor == 3 and g2.revisionMinor == 0 and g2.blockType == 2
     doAssert g2.extRecordLength == 4_000_000 and g2.generalTrailerBlocks == 0
     doAssert generalHeaderCount(g1, g2) == 17 and baseScanIntervalUs(g1, g2) == 1000.0
     doAssert externalHeaderBlocks(g1, g2) == 113 and channelSetsPerScanType(g1, g2) == 4
     doAssert recordLengthUs(g1, g2) == 4_000_000.0
-    let g3 = decodeRev3[SegdGeneralHeader3](b.toOpenArray(64, 95))
+    let g3 = decodeBlock[SegdGeneralHeader3](b.toOpenArray(64, 95))
     doAssert g3.timeZero == 1474994765504000 and g3.headerSize == 4544
     doAssert g3.dataSize == 65057624 and g3.recordSize == 65057624
     # GH#1 time is the same instant in UTC, truncated to the second.
@@ -84,12 +84,12 @@ block real_rev3_headers:
     let ghArea = b[96 ..< 32 * 17]
     doAssert blockText(ghArea.toOpenArray(32, 63)) == "West Virginia"
     doAssert crsText(ghArea).len == 5 * 31
-    let pos = decodeRev3[SegdPositionBlock](ghArea.toOpenArray(findBlock(ghArea, BtPosition1),
-      findBlock(ghArea, BtPosition1) + 95))
+    let pos = decodeBlock[SegdPositionBlock](ghArea.toOpenArray(findBlock(ghArea, BlockTypePosition1),
+      findBlock(ghArea, BlockTypePosition1) + 95))
     doAssert pos.blockType1 == 0x50 and pos.blockType2 == 0x51 and pos.blockType3 == 0x52
-    let src = decodeRev3[SegdSourceDescription](ghArea.toOpenArray(13 * 32, 14 * 32 - 1))
+    let src = decodeBlock[SegdSourceDescription](ghArea.toOpenArray(13 * 32, 14 * 32 - 1))
     doAssert src.blockType == 0x16
-    let cs4 = decodeRev3[SegdChannelSetDescriptor3](b.toOpenArray(544 + 3 * 96, 544 + 4 * 96 - 1))
+    let cs4 = decodeBlock[SegdChannelSetDescriptorRev3](b.toOpenArray(544 + 3 * 96, 544 + 4 * 96 - 1))
     doAssert cs4.channelSetNumber == 4 and cs4.channelType == 0x10 and cs4.numSamples == 4001
     doAssert cs4.channelsInSet == 3954 and cs4.samplingInterval == 1000
     doAssert cs4.descaleMultiplier == 1000.0 and cs4.traceHeaderExtensions == 13
@@ -124,7 +124,7 @@ block real_rev3_reader:
     let rec = r.record
     doAssert rec.isRev3 and rec.revision == SegdRevision(major: 3, minor: 0)
     doAssert rec.traceCount == 3957 and rec.generalBlocks.len == 14 * 32
-    doAssert rec.external.len == 113 * 32 and rec.scanTypes[0].descriptors3.len == 4
+    doAssert rec.external.len == 113 * 32 and rec.scanTypes[0].descriptorsRev3.len == 4
     var t: SegdTrace
     var n = 0
     var order: seq[int]
@@ -132,17 +132,17 @@ block real_rev3_reader:
     var t0 = newTraceTensor[float32](1, 4001)
     while r.readTrace(t):
       if order.len == 0 or order[^1] != t.channelSet: order.add t.channelSet
-      doAssert t.hasExt1 and t.numSamples == 4001 and t.extensions.len == 12 * 32
+      doAssert t.ext1Rev3.isSome and t.numSamples == 4001 and t.extensions.len == 12 * 32
       for (i, bt) in blocks(t.extensions):
         if isUserBlock(bt): inc userBlocks
       if t.offset == 53864: # the first seismic trace
-        doAssert t.ext1r3.receiverLine == 100.0 and t.ext1r3.receiverPoint == 101.0
-        doAssert t.ext1r3.receiverLineNumber == -1 # FFFFFF sentinel
+        doAssert t.ext1Rev3.get.receiverLine == 100.0 and t.ext1Rev3.get.receiverPoint == 101.0
+        doAssert t.ext1Rev3.get.receiverLineNumber == -1 # FFFFFF sentinel
         rec.decodeInto(t, t0, 0)
         doAssert t0[0, 0] == 9.369352937937947e-07'f32 and t0[0, 3] == 1.7749355265550548e-06'f32
       inc n
     doAssert n == 3957 and order == @[0, 2, 1, 3] # CS1, CS3, CS2, CS4
-    doAssert t.offset == 65041184 and t.ext1r3.receiverPoint == 225.0
+    doAssert t.offset == 65041184 and t.ext1Rev3.get.receiverPoint == 225.0
     doAssert userBlocks == 9 * 3957 # INOVA blocks 0xB0-0xB8 on every trace
     doAssert r.log.len == 0, $r.log[0]
     doAssert not r.nextRecord()
@@ -163,5 +163,5 @@ block source_description_accessors_follow_fields:
   doAssert s.size == 65534 # unsigned for a vibrator
   s.blockType = 0x16
   doAssert s.size == -2 and s.depth == 0x0102
-  let back = decodeRev3[SegdSourceDescription](s.encoded)
+  let back = decodeBlock[SegdSourceDescription](s.encoded)
   doAssert back.phaseAngle == -90 and back.depth == 0x0102

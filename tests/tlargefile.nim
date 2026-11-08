@@ -180,9 +180,9 @@ block segd_larger_than_4_gib:
       var ed = openEditor(path)
       doAssert ed.setTraceField(DTraces - 1, "ext1.receiverPointNumber", 31337)
       ed.close()
-      doAssert readSegdHeaders(path).records[0].traces[^1].ext1.receiverPointNumber == 31337
+      doAssert readSegdHeaders(path).records[0].traces[^1].ext1.get.receiverPointNumber == 31337
       doAssert rollbackJournal(path, journal).len == 0
-      doAssert readSegdHeaders(path).records[0].traces[^1].ext1.receiverPointNumber == 104
+      doAssert readSegdHeaders(path).records[0].traces[^1].ext1.get.receiverPointNumber == 104
       removeFile(journal)
     finally:
       removeFile(path)

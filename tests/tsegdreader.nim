@@ -42,7 +42,7 @@ proc sameRecords(a, b: SegdData) =
     let x = a.records[i]
     let y = b.records[i]
     doAssert x.record.gh1.encoded == y.record.gh1.encoded
-    doAssert x.record.gh2.encoded == y.record.gh2.encoded
+    doAssert x.record.gh2.get.encoded == y.record.gh2.get.encoded
     doAssert x.traces.len == y.traces.len
     for k in 0..<x.traces.len:
       doAssert x.traces[k].header.encoded == y.traces[k].header.encoded
@@ -55,17 +55,17 @@ proc sameRecords(a, b: SegdData) =
 block sample_63:
   let path = exampleDir / "63.sgd"
   let d = readSegd(path)
-  doAssert d.diagnostics.count(sevWarning) == 0 and d.diagnostics.count(sevError) == 0
-  doAssert d.diagnostics.count(sevInfo) == 2 # source set 0, array forming 0
-  doAssert not d.hasLabel and d.records.len == 1
+  doAssert d.log.count(sevWarning) == 0 and d.log.count(sevError) == 0
+  doAssert d.log.count(sevInfo) == 2 # source set 0, array forming 0
+  doAssert d.label.isNone and d.records.len == 1
   let r = d.records[0]
   doAssert r.record.revision == SegdRevision(major: 2, minor: 0)
-  doAssert r.record.format == sd8058 and r.record.traceCount == 1
+  doAssert r.record.format == some(sd8058) and r.record.traceCount == 1
   doAssert r.record.sourceHeaders.len == 1 and r.record.sourceHeaders[0].sourcePointNumber == 99.5
   doAssert r.record.extended.len == 96 and r.record.external.len == 0
   doAssert r.traces.len == 1 and r.traces[0].numSamples == 1000
-  doAssert r.traces[0].hasExt1 and r.traces[0].extensions.len == 64
-  doAssert r.traces[0].ext1.sensorType == 2 and r.traces[0].offset == 224
+  doAssert r.traces[0].ext1.isSome and r.traces[0].extensions.len == 64
+  doAssert r.traces[0].ext1.get.sensorType == 2 and r.traces[0].offset == 224
   doAssert abs(r.samples[0, 0] - 0.1001'f32) < 1e-4
   # Task 4.4: a byte-identical read -> write round trip, on disk and tape.
   doAssert d.toDisk(tmp / "63.sgd").len == 0
@@ -73,7 +73,7 @@ block sample_63:
   discard d.toTape(tmp / "63.tap")
   let e = fromTape(tmp / "63.tap")
   sameRecords(d, e)
-  doAssert e.diagnostics.count(sevWarning) == 0
+  doAssert e.log.count(sevWarning) == 0
 
 # ---------------------------------------------------- synthetic records --
 
@@ -82,14 +82,14 @@ proc makeRecord(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData 
   ## traces, no extensions: sized from the descriptor) and a seismic set (3
   ## traces, Ext1 plus one more extension); 1 skew block, 1 extended block,
   ## 1 general trailer block.
-  var r = SegdRecord(format: format, formatKnown: true, hasGh2: true,
+  var r = SegdRecord(layout: slRev2, format: some(format),
     revision: SegdRevision(major: 2, minor: 0))
   r.gh1 = SegdGeneralHeader1(fileNumber: fileNo, formatCode: ord(format), year: 26,
     additionalGhBlocks: 2, julianDay: 311, hour: 12, minute: 30, second: 5,
     manufacturerCode: 9, baseScanInterval16: 32, recordType: 8, recordLength: BcdAllF,
     scanTypesPerRecord: 1, channelSetsPerScanType: 2, skewBlocks: 1, extendedHeaderBlocks: 1,
     externalHeaderBlocks: 0)
-  r.gh2 = SegdGeneralHeader2(extFileNumber: uint32(fileNo), revisionMajor: 2,
+  r.gh2 = some SegdGeneralHeader2(extFileNumber: uint32(fileNo), revisionMajor: 2,
     generalTrailerBlocks: 1, extRecordLength: uint32(2 * ns), blockNumber: 2)
   r.sourceHeaders = @[SegdGeneralHeaderN(sourceLineNumber: 1001.5, sourcePointNumber: -12.25,
     sourcePointIndex: 1, blockNumber: 3, sourceSetNumber: 1)]
@@ -103,7 +103,7 @@ proc makeRecord(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData 
     traceHeaderExtensions: 2, verticalStack: 1, arrayForming: 1)
   var skew = newSeq[byte](32)
   for i in 0..<skew.len: skew[i] = byte(i)
-  r.scanTypes = @[SegdScanType(descriptors: @[aux, seis], skew: skew)]
+  r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: @[aux, seis], skew: skew)]
   r.extended = newSeq[byte](32)
   for i in 0..<32: r.extended[i] = byte(200 + i mod 50)
   r.trailer = @[SegdTrailerBlock(trailerNumber: 1, channelType: 0xC)]
@@ -116,8 +116,8 @@ proc makeRecord(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData 
       channelSetNumber: (if isAux: 1 else: 2), traceNumber: (if isAux: k + 1 else: k - 1),
       traceHeaderExtensions: (if isAux: 0'u8 else: 2'u8), firstTimingWord: 0.0)
     if not isAux:
-      t.hasExt1 = true
-      t.ext1 = SegdTraceHeaderExt1(receiverLineNumber: 2000, receiverPointNumber: int32(100 + k),
+      t.ext1 = some SegdTraceHeaderExt1(receiverLineNumber: 2000,
+        receiverPointNumber: int32(100 + k),
         receiverPointIndex: 1, samplesPerTrace: uint32(ns), sensorType: 2)
       t.extensions = newSeq[byte](32)
       t.extensions[0] = byte(k)
@@ -138,18 +138,18 @@ block synthetic_records_every_format_on_disk:
   let path = tmp / "multi.sgd"
   doAssert d.toDisk(path).len == 0
   let e = readSegd(path)
-  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+  doAssert e.log.len == 0, $e.log[0]
   doAssert e.records.len == rev2Formats.len
   for i, rd in e.records:
-    doAssert rd.record.format == rev2Formats[i] and rd.traces.len == 5
+    doAssert rd.record.format == some(rev2Formats[i]) and rd.traces.len == 5
     doAssert rd.record.trailer.len == 1 and rd.record.extended == d.records[i].record.extended
     doAssert rd.record.scanTypes[0].skew == d.records[i].record.scanTypes[0].skew
     doAssert rd.record.scanTypes[0].descriptors[0].mpFactor == -2.5
     doAssert rd.record.sourceHeaders[0].sourcePointNumber == -12.25
-    doAssert rd.traces[0].numSamples == 52 and not rd.traces[0].hasExt1 # sized from the CSD
-    doAssert rd.traces[4].ext1.receiverPointNumber == 104 and rd.traces[4].extensions[0] == 4
-    doAssert rd.samples[3, 0] == float32(-4 * (if rd.record.format in {sd8036, sd8038, sd9036, sd9038}: 1000 else: 1)) /
-      (if rd.record.format in {sd8036, sd8038, sd9036, sd9038}: 1'f32 else: 8'f32)
+    doAssert rd.traces[0].numSamples == 52 and rd.traces[0].ext1.isNone # sized from the CSD
+    doAssert rd.traces[4].ext1.get.receiverPointNumber == 104 and rd.traces[4].extensions[0] == 4
+    doAssert rd.samples[3, 0] == float32(-4 * (if rd.record.format.get in {sd8036, sd8038, sd9036, sd9038}: 1000 else: 1)) /
+      (if rd.record.format.get in {sd8036, sd8038, sd9036, sd9038}: 1'f32 else: 8'f32)
 
   # Rewriting what was read is byte-identical.
   doAssert e.toDisk(tmp / "multi2.sgd").len == 0
@@ -162,8 +162,7 @@ block tape_record_structure_with_label_and_marks:
     alignLeft("CREW 7", 24) & spaces(14) & align("10", 10)
   var raw = newSeq[byte](128)
   for i, c in text: raw[i] = byte(c)
-  d.label = decodeLabel(raw)
-  d.hasLabel = true
+  d.label = some(decodeLabel(raw))
   let tap = tmp / "record.tap"
   discard d.toTape(tap, SegdWriteOptions(tapeMarkPerRecord: true))
   # Label, then per record: headers, 5 traces, trailer, tape mark.
@@ -177,13 +176,13 @@ block tape_record_structure_with_label_and_marks:
   src.close()
   doAssert kinds.len == 1 + 3 * (1 + 5 + 1 + 1)
   let e = fromTape(tap)
-  doAssert e.diagnostics.len == 0, $e.diagnostics[0]
-  doAssert e.hasLabel and e.label.revision == "SD2.0" and e.records.len == 3
+  doAssert e.log.len == 0, $e.log[0]
+  doAssert e.label.isSome and e.label.get.revision == "SD2.0" and e.records.len == 3
   sameRecords(d, e)
   # The same stream on disk (label first) reads the same.
   discard d.toDisk(tmp / "labelled.sgd")
   let f = readSegd(tmp / "labelled.sgd")
-  doAssert f.hasLabel and f.records.len == 3 and f.diagnostics.len == 0
+  doAssert f.label.isSome and f.records.len == 3 and f.log.len == 0
   sameRecords(d, f)
 
 block fixrec_padding_on_tape_and_disk:
@@ -193,9 +192,8 @@ block fixrec_padding_on_tape_and_disk:
     alignLeft("CREW 7", 24) & spaces(14) & align("10", 10)
   var raw = newSeq[byte](128)
   for i, c in text: raw[i] = byte(c)
-  d.label = decodeLabel(raw)
-  d.hasLabel = true
-  doAssert d.label.isFixedRecord and d.label.maxBlockSize == 4096
+  d.label = some(decodeLabel(raw))
+  doAssert d.label.get.isFixedRecord and d.label.get.maxBlockSize == 4096
   let tap = tmp / "fixrec.tap"
   discard d.toTape(tap)
   var src: RecordSource = openTapeImageSource(tap)
@@ -203,13 +201,13 @@ block fixrec_padding_on_tape_and_disk:
   while src.readRecord(buf) == rkData: doAssert buf.len == 4096
   src.close()
   let e = fromTape(tap)
-  doAssert e.diagnostics.len == 0 and e.records.len == 2
+  doAssert e.log.len == 0 and e.records.len == 2
   sameRecords(d, e)
   let disk = tmp / "fixrec.sgd"
   discard d.toDisk(disk)
   doAssert readBytes(disk).len mod 4096 == 0
   let f = readSegd(disk)
-  doAssert f.diagnostics.len == 0 and f.records.len == 2
+  doAssert f.log.len == 0 and f.records.len == 2
   sameRecords(d, f)
 
 block writer_refusals:
@@ -239,21 +237,21 @@ block damaged_input:
   let recBytes = full.len div 2
   writeBytes(tmp / "cut.sgd", full[0 ..< recBytes + 640])
   let e = readSegd(tmp / "cut.sgd")
-  doAssert e.diagnostics.isFatal and e.records.len == 2
+  doAssert e.log.isFatal and e.records.len == 2
   doAssert e.records[0].traces.len == 5 and e.records[1].traces.len < 5
-  let fatal = e.diagnostics[e.diagnostics.len - 1]
+  let fatal = e.log[e.log.len - 1]
   doAssert fatal.code == dcTruncated and fatal.loc.record == 1
   # A Rev 3 record and a multiplexed format stop the read with a fatal entry.
   var rev3 = readBytes(exampleDir / "63.sgd")
   rev3[42] = 3
   writeBytes(tmp / "rev3.sgd", rev3)
   let r3 = readSegd(tmp / "rev3.sgd") # a Rev 2 record that claims Rev 3
-  doAssert r3.diagnostics.count(sevWarning) + r3.diagnostics.count(sevFatal) > 0
+  doAssert r3.log.count(sevWarning) + r3.log.count(sevFatal) > 0
   var mux = readBytes(exampleDir / "63.sgd")
   mux[2] = 0x00 # format 0058
   writeBytes(tmp / "mux.sgd", mux)
   let m = readSegd(tmp / "mux.sgd")
-  doAssert m.diagnostics.isFatal and "multiplexed" in m.diagnostics[m.diagnostics.len - 1].msg
+  doAssert m.log.isFatal and "multiplexed" in m.log[m.log.len - 1].msg
 
 # ------------------------------------------- Phase 4 review regressions --
 # Numbered as in the review.
@@ -265,8 +263,8 @@ block r3_corrupt_counts_are_bounded:
   b[35] = 0xFF; b[36] = 0xFF # ... = 65535
   writeBytes(tmp / "manycsd.sgd", b)
   let d = readSegd(tmp / "manycsd.sgd")
-  doAssert d.diagnostics.isFatal and d.records.len == 0
-  doAssert d.diagnostics.len <= 3
+  doAssert d.log.isFatal and d.records.len == 0
+  doAssert d.log.len <= 3
 
 block r3_repeated_diagnostics_are_summarized:
   var d = makeStream([sd8058])
@@ -281,34 +279,34 @@ block r3_repeated_diagnostics_are_summarized:
   let e = readSegd(tmp / "noisy.sgd")
   doAssert e.records[0].traces.len == 42
   var mismatch, summary = 0
-  for x in e.diagnostics:
+  for x in e.log:
     if x.loc.field == "trace.traceHeaderExtensions" and x.severity == sevWarning: inc mismatch
     if "more warning diagnostics" in x.msg: inc summary
   doAssert mismatch == 5 and summary == 1
 
 block r4_r5_labels_from_fields_and_fixrec_bounds:
   var d = makeStream([sd8058])
-  d.hasLabel = true
-  d.label = SegdStorageUnitLabel(storageUnitSeqNum: "1", revision: "SD2.0", structure: "RECORD",
+  d.label = some SegdStorageUnitLabel(storageUnitSeqNum: "1", revision: "SD2.0",
+    structure: "RECORD",
     bindingEdition: "B1", producerOrgCode: "163", creationDate: "07-NOV-2026",
     serialNumber: "T1", recordingEntityName: "CREW")
   discard d.toDisk(tmp / "fieldlabel.sgd")
   let e = readSegd(tmp / "fieldlabel.sgd")
-  doAssert e.hasLabel and e.label.recordingEntityName == "CREW" and e.records.len == 1
+  doAssert e.label.isSome and e.label.get.recordingEntityName == "CREW" and e.records.len == 1
   # Edited to FIXREC: the label written says FIXREC too.
   var f = e
-  f.label.structure = "FIXREC"
-  f.label.maxBlockSize = 1024
+  f.label.get.structure = "FIXREC"
+  f.label.get.maxBlockSize = 1024
   discard f.toDisk(tmp / "fieldfixrec.sgd")
   let g = readSegd(tmp / "fieldfixrec.sgd")
-  doAssert g.label.isFixedRecord and g.records.len == 1 and g.diagnostics.len == 0
+  doAssert g.label.get.isFixedRecord and g.records.len == 1 and g.log.len == 0
   doAssert readBytes(tmp / "fieldfixrec.sgd").len mod 1024 == 0
   for bad in [100'i64, 9_999_999_999]:
     var h = f
-    h.label.maxBlockSize = bad
+    h.label.get.maxBlockSize = bad
     doAssertRaises SegFormatError: discard h.toDisk(tmp / "badblock.sgd")
   var n = f
-  n.label.revision = "XX2.0"
+  n.label.get.revision = "XX2.0"
   doAssertRaises SegFormatError: discard n.toDisk(tmp / "badrev.sgd")
 
 block r6_r11_writer_recomputes_from_headers:
@@ -316,7 +314,7 @@ block r6_r11_writer_recomputes_from_headers:
   d.records[0].record.scanTypes[0].descriptors[1].channelCount = 4 # 5 traces written, 6 announced
   doAssertRaises SegFormatError: discard d.toDisk(tmp / "count.sgd")
   var e = makeStream([sd8058])
-  e.records[0].record.gh2.revisionMajor = 3
+  e.records[0].record.gh2.get.revisionMajor = 3
   doAssertRaises SegFormatError: discard e.toDisk(tmp / "rev3w.sgd")
   var f = makeStream([sd8058])
   for i, c in "SD2.0": f.records[0].record.gh1.generalConstants[i] = byte(c) # bytes 5-9
@@ -327,7 +325,7 @@ block r9_negative_sample_count_is_fatal:
   d.records[0].record.scanTypes[0].descriptors[0].startTime = 100 # after endTime 52
   discard d.toDisk(tmp / "negns.sgd", SegdWriteOptions(lenient: true))
   let e = readSegd(tmp / "negns.sgd")
-  doAssert e.diagnostics.isFatal and e.records[0].traces.len == 0
+  doAssert e.log.isFatal and e.records[0].traces.len == 0
 
 block r12_refused_bcd_leaves_the_buffer_untouched:
   var g1 = decodeBlock[SegdGeneralHeader1](readBytes(exampleDir / "63.sgd")[0..31])
@@ -346,13 +344,12 @@ block fixrec_traces_do_not_cross_blocks:
     alignLeft("CREW 7", 24) & spaces(14) & align("10", 10)
   var raw = newSeq[byte](128)
   for i, c in text: raw[i] = byte(c)
-  d.label = decodeLabel(raw)
-  d.hasLabel = true
+  d.label = some(decodeLabel(raw))
   let traceBytes = 20 + 64 + 52 * 4 # a seismic trace: 292 bytes
   for path in [tmp / "nocross.tap", tmp / "nocross.sgd"]:
     if path.endsWith(".tap"): discard d.toTape(path) else: discard d.toDisk(path)
     let e = if path.endsWith(".tap"): fromTape(path) else: readSegd(path)
-    doAssert e.diagnostics.len == 0, $e.diagnostics[0]
+    doAssert e.log.len == 0, $e.log[0]
     doAssert e.records.len == 2
     sameRecords(d, e)
     if path.endsWith(".sgd"):
@@ -372,10 +369,43 @@ block rev2_fixrec_every_gap_size:
       alignLeft("C", 24) & spaces(14) & align("1", 10)
     var raw = newSeq[byte](128)
     for i, c in text: raw[i] = byte(c)
-    d.label = decodeLabel(raw)
-    d.hasLabel = true
+    d.label = some(decodeLabel(raw))
     for (path, tape) in [(tmp / "gap2.sgd", false), (tmp / "gap2.tap", true)]:
       if tape: discard d.toTape(path) else: discard d.toDisk(path)
       let e = if tape: fromTape(path) else: readSegd(path)
-      doAssert e.diagnostics.len == 0, "block " & $bs & ": " & $e.diagnostics[0]
+      doAssert e.log.len == 0, "block " & $bs & ": " & $e.log[0]
       sameRecords(d, e)
+
+block layout_variants_12_3:
+  # 12.3 C6: the record, its scan types and traces carry the Rev 0-2 layout,
+  # `format` and `ext1` are Options, and the accessors resolve per layout.
+  let d = readSegd(exampleDir / "63.sgd")
+  template rec: untyped = d.records[0].record
+  doAssert rec.layout == slRev2 and not rec.isRev3 and rec.gh2.isSome
+  doAssert rec.scanTypes[0].layout == slRev2 and rec.scanTypes[0].channelSetCount == 1
+  doAssert rec.fileNumber == rec.gh1.fileNumber and rec.headerBytes == 7 * 32 # GH#1-3, one CSD, 3 extended blocks
+  let t = d.records[0].traces[0]
+  doAssert t.layout == slRev2 and t.ext1.isSome
+  let cs = rec.findChannelSet(t.header)
+  doAssert cs == some(SegdChannelSetRef(scanType: 0, channelSet: 0))
+  doAssert rec.sampleIntervalUs(t) == rec.sampleIntervalUs(0, 0)
+  doAssert rec.channelType(t) == rec.channelType(0, 0)
+  # A Rev 2 record's extended header obeys maxHeaderBytes too (it is skipped,
+  # and the record cannot be rewritten).
+  var src: RecordSource = openDiskSource(exampleDir / "63.sgd")
+  try:
+    var r = openSegd(src)
+    r.maxHeaderBytes = 40
+    doAssert r.nextRecord() and r.record.incomplete and r.record.extended.len == 0
+    var tr: SegdTrace
+    doAssert r.readTrace(tr) and tr.numSamples == t.numSamples
+  finally: src.close()
+  # The writer refuses a trace of the other layout.
+  let sink = openDiskSink(tmp / "layout.sgd")
+  try:
+    var w = openSegdWriter(sink)
+    w.writeRecordHeaders(rec)
+    doAssertRaises SegFormatError:
+      w.writeTrace(SegdTrace(layout: slRev3, header: t.header, numSamples: t.numSamples))
+    doAssert w.log.len == 1 and "layout" in w.log[0].msg
+  finally: sink.close()

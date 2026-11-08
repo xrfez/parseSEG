@@ -380,7 +380,7 @@ func targetFormat(opts: ConvertOptions, rec: SegdRecord,
   let rev = opts.revision
   if opts.format != 0: toSampleFormat(opts.format).get # checked by `checkTarget`
   elif recordFormats.card > 0: commonFormat(recordFormats, rev, opts.applyDescale, opts.byteOrder)
-  elif rec.formatKnown: losslessFormat(rec.format, rev, opts.applyDescale, opts.byteOrder)
+  elif rec.format.isSome: losslessFormat(rec.format.get, rev, opts.applyDescale, opts.byteOrder)
   else: sfFloat32
 
 func traceIdOf(rec: SegdRecord, t: SegdTrace, sensor: uint8): int16 =
@@ -472,16 +472,22 @@ proc stationHeader(k: TraceKeys, rec: SegdRecord, t: SegdTrace,
 
 proc noteRecord(c: var SegdToSegy, rec: SegdRecord) =
   # What a record carries that SEG-Y has no place for.
-  if not rec.formatKnown:
+  if rec.format.isNone:
     c.log.report(sevError, dcUnsupportedFormat, "record " & $rec.index & ": SEG-D format " &
       $rec.gh1.formatCode & " cannot be decoded; its traces are skipped", rec.offset, c.loc)
   if rec.extended.len > 0 or rec.external.len > 0:
     c.log.note(c.seen, lnSegdHeaders, "SEG-D extended/external headers are not carried into " &
       "SEG-Y", c.loc)
-  if rec.generalBlocks.len > 0 or rec.sourceHeaders.len > 1:
+  let moreGeneral = case rec.layout
+    of slRev2: rec.sourceHeaders.len > 1
+    of slRev3: rec.generalBlocks.len > 0
+  if moreGeneral:
     c.log.note(c.seen, lnSegdGeneral, "SEG-D general header blocks beyond the first source " &
       "are not carried into SEG-Y", c.loc)
-  if rec.trailer.len > 0 or rec.trailerBytes.len > 0:
+  let hasTrailer = case rec.layout
+    of slRev2: rec.trailer.len > 0
+    of slRev3: rec.trailerRev3.len > 0
+  if hasTrailer:
     c.log.note(c.seen, lnSegdTrailers, "SEG-D general trailers are not carried into SEG-Y",
       c.loc)
 
@@ -533,7 +539,8 @@ proc toSegyHeader(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, k: TraceKeys
   result = SegyTraceHeader(traceSeqLine: int32(c.nOut + 1), traceSeqFile: int32(c.nOut + 1),
     fieldRecord: int32(clamp(k.record, -2147483648.0, 2147483647.0)),
     traceInEnsemble: int32(inRecord), traceIdCode: traceIdOf(rec, t, k.sensorType))
-  result.traceNumberInField = int32(if rec.isRev3: traceNumber(t.header, t.ext1r3)
+  result.traceNumberInField = int32(if t.layout == slRev3 and t.ext1Rev3.isSome:
+                                      traceNumber(t.header, t.ext1Rev3.get)
                                     elif t.header.traceNumber >= 0: t.header.traceNumber
                                     else: inRecord)
   if not k.srcPoint.isNaN:
@@ -592,7 +599,8 @@ proc toSegySamples(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, twosComplem
   # The trace's samples in the target format: decoded exactly, optionally
   # descaled, re-encoded. Values the format cannot hold zero the trace.
   try:
-    if rec.format == sd8048 and c.outFmt == sfIbm32 and not c.opts.applyDescale:
+    let f = rec.format.get
+    if f == sd8048 and c.outFmt == sfIbm32 and not c.opts.applyDescale:
       # IBM words are copied: going through float64/float32 would lose
       # values outside float32's range.
       dst.setLen 4 * t.numSamples
@@ -600,7 +608,7 @@ proc toSegySamples(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, twosComplem
         putNum(dst, 4 * i, getNum[uint32](t.samples, 4 * i, boBig), c.opts.byteOrder)
     else:
       c.vals.setLen t.numSamples
-      decodeSegdSamples(rec.format, t.samples, c.vals, twosComplement8015)
+      decodeSegdSamples(f, t.samples, c.vals, twosComplement8015)
       if c.opts.applyDescale:
         let m = rec.descaleFactor(t)
         for v in c.vals.mitems: v *= m
@@ -667,7 +675,7 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
           c.log.report(sevFatal, dcIo, "cannot write the file headers: " & e.msg, loc = c.loc)
           stop()
         opened = true
-      if not r.record.formatKnown:
+      if r.record.format.isNone:
         discard # reported by `noteRecord`
       elif t.numSamples > 65535 and opts.revision.major < 2:
         c.log.report(sevError, dcValidation, "the trace has " & $t.numSamples &
@@ -705,7 +713,7 @@ proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
     try:
       let ix = buildIndex(m, skSegd)
       for c in ix.codecs:
-        if c.known: result.incl c.segdFormat
+        if c.segdFormat.isSome: result.incl c.segdFormat.get
     finally:
       m.close()
   except CatchableError:

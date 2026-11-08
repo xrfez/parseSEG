@@ -1,6 +1,7 @@
-## SEG-D Rev 1 / 2.x reader: a streaming walk over any `RecordSource` (disk
-## file, tape image, tape device, memory), with every problem logged as a
-## diagnostic (spec note `segd_rev2_0.md` §2, §6).
+## SEG-D reader for every revision (Rev 0, 1, 2.x and 3.x): a streaming walk
+## over any `RecordSource` (disk file, tape image, tape device, memory), with
+## every problem logged as a diagnostic (spec notes `segd_rev2_0.md` §2, §6,
+## `segd_rev3_0_a.md` §2).
 ##
 ## ```nim
 ## var r = openSegd(openDiskSource("line.sgd"))
@@ -16,20 +17,25 @@
 ## Tape marks may separate records; a FIXREC label pads every record to the
 ## label's block size. Every trace is sized from its own header: extension
 ## count (byte 10), sample count from Trace Header Extension #1, else from its
-## channel set's time window.
+## channel set's descriptor.
+##
+## The record's `layout` says which header layout it has: `slRev2` (Rev 0, 1
+## and 2.x) or `slRev3` (Rev 3.x: General Header #3, 96-byte channel set
+## descriptors, typed 32-byte blocks). The layout-specific blocks are the
+## branches of `SegdRecord`, `SegdScanType` and `SegdTrace`; accessors such
+## as `sampleIntervalUs` and `channelType` resolve a value for either.
 ##
 ## Like the SEG-Y reader it never raises on format problems; reading stops
 ## only when the rest cannot be located (truncation, an unknown sample
 ## format, an unsized trace), logged as `fatal`. Headers and traces keep
-## their bytes, so a read/write round trip is byte-identical. SEG-D Rev 3 is
-## a separate layout (task 5).
+## their bytes, so a read/write round trip is byte-identical.
 
 import std/[math, tables, strutils]
-import ../common/[endians, errors, diagnostics]
+import ../common/[errors, diagnostics]
 import ../io/[records, diskio, pushback]
 import ../model/tensors
-import ./[headers, samples, rev3]
-export headers, samples, rev3, diagnostics, tensors
+import ./[blocks, samples]
+export blocks, samples, diagnostics, tensors
 
 const
   MaxCount = 65535 ## Bound for counts that size header areas.
@@ -41,62 +47,84 @@ const
     ## otherwise pull the rest of a huge stream into memory).
   MaxDescriptors = 65535 ## Bound for scan types × channel sets in one record.
   MaxRepeats = 5 ## Diagnostics logged per (field, severity); the rest are counted.
+  UnknownTrailerBlocks* = 0xFFFF_FFFF'u32 ## Rev 3 GH#2: the trailer size is not given.
 
 type
   SegdRevision* = object
     ## From General Header #2 bytes 11-12; 0.0 for Rev 0 records (no GH#2).
     major*, minor*: uint8
 
+  SegdLayout* = enum
+    ## The header layout of a record, which its revision decides.
+    slRev2 = "Rev 0-2" ## Rev 0, 1 and 2.x: 32-byte channel set descriptors, untyped
+                       ## trace header extensions, General Header #N source blocks.
+    slRev3 = "Rev 3"   ## Rev 3.x: General Header #3, 96-byte channel set descriptors,
+                       ## blocks typed by their byte 32.
+
   SegdScanType* = object
     ## The scan type header of one scan type.
-    descriptors*: seq[SegdChannelSetDescriptor] ## One per channel set (Rev 1/2).
-    descriptors3*: seq[SegdChannelSetDescriptor3] ## One per channel set (Rev 3).
     skew*: seq[byte]                            ## Skew blocks, raw (32 bytes each).
+    case layout*: SegdLayout
+    of slRev2:
+      descriptors*: seq[SegdChannelSetDescriptor] ## One per channel set.
+    of slRev3:
+      descriptorsRev3*: seq[SegdChannelSetDescriptorRev3] ## One per channel set.
 
   SegdRecord* = object
     ## One shot record's headers and trailer.
     index*: int                ## 0-based record index in the stream.
     offset*: int64             ## Medium offset of General Header #1.
     gh1*: SegdGeneralHeader1
-    hasGh2*: bool              ## False for Rev 0 records.
-    gh2*: SegdGeneralHeader2   ## Rev 1/2 layout (also holds a Rev 3 GH#2's raw bytes).
-    sourceHeaders*: seq[SegdGeneralHeaderN] ## General Headers #3 and later (Rev 1/2).
-    isRev3*: bool              ## Rev 3 layout: the fields below apply.
-    gh2r3*: SegdGeneralHeader2Rev3
-    gh3*: SegdGeneralHeader3
-    generalBlocks*: seq[byte]  ## Rev 3 general header blocks after GH#3, raw (32 bytes each).
-    trailerBytes*: seq[byte]   ## Rev 3 general trailer, raw (32-byte blocks).
-    scanTypes*: seq[SegdScanType]
+    revision*: SegdRevision
+    scanTypes*: seq[SegdScanType] ## Each of the record's layout.
     extended*: seq[byte]       ## Extended header blocks, raw.
     external*: seq[byte]       ## External header blocks, raw.
-    trailer*: seq[SegdTrailerBlock] ## Rev 1/2 general trailer, after the last trace.
-    revision*: SegdRevision
-    format*: SegdSampleFormat  ## Valid when `formatKnown`.
-    formatKnown*: bool
+    format*: Option[SegdSampleFormat] ## The sample format; none if not decodable.
     traceCount*: int           ## Traces announced by the channel set descriptors.
-    incomplete*: bool          ## A header area or the trailer was too large to hold and was skipped.
+    incomplete*: bool
+      ## A header area or the trailer was too large to hold and was skipped.
+    case layout*: SegdLayout
+    of slRev2:
+      gh2*: Option[SegdGeneralHeader2] ## None for Rev 0 records.
+      sourceHeaders*: seq[SegdGeneralHeaderN] ## General Headers #3 and later.
+      trailer*: seq[SegdTrailerBlock] ## General trailer, after the last trace.
+    of slRev3:
+      gh2Rev3*: SegdGeneralHeader2Rev3
+      gh3*: SegdGeneralHeader3
+      generalBlocks*: seq[byte]  ## General header blocks after GH#3, raw (32 bytes each).
+      trailerRev3*: seq[byte]    ## General trailer, raw (32-byte blocks).
 
   SegdTrace* = object
     ## One trace. `readTrace` reuses the buffers of the trace it is given.
     header*: SegdTraceHeader
-    hasExt1*: bool
-    ext1*: SegdTraceHeaderExt1 ## Trace Header Extension #1 (Rev 1/2), valid when `hasExt1`.
-    ext1r3*: SegdTraceHeaderExt1Rev3 ## Trace Header Extension #1 (Rev 3), valid when `hasExt1`.
-    extensions*: seq[byte]     ## Extensions #2 and later, raw (32 bytes each; Rev 3: typed by byte 32).
+    extensions*: seq[byte]
+      ## Trace header extensions after #1, raw (32 bytes each; Rev 3: typed by byte 32).
     numSamples*: int
     samples*: seq[byte]        ## Raw sample bytes.
     scanType*: int             ## 0-based scan type index, -1 if unknown.
     channelSet*: int           ## 0-based index into that scan type's descriptors, -1 if unknown.
     index*: int                ## 0-based trace index within the record.
     offset*: int64             ## Medium offset of the trace header.
+    case layout*: SegdLayout   ## The layout of the trace's record.
+    of slRev2:
+      ext1*: Option[SegdTraceHeaderExt1] ## Trace Header Extension #1, if the trace has one.
+    of slRev3:
+      ext1Rev3*: Option[SegdTraceHeaderExt1Rev3] ## Trace Header Extension #1 (required).
+
+  SegdChannelSetRef* = object
+    ## Where a trace's channel set descriptor is (see `findChannelSet`).
+    scanType*: int   ## 0-based scan type index.
+    channelSet*: int ## 0-based index into that scan type's descriptors.
 
   SegdReader* = object
     ## Streaming reader state.
-    label*: SegdStorageUnitLabel
-    hasLabel*: bool
-    record*: SegdRecord         ## The current record (after `nextRecord`).
-    log*: DiagLog
     twosComplement8015*: bool   ## Read 8015 fractions as two's complement.
+    maxHeaderBytes*: int64      ## See `DefaultMaxHeaderBytes`.
+    maxTraceBytes*: int64       ## See `DefaultMaxTraceBytes`.
+    label: Option[SegdStorageUnitLabel]
+    record: SegdRecord
+    log: DiagLog
+    toc: seq[SegdToc]
     input: PushbackInput
     name: string
     byteStream: bool
@@ -105,22 +133,208 @@ type
     inRecord: bool
     done: bool
     csdWarned: bool
-    toc*: seq[SegdToc]          ## Rev 3 Table of Contents files met in the stream.
-    maxHeaderBytes*: int64      ## See `DefaultMaxHeaderBytes`.
-    maxTraceBytes*: int64       ## See `DefaultMaxTraceBytes`.
-    noted: Table[string, int] ## Diagnostics per (field, severity), for `note`.
+    noted: Table[(Severity, string), int] ## Diagnostics per (severity, field), for `note`.
     headersOnly: bool          ## Skip sample bytes (`SegdTrace.samples` stays empty).
 
-func `$`*(r: SegdRevision): string = $r.major & "." & $r.minor
+func `$`*(r: SegdRevision): string =
+  ## `major.minor`, e.g. `2.1`.
+  $r.major & "." & $r.minor
+
+func `<`*(a, b: SegdRevision): bool =
+  ## Revision order (major, then minor).
+  (a.major, a.minor) < (b.major, b.minor)
+
+func `<=`*(a, b: SegdRevision): bool =
+  ## Revision order (major, then minor).
+  (a.major, a.minor) <= (b.major, b.minor)
+
+func isRev3*(rec: SegdRecord): bool {.inline.} =
+  ## True for the Rev 3 layout (`layout == slRev3`).
+  rec.layout == slRev3
+
+func record*(r: SegdReader): lent SegdRecord {.inline.} =
+  ## The current record (after `nextRecord`).
+  r.record
+
+func label*(r: SegdReader): lent Option[SegdStorageUnitLabel] {.inline.} =
+  ## The storage unit label, if the stream starts with one.
+  r.label
+
+func log*(r: SegdReader): lent DiagLog {.inline.} =
+  ## Every diagnostic of the read so far.
+  r.log
+
+func toc*(r: SegdReader): lent seq[SegdToc] {.inline.} =
+  ## The Rev 3 Table of Contents files met in the stream so far.
+  r.toc
+
+func channelSetCount*(s: SegdScanType): int {.inline.} =
+  ## Channel set descriptors of the scan type.
+  case s.layout
+  of slRev2: s.descriptors.len
+  of slRev3: s.descriptorsRev3.len
+
+# ------------------------------------------- values resolved per layout --
+
+func generalHeaderCount*(rec: SegdRecord): int =
+  ## General header blocks including #1 (Rev 3: GH#2 bytes 23-24 when GH#1
+  ## byte 12H is `F`).
+  case rec.layout
+  of slRev2: rec.gh1.generalHeaderCount
+  of slRev3: generalHeaderCount(rec.gh1, rec.gh2Rev3)
+
+func fileNumber*(rec: SegdRecord): int64 =
+  ## The file number, from GH#2 when GH#1's is `FFFF`.
+  case rec.layout
+  of slRev2:
+    if rec.gh2.isSome: fileNumber(rec.gh1, rec.gh2.get) else: int64(rec.gh1.fileNumber)
+  of slRev3: fileNumber(rec.gh1, rec.gh2Rev3)
+
+func channelSetsPerScanType*(rec: SegdRecord): int =
+  ## Channel sets per scan type, from GH#2 when GH#1's is `FF`.
+  case rec.layout
+  of slRev2:
+    if rec.gh2.isSome: channelSetsPerScanType(rec.gh1, rec.gh2.get)
+    else: rec.gh1.channelSetsPerScanType
+  of slRev3: channelSetsPerScanType(rec.gh1, rec.gh2Rev3)
+
+func skewBlocks*(rec: SegdRecord): int =
+  ## Skew blocks per scan type (Rev 3: from GH#2 when GH#1's is `FF`).
+  case rec.layout
+  of slRev2: rec.gh1.skewBlocks
+  of slRev3: skewBlocks(rec.gh1, rec.gh2Rev3)
+
+func extendedHeaderBlocks*(rec: SegdRecord): int =
+  ## Extended header blocks, from GH#2 when GH#1's is `FF`.
+  case rec.layout
+  of slRev2:
+    if rec.gh2.isSome: extendedHeaderBlocks(rec.gh1, rec.gh2.get)
+    else: rec.gh1.extendedHeaderBlocks
+  of slRev3: extendedHeaderBlocks(rec.gh1, rec.gh2Rev3)
+
+func externalHeaderBlocks*(rec: SegdRecord): int =
+  ## External header blocks, from GH#2 when GH#1's is `FF`.
+  case rec.layout
+  of slRev2:
+    if rec.gh2.isSome: externalHeaderBlocks(rec.gh1, rec.gh2.get)
+    else: rec.gh1.externalHeaderBlocks
+  of slRev3: externalHeaderBlocks(rec.gh1, rec.gh2Rev3)
+
+func baseScanIntervalUs*(rec: SegdRecord): float64 =
+  ## The base scan interval in µs (Rev 3: GH#2's when GH#1 byte 23 is `FF`).
+  case rec.layout
+  of slRev2: rec.gh1.baseScanIntervalMs * 1000
+  of slRev3: baseScanIntervalUs(rec.gh1, rec.gh2Rev3)
+
+func headerBytes*(rec: SegdRecord): int64 =
+  ## Bytes of the record's header blocks, from the blocks it holds: general
+  ## headers, scan type headers, extended and external headers (for Rev 3,
+  ## what GH#3's header size gives).
+  let general = case rec.layout
+    of slRev2: (1 + ord(rec.gh2.isSome) + rec.sourceHeaders.len) * SegdBlockSize
+    of slRev3: 3 * SegdBlockSize + rec.generalBlocks.len
+  result = int64(general) + int64(rec.extended.len) + int64(rec.external.len)
+  for s in rec.scanTypes:
+    let csd = case s.layout
+      of slRev2: SegdBlockSize
+      of slRev3: 3 * SegdBlockSize
+    result += int64(csd) * int64(s.channelSetCount) + int64(s.skew.len)
+
+func announcedTraces*(rec: SegdRecord): int =
+  ## Traces the channel set descriptors announce (what `traceCount` holds
+  ## after a read).
+  for s in rec.scanTypes:
+    case s.layout
+    of slRev2:
+      for c in s.descriptors:
+        if c.channelCount > 0: result += c.channelCount
+    of slRev3:
+      for c in s.descriptorsRev3: result += int(c.channelsInSet)
+
+func scanTypeIndex(rec: SegdRecord, h: SegdTraceHeader): int =
+  # The 0-based scan type a trace header names, -1 if the record has none.
+  let st = h.scanTypeNumber - 1
+  if st >= 0 and st < rec.scanTypes.len: st else: -1
+
+func findChannelSet*(rec: SegdRecord, h: SegdTraceHeader): Option[SegdChannelSetRef] =
+  ## The channel set descriptor that trace header `h` names (its scan type
+  ## and channel set number); none when the record has no such descriptor.
+  let st = scanTypeIndex(rec, h)
+  if st >= 0:
+    let want = channelSetNumber(h) # BCD byte 4, or bytes 16-17 when it is FF
+    template s: untyped = rec.scanTypes[st]
+    case s.layout
+    of slRev2:
+      for i, c in s.descriptors:
+        if channelSetNumber(c) == want:
+          return some(SegdChannelSetRef(scanType: st, channelSet: i))
+    of slRev3:
+      for i, c in s.descriptorsRev3:
+        if int(c.channelSetNumber) == want:
+          return some(SegdChannelSetRef(scanType: st, channelSet: i))
+  none(SegdChannelSetRef)
+
+# Channel set values of a trace, the same for every revision; the Rev 1/2 or
+# Rev 3 descriptor is chosen here. A channel set that is unknown
+# (`channelSet` -1) gives the record-level value or a neutral one.
+
+func channelType*(rec: SegdRecord, scanType, channelSet: int): int =
+  ## The channel type code of a channel set (Rev 1/2: 1 = seis,
+  ## 9 = signature filtered, ...; Rev 3: 0x10 seis, 0x20-0x70 auxiliary,
+  ## ...); 0 when `channelSet` is -1.
+  if channelSet < 0: return 0
+  template s: untyped = rec.scanTypes[scanType]
+  case s.layout
+  of slRev2: int(s.descriptors[channelSet].channelType)
+  of slRev3: int(s.descriptorsRev3[channelSet].channelType)
+
+func channelType*(rec: SegdRecord, t: SegdTrace): int {.inline.} =
+  ## The channel type code of the trace's channel set (see above).
+  rec.channelType(t.scanType, t.channelSet)
+
+func sampleIntervalUs*(rec: SegdRecord, scanType, channelSet: int): float64 =
+  ## The sample interval of a channel set in µs (Rev 3: its sampling
+  ## interval; Rev 1/2: base scan interval / 2^subscan), or the record's base
+  ## scan interval when `channelSet` is -1.
+  if channelSet < 0: return rec.baseScanIntervalUs
+  template s: untyped = rec.scanTypes[scanType]
+  case s.layout
+  of slRev2: s.descriptors[channelSet].sampleIntervalMs(rec.gh1) * 1000
+  of slRev3: float64(s.descriptorsRev3[channelSet].samplingInterval)
+
+func sampleIntervalUs*(rec: SegdRecord, t: SegdTrace): float64 {.inline.} =
+  ## The trace's sample interval in µs (see above).
+  rec.sampleIntervalUs(t.scanType, t.channelSet)
+
+func startTimeMs*(rec: SegdRecord, t: SegdTrace): float64 =
+  ## The start time of the trace's channel set in ms; 0 when it is unknown.
+  if t.channelSet < 0: return 0.0
+  template s: untyped = rec.scanTypes[t.scanType]
+  case s.layout
+  of slRev2: s.descriptors[t.channelSet].startTimeMs
+  of slRev3: float64(s.descriptorsRev3[t.channelSet].startTime) / 1000
+
+func descaleFactor*(rec: SegdRecord, t: SegdTrace): float64 =
+  ## Millivolts per recorded unit of the trace's channel set: 2^MP factor
+  ## (Rev 1/2) or the descale multiplier (Rev 3; 1 when it is 0 or NaN).
+  ## 1 when the channel set is unknown.
+  if t.channelSet < 0: return 1.0
+  template s: untyped = rec.scanTypes[t.scanType]
+  case s.layout
+  of slRev2: pow(2.0, s.descriptors[t.channelSet].mpFactor)
+  of slRev3:
+    let m = float64(s.descriptorsRev3[t.channelSet].descaleMultiplier)
+    if m == 0 or m.isNaN: 1.0 else: m
+
+# ------------------------------------------------------------ bookkeeping --
 
 proc note(r: var SegdReader, severity: Severity, code: DiagCode, msg: string,
     offset: int64 = -1, loc = Location()) =
   # Logs a diagnostic, but only the first `MaxRepeats` per field and
   # severity: a systematic quirk repeated on every trace of a 40 GB file must
   # not grow the log without bound. `stop` reports how many were left out.
-  let key = $severity & " " & loc.field
-  let n = r.noted.getOrDefault(key) + 1
-  r.noted[key] = n
+  let n = r.noted.getOrDefault((severity, loc.field)) + 1
+  r.noted[(severity, loc.field)] = n
   if n <= MaxRepeats:
     r.log.report(severity, code, msg, offset, loc)
 
@@ -130,10 +344,10 @@ proc stop(r: var SegdReader) =
     r.done = true
     for key, n in r.noted:
       if n > MaxRepeats:
-        let field = key.split(' ', 1)[1]
-        r.log.report(sevInfo, dcValidation, $(n - MaxRepeats) & " more " & key.split(' ')[0] &
-          " diagnostics for " & field & " were not logged", loc = Location(file: r.name,
-          field: field))
+        let (severity, field) = key
+        r.log.report(sevInfo, dcValidation, $(n - MaxRepeats) & " more " & $severity &
+          " diagnostics for " & field & " were not logged",
+          loc = Location(file: r.name, field: field))
 
 func loc(r: SegdReader, trace = -1, channelSet = -1, field = ""): Location {.inline.} =
   Location(file: r.name, record: r.records - 1, trace: trace, channelSet: channelSet,
@@ -142,7 +356,7 @@ func loc(r: SegdReader, trace = -1, channelSet = -1, field = ""): Location {.inl
 proc readBlock[T](r: var SegdReader): T =
   var b: array[sizeof(T.default.raw), byte]
   r.input.readExactly(b)
-  when T is SegdRev3Block: decodeRev3[T](b) else: decodeBlock[T](b)
+  decodeBlock[T](b)
 
 proc readBytes(r: var SegdReader, n: int64): seq[byte] =
   r.input.readInto(result, n)
@@ -171,14 +385,22 @@ proc reportBcd[T](r: var SegdReader, h: T, blockName: string, offset: int64) =
 
 # ------------------------------------------------------------------ label --
 
+func fixedBlockSize(r: SegdReader): int64 =
+  # FIXREC: the label's block size; 0 without a FIXREC label (or its size).
+  if r.label.isSome and r.label.get.isFixedRecord: max(r.label.get.maxBlockSize, 0)
+  else: 0
+
+proc skipToBlockEnd(r: var SegdReader) =
+  # Disk: the next multiple of the FIXREC block size; tape: the next block.
+  if r.byteStream:
+    let bs = r.fixedBlockSize
+    if bs > 0: r.input.skip((bs - r.input.offset mod bs) mod bs)
+  else:
+    discard r.input.skipRecordRest()
+
 proc skipFixedPadding(r: var SegdReader) =
   # FIXREC: every record ends on a block boundary.
-  if r.hasLabel and r.label.isFixedRecord and r.label.maxBlockSize > 0:
-    if r.byteStream:
-      let bs = r.label.maxBlockSize
-      r.input.skip((bs - r.input.offset mod bs) mod bs)
-    else:
-      discard r.input.skipRecordRest()
+  if r.fixedBlockSize > 0: r.skipToBlockEnd()
 
 proc skipTracePadding(r: var SegdReader) =
   # FIXREC: a block may end with zero padding so that the next trace starts
@@ -186,10 +408,9 @@ proc skipTracePadding(r: var SegdReader) =
   # 19 bytes, and a header cannot begin with 20 zero bytes (scan type 0 is
   # invalid): so zeros up to the block end, or 20 zeros, are padding. The
   # peek never looks past the block boundary.
-  if r.hasLabel and r.label.isFixedRecord and r.label.maxBlockSize > 0:
-    let gap = if r.byteStream:
-                int((r.label.maxBlockSize - r.input.offset mod r.label.maxBlockSize) mod
-                  r.label.maxBlockSize)
+  let bs = r.fixedBlockSize
+  if bs > 0:
+    let gap = if r.byteStream: int((bs - r.input.offset mod bs) mod bs)
               else: r.input.remainingInRecord
     if gap > 0:
       var peek: array[SegdTraceHeaderSize, byte]
@@ -206,11 +427,11 @@ proc readLabel(r: var SegdReader) =
   var head: array[128, byte]
   let got = r.input.readAvail(head)
   if got == 128 and isStorageUnitLabel(head):
-    r.label = decodeLabel(head)
-    r.hasLabel = true
-    if r.label.isFixedRecord and r.label.maxBlockSize <= 0:
+    let label = decodeLabel(head)
+    if label.isFixedRecord and label.maxBlockSize <= 0:
       r.note(sevWarning, dcTapeLayout, "FIXREC label without a block size; " &
         "records are read unpadded", 19, Location(file: r.name, field: "label.maxBlockSize"))
+    r.label = some(label)
     if not r.byteStream:
       discard r.input.skipRecordRest() # the label is its own tape block
     else:
@@ -236,120 +457,90 @@ proc openSegd*(src: RecordSource, twosComplement8015 = false,
 
 # ---------------------------------------------------------------- headers --
 
-proc alignToBlock(r: var SegdReader) =
-  # Rev 3: the first trace header and the first trailer block start a device
-  # block (tape: a new tape block; FIXREC disk: the next block boundary).
-  if not r.byteStream:
-    discard r.input.skipRecordRest()
-  elif r.hasLabel and r.label.isFixedRecord and r.label.maxBlockSize > 0:
-    let bs = r.label.maxBlockSize
-    r.input.skip((bs - r.input.offset mod bs) mod bs)
-
-proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
+proc checkCounts(r: var SegdReader) =
+  # The counts that size the rest of the header must be readable.
   template rec: untyped = r.record
-  rec.isRev3 = true
-  rec.gh2r3 = decodeRev3[SegdGeneralHeader2Rev3](rec.gh2.raw)
-  if rec.gh2r3.blockType != BtGeneralHeader2:
-    r.note(sevWarning, dcBadValue, "General Header #2 block type is " & $rec.gh2r3.blockType &
-      ", not 2", gh2Offset + 31, r.loc(field = "gh2.blockType"))
-  if rec.revision.major > 3 or rec.revision.minor > 1:
-    r.note(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision & " read as Rev 3.1",
-      gh2Offset + 10, r.loc(field = "gh2.revision"))
-  let nGh = generalHeaderCount(rec.gh1, rec.gh2r3)
-  if nGh < 3 or nGh > MaxCount:
-    raiseUnlocatable(dcBadValue, "a Rev 3 record needs General Header #3, but " & $nGh &
-      " general header blocks are declared", rec.offset + 11)
-  let o3 = r.input.offset
-  rec.gh3 = r.readBlock[:SegdGeneralHeader3]()
-  if rec.gh3.blockType != BtGeneralHeader3:
-    r.note(sevWarning, dcBadValue, "General Header #3 block type is " & $rec.gh3.blockType &
-      ", not 3", o3 + 31, r.loc(field = "gh3.blockType"))
-  rec.generalBlocks = r.readBytes(32 * (nGh - 3))
-  for (i, t) in blocks(rec.generalBlocks):
-    if not isDefinedBlock(t):
-      r.note(sevWarning, dcUnknownBlock, "general header block of undefined type 0x" &
-        toHex(t) & " kept raw", o3 + 32 + i + 31, r.loc(field = "gh.blockType"))
   let nST = rec.gh1.scanTypesPerRecord
-  let nCS = channelSetsPerScanType(rec.gh1, rec.gh2r3)
-  let nSK = skewBlocks(rec.gh1, rec.gh2r3)
-  let nEC = extendedHeaderBlocks(rec.gh1, rec.gh2r3)
-  let nEX = externalHeaderBlocks(rec.gh1, rec.gh2r3)
-  for (name, v) in [("scanTypesPerRecord", nST), ("channelSetsPerScanType", nCS),
-      ("skewBlocks", nSK)]:
-    if v < 0 or v > MaxCount:
+  let nCS = rec.channelSetsPerScanType
+  for (name, v, limit) in [("scanTypesPerRecord", nST, MaxCount),
+      ("channelSetsPerScanType", nCS, MaxCount), ("skewBlocks", rec.skewBlocks, MaxCount),
+      ("extendedHeaderBlocks", rec.extendedHeaderBlocks, high(int)),
+      ("externalHeaderBlocks", rec.externalHeaderBlocks, high(int))]:
+    if v < 0 or v > limit:
       raiseUnlocatable(dcBadBcd, "General Header #1 " & name & " is unreadable (" & $v &
         "), so the header cannot be located", rec.offset)
   if nST * nCS > MaxDescriptors:
     raiseUnlocatable(dcBadValue, "the record declares " & $nST & " scan types × " & $nCS &
       " channel sets, more than " & $MaxDescriptors & "; the header is probably corrupt",
       rec.offset + 27)
-  if nEC < 0 or nEX < 0:
-    raiseUnlocatable(dcBadBcd, "General Header #1 extended or external header count is " &
-      "unreadable", rec.offset + 30)
-  rec.traceCount = 0
-  for st in 0..<nST:
-    var s = SegdScanType()
-    for cs in 0..<nCS:
-      let o = r.input.offset
-      var b: array[96, byte]
-      r.input.readExactly(b)
-      let c = decodeRev3[SegdChannelSetDescriptor3](b)
-      if c.blockType1 != BtCsd1 or c.blockType2 != BtCsd2 or c.blockType3 != BtCsd3:
-        r.note(sevWarning, dcBadValue, "channel set descriptor block types are " &
-          $c.blockType1 & "/" & $c.blockType2 & "/" & $c.blockType3 & ", not 0x30/0x31/0x32",
-          o + 31, r.loc(channelSet = cs, field = "csd.blockType"))
-      if c.scanTypeNumber != st + 1:
-        r.note(sevWarning, dcInconsistent, "channel set descriptor " & $(cs + 1) &
-          " of scan type " & $(st + 1) & " says scan type " & $c.scanTypeNumber, o,
-          r.loc(channelSet = cs, field = "csd.scanTypeNumber"))
-      rec.traceCount += int(c.channelsInSet)
-      s.descriptors3.add c
-    s.skew = r.readBytes(32 * nSK)
+
+proc readDescriptor(r: var SegdReader, s: var SegdScanType, st, cs: int) =
+  # Channel set descriptor `cs` of scan type `st`, with its checks.
+  template rec: untyped = r.record
+  let o = r.input.offset
+  var scanTypeNumber: int
+  case s.layout
+  of slRev2:
+    let c = r.readBlock[:SegdChannelSetDescriptor]()
+    r.reportBcd(c, "csd", o)
+    if c.arrayForming == 0 and c.channelCount > 0 and rec.gh2.isSome: # Rev 0: unused
+      r.note(sevInfo, dcBadValue, "channel set " & $c.channelSetNumber &
+        " array forming code is 0 (spec: undefined; common in real files)", o + 31,
+        r.loc(channelSet = cs, field = "csd.arrayForming"))
+    scanTypeNumber = c.scanTypeNumber
+    s.descriptors.add c
+  of slRev3:
+    let c = r.readBlock[:SegdChannelSetDescriptorRev3]()
+    if c.blockType1 != BlockTypeChannelSet1 or c.blockType2 != BlockTypeChannelSet2 or
+        c.blockType3 != BlockTypeChannelSet3:
+      r.note(sevWarning, dcBadValue, "channel set descriptor block types are " &
+        $c.blockType1 & "/" & $c.blockType2 & "/" & $c.blockType3 & ", not 0x30/0x31/0x32",
+        o + 31, r.loc(channelSet = cs, field = "csd.blockType"))
+    scanTypeNumber = c.scanTypeNumber
+    s.descriptorsRev3.add c
+  if scanTypeNumber != st + 1:
+    r.note(sevWarning, dcInconsistent, "channel set descriptor " & $(cs + 1) &
+      " of scan type " & $(st + 1) & " says scan type " & $scanTypeNumber, o,
+      r.loc(channelSet = cs, field = "csd.scanTypeNumber"))
+
+proc readScanTypes(r: var SegdReader) =
+  # Scan type headers, extended and external headers, and the sample format.
+  template rec: untyped = r.record
+  r.checkCounts()
+  let nCS = rec.channelSetsPerScanType
+  if rec.layout == slRev2 and (rec.gh1.scanTypesPerRecord == 0 or nCS == 0):
+    r.note(sevWarning, dcBadValue, "the record declares " & $rec.gh1.scanTypesPerRecord &
+      " scan types and " & $nCS & " channel sets per scan type", rec.offset + 27,
+      r.loc(field = "gh1.scanTypesPerRecord"))
+  for st in 0 ..< rec.gh1.scanTypesPerRecord:
+    var s = SegdScanType(layout: rec.layout)
+    for cs in 0..<nCS: r.readDescriptor(s, st, cs)
+    s.skew = r.readBytes(SegdBlockSize * rec.skewBlocks)
     rec.scanTypes.add s
-  rec.extended = r.readArea(32 * int64(nEC), "extended")
-  rec.external = r.readArea(32 * int64(nEX), "external")
-  # From the blocks read, not medium offsets (tape images interleave markers).
-  var computed = 3 * 32 + int64(rec.generalBlocks.len) + int64(rec.extended.len) +
-    int64(rec.external.len)
-  for st in rec.scanTypes: computed += 96 * int64(st.descriptors3.len) + int64(st.skew.len)
-  if rec.gh3.headerSize != 0 and int64(rec.gh3.headerSize) != computed:
-    r.note(sevWarning, dcInconsistent, "General Header #3 header size is " &
-      $rec.gh3.headerSize & ", the header blocks take " & $computed & " bytes", o3 + 24,
-      r.loc(field = "gh3.headerSize"))
-  var f: SegdSampleFormat
-  if toSegdFormat(rec.gh1.formatCode, f):
-    rec.format = f
-    rec.formatKnown = true
-    if f.isLittleEndian and rec.revision.major == 3 and rec.revision.minor == 0:
-      r.note(sevWarning, dcBadValue, "format " & $ord(f) & " (little-endian) is defined from " &
-        "Rev 3.1, but the record says 3.0; decoded as little-endian", rec.offset + 2,
-        r.loc(field = "gh1.formatCode"))
-  else:
+  rec.traceCount = rec.announcedTraces
+  rec.extended = r.readArea(SegdBlockSize * int64(rec.extendedHeaderBlocks), "extended")
+  rec.external = r.readArea(SegdBlockSize * int64(rec.externalHeaderBlocks), "external")
+  rec.format = toSegdFormat(rec.gh1.formatCode)
+  if rec.format.isNone:
     raiseUnlocatable(dcUnsupportedFormat, "sample format code " & $rec.gh1.formatCode &
       " is undefined or multiplexed, so trace lengths are unknown", rec.offset + 2)
-  if rec.traceCount > 0: r.alignToBlock()
+  if rec.format.get.isLittleEndian and rec.revision < SegdRevision(major: 3, minor: 1):
+    r.note(sevWarning, dcBadValue, "format " & $rec.gh1.formatCode & " (little-endian) is " &
+      "defined from Rev 3.1, but the record says " & $rec.revision & "; decoded anyway",
+      rec.offset + 2, r.loc(field = "gh1.formatCode"))
 
-proc readRecordHeaders(r: var SegdReader) =
+proc readRev2Headers(r: var SegdReader, gh2Offset: int64) =
+  # After GH#1 and GH#2 (if any): source headers, then the scan type headers.
   template rec: untyped = r.record
-  rec.offset = r.input.offset
-  rec.gh1 = r.readBlock[:SegdGeneralHeader1]()
-  r.reportBcd(rec.gh1, "gh1", rec.offset)
-  let nGh = rec.gh1.generalHeaderCount
-  if nGh >= 2:
-    rec.hasGh2 = true
-    let o = r.input.offset
-    rec.gh2 = r.readBlock[:SegdGeneralHeader2]()
-    rec.revision = SegdRevision(major: rec.gh2.revisionMajor, minor: rec.gh2.revisionMinor)
-    if rec.revision.major >= 3:
-      r.readRev3Headers(o)
-      return
-    if rec.gh2.blockNumber != 2:
+  if rec.gh2.isSome:
+    let g2 = rec.gh2.get
+    if g2.blockNumber != 2:
       r.note(sevWarning, dcBadValue, "General Header #2 block number is " &
-        $rec.gh2.blockNumber & ", not 2", o + 18, r.loc(field = "gh2.blockNumber"))
-    if rec.revision.major > 2 or (rec.revision.major == 2 and rec.revision.minor > 1):
+        $g2.blockNumber & ", not 2", gh2Offset + 18, r.loc(field = "gh2.blockNumber"))
+    if SegdRevision(major: 2, minor: 1) < rec.revision:
       r.note(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision &
-        " read as Rev 2.1", o + 10, r.loc(field = "gh2.revision"))
-  for n in 3..nGh:
+        " read as Rev 2.1", gh2Offset + 10, r.loc(field = "gh2.revision"))
+  for n in 3..rec.gh1.generalHeaderCount:
     let o = r.input.offset
     let g = r.readBlock[:SegdGeneralHeaderN]()
     if g.blockNumber != uint8(n):
@@ -357,141 +548,131 @@ proc readRecordHeaders(r: var SegdReader) =
         $g.blockNumber, o + 18, r.loc(field = "gh" & $n & ".blockNumber"))
     if g.sourceSetNumber == 0:
       r.note(sevInfo, dcBadValue, "General Header #" & $n & " source set number is 0 " &
-        "(spec: not valid; common in real files)", o + 19, r.loc(field = "gh" & $n & ".sourceSetNumber"))
+        "(spec: not valid; common in real files)", o + 19,
+        r.loc(field = "gh" & $n & ".sourceSetNumber"))
     rec.sourceHeaders.add g
+  r.readScanTypes()
 
-  # Counts that size the rest of the header.
-  let nST = rec.gh1.scanTypesPerRecord
-  let nCS = if rec.hasGh2: channelSetsPerScanType(rec.gh1, rec.gh2)
-            else: rec.gh1.channelSetsPerScanType
-  let nSK = rec.gh1.skewBlocks
-  let nEC = if rec.hasGh2: extendedHeaderBlocks(rec.gh1, rec.gh2) else: rec.gh1.extendedHeaderBlocks
-  let nEX = if rec.hasGh2: externalHeaderBlocks(rec.gh1, rec.gh2) else: rec.gh1.externalHeaderBlocks
-  for (name, v) in [("scanTypesPerRecord", nST), ("channelSetsPerScanType", nCS),
-      ("skewBlocks", nSK), ("extendedHeaderBlocks", nEC), ("externalHeaderBlocks", nEX)]:
-    if v < 0 or v > MaxCount:
-      raiseUnlocatable(dcBadBcd, "General Header #1 " & name & " is unreadable (" & $v &
-        "), so the header cannot be located", rec.offset)
-  if nST * nCS > MaxDescriptors:
-    raiseUnlocatable(dcBadValue, "the record declares " & $nST & " scan types × " & $nCS &
-      " channel sets, more than " & $MaxDescriptors & "; the header is probably corrupt",
-      rec.offset + 27)
-  if nST == 0 or nCS == 0:
-    r.note(sevWarning, dcBadValue, "the record declares " & $nST & " scan types and " &
-      $nCS & " channel sets per scan type", rec.offset + 27, r.loc(field = "gh1.scanTypesPerRecord"))
+proc readRev3Headers(r: var SegdReader, gh2Offset: int64) =
+  # After GH#1 and GH#2: GH#3, the other general header blocks, then the
+  # scan type headers; the first trace starts a device block.
+  template rec: untyped = r.record
+  if rec.gh2Rev3.blockType != BlockTypeGeneralHeader2:
+    r.note(sevWarning, dcBadValue, "General Header #2 block type is " &
+      $rec.gh2Rev3.blockType & ", not 2", gh2Offset + 31, r.loc(field = "gh2.blockType"))
+  if SegdRevision(major: 3, minor: 1) < rec.revision:
+    r.note(sevWarning, dcUnsupportedRevision, "revision " & $rec.revision & " read as Rev 3.1",
+      gh2Offset + 10, r.loc(field = "gh2.revision"))
+  let nGh = rec.generalHeaderCount
+  if nGh < 3 or nGh > MaxCount:
+    raiseUnlocatable(dcBadValue, "a Rev 3 record needs General Header #3, but " & $nGh &
+      " general header blocks are declared", rec.offset + 11)
+  let o3 = r.input.offset
+  rec.gh3 = r.readBlock[:SegdGeneralHeader3]()
+  if rec.gh3.blockType != BlockTypeGeneralHeader3:
+    r.note(sevWarning, dcBadValue, "General Header #3 block type is " & $rec.gh3.blockType &
+      ", not 3", o3 + 31, r.loc(field = "gh3.blockType"))
+  rec.generalBlocks = r.readBytes(SegdBlockSize * (nGh - 3))
+  for (i, t) in blocks(rec.generalBlocks):
+    if not isDefinedBlock(t):
+      r.note(sevWarning, dcUnknownBlock, "general header block of undefined type 0x" &
+        toHex(t) & " kept raw", o3 + 32 + i + 31, r.loc(field = "gh.blockType"))
+  r.readScanTypes()
+  # From the blocks read, not medium offsets (tape images interleave markers).
+  let computed = rec.headerBytes
+  if rec.gh3.headerSize != 0 and int64(rec.gh3.headerSize) != computed:
+    r.note(sevWarning, dcInconsistent, "General Header #3 header size is " &
+      $rec.gh3.headerSize & ", the header blocks take " & $computed & " bytes", o3 + 24,
+      r.loc(field = "gh3.headerSize"))
+  if rec.traceCount > 0: r.skipToBlockEnd()
 
-  rec.traceCount = 0
-  for st in 0..<nST:
-    var s = SegdScanType()
-    for cs in 0..<nCS:
-      let o = r.input.offset
-      let c = r.readBlock[:SegdChannelSetDescriptor]()
-      r.reportBcd(c, "csd", o)
-      if c.scanTypeNumber != st + 1:
-        r.note(sevWarning, dcInconsistent, "channel set descriptor " & $(cs + 1) &
-          " of scan type " & $(st + 1) & " says scan type " & $c.scanTypeNumber, o,
-          r.loc(channelSet = cs, field = "csd.scanTypeNumber"))
-      if c.arrayForming == 0 and c.channelCount > 0 and rec.hasGh2: # Rev 0: unused
-        r.note(sevInfo, dcBadValue, "channel set " & $c.channelSetNumber &
-          " array forming code is 0 (spec: undefined; common in real files)", o + 31,
-          r.loc(channelSet = cs, field = "csd.arrayForming"))
-      if c.channelCount > 0: rec.traceCount += c.channelCount
-      s.descriptors.add c
-    s.skew = r.readBytes(32 * nSK)
-    rec.scanTypes.add s
-  rec.extended = r.readBytes(32 * nEC)
-  rec.external = r.readBytes(32 * nEX)
-
-  var f: SegdSampleFormat
-  if toSegdFormat(rec.gh1.formatCode, f):
-    rec.format = f
-    rec.formatKnown = true
-    if f.isLittleEndian:
-      r.note(sevWarning, dcBadValue, "format " & $ord(f) & " (little-endian) is defined from " &
-        "Rev 3.1; decoded anyway", rec.offset + 2, r.loc(field = "gh1.formatCode"))
+proc readRecordHeaders(r: var SegdReader, index: int) =
+  # GH#1 and GH#2 decide the layout; the record is then read in it.
+  let offset = r.input.offset
+  let gh1 = r.readBlock[:SegdGeneralHeader1]()
+  r.record = SegdRecord(layout: slRev2, index: index, offset: offset, gh1: gh1)
+  r.reportBcd(gh1, "gh1", offset)
+  let o = r.input.offset
+  if gh1.generalHeaderCount < 2:
+    r.readRev2Headers(o) # Rev 0: no GH#2
   else:
-    raiseUnlocatable(dcUnsupportedFormat, "sample format code " & $rec.gh1.formatCode &
-      " is undefined or multiplexed, so trace lengths are unknown", rec.offset + 2)
+    var b: array[SegdBlockSize, byte]
+    r.input.readExactly(b)
+    let revision = SegdRevision(major: b[10], minor: b[11]) # GH#2 bytes 11-12
+    if revision.major >= 3:
+      r.record = SegdRecord(layout: slRev3, index: index, offset: offset, gh1: gh1,
+        revision: revision, gh2Rev3: decodeBlock[SegdGeneralHeader2Rev3](b))
+      r.readRev3Headers(o)
+    else:
+      r.record.revision = revision
+      r.record.gh2 = some(decodeBlock[SegdGeneralHeader2](b))
+      r.readRev2Headers(o)
 
 # ----------------------------------------------------------------- traces --
 
-proc findChannelSet*(rec: SegdRecord, h: SegdTraceHeader, st, cs: var int) =
-  ## The 0-based scan type and channel set indices that trace header `h`
-  ## names; -1 when there is none.
-  st = h.scanTypeNumber - 1
-  cs = -1
-  if st >= 0 and st < rec.scanTypes.len:
-    let want = channelSetNumber(h) # BCD byte 4, or bytes 16-17 when it is FF
-    if rec.isRev3:
-      for i, c in rec.scanTypes[st].descriptors3:
-        if int(c.channelSetNumber) == want and cs < 0: cs = i
-    else:
-      for i, c in rec.scanTypes[st].descriptors:
-        if channelSetNumber(c) == want and cs < 0: cs = i
-  else:
-    st = -1
-
-# Channel set values of a trace, the same for every revision; the Rev 1/2 or
-# Rev 3 descriptor is chosen here. A trace whose channel set is unknown
-# (`channelSet` -1) gets the record-level value or a neutral one.
-
-func channelType*(rec: SegdRecord, t: SegdTrace): int =
-  ## The channel type code of the trace's channel set (Rev 1/2: 1 = seis,
-  ## 9 = signature filtered, ...; Rev 3: 0x10 seis, 0x20-0x70 auxiliary,
-  ## ...); 0 when the channel set is unknown.
-  if t.channelSet < 0: 0
-  elif rec.isRev3: int(rec.scanTypes[t.scanType].descriptors3[t.channelSet].channelType)
-  else: int(rec.scanTypes[t.scanType].descriptors[t.channelSet].channelType)
-
-func sampleIntervalUs*(rec: SegdRecord, t: SegdTrace): float64 =
-  ## The trace's sample interval in µs: its channel set's, or the record's
-  ## base scan interval when the channel set is unknown.
-  if t.channelSet < 0:
-    if rec.isRev3: baseScanIntervalUs(rec.gh1, rec.gh2r3) else: rec.gh1.baseScanIntervalMs * 1000
-  elif rec.isRev3: float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].samplingInterval)
-  else: rec.scanTypes[t.scanType].descriptors[t.channelSet].sampleIntervalMs(rec.gh1) * 1000
-
-func startTimeMs*(rec: SegdRecord, t: SegdTrace): float64 =
-  ## The start time of the trace's channel set in ms; 0 when it is unknown.
-  if t.channelSet < 0: 0.0
-  elif rec.isRev3: float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].startTime) / 1000
-  else: rec.scanTypes[t.scanType].descriptors[t.channelSet].startTimeMs
-
-func descaleFactor*(rec: SegdRecord, t: SegdTrace): float64 =
-  ## Millivolts per recorded unit of the trace's channel set: 2^MP factor
-  ## (Rev 1/2) or the descale multiplier (Rev 3; 1 when it is 0 or NaN).
-  ## 1 when the channel set is unknown.
-  if t.channelSet < 0: 1.0
-  elif rec.isRev3:
-    let m = float64(rec.scanTypes[t.scanType].descriptors3[t.channelSet].descaleMultiplier)
-    if m == 0 or m.isNaN: 1.0 else: m
-  else: pow(2.0, rec.scanTypes[t.scanType].descriptors[t.channelSet].mpFactor)
-
-proc readSamples(r: var SegdReader, t: var SegdTrace, nbytes: int) =
+proc readSamples(r: var SegdReader, t: var SegdTrace) =
+  # The trace's sample bytes, once `numSamples` is known.
+  template rec: untyped = r.record
+  let f = rec.format.get
+  if f == sd8015 and t.numSamples mod 4 != 0:
+    r.note(sevWarning, dcBadValue, "format 8015 needs a multiple of 4 samples, the " &
+      "trace has " & $t.numSamples, t.offset, r.loc(t.index, t.channelSet, "trace.numSamples"))
+  let nbytes = dataBytes(f, t.numSamples)
+  if int64(nbytes) > r.maxTraceBytes:
+    raiseUnlocatable(dcBadValue, "trace of " & $t.numSamples & " samples (" & $nbytes &
+      " bytes) exceeds maxTraceBytes; the sample count is probably corrupt", t.offset)
   if r.headersOnly:
     t.samples.setLen 0
     r.input.skipExactly(nbytes)
   else:
     r.input.readInto(t.samples, nbytes)
+  inc r.tracesRead
+
+proc readRev2TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
+  # After the demux header: extension blocks and the sample count.
+  template rec: untyped = r.record
+  if the > 15:
+    r.note(sevWarning, dcBadValue, "trace header extension count " & $the &
+      " exceeds 15", t.offset + 9, r.loc(t.index, field = "trace.traceHeaderExtensions"))
+  t.ext1 = none(SegdTraceHeaderExt1)
+  if the >= 1:
+    let e = r.readBlock[:SegdTraceHeaderExt1]()
+    t.ext1 = some(e)
+    if the > 1: r.input.readInto(t.extensions, SegdBlockSize * (the - 1))
+    t.numSamples = int(e.samplesPerTrace)
+  elif t.channelSet >= 0:
+    # No extension: the spec gives no rule; (TE - TF) / SI matches real data.
+    template c: untyped = rec.scanTypes[t.scanType].descriptors[t.channelSet]
+    let si = c.sampleIntervalMs(rec.gh1)
+    if si <= 0:
+      raiseUnlocatable(dcBadValue, "trace has no sample count and its sample interval is 0",
+        t.offset)
+    t.numSamples = int(round((c.endTimeMs - c.startTimeMs) / si))
+    if t.numSamples < 0:
+      raiseUnlocatable(dcBadValue, "channel set ends (" & $c.endTimeMs &
+        " ms) before it starts (" & $c.startTimeMs & " ms), so the trace length is unknown",
+        t.offset)
+  else:
+    raiseUnlocatable(dcInconsistent, "trace has no Trace Header Extension and no channel " &
+      "set descriptor, so its length is unknown", t.offset)
 
 proc readRev3TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
-  # After the demux header: extension blocks (THE#1 required) and samples.
+  # After the demux header: extension blocks (THE#1 required) and the
+  # sample count.
   template rec: untyped = r.record
-  t.extensions.setLen 0
-  t.hasExt1 = the >= 1
-  var csdNs = -1
-  if t.channelSet >= 0:
-    csdNs = int(rec.scanTypes[t.scanType].descriptors3[t.channelSet].numSamples)
-  if t.hasExt1:
-    var eb: array[SegdBlockSize, byte]
-    r.input.readExactly(eb)
-    t.ext1r3 = decodeRev3[SegdTraceHeaderExt1Rev3](eb)
-    if t.ext1r3.blockType != BtTraceExt1:
+  let csdNs = if t.channelSet >= 0:
+                int(rec.scanTypes[t.scanType].descriptorsRev3[t.channelSet].numSamples)
+              else: -1
+  t.ext1Rev3 = none(SegdTraceHeaderExt1Rev3)
+  if the >= 1:
+    let e = r.readBlock[:SegdTraceHeaderExt1Rev3]()
+    t.ext1Rev3 = some(e)
+    if e.blockType != BlockTypeTraceHeaderExt1:
       r.note(sevWarning, dcBadValue, "the first trace header extension has block type 0x" &
-        toHex(t.ext1r3.blockType) & ", not 0x40", t.offset + 20 + 31,
+        toHex(e.blockType) & ", not 0x40", t.offset + 20 + 31,
         r.loc(t.index, t.channelSet, "ext1.blockType"))
-    if the > 1: r.input.readInto(t.extensions, 32 * (the - 1))
-    t.numSamples = int(t.ext1r3.numSamples)
+    if the > 1: r.input.readInto(t.extensions, SegdBlockSize * (the - 1))
+    t.numSamples = int(e.numSamples)
     if csdNs >= 0 and csdNs != t.numSamples and rec.gh3.extendedRecordingMode == 0:
       r.note(sevWarning, dcInconsistent, "trace has " & $t.numSamples & " samples, its " &
         "channel set descriptor says " & $csdNs, t.offset + 20 + 24,
@@ -504,26 +685,23 @@ proc readRev3TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
   else:
     raiseUnlocatable(dcInconsistent, "trace has no Trace Header Extension and no channel " &
       "set descriptor, so its length is unknown", t.offset)
-  if rec.format == sd8015 and t.numSamples mod 4 != 0:
-    r.note(sevWarning, dcBadValue, "format 8015 needs a multiple of 4 samples, the " &
-      "trace has " & $t.numSamples, t.offset, r.loc(t.index, t.channelSet, "trace.numSamples"))
-  let nbytes = dataBytes(rec.format, t.numSamples)
-  if int64(nbytes) > r.maxTraceBytes:
-    raiseUnlocatable(dcBadValue, "trace of " & $t.numSamples & " samples (" & $nbytes &
-      " bytes) exceeds maxTraceBytes; the sample count is probably corrupt", t.offset)
-  r.readSamples(t, nbytes)
-  inc r.tracesRead
 
 proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
   template rec: untyped = r.record
   r.skipTracePadding()
+  if t.layout != rec.layout: t = SegdTrace(layout: rec.layout) # else its buffers are reused
   t.index = r.tracesRead
   t.offset = r.input.offset
-  var hb: array[SegdTraceHeaderSize, byte]
-  r.input.readExactly(hb)
-  t.header = decodeBlock[SegdTraceHeader](hb)
+  t.extensions.setLen 0
+  t.header = r.readBlock[:SegdTraceHeader]()
   r.reportBcd(t.header, "trace", t.offset)
-  findChannelSet(rec, t.header, t.scanType, t.channelSet)
+  let found = rec.findChannelSet(t.header)
+  if found.isSome:
+    t.scanType = found.get.scanType
+    t.channelSet = found.get.channelSet
+  else:
+    t.scanType = scanTypeIndex(rec, t.header)
+    t.channelSet = -1
   let the = int(t.header.traceHeaderExtensions)
   if t.channelSet < 0:
     if not r.csdWarned:
@@ -533,66 +711,35 @@ proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
         ", which no channel set descriptor has (reported once per record)", t.offset + 2,
         r.loc(t.index, field = "trace.channelSetNumber"))
   else:
-    let declared = if rec.isRev3: int(rec.scanTypes[t.scanType].descriptors3[t.channelSet].traceHeaderExtensions)
-                   else: int(rec.scanTypes[t.scanType].descriptors[t.channelSet].traceHeaderExtensions)
+    template s: untyped = rec.scanTypes[t.scanType]
+    let declared = case s.layout
+      of slRev2: int(s.descriptors[t.channelSet].traceHeaderExtensions)
+      of slRev3: int(s.descriptorsRev3[t.channelSet].traceHeaderExtensions)
     if declared != the:
       r.note(sevWarning, dcInconsistent, "trace has " & $the & " header extensions, " &
         "its channel set descriptor says " & $declared, t.offset + 9,
         r.loc(t.index, t.channelSet, "trace.traceHeaderExtensions"))
-  if rec.isRev3:
-    r.readRev3TraceRest(t, the)
-    return
-  if the > 15:
-    r.note(sevWarning, dcBadValue, "trace header extension count " & $the &
-      " exceeds 15", t.offset + 9, r.loc(t.index, field = "trace.traceHeaderExtensions"))
-  t.hasExt1 = the >= 1
-  t.extensions.setLen 0
-  if t.hasExt1:
-    var eb: array[SegdBlockSize, byte]
-    r.input.readExactly(eb)
-    t.ext1 = decodeBlock[SegdTraceHeaderExt1](eb)
-    if the > 1: r.input.readInto(t.extensions, 32 * (the - 1))
-    t.numSamples = int(t.ext1.samplesPerTrace)
-  elif t.channelSet >= 0:
-    # No extension: the spec gives no rule; (TE - TF) / SI matches real data.
-    let c = rec.scanTypes[t.scanType].descriptors[t.channelSet]
-    let si = c.sampleIntervalMs(rec.gh1)
-    if si <= 0:
-      raiseUnlocatable(dcBadValue, "trace has no sample count and its sample interval is 0",
-        t.offset)
-    t.numSamples = int(round((c.endTimeMs - c.startTimeMs) / si))
-    if t.numSamples < 0:
-      raiseUnlocatable(dcBadValue, "channel set ends (" & $c.endTimeMs & " ms) before it starts (" &
-        $c.startTimeMs & " ms), so the trace length is unknown", t.offset)
-  else:
-    raiseUnlocatable(dcInconsistent, "trace has no Trace Header Extension and no channel " &
-      "set descriptor, so its length is unknown", t.offset)
-  if rec.format == sd8015 and t.numSamples mod 4 != 0:
-    r.note(sevWarning, dcBadValue, "format 8015 needs a multiple of 4 samples, the " &
-      "trace has " & $t.numSamples, t.offset, r.loc(t.index, t.channelSet, "trace.numSamples"))
-  let nbytes = dataBytes(rec.format, t.numSamples)
-  if int64(nbytes) > r.maxTraceBytes:
-    raiseUnlocatable(dcBadValue, "trace of " & $t.numSamples & " samples (" & $nbytes &
-      " bytes) exceeds maxTraceBytes; the sample count is probably corrupt", t.offset)
-  r.readSamples(t, nbytes)
-  inc r.tracesRead
+  case rec.layout
+  of slRev2: r.readRev2TraceRest(t, the)
+  of slRev3: r.readRev3TraceRest(t, the)
+  r.readSamples(t)
 
 proc readRev3Trailer(r: var SegdReader) =
   # The general trailer: GH#2 bytes 13-16 blocks; when unknown (FFFFFFFF),
   # GH#3 recordSize - dataSize, else description-block groups as long as they
   # last.
   template rec: untyped = r.record
-  let n = rec.gh2r3.generalTrailerBlocks
+  let n = rec.gh2Rev3.generalTrailerBlocks
   if n == 0: return
-  r.alignToBlock()
-  if n != 0xFFFF_FFFF'u32:
-    rec.trailerBytes = r.readArea(32 * int64(n), "trailer")
+  r.skipToBlockEnd()
+  if n != UnknownTrailerBlocks:
+    rec.trailerRev3 = r.readArea(SegdBlockSize * int64(n), "trailer")
   elif rec.gh3.recordSize > rec.gh3.dataSize and rec.gh3.dataSize > 0:
     let diff = rec.gh3.recordSize - rec.gh3.dataSize
     if diff > uint64(high(int64) div 2):
       raiseUnlocatable(dcBadValue, "General Header #3 sizes give a trailer of " & $diff &
         " bytes; the record end cannot be located", r.input.offset)
-    rec.trailerBytes = r.readArea(int64(diff), "trailer")
+    rec.trailerRev3 = r.readArea(int64(diff), "trailer")
   else:
     var desc: array[SegdBlockSize, byte]
     var going = true
@@ -600,22 +747,18 @@ proc readRev3Trailer(r: var SegdReader) =
       let got = r.input.readAvail(desc)
       # A description block: type 0x70, binary/ASCII flag 1 or 2, bytes 3-4
       # zero (so a following record's GH#1 with EX = 70 is not taken).
-      if got == SegdBlockSize and desc[31] == BtTrailerDescription and desc[1] in {1'u8, 2} and
-          desc[2] == 0 and desc[3] == 0:
-        rec.trailerBytes.add desc
-        let d = decodeRev3[SegdTrailerDescription](desc)
-        rec.trailerBytes.add r.readArea(32 * int64(d.blockSize), "trailer")
+      if got == SegdBlockSize and desc[31] == BlockTypeTrailerDescription and
+          desc[1] in {1'u8, 2} and desc[2] == 0 and desc[3] == 0:
+        rec.trailerRev3.add desc
+        let d = decodeBlock[SegdTrailerDescription](desc)
+        rec.trailerRev3.add r.readArea(SegdBlockSize * int64(d.blockSize), "trailer")
       else:
         r.input.unread(desc.toOpenArray(0, got - 1))
         going = false
 
-proc readRecordTrailer(r: var SegdReader) =
+proc readRev2Trailer(r: var SegdReader) =
   template rec: untyped = r.record
-  if rec.isRev3:
-    r.readRev3Trailer()
-    r.skipFixedPadding()
-    return
-  let n = if rec.hasGh2: int(rec.gh2.generalTrailerBlocks) else: 0
+  let n = if rec.gh2.isSome: int(rec.gh2.get.generalTrailerBlocks) else: 0
   for i in 1..n:
     let o = r.input.offset
     let b = r.readBlock[:SegdTrailerBlock]()
@@ -624,12 +767,17 @@ proc readRecordTrailer(r: var SegdReader) =
         " has channel type " & $b.channelType & ", not 0xC", o + 10,
         r.loc(field = "trailer.channelType"))
     rec.trailer.add b
+
+proc readRecordTrailer(r: var SegdReader) =
+  case r.record.layout
+  of slRev2: r.readRev2Trailer()
+  of slRev3: r.readRev3Trailer()
   r.skipFixedPadding()
 
 proc readTrace*(r: var SegdReader, t: var SegdTrace): bool =
   ## Reads the next trace of the current record into `t`. Returns false after
-  ## the record's last trace (its general trailer is then in
-  ## `record.trailer`), or when the read had to stop (see `log`).
+  ## the record's last trace (its general trailer is then in `record`), or
+  ## when the read had to stop (see `log`).
   if not r.inRecord or r.done:
     return false
   if r.tracesRead >= r.record.traceCount:
@@ -643,6 +791,23 @@ proc readTrace*(r: var SegdReader, t: var SegdTrace): bool =
     r.inRecord = false
     r.stop()
     result = false
+
+proc readToc(r: var SegdReader) =
+  # A Rev 3 Table of Contents file (between file marks on tape).
+  var head: seq[byte]
+  r.input.readInto(head, TocHeaderSize)
+  let n = tocEntryCount(head)
+  if n < 0 or n > 10_000_000:
+    raiseUnlocatable(dcBadValue, "the Table of Contents entry count is unreadable",
+      r.input.offset)
+  var entries: seq[byte]
+  if int64(n) * TocEntrySize > r.maxHeaderBytes:
+    discard r.readArea(int64(n) * TocEntrySize, "toc") # skipped; header kept
+  else:
+    r.input.readInto(entries, int64(n) * TocEntrySize)
+  head.add entries
+  r.toc.add decodeToc(head)
+  if r.byteStream: r.skipFixedPadding() else: discard r.input.skipRecordRest()
 
 proc nextRecord*(r: var SegdReader): bool =
   ## Reads the next shot record's headers into `record`. Traces left unread
@@ -658,54 +823,44 @@ proc nextRecord*(r: var SegdReader): bool =
   if not ok or not r.input.atData:
     r.stop()
     return false
-  # A Rev 3 Table of Contents file (between file marks on tape).
   var peek: array[13, byte]
   let got = r.input.readAvail(peek)
   r.input.unread(peek.toOpenArray(0, got - 1))
   if isTocFile(peek):
-    ok = r.log.tryRecord(Location(file: r.name, field: "toc")):
-      var head: seq[byte]
-      r.input.readInto(head, TocHeaderSize)
-      let n = tocEntryCount(head)
-      if n < 0 or n > 10_000_000:
-        raiseUnlocatable(dcBadValue, "the Table of Contents entry count is unreadable", r.input.offset)
-      var entries: seq[byte]
-      if int64(n) * TocEntrySize > r.maxHeaderBytes:
-        discard r.readArea(int64(n) * TocEntrySize, "toc") # skipped; header kept
-      else:
-        r.input.readInto(entries, int64(n) * TocEntrySize)
-      head.add entries
-      r.toc.add decodeToc(head)
-      if r.byteStream: r.skipFixedPadding() else: discard r.input.skipRecordRest()
-    if not ok:
+    if not r.log.tryRecord(Location(file: r.name, field: "toc"), r.readToc()):
       r.stop()
       return false
     return r.nextRecord()
-  r.record = SegdRecord(index: r.records)
+  let index = r.records
   inc r.records
   r.tracesRead = 0
   r.csdWarned = false
-  ok = r.log.tryRecord(r.loc(), r.readRecordHeaders())
-  if ok:
+  if r.log.tryRecord(r.loc(), r.readRecordHeaders(index)):
     r.inRecord = true
     result = true
   else:
     r.stop()
     result = false
 
-func isDone*(r: SegdReader): bool {.inline.} = r.done
-func headersOnly*(r: SegdReader): bool {.inline.} = r.headersOnly
+func isDone*(r: SegdReader): bool {.inline.} =
+  ## True once the stream has ended (or the read had to stop).
+  r.done
+
+func headersOnly*(r: SegdReader): bool {.inline.} =
+  ## True when the reader skips sample bytes (see `openSegd`).
+  r.headersOnly
 
 proc decodeInto*[T: SegdSampleType](rec: SegdRecord, t: SegdTrace, dst: var Tensor[T], row: int,
     twosComplement8015 = false) =
   ## Decodes the trace's samples into row `row` of `dst` (recorded values;
-  ## multiply by 2^mpFactor of its channel set for millivolts).
-  if not rec.formatKnown:
+  ## multiply by `descaleFactor` for millivolts). Raises `SegFormatError`
+  ## for an undecodable format or a trace read with `headersOnly`.
+  if rec.format.isNone:
     raiseFormat("sample format " & $rec.gh1.formatCode & " is not decodable")
-  if t.samples.len < dataBytes(rec.format, t.numSamples):
+  let f = rec.format.get
+  if t.samples.len < dataBytes(f, t.numSamples):
     raiseFormat("trace " & $t.index & " holds no samples (read with headersOnly)")
-  dst.decodeTrace(row, rec.format, t.samples, min(t.numSamples, dst.shape[1]),
-    twosComplement8015)
+  dst.decodeTrace(row, f, t.samples, min(t.numSamples, dst.shape[1]), twosComplement8015)
 
 # ---------------------------------------------------------------------------
 # Whole-stream convenience.
@@ -719,10 +874,9 @@ type
 
   SegdData* = object
     ## A whole SEG-D stream in memory.
-    label*: SegdStorageUnitLabel
-    hasLabel*: bool
+    label*: Option[SegdStorageUnitLabel] ## The storage unit label, if any.
     records*: seq[SegdRecordData]
-    diagnostics*: DiagLog
+    log*: DiagLog                        ## The reader's diagnostics.
 
 proc readSegd*(src: RecordSource, twosComplement8015 = false, headersOnly = false): SegdData =
   ## Reads every record of a SEG-D stream into memory. Meant for small files
@@ -747,13 +901,12 @@ proc readSegd*(src: RecordSource, twosComplement8015 = false, headersOnly = fals
           d.record.decodeInto(tr, d.samples, i, twosComplement8015))
     result.records.add d
   result.label = r.label
-  result.hasLabel = r.hasLabel
-  result.diagnostics = r.log
+  result.log = r.log
 
 proc readSegd*(path: string, twosComplement8015 = false, headersOnly = false): SegdData =
   ## Reads a SEG-D disk file into memory; see `readSegd(RecordSource)`.
   var src: RecordSource
-  if result.diagnostics.tryRecord(Location(file: path), (src = openDiskSource(path))):
+  if result.log.tryRecord(Location(file: path), (src = openDiskSource(path))):
     try:
       result = readSegd(src, twosComplement8015, headersOnly)
     finally:

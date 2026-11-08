@@ -29,7 +29,7 @@ proc recordAs(f: SegdSampleFormat, vals: seq[float64], fileNo: int): SegdRecordD
   ## 63.sgd's record with its one trace re-encoded as format `f`.
   let d = readSegd(exampleDir / "63.sgd")
   result = d.records[0]
-  result.record.format = f
+  result.record.format = some(f)
   result.record.gh1.formatCode = ord(f)
   result.record.gh1.fileNumber = fileNo
   result.traces[0].samples = newSeq[byte](dataBytes(f, vals.len))
@@ -84,8 +84,8 @@ block b2_out_of_range_time_zero_does_not_raise:
     doAssert readSegy(tmp / "tz.sgy").traces[3].header.year == 0
 
 block b3_position_after_additional_source_info_is_the_source:
-  var rec = SegdRecord(isRev3: true, hasGh2: true)
-  var t = SegdTrace(hasExt1: true)
+  var rec = SegdRecord(layout: slRev3)
+  var t = SegdTrace(layout: slRev3, ext1Rev3: some(SegdTraceHeaderExt1Rev3()))
   var src = SegdSourceDescription(sourceLineNumber: 1, sourcePointNumber: 2, blockType: 0x15)
   var asi = newSeq[byte](32)
   asi[31] = 0x20

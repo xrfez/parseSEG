@@ -2,7 +2,7 @@
 
 import std/[assertions, os, strutils]
 import parseSEG/common/errors
-import parseSEG/segd/headers
+import parseSEG/segd/blocks
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 
