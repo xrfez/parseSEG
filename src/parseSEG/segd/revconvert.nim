@@ -53,7 +53,7 @@
 ##   interval / 2^k (k = 0..9), more than 99 skew blocks, more than 65535
 ##   extended or external blocks.
 
-import std/[math, strutils]
+import std/[math, os, strutils]
 import ../common/[errors, diagnostics, endians, outputfile]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer]
@@ -128,6 +128,7 @@ type
     inexact: int
     zeroed: int
     adjusted: int
+    srcSize: int64 # bytes of the input file; -1 unknown (a stream)
 
 const
   WrapDescription = "SEG-D REV2 TRLR " ## Trailer group holding a Rev 2 trailer.
@@ -588,6 +589,14 @@ proc withinRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecor
   # The trailer comes after the traces; a placeholder of the announced size
   # until then (see setRev3Trailer).
   let gt = rec.gh2Rev3.generalTrailerBlocks
+  if gt != UnknownTrailerBlocks:
+    # Bounded before the placeholder is allocated: a damaged count (up to
+    # 2^32 blocks, 137 GB) must not cost memory (13.3 R4-2).
+    let bytes = SegdBlockSize * int64(gt)
+    let limit = if c.srcSize >= 0: c.srcSize else: DefaultMaxHeaderBytes
+    if bytes > limit:
+      skipRecord("General Header #2 announces " & $gt & " trailer blocks (" & $bytes &
+        " bytes), more than the " & (if c.srcSize >= 0: "file holds" else: "reader holds"))
   result.trailerRev3 = newSeq[byte](if gt == UnknownTrailerBlocks: 0
                                     else: SegdBlockSize * int(gt))
   result.gh1.formatCode = ord(fOut)
@@ -729,6 +738,9 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
       else:
         w.endRecord(blocks.get(@[]))
 
+proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions,
+    scan: seq[SegdRecordScan], srcSize: int64): DiagLog
+
 proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
     opts = SegdConvertOptions(), scan: seq[SegdRecordScan] = @[]): DiagLog =
   ## Converts the SEG-D stream at `src` to revision `opts.revision` on
@@ -739,7 +751,13 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
   ## that differ are adjusted (with a warning), and Rev 3 trailers are
   ## dropped. The reader's, the writer's and the conversion's diagnostics are
   ## all in the result; a fatal one means the output is incomplete.
-  var c = Conv(opts: opts, loc: Location(file: sink.name))
+  convertStream(src, sink, opts, scan, -1)
+
+proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions,
+    scan: seq[SegdRecordScan], srcSize: int64): DiagLog =
+  # `convertSegdRevision`; `srcSize` (-1: unknown) bounds what damaged
+  # headers may make it allocate.
+  var c = Conv(opts: opts, loc: Location(file: sink.name), srcSize: srcSize)
   let target = opts.revision
   if not validTarget(target):
     c.log.report(sevFatal, dcValidation, "target SEG-D revision " & $target &
@@ -779,11 +797,12 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
     segApi.} =
   ## Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
   ## version). Never raises: problems, including I/O failures, are in the
-  ## result. The output is written to `<dstPath>.tmp` and renamed when
-  ## complete.
+  ## result. The output is written to a new temporary file next to
+  ## `dstPath` and renamed when complete.
   if sameAsInput(srcPath, dstPath, result):
     return
-  let tmp = tmpPathFor(dstPath)
+  let tmp = createTempFor(dstPath, result)
+  if tmp.len == 0: return
   var src: RecordSource
   var sink: RecordSink
   try:
@@ -793,7 +812,7 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
     src = nil
     src = openDiskSource(srcPath)
     sink = openDiskSink(tmp)
-    result = convertSegdRevision(src, sink, opts, scan)
+    result = convertStream(src, sink, opts, scan, getFileSize(srcPath))
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finally:

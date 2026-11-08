@@ -378,11 +378,14 @@ proc writeP1*(f: P1File, s: Stream, opts = P1WriteOptions()): DiagLog =
       if i < lines.len - 1 or f.finalNewline: s.write nl
 
 proc writeP1*(f: P1File, path: string, opts = P1WriteOptions()): DiagLog =
-  ## Writes `f` to `path` through `<path>.tmp`, renamed on success.
-  let tmp = tmpPathFor(path)
-  let s = newFileStream(tmp, fmWrite)
+  ## Writes `f` to `path` through a new temporary file next to it, renamed on
+  ## success.
+  let tmp = createTempFor(path, result)
+  let s = if tmp.len > 0: newFileStream(tmp, fmWrite) else: nil
   if s == nil:
-    result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
+    if tmp.len > 0:
+      result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
+      finishOutput(tmp, path, keep = false, result)
   else:
     try:
       result = writeP1(f, s, opts)

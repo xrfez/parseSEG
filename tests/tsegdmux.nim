@@ -309,6 +309,8 @@ block two_scan_types_split_by_dp:
   s.checkTraces(d.records[0])
   doAssert d.records[0].traces[5].offset == s.headerBlock.len + 4 * s.bytesPerScan
   # Without DP toggles, the windows split the scan types (with a warning).
+  # This path once read `starts[^1]` after the seq grew (13.3 R4-3, seen
+  # under ASan only).
   s.dpToggles = false
   writeBytes(tmp / "st2b.sgd", s.muxRecord)
   let e = readSegd(tmp / "st2b.sgd")

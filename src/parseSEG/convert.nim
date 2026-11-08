@@ -1077,8 +1077,9 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
   ## with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
   ## input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
   ## raises: problems, including I/O failures, are in the result. The output
-  ## is written to `<dstPath>.tmp` and renamed when complete, so a failed
-  ## conversion leaves an existing `dstPath` untouched and no partial file.
+  ## is written to a new temporary file next to `dstPath` (`<dstPath>.<random>.tmp`,
+  ## created exclusively) and renamed when complete, so a failed conversion
+  ## leaves an existing `dstPath` untouched and no partial file.
   ## `join` (internal) joins survey geometry to SEG-D keys (SEG-Y target
   ## only); for survey
   ## geometry in the output use `convertWithGeometry`.
@@ -1118,7 +1119,8 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
     return
   # SEG-D: one target format must hold every record.
   let formats = if kind == skSegd and opts.format == stKeep: recordFormats(srcPath) else: {}
-  let tmp = tmpPathFor(dstPath)
+  let tmp = createTempFor(dstPath, result)
+  if tmp.len == 0: return
   var src: RecordSource
   var sink: RecordSink
   var seg2: SeismicFile

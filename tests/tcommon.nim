@@ -87,8 +87,8 @@ block output_files_through_tmp:
   let dir = getTempDir() / "parseseg_tcommon"
   createDir(dir)
   let dst = dir / "out.bin"
-  let tmp = tmpPathFor(dst)
-  doAssert tmp == dst & ".tmp"
+  var tmp = createTempFor(dst)
+  doAssert tmp.startsWith(dst & ".") and tmp.endsWith(".tmp") and getFileSize(tmp) == 0
   writeFile(tmp, "complete")
   var log: DiagLog
   finishOutput(tmp, dst, keep = true, log)

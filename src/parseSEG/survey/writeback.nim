@@ -776,9 +776,10 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry,
   ## Multiplexed SEG-D is written demultiplexed. `srcPath` is never changed.
   ## SEG-2 is not supported yet (a fatal diagnostic). Never raises: problems
   ## are in the result, with an info summary. The output goes through
-  ## `<dstPath>.tmp` and is renamed when complete.
+  ## a new temporary file next to `dstPath` and is renamed when complete.
   if sameAsInput(srcPath, dstPath, result): return
-  let tmp = tmpPathFor(dstPath)
+  let tmp = createTempFor(dstPath, result)
+  if tmp.len == 0: return
   try:
     var f = openSeismic(srcPath)
     try:
@@ -838,7 +839,8 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
       GeometryJoin(survey: addr g, fields: fields, overwrite: overwrite))
   of skSegy:
     if sameAsInput(srcPath, dstPath, result): return
-    let tmp = tmpPathFor(dstPath)
+    let tmp = createTempFor(dstPath, result)
+    if tmp.len == 0: return
     result.add convertFile(srcPath, tmp, opts)
     if not result.isFatal:
       try:

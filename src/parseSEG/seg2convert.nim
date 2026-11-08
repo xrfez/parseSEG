@@ -129,6 +129,9 @@ proc closeQuietly(f: var SeismicFile) {.raises: [].} =
 proc decodeTrace(f: SeismicFile, i: int, vals: var seq[float64]) =
   # Trace `i`'s samples as float64; raises like `decodeEntry`.
   let e = f.index.entries[i]
+  # Checked before the buffer: no format packs a sample in under a byte.
+  if int64(e.numSamples) > f.mappedSize:
+    raiseTruncated("trace samples lie past the end of the file", e.offset)
   vals.setLen int(e.numSamples)
   if vals.len > 0:
     decodeEntry(f.unsafeMemory, f.mappedSize, e, f.index.codecs[e.record],
@@ -418,7 +421,8 @@ proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions()): Diag
   ## Converts the SEG-Y, SEG-D or SEG-2 file `srcPath` to the SEG-2 file
   ## `dstPath` (see the module doc). Never raises: problems, including I/O
   ## failures, are in the result (the input's own diagnostics first). The
-  ## output is written to `<dstPath>.tmp` and renamed when complete.
+  ## output is written to a new temporary file next to `dstPath` and renamed
+  ## when complete.
   var c = Conv(loc: Location(file: dstPath))
   if sameAsInput(srcPath, dstPath, result): return
   var f: SeismicFile
@@ -436,7 +440,10 @@ proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions()): Diag
       " traces; the input has " & $f.len & " (split it first)", loc = c.loc)
     f.closeQuietly()
     return
-  let tmp = tmpPathFor(dstPath)
+  let tmp = createTempFor(dstPath, result)
+  if tmp.len == 0:
+    f.closeQuietly()
+    return
   try:
     c.writeSeg2From(f, tmp, opts)
   except CatchableError as e:
@@ -730,7 +737,8 @@ proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions()): 
   ## Converts the SEG-2 file `srcPath` to the SEG-D file `dstPath`, Rev 2.0,
   ## 2.1, 3.0 or 3.1 (`opts.revision`; see the module doc). Never raises:
   ## problems, including I/O failures, are in the result. The output is
-  ## written to `<dstPath>.tmp` and renamed when complete.
+  ## written to a new temporary file next to `dstPath` and renamed when
+  ## complete.
   var c = Conv(loc: Location(file: dstPath))
   if sameAsInput(srcPath, dstPath, result): return
   let r = opts.revision
@@ -752,7 +760,10 @@ proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions()): 
     return
   # Rev 3 is written directly; Rev 2 through a Rev 3.0 file.
   let direct = r.major == 3
-  let rev3Path = if direct: tmpPathFor(dstPath) else: dstPath & ".rev3.tmp"
+  let rev3Path = createTempFor(if direct: dstPath else: dstPath & ".rev3", result)
+  if rev3Path.len == 0:
+    f.closeQuietly()
+    return
   var sink: RecordSink
   try:
     try:

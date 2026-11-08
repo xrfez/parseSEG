@@ -2083,8 +2083,8 @@ class Prefetcher(_Handle):
 def convert_segd_revision(src_path, dst_path, opts=None):
     """Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
     version). Never raises: problems, including I/O failures, are in the
-    result. The output is written to `<dstPath>.tmp` and renamed when
-    complete."""
+    result. The output is written to a new temporary file next to
+    `dstPath` and renamed when complete."""
     _o = ctypes.c_void_p()
     _st = _lib.seg_convert_segd_revision(_str(src_path, "src_path"), _str(dst_path, "dst_path"), ctypes.byref(_struct_arg(SegSegdConvertOptions, opts, "opts")), ctypes.byref(_o))
     return _logged(_st, _o)
@@ -2120,8 +2120,9 @@ def convert_file(src_path, dst_path, opts=None):
     with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
     input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
     raises: problems, including I/O failures, are in the result. The output
-    is written to `<dstPath>.tmp` and renamed when complete, so a failed
-    conversion leaves an existing `dstPath` untouched and no partial file.
+    is written to a new temporary file next to `dstPath` (`<dstPath>.<random>.tmp`,
+    created exclusively) and renamed when complete, so a failed conversion
+    leaves an existing `dstPath` untouched and no partial file.
     `join` (internal) joins survey geometry to SEG-D keys (SEG-Y target
     only); for survey
     geometry in the output use `convertWithGeometry`."""

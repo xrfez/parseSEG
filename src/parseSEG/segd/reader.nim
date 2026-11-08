@@ -677,7 +677,10 @@ proc splitScanTypes(r: var SegdReader) =
       r.note(sevWarning, dcInconsistent, "the start-of-scan DP bit changes in a record with " &
         "one scan type", m.offset, r.loc(field = "scan.dp"))
     for st in 0 ..< nST - 1:
-      starts.add min(n, starts[^1] + max(0, rec.windowScans(st)))
+      # Read before `add`: `starts.add f(starts[^1])` may take the element's
+      # address, then grow (and free) the seq (13.3 R4-3, a use-after-free).
+      let last = starts[^1]
+      starts.add min(n, last + max(0, rec.windowScans(st)))
   for st in 0..<nST:
     let a = starts[st]
     let b = if st + 1 < nST: starts[st + 1] else: n

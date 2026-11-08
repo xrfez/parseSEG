@@ -40,7 +40,7 @@
 ## Memory does not grow with the file or the document.
 
 import std/[os, strutils, math, options]
-import ../common/[errors, diagnostics, niftext]
+import ../common/[errors, diagnostics, niftext, outputfile]
 import ../segd/reader as segdreader
 from ../seg2/reader import Seg2String, fileBlockSize
 import ./[traceindex, headerfields, edit]
@@ -156,17 +156,19 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   ## Writes every named header field of `f` to the NIF file `path`, streamed
   ## through a buffer (memory does not grow with the file). `raw` adds each
   ## block's bytes, and each trace's whole header, as hex. The document is
-  ## written to `path.tmp` and renamed when complete. Raises `IOError` if it
-  ## cannot be written, and `ValueError` if `f` is closed or `path` is the
-  ## seismic file itself. SEG-2 blocks also list their keyword strings
-  ## (see the module doc).
+  ## written to a new temporary file next to `path` and renamed when
+  ## complete. Raises `IOError` if it cannot be written, and `ValueError` if
+  ## `f` is closed or `path` is the seismic file itself. SEG-2 blocks also
+  ## list their keyword strings (see the module doc).
   if not f.isOpen and f.len > 0: raise newException(ValueError, "the file is closed")
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
-  let tmp = path & ".tmp"
+  let tmp = createTempFor(path)
   var o = NifOut()
   for k in HeaderBlock: o.names[k] = fieldNames(k)
-  if not open(o.f, tmp, fmWrite): raise newException(IOError, "cannot write " & tmp)
+  if not open(o.f, tmp, fmWrite):
+    removeFile(tmp)
+    raise newException(IOError, "cannot write " & tmp)
   try:
     o.put "(.nif27)\n(.vendor \"parseSEG\")\n(headers\n (standard " &
       standardName(f.kind) & ")\n (traces " & $f.len & ")\n"
@@ -608,9 +610,9 @@ proc writeHeaderPatch*(changes: openArray[HeaderChange], path: string) =
   ## preferably into a copy with `outPath`). The patch names no standard or
   ## counts, so `importHeaders` checks only its fields against the file.
   ## Consecutive changes of one block share a `(block ...)`. Written to
-  ## `path.tmp` and renamed when complete. Raises `ValueError` for a
-  ## malformed name or index (nothing is written) and `IOError` if `path`
-  ## cannot be written.
+  ## a new temporary file next to `path` and renamed when complete. Raises
+  ## `ValueError` for a malformed name or index (nothing is written) and
+  ## `IOError` if `path` cannot be written.
   for c in changes: checkChange(c.scope, c.index, c.name)
   var s = "(.nif27)\n(.vendor \"parseSEG\")\n(headers"
   var i = 0
@@ -627,7 +629,7 @@ proc writeHeaderPatch*(changes: openArray[HeaderChange], path: string) =
       s.add ")"
     s.add ")"
   s.add ")\n"
-  let tmp = path & ".tmp"
+  let tmp = createTempFor(path)
   try:
     writeFile(tmp, s)
   except IOError:

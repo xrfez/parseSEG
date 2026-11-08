@@ -278,7 +278,7 @@ proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool): TraceIndex =
     if c == result.codecs.len:
       result.codecs.add TraceCodec(kind: skSeg2, seg2Format: fmt, order: f.order,
         twosComplement8015: twosComplement8015)
-    let n = t.sampleCount
+    let n = t.sampleCount(size) # bounded by the file (13.3 R4-1)
     result.entries.add TraceEntry(offset: t.offset,
       headerBytes: if t.valid: uint32(t.blockSize) else: 0, numSamples: uint32(n),
       record: uint32(c), channelSet: NoChannelSet, scanType: -1,
