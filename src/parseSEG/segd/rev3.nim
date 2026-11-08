@@ -411,18 +411,24 @@ func traceBytes*(c: SegdChannelSetDescriptor3, dataBytes: int): int =
   ## Bytes of one trace of this set, given its sample data size.
   SegdTraceHeaderSize + SegdBlockSize * int(c.traceHeaderExtensions) + dataBytes
 
-# Type-specific Source Description fields.
+# Type-specific Source Description fields, read from the decoded
+# `typeSpecific15` (bytes 15-18) and `typeSpecific28` (bytes 28-29).
 func phaseAngle*(s: SegdSourceDescription): int16 =
   ## Vibrator (0x15): phase angle, bytes 17-18.
-  cast[int16](beU16(s.raw, 16))
-func vibratorType*(s: SegdSourceDescription): uint8 = s.raw[15]
-func phaseControl*(s: SegdSourceDescription): uint8 = s.raw[14]
+  beI16(s.typeSpecific15, 2)
+func vibratorType*(s: SegdSourceDescription): uint8 =
+  ## Vibrator (0x15): vibrator type, byte 16.
+  s.typeSpecific15[1]
+func phaseControl*(s: SegdSourceDescription): uint8 =
+  ## Vibrator (0x15): phase control, byte 15.
+  s.typeSpecific15[0]
 func depth*(s: SegdSourceDescription): uint16 =
   ## Explosive, airgun, watergun (0x16-0x18): depth, bytes 15-16.
-  beU16(s.raw, 14)
+  beU16(s.typeSpecific15, 0)
 func size*(s: SegdSourceDescription): int32 =
   ## Source size, bytes 28-29 (unsigned for vibrators, signed otherwise).
-  if s.blockType == 0x15: int32(beU16(s.raw, 27)) else: int32(cast[int16](beU16(s.raw, 27)))
+  if s.blockType == 0x15: int32(beU16(s.typeSpecific28, 0))
+  else: int32(beI16(s.typeSpecific28, 0))
 
 # ---------------------------------------------------------------------------
 # SEG-D timestamps: µs since 1980-01-06T00:00:00 GPS, no leap seconds.

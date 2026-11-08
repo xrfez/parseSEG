@@ -153,3 +153,15 @@ block rev31_crs_text_format:
   doAssert crsFormat("  ((ogp : p1/11crs))") == ctP1_11
   doAssert crsFormat("((SEG: Location Data ver 1.0))") == ctStanza
   doAssert crsFormat("\0\0  ") == ctNone and crsFormat("WGS 84") == ctUnknown
+
+block source_description_accessors_follow_fields:
+  # The type-specific accessors read the decoded fields, so an edit shows.
+  var s = SegdSourceDescription(blockType: 0x15)
+  s.typeSpecific15 = [1'u8, 2, 0xFF, 0xA6] # control 1, type 2, angle -90
+  s.typeSpecific28 = [0xFF'u8, 0xFE]
+  doAssert s.phaseControl == 1 and s.vibratorType == 2 and s.phaseAngle == -90
+  doAssert s.size == 65534 # unsigned for a vibrator
+  s.blockType = 0x16
+  doAssert s.size == -2 and s.depth == 0x0102
+  let back = decodeRev3[SegdSourceDescription](s.encoded)
+  doAssert back.phaseAngle == -90 and back.depth == 0x0102
