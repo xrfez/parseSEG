@@ -23,7 +23,10 @@
 ## omitted when unknown.
 
 import std/strutils
-import nifbuilder, nifreader, nifcore, stringviews
+import "$nim/dist/nimony/src/lib/nifbuilder", "$nim/dist/nimony/src/lib/nifreader",
+  "$nim/dist/nimony/src/lib/nifcore", "$nim/dist/nimony/src/lib/stringviews"
+  # The NIF reader/builder ship with the Nim toolchain (2.4+); imported by path
+  # so dependent projects need no --path switch.
 import errors, diagcodes
 
 export diagcodes
