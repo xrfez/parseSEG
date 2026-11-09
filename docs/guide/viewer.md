@@ -235,16 +235,16 @@ file leaves at 0.
 ## Keep the user's header edits as a patch
 
 A viewer should not write to the file while the user experiments. Collect the changes in a
-`HeaderPatch` and save it; applying it later is an explicit step ([editing.md](editing.md)).
+`seq[HeaderChange]` and save it; applying it later is an explicit step ([editing.md](editing.md)).
 
 ```nim
 import parseSEG
 
-var patch = initHeaderPatch()
-patch.add(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_000))
-patch.add(hsTrace, 6, "trace.sourceX", toFieldValue(1_700_025))
-patch.add(hsFile, 0, "binary.jobId", toFieldValue(7))
-patch.write("viewer-edits.nif")
+var patch: seq[HeaderChange]
+patch.add initHeaderChange(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_000))
+patch.add initHeaderChange(hsTrace, 6, "trace.sourceX", toFieldValue(1_700_025))
+patch.add initHeaderChange(hsFile, 0, "binary.jobId", toFieldValue(7))
+writeHeaderPatch(patch, "viewer-edits.nif")
 doAssert patch.len == 3
 echo readFile("viewer-edits.nif")
 ```

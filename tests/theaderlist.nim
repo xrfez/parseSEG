@@ -13,17 +13,17 @@ const
   inova = exampleDir / "inova_rev30_5traces.sgd"
   inglewood = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
 
-proc blocksOf(l: HeaderListing): seq[string] =
+proc blocksOf(l: openArray[HeaderRow]): seq[string] =
   ## The block names in listing order, once each.
   for r in l:
     if result.len == 0 or result[^1] != r.blockName: result.add r.blockName
 
-proc row(l: HeaderListing, name: string): HeaderRow =
+proc row(l: openArray[HeaderRow], name: string): HeaderRow =
   for r in l:
     if r.blockName & "." & r.field == name: return r
   raiseAssert "no row " & name
 
-proc checkTiling(l: HeaderListing) =
+proc checkTiling(l: openArray[HeaderRow]) =
   ## Every row lies inside its block, and the blocks do not overlap.
   var lastEnd = -1'i64
   var lastBlock = ""
@@ -186,15 +186,15 @@ block unknown_file:
 block header_patch_round_trip:
   # A viewer's edits, saved as a patch and applied by an explicit import.
   let f = openSeismic(inglewood)
-  var p = initHeaderPatch()
-  p.add(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_000))
-  p.add(hsTrace, 5, "trace.groupX", toFieldValue(3))
-  p.add(hsFile, 0, "binary.jobId", toFieldValue(7))
-  p.add(hsTrace, 0, "trace.headerName", toFieldValue("A\"B"))
-  p.add(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_001)) # the last change wins
+  var p: seq[HeaderChange]
+  p.add initHeaderChange(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_000))
+  p.add initHeaderChange(hsTrace, 5, "trace.groupX", toFieldValue(3))
+  p.add initHeaderChange(hsFile, 0, "binary.jobId", toFieldValue(7))
+  p.add initHeaderChange(hsTrace, 0, "trace.headerName", toFieldValue("A\"B"))
+  p.add initHeaderChange(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_001)) # the last change wins
   doAssert p.len == 5
   let patch = tmp / "viewer.nif"
-  p.write(patch)
+  writeHeaderPatch(p, patch)
   let text = readFile(patch)
   doAssert text.startsWith("(.nif27)") and "(standard" notin text
   doAssert "(trace 5 (block trace (f sourceX 1700000) (f groupX 3)))" in text, text
@@ -213,28 +213,24 @@ block header_patch_round_trip:
   doAssert g.traceField(0, "trace.headerName").text.startsWith("A\"B")
   doAssert readFile(inglewood) == before
   # Floats and the special values survive the NIF form.
-  var q = initHeaderPatch()
-  q.add(hsRecord, 0, "gh3.sourcePointNumber", toFieldValue(12.25))
-  q.add(hsTrace, 0, "trace.firstTimingWord", toFieldValue(NaN))
-  writeHeaderPatch(q.changes, tmp / "floats.nif")
+  let q = [initHeaderChange(hsRecord, 0, "gh3.sourcePointNumber", toFieldValue(12.25)),
+    initHeaderChange(hsTrace, 0, "trace.firstTimingWord", toFieldValue(NaN))]
+  writeHeaderPatch(q, tmp / "floats.nif")
   let ft = readFile(tmp / "floats.nif")
   doAssert "(record 0 (block gh3 (f sourcePointNumber 12.25)))" in ft and "(nan)" in ft
   # Malformed names and indices are refused, and nothing is written.
-  var bad = initHeaderPatch()
   for name in ["trace", "trace.", ".x", "a.b.c", "trace.so urce", "1x.y", "x.(y)"]:
-    doAssertRaises(ValueError): bad.add(hsTrace, 0, name, toFieldValue(1))
-  doAssertRaises(ValueError): bad.add(hsTrace, -1, "trace.sourceX", toFieldValue(1))
-  doAssertRaises(ValueError): bad.add(hsFile, 1, "binary.jobId", toFieldValue(1))
-  doAssert bad.len == 0
+    doAssertRaises(ValueError): discard initHeaderChange(hsTrace, 0, name, toFieldValue(1))
+  doAssertRaises(ValueError): discard initHeaderChange(hsTrace, -1, "trace.sourceX", toFieldValue(1))
+  doAssertRaises(ValueError): discard initHeaderChange(hsFile, 1, "binary.jobId", toFieldValue(1))
   doAssertRaises(ValueError):
     writeHeaderPatch([HeaderChange(scope: hsTrace, index: 0, name: "bogus")], tmp / "bad.nif")
   doAssert not fileExists(tmp / "bad.nif")
-  doAssertRaises(IOError): p.write(tmp / "no-such-dir" / "x.nif")
+  doAssertRaises(IOError): writeHeaderPatch(p, tmp / "no-such-dir" / "x.nif")
   # A patch to a block the editor cannot reach is refused by the import,
   # with the reason in its log.
-  var listOnly = initHeaderPatch()
-  listOnly.add(hsRecord, 0, "gh2.extFileNumber", toFieldValue(5))
-  listOnly.write(tmp / "gh2.nif")
+  writeHeaderPatch([initHeaderChange(hsRecord, 0, "gh2.extFileNumber", toFieldValue(5))],
+    tmp / "gh2.nif")
   let r2 = importHeaders(s63, tmp / "gh2.nif", ImportOptions(dryRun: true))
   doAssert r2.applied == 0 and r2.log.hasErrors
 

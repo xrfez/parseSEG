@@ -10,7 +10,7 @@
 ## ```
 ##
 ## The listing is **read-only**: it reads the mapped bytes and never writes.
-## A viewer collects its edits as a `HeaderPatch` (or `HeaderChange`s) and
+## A viewer collects its edits as `HeaderChange`s (`initHeaderChange`) and
 ## saves them with `writeHeaderPatch`; applying one is a separate, explicit
 ## `importHeaders` (a `dryRun` first, preferably with `outPath`).
 ##
@@ -67,27 +67,6 @@ type
       ## nibbles touch).
     blockOffset*: int64 ## File offset of the block (`copyBytes(blockOffset, blockSize)`).
     blockSize*: int    ## Bytes in the block.
-
-  HeaderListing* = object
-    ## The ordered header rows of one trace, record or file.
-    rows: seq[HeaderRow]
-
-func len*(l: HeaderListing): int {.inline.} =
-  ## The number of rows.
-  l.rows.len
-
-func `[]`*(l: HeaderListing; i: int): lent HeaderRow {.inline.} =
-  ## Row `i`, in file order. As for a `seq`, an `i` outside `0 ..< len` is a
-  ## bug (`IndexDefect`).
-  l.rows[i]
-
-iterator items*(l: HeaderListing): lent HeaderRow =
-  ## Yields the rows in file order.
-  for r in l.rows: yield r
-
-iterator pairs*(l: HeaderListing): (int, lent HeaderRow) =
-  ## Yields `(index, row)` pairs in file order.
-  for i, r in l.rows: yield (i, r)
 
 # ---------------------------------------------------------------- builder --
 
@@ -192,7 +171,7 @@ func traceEnd(f: SeismicFile, i: int): int64 =
   let e = f.index.entries[i]
   e.sampleOffset + int64(f.index.dataBytes(i))
 
-proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing =
+proc traceHeaders*(f: SeismicFile, trace: int): seq[HeaderRow] =
   ## Every header block of trace `trace`, as rows in file order: `trace`,
   ## `ext1` and any further extensions (see the module documentation).
   ## Raises `ValueError` for a trace out of range or a closed file.
@@ -202,7 +181,7 @@ proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing =
   let e = f.index.entries[trace]
   if f.kind == skSeg2:
     L.addSeg2Block(f, "trace", hbSeg2Trace, e.offset, int(e.headerBytes))
-    return HeaderListing(rows: move L.rows)
+    return move L.rows
   discard L.located(f, hsTrace, trace, "trace")
   let hasExt1 = L.located(f, hsTrace, trace, "ext1")
   if f.kind == skSegy:
@@ -222,9 +201,9 @@ proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing =
         for k in 0 ..< n:
           L.addRaw("ext" & $(k + 2), "traceHeaderExtension", first + int64(k) * SegdBlockSize,
             SegdBlockSize)
-  HeaderListing(rows: move L.rows)
+  move L.rows
 
-proc recordHeaders*(f: SeismicFile, record: int): HeaderListing =
+proc recordHeaders*(f: SeismicFile, record: int): seq[HeaderRow] =
   ## Every header block of SEG-D record `record`, as rows in file order:
   ## general headers, channel set descriptors, skew, extended and external
   ## headers, and the trailer (see the module documentation). Empty for
@@ -276,9 +255,9 @@ proc recordHeaders*(f: SeismicFile, record: int): HeaderListing =
     for i, e in f.index.entries:
       if int(e.record) == record: last = i
     if last >= 0: L.addRaw("trailer", "general trailer", f.traceEnd(last), trailer)
-  HeaderListing(rows: move L.rows)
+  move L.rows
 
-proc fileHeaders*(f: SeismicFile): HeaderListing =
+proc fileHeaders*(f: SeismicFile): seq[HeaderRow] =
   ## The file-level header blocks, as rows in file order: SEG-Y tape label,
   ## textual, binary, extended textual headers and data trailer; SEG-D the
   ## storage unit label; SEG-2 the File Descriptor Block (fixed fields and
@@ -303,4 +282,4 @@ proc fileHeaders*(f: SeismicFile): HeaderListing =
     L.addSeg2Block(f, "file", hbSeg2File, 0,
       fileBlockSize(L.mem.toOpenArray(0, int(L.size) - 1), f.index.seg2))
   of skUnknown: discard
-  HeaderListing(rows: move L.rows)
+  move L.rows

@@ -372,7 +372,7 @@ proc parseSelection(s: string, n: int, unit = "trace", all = true): seq[int] =
     check(b)
     for i in a..b: result.add i
 
-proc printListing(title: string, l: HeaderListing) =
+proc printListing(title: string, l: openArray[HeaderRow]) =
   echo title
   for r in l:
     let where = "  (@" & $r.offset & ", " & $r.size & " B)"

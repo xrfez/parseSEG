@@ -30,8 +30,8 @@
 ## bytes as `\HH`. A trace's `(raw ...)` holds all its header bytes; raw bytes
 ## are informational and are not imported.
 ##
-## `writeHeaderPatch` writes a change set (a viewer's edits, `HeaderPatch`)
-## in the same layout, for `importHeaders`.
+## `writeHeaderPatch` writes a change set (a viewer's edits, `HeaderChange`s
+## from `initHeaderChange`) in the same layout, for `importHeaders`.
 ##
 ## Both directions stream: export writes through a buffer, import reads the
 ## document with a small strict tokenizer (documents are untrusted input; it
@@ -568,11 +568,6 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
 
 # ------------------------------------------------------------------ patch --
 
-type
-  HeaderPatch* = object
-    ## A pending change set (a viewer's edits), saved with `writeHeaderPatch`.
-    changes*: seq[HeaderChange]
-
 func validName(name: string): bool =
   # `<block>.<field>`, both NIF identifiers.
   let dot = name.find('.')
@@ -586,22 +581,14 @@ proc checkChange(scope: HeaderScope, index: int, name: string) =
     raise newException(ValueError, name & ": index " & $index & " is not a " & $scope &
       " index")
 
-func initHeaderPatch*(): HeaderPatch =
-  ## An empty change set.
-  HeaderPatch()
-
-proc add*(p: var HeaderPatch, scope: HeaderScope, index: int, name: string,
-    value: FieldValue) =
-  ## Adds a change of field `name` (`<block>.<field>`, as in the listings)
-  ## of the file (`hsFile`, index 0), record `index` or trace `index` to
-  ## `value`. A later change of the same field wins when the patch is
-  ## imported. Raises `ValueError` for a malformed name or index.
+proc initHeaderChange*(scope: HeaderScope, index: int, name: string,
+    value: FieldValue): HeaderChange =
+  ## A change of field `name` (`<block>.<field>`, as in the listings) of the
+  ## file (`hsFile`, index 0), record `index` or trace `index` to `value`, for
+  ## `writeHeaderPatch`. A later change of the same field wins when the patch
+  ## is imported. Raises `ValueError` for a malformed name or index.
   checkChange(scope, index, name)
-  p.changes.add HeaderChange(scope: scope, index: index, name: name, new: value)
-
-func len*(p: HeaderPatch): int {.inline.} =
-  ## The number of changes.
-  p.changes.len
+  HeaderChange(scope: scope, index: index, name: name, new: value)
 
 proc writeHeaderPatch*(changes: openArray[HeaderChange], path: string) =
   ## Writes `changes` (their `new` values) as a NIF patch in the
@@ -635,9 +622,3 @@ proc writeHeaderPatch*(changes: openArray[HeaderChange], path: string) =
     if fileExists(tmp): removeFile(tmp)
     raise
   moveFile(tmp, path)
-
-proc write*(p: HeaderPatch, path: string) =
-  ## Writes the change set as a NIF patch (`writeHeaderPatch`): the
-  ## `exportHeaders` layout, for an explicit `importHeaders`. Raises
-  ## `IOError` if `path` cannot be written.
-  writeHeaderPatch(p.changes, path)

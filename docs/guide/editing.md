@@ -143,7 +143,7 @@ edits made before one stay (journaled).
 
 ### Patches from a viewer
 
-`HeaderPatch` (or `writeHeaderPatch` with a list of `HeaderChange`s) writes the same layout
+`writeHeaderPatch` with a list of `HeaderChange`s (made with `initHeaderChange`) writes the same layout
 with only the changed fields and no standard or counts, so `importHeaders` checks only the
 fields themselves. This is how a viewer saves a user's pending edits without touching the
 file ([viewer.md](viewer.md)).
@@ -152,10 +152,9 @@ file ([viewer.md](viewer.md)).
 import std/os
 import parseSEG
 
-var patch = initHeaderPatch()
-patch.add(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_000))
-patch.add(hsFile, 0, "binary.jobId", toFieldValue(7))
-patch.write("pending.nif")
+writeHeaderPatch([
+  initHeaderChange(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_000)),
+  initHeaderChange(hsFile, 0, "binary.jobId", toFieldValue(7))], "pending.nif")
 
 copyFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "survey.sgy")
 let r = importHeaders("survey.sgy", "pending.nif")         # in place, journaled
