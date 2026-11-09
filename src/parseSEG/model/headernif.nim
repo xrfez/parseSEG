@@ -165,7 +165,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
   ## written, in bytes) and once at the end; when it returns false the
   ## export stops with `SegCancelledError` and nothing is written (like a
   ## failed write, a cancel raises: this call reports by exceptions).
-  if not f.isOpen and f.len > 0: raise newException(ValueError, "the file is closed")
+  if f.len > 0: f.requireOpen()
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
   let tmp = createTempFor(path)

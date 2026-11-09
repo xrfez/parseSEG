@@ -202,7 +202,7 @@ proc summary*(f: SeismicFile): FileSummary =
   case f.kind
   of skUnknown: discard
   of skSegy:
-    if f.len > 0 and not f.isOpen: raise newException(ValueError, "the file is closed")
+    if f.len > 0: f.requireOpen()
     template s: untyped = ix.segy
     result.revision = StandardRevision(major: int(s.revision.major), minor: int(s.revision.minor))
     result.byteOrder = s.byteOrder
@@ -241,7 +241,7 @@ proc summary*(f: SeismicFile): FileSummary =
     result.crsFormat = segdCrs(ix, text)
     result.coordinateUnits = crsUnits(text, result.crsFormat)
   of skSeg2:
-    if f.len > 0 and not f.isOpen: raise newException(ValueError, "the file is closed")
+    if f.len > 0: f.requireOpen()
     template s: untyped = ix.seg2
     result.revision = StandardRevision(major: int(s.revision))
     result.byteOrder = s.order

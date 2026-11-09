@@ -663,7 +663,7 @@ proc planTrace(p: var Planner, ix: TraceIndex, trace: int, k: TraceKeys,
   of skSeg2, skUnknown: {}
 
 proc checkGeometryInput(f: SeismicFile, keys: openArray[TraceKeys]) =
-  if not f.isOpen: raise newException(ValueError, "the file is closed")
+  f.requireOpen()
   case f.kind
   of skSeg2:
     raise newException(ValueError, "geometry cannot be written to SEG-2 files yet")

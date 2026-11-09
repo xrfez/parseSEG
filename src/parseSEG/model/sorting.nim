@@ -100,9 +100,7 @@ proc sortTraces*(f: SeismicFile, by: openArray[string], traces: openArray[int]):
   ## no data (decode it with `readTracesInto(f, order, ...)`). No keys give
   ## `traces` unchanged. Raises `ValueError` as `traceFieldColumn` does: an
   ## unknown, text or raw field, a trace out of range or a closed file.
-  for i in traces:
-    if i notin 0 ..< f.len:
-      raise newException(ValueError, "no trace " & $i & " (the file has " & $f.len & ")")
+  for i in traces: f.requireTrace(i)
   template fill(j: int, col: var seq[float64]) =
     f.traceFieldColumnInto(by[j], traces, col) # also checks the name when n < 2
   let pos = sortBy(traces.len, by.len, fill)

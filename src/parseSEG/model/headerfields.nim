@@ -516,7 +516,7 @@ proc seg2Strings*(f: SeismicFile, trace: int): seq[Seg2String] =
   ## The keyword strings of SEG-2 trace `trace`, or of the File Descriptor
   ## Block when `trace` is -1, in file order. Raises `ValueError` for a file
   ## that is not SEG-2 or is closed, or a trace out of range.
-  if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
+  f.requireKind(skSeg2)
   if trace == -1: f.index.seg2.strings
   else: f.seg2Trace(trace).strings
 
@@ -534,9 +534,8 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 =
   ## caller error. Raises `ValueError` for a trace out of range or a closed
   ## file (the headers are read from the map, as `traceField` does).
   template ix: untyped = f.index
-  if trace notin 0 ..< ix.len:
-    raise newException(ValueError, "no trace " & $trace & " (the file has " & $ix.len & ")")
-  if not f.isOpen: raise newException(ValueError, "the file is closed")
+  f.requireTrace(trace)
+  f.requireOpen()
   let e = ix.entries[trace]
   case ix.kind
   of skSeg2:

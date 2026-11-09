@@ -204,7 +204,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   ## the file (an empty range must still start in `0 .. f.len`), a closed or
   ## tape file, a non-positive chunk size or depth, or a negative
   ## `firstSample`.
-  if not f.isOpen and f.len > 0: raiseArg("the file is closed")
+  if f.len > 0: f.requireOpen()
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
   if chunkTraces <= 0 or depth <= 0 or cols < -1 or firstSample < 0:
     raiseArg("need chunkTraces > 0, depth > 0, cols >= -1 and firstSample >= 0")

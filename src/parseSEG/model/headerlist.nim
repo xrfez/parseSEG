@@ -142,7 +142,7 @@ proc addRev3Blocks(L: var Lister, prefix: string, first: int, at: int64, n: int)
       inc k
 
 proc initLister(f: SeismicFile): Lister =
-  if not f.isOpen: raise newException(ValueError, "the file is closed")
+  f.requireOpen()
   Lister(mem: f.unsafeMemory, size: f.mappedSize)
 
 proc located(L: var Lister, f: SeismicFile, scope: HeaderScope, index: int,
@@ -175,8 +175,7 @@ proc traceHeaders*(f: SeismicFile, trace: int): seq[HeaderRow] =
   ## Every header block of trace `trace`, as rows in file order: `trace`,
   ## `ext1` and any further extensions (see the module documentation).
   ## Raises `ValueError` for a trace out of range or a closed file.
-  if trace notin 0 ..< f.len:
-    raise newException(ValueError, "no trace " & $trace & " (the file has " & $f.len & ")")
+  f.requireTrace(trace)
   var L = initLister(f)
   let e = f.index.entries[trace]
   if f.kind == skSeg2:

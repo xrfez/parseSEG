@@ -40,6 +40,7 @@ import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
 export traceindex except unsafeMemory, decodeEntry, tryDecodeEntry, DecodeStatus, adviseTraces,
   decodeMessages, mappedSize, flush,
   requireKeys, checkSpan, spanLen, MapPin, pinMap, openSeismicRw, remapWritable,
+  raiseClosed, requireOpen, raiseNoTrace, requireTrace, requireKind,
   ProgressTicker, initProgressTicker, tick, finish, progressPhase, reportCancelled
 export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
   isLayoutField, isNamedField, fieldValueOf, readFields

@@ -999,7 +999,7 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
   ## incomplete. Raises `ValueError` when `f` is not SEG-2 or has no keys.
   ## `progress` as for `convertSegy` (done: the share of traces written, in
   ## bytes of the file).
-  if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
+  f.requireKind(skSeg2)
   if not f.hasKeys: raise newException(ValueError, "open the file with keys = true")
   var c = SegdToSegy(opts: opts, loc: Location(file: sink.name))
   var err: string

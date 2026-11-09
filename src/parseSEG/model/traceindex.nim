@@ -576,6 +576,16 @@ func mapped(f: SeismicFile): bool {.inline.} =
   # ORC's reference counts are not atomic.
   f.map != nil and f.map.src != nil
 
+proc raiseClosed*() {.noinline, noreturn.} =
+  ## **Internal.** Raises `ValueError` "the file is closed". Not exported by
+  ## `parseSEG`.
+  raise newException(ValueError, "the file is closed")
+
+proc requireOpen*(f: SeismicFile) {.inline.} =
+  ## **Internal.** Raises `ValueError` when `f` is closed (`isOpen`). Not
+  ## exported by `parseSEG`.
+  if not f.mapped: raiseClosed()
+
 proc pinMap*(f: SeismicFile): MapPin =
   ## **Internal.** A pin on `f`'s map (an empty pin for a closed file).
   if f.map != nil:
@@ -704,7 +714,7 @@ proc remapWritable*(f: var SeismicFile) =
   ## `f` is unchanged then. A prefetcher on `f` keeps the old map through its
   ## pin, and the index tables it reads stay parked there: the file gets
   ## copies of them.
-  if not f.mapped: raise newException(ValueError, "the file is closed")
+  f.requireOpen()
   if f.demuxPath.len > 0:
     raise newException(ValueError, f.path & " holds multiplexed SEG-D, which cannot be " &
       "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
@@ -764,14 +774,29 @@ func maxSamples*(f: SeismicFile): int {.inline.} =
   ## Samples in the longest trace.
   f.index.maxSamples
 
-proc raiseNoTrace(f: SeismicFile, trace: int) {.noinline, noreturn.} =
-  raise newException(ValueError, "no trace " & $trace & " (the file has " & $f.len & ")")
+proc raiseNoTrace*(trace, len: int) {.noinline, noreturn.} =
+  ## **Internal.** Raises `ValueError` for trace `trace` of a file of `len`
+  ## traces. Not exported by `parseSEG`.
+  raise newException(ValueError, "no trace " & $trace & " (the file has " & $len & ")")
+
+proc requireTrace*(f: SeismicFile, trace: int) {.inline.} =
+  ## **Internal.** Raises `ValueError` for a trace out of range. Not
+  ## exported by `parseSEG`.
+  if trace notin 0 ..< f.len: raiseNoTrace(trace, f.len)
+
+proc raiseNotKind(kind: SeismicKind) {.noinline, noreturn.} =
+  raise newException(ValueError, "not a " & $kind & " file")
+
+proc requireKind*(f: SeismicFile, kind: SeismicKind) {.inline.} =
+  ## **Internal.** Raises `ValueError` "not a SEG-Y file" (etc.) when `f` is
+  ## not of `kind`. Not exported by `parseSEG`.
+  if f.kind != kind: raiseNotKind(kind)
 
 func traceEntry*(f: SeismicFile, trace: int): TraceEntry =
   ## Where trace `trace` lives: header offset, header bytes, samples, record,
   ## channel set, scan type and channel type. Raises `ValueError` for a trace
   ## out of range.
-  if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
+  f.requireTrace(trace)
   f.index.entries[trace]
 
 func hasKeys*(f: SeismicFile): bool {.inline.} =
@@ -781,7 +806,7 @@ func hasKeys*(f: SeismicFile): bool {.inline.} =
 func traceKeys*(f: SeismicFile, trace: int): TraceKeys =
   ## A trace's geometry (NaN or 0 where unknown). Raises `ValueError` for a
   ## trace out of range or a file opened without `keys`.
-  if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
+  f.requireTrace(trace)
   if not f.hasKeys: raise newException(ValueError, "open the file with keys = true")
   f.index.keys[trace]
 
@@ -789,9 +814,9 @@ proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   ## The SEG-2 Trace Descriptor Block of trace `trace` (fixed part and
   ## keyword strings), re-read from the map. Raises `ValueError` for a file
   ## that is not SEG-2 or is closed, or a trace out of range.
-  if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
-  if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
-  if not f.mapped: raise newException(ValueError, "the file is closed")
+  f.requireKind(skSeg2)
+  f.requireTrace(trace)
+  f.requireOpen()
   var log: DiagLog # already reported by the index walk
   readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.index.seg2, trace,
     log, f.path)
@@ -803,15 +828,13 @@ func cardLines(text: string): string =
     if i > 0 and i mod CardWidth == 0: result.add '\n'
     result.add c
 
-proc requireSegy(f: SeismicFile) =
-  if f.kind != skSegy: raise newException(ValueError, "not a SEG-Y file")
 
 func textHeader*(f: SeismicFile): string =
   ## SEG-Y: the 3200-byte textual file header decoded (EBCDIC or ASCII, as
   ## detected) to 40 lines of 80 Latin-1 characters joined by '\n', with no
   ## trailing newline. Works on a closed file. Raises `ValueError` for a file
   ## that is not SEG-Y.
-  f.requireSegy()
+  f.requireKind(skSegy)
   cardLines(f.index.segy.text.text)
 
 proc extendedTextHeaders*(f: SeismicFile): seq[string] =
@@ -822,12 +845,12 @@ proc extendedTextHeaders*(f: SeismicFile): seq[string] =
   ## stanzas come out as their bytes in Latin-1. Raises `ValueError` for a
   ## file that is not SEG-Y, or a closed one when the records were too large
   ## to keep in memory.
-  f.requireSegy()
+  f.requireKind(skSegy)
   template ext: untyped = f.index.segy.extended
   let n = ext.recordCount
   let start = int64(f.index.segy.tapeLabel.len + TextHeaderSize + BinaryHeaderSize)
   if not ext.isComplete and n > 0:
-    if not f.mapped: raise newException(ValueError, "the file is closed")
+    f.requireOpen()
     if start + int64(n * TextHeaderSize) > f.map.src.size:
       raise newException(ValueError, "the extended textual header lies past the end of the file")
   template record(rec: openArray[byte]): string =
@@ -857,7 +880,7 @@ proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
   ## A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
   ## hex view). Raises `ValueError` if the file is closed or the range lies
   ## outside it. Changing the copy never changes the file.
-  if not f.mapped: raise newException(ValueError, "the file is closed")
+  f.requireOpen()
   let size = f.map.src.size
   # `n > size - offset`, not `offset + n > size`: the sum can overflow.
   if offset < 0 or offset > size or int64(n) > size - offset:
@@ -970,7 +993,7 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
   if f.hasKeys:
     for k in 0 ..< count: dst[k] = f.index.keys[traceAt(k)]
   elif count > 0:
-    if not f.isOpen: raise newException(ValueError, "the file is closed")
+    f.requireOpen()
     let mem = f.unsafeMemory
     let size = f.mappedSize
     var r = initKeyReader(f)
@@ -986,7 +1009,7 @@ proc traceKeysInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[T
   ## the traces asked for. Raises `ValueError` for a trace out of range, a
   ## closed file or a `dst` of the wrong length.
   for i in traces:
-    if i notin 0 ..< f.len: f.raiseNoTrace(i)
+    f.requireTrace(i)
   template at(k: int): int = traces[k]
   keysLoop(f, dst, traces.len, at)
 
@@ -1032,7 +1055,7 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
   failed
 
 proc checkReadable(f: SeismicFile, count: int) =
-  if not f.isOpen and count > 0: raise newException(ValueError, "the file is closed")
+  if count > 0: f.requireOpen()
   if not f.index.contiguous:
     raise newException(ValueError, "range reads need a plain disk file")
 
@@ -1041,7 +1064,7 @@ proc checkSelection(f: SeismicFile, traces: Slice[int]) {.inline.} =
 
 proc checkSelection(f: SeismicFile, traces: openArray[int]) =
   for i in traces:
-    if i notin 0 ..< f.len: f.raiseNoTrace(i)
+    f.requireTrace(i)
 
 proc checkRows[T](dst: Tensor[T], row, count: int) =
   if not (dst.rank == 2 and dst.is_C_contiguous and row >= 0 and row + count <= dst.shape[0]):
@@ -1392,7 +1415,7 @@ proc saveIndex*(f: SeismicFile, path: string) =
   ## cache holds the file's own index), a file that changed since it was
   ## opened, or `path` naming the file itself; `IOError`/`OSError` if the
   ## cache cannot be written.
-  if not f.mapped: raise newException(ValueError, "the file is closed")
+  f.requireOpen()
   if not f.index.detected:
     raise newException(ValueError, f.path & " is not a SEG-Y, SEG-D or SEG-2 file")
   if f.demuxPath.len > 0:
