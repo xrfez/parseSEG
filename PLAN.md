@@ -2,33 +2,34 @@
 
 > **Resuming in a new session? Read this file first, then follow "Resume protocol".**
 
-## Handoff (2026-11-09) — start here
-- **Branch state:**
-  - `seg-library` at the "PLAN: handoff" commit; `main` is behind it with no commits of its
-    own, so a merge fast-forwards. No worktrees, nothing pushed.
-  - Full suite green: 41 test files (44 before 14.1), run as `TMPDIR=/tmp/pl nim test` (see the gotcha).
-- **Done since Phase 12:**
-  - 4.7, 6.8-6.10, 10.5, 11.1, 11.2;
-  - Phase 13: 13.1 docs, 13.2 benchmarks and performance fixes, 13.3 review, 13.4 Group I
-    fixes.
-- **New owner direction (2026-11-09):** parseSEG is a **Nim library**. Remove the C ABI and
-  the Python module, and stop shaping the library around an FFI. Stay lean in features and fast.
-  That is Phase 14 below. It replaces the C/Python items of Phase 13, and the merge to `main`
-  (13.5) moves after Phase 14.
-- **Next steps, in order:**
-  - ~~14.1: remove the FFI~~ (done 2026-11-09);
-  - ~~14.2: simplify what the FFI shaped~~ (done 2026-11-09);
-  - 14.3: decide the Nim-only API additions with the owner;
-  - 14.4: re-benchmark Nim only, then merge into `main` (13.5).
+## Handoff (2026-11-09, end of Phase 14) — start here
+- **Branch state:** Phase 14 is complete, and `main` was fast-forwarded to `seg-library` (13.5).
+  Both point at the same commit. Nothing is pushed: push only if the owner asks.
+- **What parseSEG is now:** a Nim-only library (0.5.0), plus the `parseSEG` CLI.
+  - 14.1 removed the C ABI and Python module.
+  - 14.2 removed the API shapes the FFI forced (see `docs/design/phase14_audit.md`).
+  - 14.3 added bulk header columns and keys on demand, sample windows, `textHeader`,
+    `sortTraces`, `openEditor(f)`/`release`, `SeismicWriter`, a progress/cancel hook, the
+    index cache (`saveIndex`, `openSeismic(cache = ...)`) and prefetch recycling.
+  - `docs/benchmarks.md` has a Phase 14 re-run section.
+- **Suite:** `TMPDIR=/tmp/pl nim test` (47 test files). Check both the exit code and the
+  line "All test files completed".
 - **Gotchas:**
-  - Run tests with a short `TMPDIR` (e.g. `TMPDIR=/tmp/pl nim test`). `theadernif`
-    `failed_journal_syncs` fails under a long TMPDIR, because its 100-byte RLIMIT is smaller
-    than the journal line. This could be fixed in 14.x by raising the limit in the test.
-  - Agent reports for 13.1, 13.2 and 13.4 were lost when the editor window crashed. Their work
-    was committed and merged (see the 2026-11-09 Log). Check `docs/benchmarks.md` and
-    `docs/guide/` rather than trusting a report.
-  - Parallel agents need their own worktree, `XDG_CACHE_HOME` and a short `TMPDIR`. A `deps/`
-    symlink to the main checkout's deps works.
+  - **Short TMPDIR:** `theadernif` `failed_journal_syncs` fails under a long TMPDIR.
+  - **Map refs on shared read paths:** never copy `f.map`/`f.map.src` into a local. ORC
+    counts are not atomic, and threads share files (`tests/tsharedreads.nim`).
+  - **Commits:** commit as a separate command after checking the suite. A commit on the
+    line after a heredoc runs even when the check before it failed.
+  - **Known leak:** ASan reports a 32 KB leak in 2 allocations in the prefetcher tests. It
+    predates Phase 14 (Nim thread runtime) and has not been investigated.
+  - **Parallel agents:** they need their own worktree, `XDG_CACHE_HOME` and a short
+    `TMPDIR`. Phase 14.3 ran one agent at a time on the main checkout instead.
+- **Open (from the 14.3 logs):**
+  - the SEG-D writer cannot change sample counts and refuses multiplexed input;
+  - the full-scale bench (`PARSESEG_BENCH_SCALE=full`) was not re-run;
+  - "Open questions for the owner" below still stand.
+- **Next:** nothing is scheduled after Phase 14. Ask the owner (candidates: Phase 11.3 needs
+  a real SEG-2 file; "Future").
 
 ## Goal
 An idiomatic, high-performance Nim library to **read and write** SEG seismic data on **disk and
@@ -934,7 +935,7 @@ high-performance viewer. Then `seg-library` is merged into `main`.
         by sharing the map owner (close defers the unmap), or by having close raise.
       - R3-11b: `struct_size` first in the option structs, for ABI growth.
 - [x] 13.4 Apply the 13.3 findings (and 13.2 fixes not yet applied); full suite green.
-- [ ] 13.5 Merge `seg-library` into `main` (owner asked, 2026-11-08), after Phase 14. Do not
+- [x] 13.5 Merge `seg-library` into `main` (owner asked, 2026-11-08), after Phase 14. Do not
       push unless the owner asks.
 
 ### Phase 14: Nim library only (owner, 2026-11-09)
@@ -1005,7 +1006,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
         optional index sidecar cache.
       - **Editing (R3-4):** `openEditor(f: SeismicFile)` reusing the viewer's index.
       - **Prefetch (R3-9):** chunk recycling, `recycle` / `nextInto`.
-- [ ] 14.4 Re-run `nim bench` (Nim only) and update `docs/benchmarks.md`, then do 13.5.
+- [x] 14.4 Re-run `nim bench` (Nim only) and update `docs/benchmarks.md`, then do 13.5.
 
 ### Future (noted, not scheduled)
 - From the 14.2 audit, declined for now: a bounds-checked `mapped(f)` view for internal map
@@ -1600,3 +1601,5 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 - 2026-11-09: 14.3d done. New `model/writefile`: `openSeismicWriter(path, like, segyFormat = stKeep, segdFormat = tfKeep, seg2Format = s2tKeep): SeismicWriter`, `writeTrace(w, src, trace, samples: openArray[T])` and `writeTrace(w, src, trace, x: Tensor[T], row, samples = -1)`, `close(w): DiagLog`, `len`, `path`. File headers come from `like`; trace headers are re-read from `src`'s map and only what the samples change is changed (format code; SEG-Y/SEG-2 sample counts in the trace header, SEG-Y binary count when uniform, fixed-length files need one count, the declared Rev 2 trace count patched at close; SEG-D Rev 3 GH#3 data/record sizes on a format change). SEG-Y headers are validated at open on a null sink, the real writer opens at the first trace. SEG-D rule: records whole, traces in input order, a record ends when another record's trace arrives or at close (`ValueError` if incomplete); records may be skipped/reordered. Output via `createTempFor`/`finishOutput`; a `=destroy` removes the temp file of a writer dropped without close (or whose close raised). Tests: new `tests/twritefile.nim` (identity rewrite byte-identical on 14 fixtures; scaled SEG-Y Rev 0/1/2.1 BE/LE in formats 1/2/3/5/6/9, SEG-D 2.0/2.1/3.0 with 8048/8058/8080, SEG-2 formats 4/5; count changes; record rule; refusals; dropped writer). Docs: processing.md "Write like the input" (2 tested examples; replaces "SEG-D or SEG-2 in"), api.md section. Open (refused with `ValueError`): SEG-D sample-count changes (would need descriptor edits before the record headers are written), multiplexed SEG-D input. Note: 8015 output is always one's complement (the encoder has no two's-complement mode).
 - 2026-11-09: 14.3e done. Progress/cancel: new `common/progress` with `Progress = proc (done, total: int64): bool {.closure, gcsafe, raises: [].}` (input bytes, total -1 if unknown; about every MiB via a one-compare ticker, plus once at the end), passed as `progress = nil` to `openSeismic`, `buildIndex`, `exportHeaders`, `convertFile` and every converter it dispatches to (`convertSegy`, `convertSegdToSegy`, `convertSeg2ToSegy`, `convertToSeg2`, `convertSeg2ToSegd`, `convertSegdRevision` path and stream, `scanSegdRecords`), `convertWithGeometry`, `copyWithGeometry` (chunked copy when hooked); multi-pass operations spread their passes over one 0..total run. Cancel: `openSeismic`/`buildIndex`/`exportHeaders` raise the new `SegCancelledError` (errors.nim; the file is built in a local, so it is unmapped; no export output), conversions return fatal `dcCancelled` and leave nothing (temp-and-rename). Index cache: `saveIndex(f, path)` + `openSeismic(..., cache = path)` + `f.fromCache`; chosen over `openSeismic(cache)` writing the file because of the owner rule "persisting derived data is a separate, named call" (and `saveIndex` can refuse indexes whose keys were joined: new `TraceIndex.joined`). The cache is a NIF header (version, library version, schema hash, endianness, absolute path, size, mtime s+ns, checksums of the first/last 64 KiB, twosComplement8015, keys), then the whole `TraceIndex` as a native snapshot (new `common/binstore`: generic `fieldPairs` put/get incl. variants and private fields; POD seqs as one block; `schemaOf` macro describes every stored type so any layout change invalidates), then length + checksum. Valid only if the header is exactly the one the file would get now (a keys cache serves keys = false); otherwise walked, with an info `dcIndexCache` saying why; the saved log excludes that note. Demultiplexed copies are refused. Measured (-d:danger, warm, 10 M SEG-Y traces, 12.4 GB): walk 2.58 s before / 2.48 s after / 2.48 s with a hook (11 822 calls); from the cache 43 ms (240 MB, saved in 95 ms); keys 7.0 s vs 0.47 s cached. Tests: new `tprogress` (counts, monotonic, cancel in open/convert/export/geometry writers, unmapped after cancel, unchanged output without a hook), `tindexcache` (snapshot-equal round trip on every sample and SEG-Y LE / Rev 1, SEG-D 2.0/2.1/3.0/3.1/8015, SEG-2 fixtures with and without keys; size/mtime/head/tail/path/option/keys/version/schema/library staleness; truncated, flipped, empty, foreign and directory caches; refusals), tsegdmux (mux not cached). Docs: api.md, diagnostics.md codes, viewer.md section, benchmarks item 2.
 - 2026-11-09: 14.3f done. Prefetch buffer recycling: `nextInto(p, c)` / `tryNextInto(p, c)` (the caller gives up `c.samples`: if it has the chunk shape `[chunkTraces, cols]`, owns its storage from offset 0 and nothing else shares it (`isUniqueRef` on the Arraymancer storage, so a kept copy or view is never overwritten, only not reused), it is swapped into the slot as its next decode target), `recycle(p, t: sink Tensor[T])` / `recycle(p, c: sink PrefetchChunk[T])` (a spare list of at most `depth` reusable buffers that `next` takes before allocating; others are dropped). Partial chunks still clone (with `into` the old buffer goes to the spare list). `next`/`tryNext`/`chunks` unchanged. Tests in tprefetch: data across files/chunk sizes/seeks, random seeks with short spans and selections, kept copies and views intact, recycle of shared/view/wrong-shape/own tensors, cols = 0; allocation counter (new `tests/tprefetch.nims` sets `-d:nimAllocStats`): 0 allocations over 400 steady `nextInto` chunks vs >= 1 per chunk with `next`. ASan clean (only the known 32 KB thread-runtime leak). Measured (`-d:danger`, warm, y-ieee-1m first 300 k traces = 300 MB float32, depth 4): chunk 4096 (4 MB) `next` 1 930 chunks/s 7.8 GB/s vs `nextInto` 1 910 chunks/s 7.7 GB/s; chunk 256: 31 300 vs 31 300 chunks/s, 8.0 GB/s both: throughput is bound by the one decoding worker, so recycling saves the 4 MB allocation (and its page faults) per chunk, not wall time. Docs: api.md prefetcher row, viewer.md (tested example), module doc.
+- 2026-11-09: 14.4 done. Ran `nim bench` at small scale; it passed. `docs/benchmarks.md` has a "Phase 14 re-run" section: the same per-trace index cost (218 vs 244 ns/trace), keys (648 vs 682), heap, IBM/8015 decode and single-trace latency as before, plus the 14.3 rows (sample window, header column) and the agents' cache/hook/recycling numbers. Full scale was not re-run.
+- 2026-11-09: 13.5 done. `main` was fast-forwarded to `seg-library` at the end of Phase 14; nothing is pushed. Handoff rewritten.
