@@ -223,3 +223,15 @@ block two_prefetchers_one_map:
   doAssert b.next(c) and c.count == 5
   b.close()
   doAssert not mapped(path)
+
+block chunks_iterator:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64)
+  var n = 0
+  for c in p.chunks:
+    doAssert c.first == n and c.samples == all.rows(c.first, c.count)
+    n += c.count
+  doAssert n == f.len and p.atEnd
+  p.close()
+  f.close()

@@ -48,7 +48,7 @@ Conventions that hold throughout:
 | `readTraces(f, traces, T = float32)` | Without a log: raises `SegFormatError` (`SegTruncatedError`) naming the first trace that cannot be decoded. |
 | `readTracesInto(f, traces, var tensor, row = 0[, log]): int` | Decode a range or a selection into an existing tensor; returns the number of traces left zero (logged in `log`). |
 | `maxSamples(f, traces)` | Longest trace of a range or selection. |
-| `newPrefetcher[T](f, traces, chunkTraces, depth, cols)` (a range or a list) | Read-ahead on a worker thread: `tryNext` (never blocks), `next`, `seek(span)`, `atEnd`, `traceAt`, `len` (positions), `close`. A `PrefetchChunk` has `first`, `count`, `samples`, `failed` and `log` (one error per trace left zero, with its trace index). |
+| `newPrefetcher[T](f, traces, chunkTraces, depth, cols)` (a range or a list) | Read-ahead on a worker thread: `tryNext` (never blocks), `next`, `for c in p.chunks`, `seek(span)`, `atEnd`, `traceAt`, `len` (positions), `close`. It keeps the file's map alive until its `close`. A `PrefetchChunk` has `first`, `count`, `samples`, `failed` and `log` (one error per trace left zero, with its trace index). |
 
 Bad caller input (a trace, range or position out of range, a closed file) raises
 `ValueError` everywhere.

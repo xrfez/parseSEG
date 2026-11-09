@@ -48,20 +48,19 @@ Pick the form that matches your policy for damaged data.
 ### Overlap decoding with computing
 
 A `Prefetcher` decodes the next chunks on a worker thread while you process the current one.
-`next` waits for a chunk; each chunk's tensor is yours to keep.
+`chunks` (or `next` in a loop) waits for each chunk; each chunk's tensor is yours to keep.
 
 ```nim
 import parseSEG
 
 var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
 var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 3)
-var c: PrefetchChunk[float32]
 var peak = 0'f32
 var traces = 0
-while p.next(c):
+for c in p.chunks:
   peak = max(peak, max(abs(c.samples)))
   traces += c.count - c.failed
-p.close()                     # stops and joins the worker; do it before closing the file
+p.close()                     # stops and joins the worker
 echo traces, " traces, peak amplitude ", peak
 doAssert traces == f.len and peak > 0
 ```

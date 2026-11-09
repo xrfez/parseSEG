@@ -37,12 +37,13 @@ import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
 export traceindex except unsafeMemory, decodeEntry, mappedSize, flush,
   requireKeys, checkSpan, spanLen, MapPin, pinMap, openSeismicRw
 export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
-  isLayoutField, isNamedField, fieldValueOf
+  isLayoutField, isNamedField, fieldValueOf, readFields
 export keys, gathers, prefetch, headernif, summary, headerlist
 export edit except writeBytes, flushPending, batching, logVar
 
 import parseSEG/survey/[textrec, sps, p1, join, writeback]
-export textrec, sps, p1, join, writeback
+export textrec, sps, p1, join
+export writeback except chooseScalar
 
 import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
 export records, diskio, memsource, tapeimage, tapedevice

@@ -1,5 +1,4 @@
-## Regression tests for the Phase 8 review findings (Nim side; the C ABI
-## findings are in tests/c/abi_test.c: test_concurrent_init, test_limits).
+## Regression tests for the Phase 8 review findings.
 ## One block per finding (b<N> = the Nim-side review's numbering).
 
 import std/[assertions, os, math, strutils]

@@ -9,8 +9,7 @@
 ## ```nim
 ## var f = openSeismic("survey.sgd")
 ## var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 512, depth = 4)
-## var c: PrefetchChunk[float32]
-## while p.next(c):
+## for c in p.chunks:             # or `while p.next(c)`, or `tryNext` to poll
 ##   show(c.first, c.samples)      # [c.count, cols] tensor, owned by the caller
 ##   for d in c.log: echo d.msg    # one error per trace that could not be decoded
 ## p.close()
@@ -311,6 +310,12 @@ proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   release(p.sh.lock)
   if more: p.take(c)
   more
+
+iterator chunks*[T](p: var Prefetcher[T]): PrefetchChunk[T] =
+  ## Yields the chunks of the current range in order, waiting for each
+  ## (`next` in a loop). Do not `seek` or `close` inside the loop.
+  var c: PrefetchChunk[T]
+  while p.next(c): yield move(c)
 
 proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   ## Restarts read-ahead over the positions `span` (traces in range mode).

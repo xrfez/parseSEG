@@ -1,5 +1,4 @@
-## The core procs added for task 12.5 (the C and Python names derive from
-## them): file accessors, raising lookups, Slice ranges, survey geometry
+## The core procs added for task 12.5: file accessors, raising lookups, Slice ranges, survey geometry
 ## setup, and the `ValueError`s that replace assertions on bad input.
 
 import std/[os, math, tables]

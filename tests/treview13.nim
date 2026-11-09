@@ -1,6 +1,5 @@
 ## Regression tests for the Phase 13.3 review findings (task 13.4). One block
-## per finding (R<reviewer>-<n>, as in PLAN.md). The C-boundary findings
-## are in tests/c/abi_test.c and tests/c/guard_test.c.
+## per finding (R<reviewer>-<n>, as in PLAN.md).
 
 import std/[assertions, os, strutils, options, times]
 import parseSEG

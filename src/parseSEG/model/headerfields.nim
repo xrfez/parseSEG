@@ -1,7 +1,7 @@
 ## Header fields by name (task 8.2): read any header field of a mapped file
 ## as `<block>.<field>`, with the field names of the header types. The same
 ## names (and this module's block lookup) serve the in-place editor
-## (`model/edit`) and the C ABI.
+## (`model/edit`).
 ##
 ## - per trace (`traceField`): `trace` (the SEG-Y trace header or SEG-D demux
 ##   header) and `ext1` (SEG-Y Trace Header Extension 1; SEG-D THE#1, in the

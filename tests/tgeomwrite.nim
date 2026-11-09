@@ -7,6 +7,7 @@
 import std/[assertions, options, os, strutils, math]
 import parseSEG
 import parseSEG/survey/cards # column helpers (internal)
+from parseSEG/survey/writeback import chooseScalar # internal
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 let tmp = getEnv("XDG_CACHE_HOME", getTempDir()) / "parseseg_tgeomwrite"
