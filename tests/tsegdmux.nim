@@ -464,6 +464,9 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   doAssertRaises ValueError: discard openEditor(tmp / "m15.sgd")
   doAssertRaises ValueError: discard openEditor(tmp / "m15.sgd", tmp / "j.nif")
   doAssert not fileExists(tmp / "j.nif")
+  # So does an editor made from the open file (its demultiplexed copy) (14.3c).
+  doAssertRaises ValueError: discard openEditor(openSeismic(tmp / "m15.sgd"), tmp / "j.nif")
+  doAssert not fileExists(tmp / "j.nif")
   # Survey geometry: in place is refused like any edit; a copy is written
   # demultiplexed (10.5).
   let geo = copyWithGeometry(tmp / "m15.sgd", tmp / "m15geo.sgd", initSurveyGeometry()).log

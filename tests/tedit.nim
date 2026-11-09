@@ -5,7 +5,7 @@ import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, writer as segywriter]
 import parseSEG/segd/[reader as segdreader]
-import parseSEG/model/[traceindex, headerfields, edit]
+import parseSEG/model/[traceindex, headerfields, edit, prefetch]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 let tmp = getTempDir() / "parseseg_tedit"
@@ -361,5 +361,92 @@ block batch_edits_several_fields_of_one_header_without_a_flush:
     doAssert ed.file.traceField(i, "trace.sourceY").intVal == 2000 + i
   ed.close()
   doAssert editLines(journal) == 3 * n
+  doAssert rollbackJournal(path, journal).len == 0
+  doAssert readBytes(path) == orig
+
+block editor_from_an_open_file:
+  # 14.3c: the editor takes over the open file and its index (no second
+  # open or walk); journal, rollback and refusals as `openEditor(path)`.
+  let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+  let orig = readBytes(path)
+  var f = openSeismic(path, keys = true)
+  let n = f.len
+  let entries = f.index.entries
+  var ed = openEditor(move f)
+  doAssert not f.isOpen # moved into the editor
+  doAssert ed.journalPath == journal and fileExists(journal)
+  doAssert ed.file.isOpen and ed.file.len == n and ed.file.hasKeys
+  doAssert ed.file.index.entries == entries
+  doAssert ed.setTraceField(5, "trace.sourceX", 1_700_000)
+  doAssert ed.setFileField("binary.jobId", 4242)
+  doAssert ed.file.traceField(5, "trace.sourceX").intVal == 1_700_000
+  doAssert ed.file.index.segy.binary.jobId == 4242 # cached header refreshed
+  ed.close()
+  doAssert not ed.file.isOpen and editLines(journal) == 2
+  var g = openSeismic(path)
+  doAssert g.traceField(5, "trace.sourceX").intVal == 1_700_000
+  g.close()
+  doAssert rollbackJournal(path, journal).len == 0
+  doAssert readBytes(path) == orig
+
+block editor_from_an_open_file_released:
+  # `release` hands the file back, still mapped and as edited.
+  let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+  let orig = readBytes(path)
+  var ed = openEditor(openSeismic(path), journal)
+  ed.beginBatch()
+  doAssert ed.setTraceField(3, "trace.groupStatic", -12)
+  var f = release(move ed)
+  doAssert f.isOpen and f.traceField(3, "trace.groupStatic").intVal == -12
+  doAssert editLines(journal) == 1
+  # Edit again from the released file: a fresh session in the same journal.
+  var ed2 = openEditor(move f, journal)
+  doAssert ed2.setTraceField(4, "trace.groupStatic", -13)
+  ed2.close()
+  doAssert editLines(journal) == 2
+  doAssert rollbackJournal(path, journal).len == 0
+  doAssert readBytes(path) == orig
+
+block editor_from_an_open_file_refusals:
+  let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+  let orig = readBytes(path)
+  var closed = openSeismic(path)
+  closed.close()
+  doAssertRaises(ValueError): discard openEditor(move closed)
+  doAssertRaises(ValueError): discard openEditor(openSeismic(path), path) # journal is the file
+  # A file that changed size since it was opened: its index would be stale.
+  var f = openSeismic(path)
+  block:
+    let h = open(path, fmAppend)
+    h.write("x")
+    h.close()
+  doAssertRaises(ValueError): discard openEditor(move f)
+  doAssert not fileExists(journal), "nothing opened on a refusal"
+  doAssert readBytes(path)[0 ..< orig.len] == orig
+
+block editor_from_a_file_with_a_running_prefetcher:
+  # The prefetcher pins the old read-only map and the index tables it reads;
+  # the editor maps anew and works on copies, so closing the editor first
+  # leaves the prefetcher reading valid memory.
+  let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+  let orig = readBytes(path)
+  var f = openSeismic(path)
+  let all = f.readTraces(0 ..< f.len)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 7, depth = 2)
+  proc editAndDrop(f: sink SeismicFile, journal: string) =
+    # The editor, its file and that file's index tables go at the return.
+    var ed = openEditor(f, journal)
+    doAssert ed.setTraceField(0, "trace.sourceX", 1_700_000) # headers only: samples unchanged
+    ed.close()
+  doAssert f.len > 3 * 7, "the worker still decodes after the editor is gone"
+  editAndDrop(move f, journal)
+  var c: PrefetchChunk[float32]
+  var expect = 0
+  while p.next(c):
+    doAssert c.first == expect and c.failed == 0
+    doAssert c.samples == all[c.first ..< c.first + c.count, _]
+    expect += c.count
+  doAssert expect == all.shape[0]
+  p.close()
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == orig

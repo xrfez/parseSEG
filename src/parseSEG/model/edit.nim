@@ -12,6 +12,9 @@
 ## echo rollbackJournal("line.sgy", "line.sgy.edits.nif")  # undo everything
 ## ```
 ##
+## A file already open (`openSeismic`) is taken over with `openEditor(f)`,
+## which keeps its index (joined keys included); `release` hands it back.
+##
 ## Every edit is checked and journaled before a byte changes:
 ## - the field is encoded with the library's own field codecs, so a value
 ##   that does not fit the field's width, BCD digits, nibble or range is
@@ -449,6 +452,12 @@ proc applyJournal*(path, journalPath: string): DiagLog =
 
 # ------------------------------------------------------------------ edits --
 
+proc journalFor(path, journalPath: string): string =
+  # The journal path (default `path & ".edits.nif"`); `ValueError` if it is the file.
+  result = if journalPath.len > 0: journalPath else: path & ".edits.nif"
+  if result == path or (fileExists(result) and fileExists(path) and sameFile(result, path)):
+    raise newException(ValueError, "the journal " & result & " is the file being edited")
+
 proc openEditor*(path: string, journalPath = ""): HeaderEditor =
   ## Maps `path` read-write, builds its trace index and opens the journal
   ## (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
@@ -457,10 +466,24 @@ proc openEditor*(path: string, journalPath = ""): HeaderEditor =
   ## demultiplexed file first; see `openSeismic`). Problems reading the file
   ## are in `file.index.log`; a file whose index has a fatal problem can
   ## still be edited where its headers were located.
-  let jp = if journalPath.len > 0: journalPath else: path & ".edits.nif"
-  if jp == path or (fileExists(jp) and fileExists(path) and sameFile(jp, path)):
-    raise newException(ValueError, "the journal " & jp & " is the file being edited")
+  let jp = journalFor(path, journalPath)
   result = HeaderEditor(file: openSeismicRw(path), journalPath: jp)
+  result.openJournal()
+
+proc openEditor*(f: sink SeismicFile, journalPath = ""): HeaderEditor =
+  ## Takes over the open file `f` (from `openSeismic`) for editing: maps
+  ## `f.path` read-write in place of its read-only map and keeps its index
+  ## (entries, codecs, and keys, joined ones included), so the file is not
+  ## walked again; then as `openEditor(path, journalPath)`. A prefetcher still
+  ## running on `f` keeps reading the old map, and sees the edits. Raises
+  ## `ValueError` for a closed file, a demultiplexed copy of multiplexed
+  ## SEG-D, a file whose size changed since it was opened, or a journal that
+  ## is the file itself; `IOError`/`OSError` if the file or the journal
+  ## cannot be opened. On a raise, `f` is closed with it.
+  var file = f
+  let jp = journalFor(file.path, journalPath)
+  file.remapWritable()
+  result = HeaderEditor(file: file, journalPath: jp)
   result.openJournal()
 
 proc close*(ed: var HeaderEditor) =
@@ -480,6 +503,25 @@ proc close*(ed: var HeaderEditor) =
   if not synced:
     raise newException(IOError, "the journal " & ed.journalPath &
       " cannot be synced; the batch's pending edits were not written")
+
+proc release*(ed: sink HeaderEditor): SeismicFile =
+  ## Ends the editing session and hands back the file, still mapped, with its
+  ## index (cached headers as edited): `close` without unmapping, for a
+  ## viewer that goes on reading. Ends a batch, flushes the map and closes
+  ## the journal. Raises `IOError` as `close` does; the file is closed then.
+  var e = ed
+  var synced = true
+  try:
+    if e.batch: synced = e.endBatch()
+    e.file.flush()
+  finally:
+    if e.journal.f != nil:
+      e.journal.f.close()
+      e.journal.f = nil
+  if not synced:
+    raise newException(IOError, "the journal " & e.journalPath &
+      " cannot be synced; the batch's pending edits were not written")
+  result = move e.file
 
 func file*(ed: HeaderEditor): lent SeismicFile {.inline.} =
   ## The mapped file and its index (cached headers refreshed by the edits).

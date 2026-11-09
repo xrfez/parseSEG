@@ -586,11 +586,9 @@ proc edit(a: Args): int =
   a.onlyOptions(["journal"])
   if a.pos.len < 2: usage("expected edit <file> <assignment>...")
   let path = a.pos[0]
-  var plan: seq[Assignment]
-  block:
-    var f = openFile(path) # checked read-only first: nothing is written on a usage error
-    plan = parseAssignments(f, a.pos[1..^1])
-  var ed = openEditor(path, a.get("journal"))
+  var f = openFile(path) # checked read-only first: nothing is written on a usage error
+  let plan = parseAssignments(f, a.pos[1..^1])
+  var ed = openEditor(f, a.get("journal")) # takes over the file and its index
   var refused = 0
   try:
     ed.beginBatch()
@@ -934,9 +932,9 @@ proc surveyApply(a: Args): int =
     log.add r.log
     printChanges(c, "changed in " & output)
   elif inPlace:
-    var ed = openEditor(path, a.get("journal"))
+    var ed = openEditor(move f, a.get("journal")) # keeps the joined index: no second walk
     try:
-      c = ed.writeGeometry(f.index, fields)
+      c = ed.writeGeometry(fields)
     finally:
       ed.close()
     log.add ed.log

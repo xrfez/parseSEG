@@ -295,6 +295,9 @@ f.close()
 
 A viewer should not write to the file while the user experiments. Collect the changes in a
 `seq[HeaderChange]` and save it; applying it later is an explicit step ([editing.md](editing.md)).
+When the user does save into the file, `openEditor(f)` takes over the open file and its index
+(no second open), and `release(ed)` hands it back as edited
+([editing.md](editing.md#editing-a-file-that-is-already-open)).
 
 ```nim
 import parseSEG

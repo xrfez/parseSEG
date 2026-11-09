@@ -255,6 +255,30 @@ block refusals:
   doAssert copyWithGeometry(path, path, initSurveyGeometry()).log.isFatal
   doAssert copyWithGeometry(tmp / "missing.sgy", tmp / "x.sgy", initSurveyGeometry()).log.isFatal
 
+block segy_in_place_from_the_open_file:
+  # 14.3c: the editor takes over the joined file; its keys are the joined
+  # ones (no second walk, which would read the file's empty coordinates).
+  let path = tmp / "h.sgy"
+  segyFile(path)
+  let original = bytesOf(path)
+  var f = openSeismic(path, keys = true)
+  doAssert f.applySurvey(sps("h.sps", segySurvey)) == 4
+  let plan = f.geometryChanges()
+  var ed = openEditor(move f)
+  doAssert ed.file.hasKeys and ed.file.index.keys[2].rcvX == 500150
+  let w = ed.writeGeometry()
+  doAssert w == plan and w.traces == 4, $w
+  ed.close()
+  doAssert not ed.log.hasErrors
+  doAssert readSegy(path).traces[2].header.groupX == 50015000
+  doAssert rollbackJournal(path, path & ".edits.nif").len == 0
+  doAssert bytesOf(path) == original
+  # An editor without keys refuses.
+  var e = openEditor(openSeismic(path), tmp / "h.nif")
+  doAssertRaises ValueError: discard e.writeGeometry()
+  e.close()
+  doAssert bytesOf(path) == original
+
 when defined(linux):
   import std/posix
 

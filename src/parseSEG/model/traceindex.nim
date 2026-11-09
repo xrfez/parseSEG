@@ -551,6 +551,32 @@ proc openSeismicRw*(path: string): SeismicFile =
   ## would change only the demultiplexed copy.
   openMapped(path, false, false, true, "")
 
+proc remapWritable*(f: var SeismicFile) =
+  ## **Internal** (`openEditor(f)`; not exported by `parseSEG`). Maps `f.path`
+  ## read-write in place of the file's read-only map and keeps its index.
+  ## Raises `ValueError` for a closed file, a demultiplexed copy, or a file
+  ## whose size changed since it was opened (its index would be stale);
+  ## `f` is unchanged then. A prefetcher on `f` keeps the old map through its
+  ## pin, and the index tables it reads stay parked there: the file gets
+  ## copies of them.
+  if not f.mapped: raise newException(ValueError, "the file is closed")
+  if f.demuxPath.len > 0:
+    raise newException(ValueError, f.path & " holds multiplexed SEG-D, which cannot be " &
+      "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
+      "--to=segd`, `convertSegdRevision`) and edit that")
+  let m = MapRef(src: openMemFileSource(f.path, writable = true)) # unmapped on a raise
+  if m.src.size != f.map.src.size:
+    raise newException(ValueError, f.path & " changed size since it was opened (" &
+      $f.map.src.size & " bytes, now " & $m.src.size & "); open it again")
+  if f.map.pins > 0:
+    # A prefetcher reads `entries` and `codecs` through raw pointers: the
+    # payloads move to the map it keeps alive, the file keeps copies.
+    f.map.parkedEntries = move f.index.entries
+    f.map.parkedCodecs = move f.index.codecs
+    f.index.entries = f.map.parkedEntries
+    f.index.codecs = f.map.parkedCodecs
+  f.map = m
+
 proc close*(f: var SeismicFile) =
   ## Unmaps the file and deletes a demultiplexed copy (`demuxPath`). The
   ## index stays usable; range reads do not. A prefetcher still running on

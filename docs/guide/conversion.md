@@ -131,7 +131,9 @@ doAssert changed == 1 and k.rcvX == 500100 and k.srcPoint == 205
 ## Write the geometry into the file
 
 Once the keys are joined, three calls persist them. Each is an explicit write; all of them
-first let you see what would change.
+first let you see what would change. In place, `openEditor(f)` maps the open file read-write
+and keeps its index, joined keys included, so `writeGeometry()` writes them without opening
+or walking the file again (`move f` at a module's top level, where `f` is a global).
 
 ```nim
 import std/os
@@ -153,10 +155,9 @@ var report: DiagLog
 let plan = f.geometryChanges(GeometryFields(), report)   # a dry run: nothing is written
 echo "would change ", plan                # traces per kind, values with no slot
 for d in report: echo "  ", d.msg
-var ed = openEditor("shot.sgd")
-let done = ed.writeGeometry(f.index)
+var ed = openEditor(move f)               # takes over the open file and its joined keys
+let done = ed.writeGeometry()
 ed.close()
-f.close()
 doAssert done.receiverStations == 1
 var check = openSeismic("shot.sgd", keys = true)
 doAssert check.traceKeys(0).rcvPoint == 101

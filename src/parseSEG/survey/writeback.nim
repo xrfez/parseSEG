@@ -763,6 +763,15 @@ proc writeGeometry*(ed: var HeaderEditor, ix: TraceIndex,
       ed.logVar.report(sevFatal, dcIo, $dropped & " traces' geometry was not written: the " &
         "journal could not be synced", loc = Location(file: ed.file.path))
 
+proc writeGeometry*(ed: var HeaderEditor, fields = GeometryFields()): GeometryChanges =
+  ## Writes the joined geometry of the editor's own index into its file, in
+  ## place: for an editor made from an open file (`openEditor(f)`) whose
+  ## keys were joined by `applySurvey`. As `writeGeometry(ed, ix, fields)`
+  ## otherwise. Raises `ValueError` when the editor's index holds no keys
+  ## (open the file with `keys = true`), for SEG-2 or a closed file.
+  ed.file.index.requireKeys()
+  ed.writeGeometry(ed.file.index, fields)
+
 # ------------------------------------------------------------------ files --
 
 proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overwrite: bool,
@@ -770,18 +779,15 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
   # Joins `g` to the file at `path` and writes it in place, journaled into a
   # temporary journal that is removed afterwards (the file is new output).
   var j = openSeismic(path, keys = true)
+  discard j.applySurvey(g, overwrite)
+  let journal = path & ".geometry.nif"
+  var ed = openEditor(j, journal)
   try:
-    discard j.applySurvey(g, overwrite)
-    let journal = path & ".geometry.nif"
-    var ed = openEditor(path, journal)
-    try:
-      result = ed.writeGeometry(j.index, fields)
-    finally:
-      ed.close()
-      log.add ed.log
-      discard tryRemoveFile(journal)
+    result = ed.writeGeometry(fields)
   finally:
-    j.close()
+    ed.close()
+    log.add ed.log
+    discard tryRemoveFile(journal)
 
 proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = GeometryFields(),
     overwrite = false): GeometryCopy =

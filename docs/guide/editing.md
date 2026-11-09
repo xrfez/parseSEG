@@ -53,6 +53,31 @@ What the editor refuses, and why:
   `binary` (SEG-Y), `gh1`, and for SEG-D Rev 1/2 the source headers `gh3`, `gh4`, ...
   (`setRecordField`).
 
+## Editing a file that is already open
+
+A viewer has the file open already (`openSeismic`, maybe with joined keys). `openEditor(f)`
+takes it over: it maps the same path read-write in place of the read-only map and keeps the
+index, so nothing is walked twice; journal and refusals are those of `openEditor(path)`. It
+refuses (`ValueError`) a closed file, a demultiplexed copy of multiplexed SEG-D, and a file
+whose size changed since it was opened. `release(ed)` ends the session like `close` but hands
+the file back, still mapped and showing the edits. A prefetcher running on the file keeps
+its own map and sees the edits too.
+
+```nim
+import std/os
+import parseSEG
+
+copyFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "view.sgy")
+var f = openSeismic("view.sgy")
+echo "trace 2 static: ", f.traceField(2, "trace.totalStatic")
+var ed = openEditor(move f)                 # `move`: `f` is a global here
+doAssert ed.setTraceField(2, "trace.totalStatic", 9)
+f = release(move ed)                        # the same file, as edited, still open
+doAssert f.traceField(2, "trace.totalStatic").intVal == 9
+f.close()
+doAssert rollbackJournal("view.sgy", "view.sgy.edits.nif").len == 0
+```
+
 ## Many edits: batches
 
 Each edit is journaled and synced to disk before the file changes. For thousands of edits,
