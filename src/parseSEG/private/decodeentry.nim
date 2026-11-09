@@ -103,10 +103,14 @@ proc adviseTraces*(mem: ptr UncheckedArray[byte], size: int64,
   ## indices into `sel` when it is not nil), samples `first ..< first + cols`
   ## each: asks the OS to read their pages ahead (`adviseWillNeed`), so a
   ## cold scattered read waits for the disk once instead of once per trace.
-  ## Skipped for small reads and when the first and last traces are
-  ## in memory (a warm read pays two `mincore` calls, ~1.5 µs). Windows of traces
-  ## that follow each other closely are advised as one span. Makes no
-  ## managed objects and raises nothing: the prefetch worker calls it.
+  ## Skipped for small reads, when the traces probed are in memory (the
+  ## last trace of a range, the first and last of a selection: one or two
+  ## `mincore` calls, ~0.7 µs each, on a warm read), and for a range
+  ## (`sel` nil) that continues a sequential read: the byte before trace
+  ## `lo` is in memory, so the kernel's readahead is already streaming.
+  ## Windows of traces that follow each other closely are advised as one
+  ## span. Makes no managed objects and raises nothing: the prefetch worker
+  ## calls it.
   let count = hi - lo
   if count <= 0 or cols <= 0 or mem == nil: return
   template entry(pos: int): TraceEntry =
@@ -123,13 +127,19 @@ proc adviseTraces*(mem: ptr UncheckedArray[byte], size: int64,
       window(entry(pos), a, b)
       bytes += b - a
     if bytes < AdviseMinBytes: return
+  # A range is probed at its last trace only (a jump or a forward scroll
+  # leaves its end out of memory; each probe costs a syscall, ~0.7 µs), a
+  # selection at both ends.
   var resident = true
-  for pos in [lo, hi - 1]:
-    window(entry(pos), a, b)
-    if b > a and not isResident(mem, size, a):
-      resident = false
-      break
+  for pos in [hi - 1, lo]:
+    if resident and (pos == hi - 1 or sel != nil):
+      window(entry(pos), a, b)
+      if b > a and not isResident(mem, size, a): resident = false
   if resident: return
+  # A range whose preceding bytes are in memory continues a sequential read:
+  # the kernel's own readahead keeps that stream going, and advice per chunk
+  # stalls it (cold 64-trace chunks read at half the disk's speed).
+  if sel == nil and lo > 0 and isResident(mem, size, entries[lo].offset - 1): return
   var spanA, spanB = -1'i64
   for pos in lo..<hi:
     window(entry(pos), a, b)

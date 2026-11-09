@@ -97,6 +97,8 @@ type
     sel: ptr UncheckedArray[int] # selection mode: positions index this list; nil = ranges
     quick: bool      # `quickFirst`: chunk 0 of each range holds `head` rows
     head: int        # rows of chunk 0 of the current range
+    advised: int     # positions before this one were advised read-ahead (this range)
+    aheadTraces: int # advice is issued for at least this many positions at a time
     workers: int
     threads: ptr UncheckedArray[Thread[ptr Shared[T]]]
 
@@ -196,11 +198,22 @@ proc worker[T](sh: ptr Shared[T]) {.thread.} =
       s.chunk = n
       s.first = sh.chunkFirst(n)
       s.count = min(if n == 0: sh.head else: sh.chunkTraces, sh.stop - s.first)
-      # Ask the OS for the next chunk's pages while this one decodes; after a
-      # start or `seek`, for this chunk's too.
+      # Ask the OS for the pages ahead while this chunk decodes, about
+      # `AdviseAheadBytes` at a time (one residency probe per span, not per
+      # chunk: two `mincore` calls per 64-trace chunk cost 16 % of a warm
+      # run). A range is advised once after a start or `seek`, from this
+      # chunk on; the kernel's sequential readahead then keeps up, and more
+      # advice stalls it. A list is advised span by span.
       let ahead = s.first + s.count
-      s.aheadLo = if n == 0: s.first else: ahead
-      s.aheadHi = min(sh.stop, ahead + sh.chunkTraces)
+      let wantLo = if n == 0: s.first else: ahead
+      let wantHi = min(sh.stop, ahead + sh.chunkTraces)
+      if wantHi > sh.advised and (n == 0 or sh.sel != nil):
+        s.aheadLo = max(wantLo, sh.advised)
+        s.aheadHi = min(sh.stop, max(wantHi, s.aheadLo + sh.aheadTraces))
+        sh.advised = s.aheadHi
+      else:
+        s.aheadLo = 0
+        s.aheadHi = 0
       inc sh.nextChunk
       release(sh.lock)
       {.cast(gcsafe).}:
@@ -221,6 +234,10 @@ proc rawData[T](t: Tensor[T]): ptr UncheckedArray[T] {.inline.} =
 
 proc raiseArg(msg: string) {.noinline, noreturn.} =
   raise newException(ValueError, msg)
+
+const AdviseAheadBytes = 4 shl 20
+  ## The workers advise read-ahead (`adviseTraces`) for about this many
+  ## bytes of samples at a time.
 
 const DefaultRingBytes* = 4 shl 20
   ## `newPrefetcher`'s default cap on the ring's slot buffers: decoded
@@ -267,6 +284,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   sh.chunkTraces = rows
   sh.quick = quickFirst
   sh.head = sh.headRows
+  sh.advised = first
+  sh.aheadTraces = max(rows, AdviseAheadBytes div max(1, width * 4))
   sh.cols = width
   sh.firstSample = firstSample
   sh.mem = f.unsafeMemory
@@ -466,6 +485,7 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   sh.nextChunk = 0
   sh.takeChunk = 0
   sh.head = sh.headRows
+  sh.advised = first
   p.untaken = sh.chunkCount
   for i in 0..<sh.depth:
     if sh.slots[i].state == ssReady: sh.slots[i].state = ssFree

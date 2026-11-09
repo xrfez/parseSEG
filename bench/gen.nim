@@ -7,7 +7,8 @@
 ## library's encoders, samples through its codecs), SEG-D through the
 ## library's `SegdWriter` and SEG-2 through its `Seg2Writer`, so every file
 ## is what the library itself would write. Samples are a decaying sine plus
-## a little noise, cycled over 64 variants per file; headers carry a shot
+## a little noise (random values of random sign for the `noise` files),
+## cycled over 64 variants per file; headers carry a shot
 ## geometry (`perRecord` channels per shot, a moving source and a fixed
 ## spread), so keys, gathers and geometry write-back have real values.
 
@@ -43,8 +44,20 @@ proc waveform(v, n: int, amp: float64): seq[float64] =
       exp(-float64(i) / float64(n)) + noise
     result[i] = round(x * amp * 64) / 64 # few mantissa bits: exact in every format
 
-proc variants(n: int, amp: float64): seq[seq[float64]] =
-  for v in 0..<Variants: result.add waveform(v, n, amp)
+proc noise(v, n: int, amp: float64): seq[float64] =
+  # Variant `v` of a random trace: values spread over 0.001 .. 1 of `amp`
+  # (16 binary orders), random signs.
+  result = newSeq[float64](n)
+  var s = uint32(v) * 2246822519'u32 + 7
+  for i in 0..<n:
+    s = s * 1664525'u32 + 1013904223'u32
+    let mag = pow(2.0, -float64((s shr 8) and 15)) * (0.5 + float64(s shr 20) / 8192)
+    let x = if (s and 0x8000) != 0: -mag else: mag
+    result[i] = round(x * amp * 64) / 64
+
+proc variants(s: Spec, amp: float64): seq[seq[float64]] =
+  for v in 0..<Variants:
+    result.add(if s.noise: noise(v, s.samples, amp) else: waveform(v, s.samples, amp))
 
 proc report(s: Spec, path: string, t0: MonoTime) =
   let secs = (getMonoTime() - t0).inMilliseconds.float / 1000
@@ -58,7 +71,7 @@ proc genSegy(s: Spec, path: string, traces: int) =
   let fmt = toSampleFormat(s.format).get
   let traceBytes = TraceHeaderSize + s.samples * sampleSize(fmt)
   var blocks: seq[seq[byte]]
-  for w in variants(s.samples, amplitude(s.format, cSegy)):
+  for w in variants(s, amplitude(s.format, cSegy)):
     var b = newSeq[byte](s.samples * sampleSize(fmt))
     encodeSamples(fmt, w, b, order)
     blocks.add b
@@ -155,7 +168,7 @@ proc segdRecord(s: Spec, fileNo, ns: int, fmt: SegdSampleFormat): SegdRecord =
 proc genSegd(s: Spec, path: string, traces: int) =
   let fmt = toSegdFormat(s.format).get
   var blocks: seq[seq[byte]]
-  for w in variants(s.samples, amplitude(s.format, s.container)):
+  for w in variants(s, amplitude(s.format, s.container)):
     var b = newSeq[byte](dataBytes(fmt, s.samples))
     encodeSamples(fmt, w, b)
     blocks.add b
@@ -210,7 +223,7 @@ proc genSeg2(s: Spec, path: string, traces: int) =
   fdb.traceCount = uint16(traces)
   fdb["UNITS"] = "METERS"
   var w = openSeg2Writer(path, fdb)
-  let ws = variants(s.samples, amplitude(s.format, cSeg2))
+  let ws = variants(s, amplitude(s.format, cSeg2))
   var f32 = newSeq[float32](s.samples)
   for i in 0..<traces:
     var t = Seg2Trace(formatCode: uint8(s.format))

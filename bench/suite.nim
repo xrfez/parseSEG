@@ -1,13 +1,14 @@
 ## The parseSEG benchmark suite (task 13.2). Reads the files `bench/gen`
 ## writes and prints Markdown tables (also saved as
-## `<data dir>/results-<scale>.md`).
+## `<data dir>/results-<scale>-<build>.md`).
 ##
 ##   suite [--scale=small|full] [--dir=DIR] [section ...]
 ##
 ## Sections: `baseline`, `index`, `decode`, `latency`, `threads`, `prefetch`,
-## `write`; all of them when none is named. `nim bench` builds this with the
-## release flags (`-d:danger`, `-march=native`) and runs it; see
-## `docs/benchmarks.md` for the method.
+## `write`; all of them when none is named. `nim bench` builds this (by
+## default `-d:danger -march=native`; `PARSESEG_BENCH_BUILD=release` for the
+## shipped x86-64-v3 build) and runs it; see `docs/benchmarks.md` for the
+## method.
 ##
 ## Warm runs read the file once first so it is in the page cache; cold runs
 ## drop the file's pages first (`posix_fadvise(POSIX_FADV_DONTNEED)`, after
@@ -25,6 +26,13 @@ var
   rep: Report
   warmOnly = getEnv("PARSESEG_BENCH_WARM_ONLY") == "1"
     ## Skip the cold (disk-bound) runs, e.g. for before/after builds.
+  build = getEnv("PARSESEG_BENCH_BUILD", "danger")
+    ## The build `nim bench` made (`danger`, `release` or `portable`).
+
+const
+  ChunkBytes = 4_000_000
+    ## Decode chunks hold this many bytes of float32 samples (1000 traces of
+    ## 1000 samples), so files with longer traces compare like with like.
 
 proc pathOf(name: string): string = find(name).path(dir, sc)
 
@@ -47,7 +55,7 @@ func formatName(s: Spec): string =
   of cSegy:
     let names = ["", "IBM float", "int32", "int16", "", "IEEE float"]
     "SEG-Y " & $s.format & " (" & names[s.format] & (if s.littleEndian: ", LE" else: "") & ")"
-  of cSegd21: "SEG-D 2.1 " & $s.format
+  of cSegd21: "SEG-D 2.1 " & $s.format & (if s.noise: " (random samples)" else: "")
   of cSegd30: "SEG-D 3.0 " & $s.format
   of cSeg2: "SEG-2 " & $s.format & " (float32, LE)"
 
@@ -114,10 +122,13 @@ proc baseline() =
 proc index() =
   rep.heading "Index build and keys (openSeismic)"
   rep.line "Cold: the file's pages dropped first. Warm: best of 3 with the file cached. " &
-    "Memory: managed heap growth (`getOccupiedMem`) of the open file, per trace."
+    "Open: the default `openSeismic` (fixed-length SEG-Y: sampled, O(1)); walk: " &
+    "`verify = vfFull` (every header). Memory: managed heap growth (`getOccupiedMem`) " &
+    "of the open file, per trace."
   rep.line()
-  rep.table ["file", "traces", "GB", "cold open ms", "cold first trace ms", "warm open ms",
-    "ns/trace", "keys ms", "ns/trace keys", "heap B/trace", "keys heap B/trace", "gathers ms"]
+  rep.table ["file", "traces", "GB", "cold open ms", "cold first trace ms", "cold walk ms",
+    "warm open ms", "walk ms", "ns/trace walk", "keys ms", "ns/trace keys", "heap B/trace",
+    "keys heap B/trace", "gathers ms"]
   for name in ["y-ieee", "d21-8058", "y-ieee-1m", "d21-8058-1m", "y-ieee-10m", "d21-8058-10m",
       "y-ieee-big"]:
     if not present(name): continue
@@ -130,7 +141,7 @@ proc index() =
       var f = openSeismic(p)
       n = f.len
       f.close()
-      cells = @[name, $n, gb(size), "-", "-"]
+      cells = @[name, $n, gb(size), "-", "-", "-"]
     else:
       evict(p)
       let tCold = timed:
@@ -142,14 +153,21 @@ proc index() =
         var f = openSeismic(p)
         discard f.readTraces(0..0)
         f.close()
-      cells = @[name, $n, gb(size), ms(tCold), ms(tFirst)]
+      evict(p)
+      let tWalkCold = timed:
+        var f = openSeismic(p, opts = OpenOptions(verify: vfFull))
+        f.close()
+      cells = @[name, $n, gb(size), ms(tCold), ms(tFirst), ms(tWalkCold)]
     if find(name).role == rBig:
-      cells.add ["-", "-", "-", "-", "-", "-", "-"] # larger than the free page cache
+      cells.add ["-", "-", "-", "-", "-", "-", "-", "-"] # larger than the free page cache
     else:
       warm(p)
       let runs = if n >= 5_000_000: 2 else: 3
       let tWarm = best(runs):
         var f = openSeismic(p)
+        f.close()
+      let tWalk = best(runs):
+        var f = openSeismic(p, opts = OpenOptions(verify: vfFull))
         f.close()
       let tKeys = best(runs):
         var f = openSeismic(p, keys = true)
@@ -163,26 +181,32 @@ proc index() =
       var gs: seq[Gather]
       let tGathers = timed: gs = f.gathers
       f.close()
-      cells.add [ms(tWarm), &"{tWarm / float(n) * 1e9:.0f}", ms(tKeys),
+      cells.add [ms(tWarm), ms(tWalk), &"{tWalk / float(n) * 1e9:.0f}", ms(tKeys),
         &"{tKeys / float(n) * 1e9:.0f}", &"{float(m1 - m0) / float(n):.1f}",
         &"{float(m2 - m1) / float(n):.1f}", &"{ms(tGathers)} ({gs.len})"]
     rep.row cells
 
 # ----------------------------------------------------------------- decode --
 
-const ChunkTraces = 1000
+func chunkTraces(f: SeismicFile): int =
+  ## Traces per decode chunk: `ChunkBytes` of float32 samples.
+  max(1, ChunkBytes div (max(1, f.maxSamples) * sizeof(float32)))
 
 proc readAll[T](f: SeismicFile, t: var Tensor[T]): int =
+  ## Decodes the whole file, `t.shape[0]` traces at a time.
+  let chunk = t.shape[0]
   var i = 0
   while i < f.len:
-    let n = min(ChunkTraces, f.len - i)
+    let n = min(chunk, f.len - i)
     result += f.readTracesInto(i ..< i + n, t)
     i += n
 
 proc decode() =
-  rep.heading "Sequential decode throughput (readTracesInto, 1000-trace chunks, 1 thread)"
-  rep.line &"GB/s of file bytes. First pass: right after `openSeismic` (pages the index walk " &
-    "did not touch still fault in); mapped: best of 3 later passes. memcpy baseline: " &
+  rep.heading "Sequential decode throughput (readTracesInto, 4 MB chunks, 1 thread)"
+  rep.line &"GB/s of file bytes. Chunks of {ChunkBytes div 1_000_000} MB of float32 samples " &
+    "(1000 traces of 1000 samples, 250 of the SEG-2 file's 4000). First pass: right after " &
+    "`openSeismic` (pages not touched yet fault in); mapped: best of 3 later passes. " &
+    "memcpy baseline: " &
     &"{memcpyRate:.1f} GB/s, read baseline {readRate:.1f} GB/s."
   rep.line()
   rep.table ["file", "format", "GB", "cold GB/s", "first pass GB/s", "mapped GB/s",
@@ -194,7 +218,7 @@ proc decode() =
     var f = openSeismic(p)
     doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0, s.name & ": " & $f.log[0]
     let samples = f.samplesOf
-    var t = newTraceTensor[float32](ChunkTraces, f.maxSamples)
+    var t = newTraceTensor[float32](f.chunkTraces, f.maxSamples)
     var cold = "-"
     if not warmOnly:
       f.dropCache()
@@ -205,7 +229,7 @@ proc decode() =
     f = openSeismic(p)
     let tFirst = timed: doAssert f.readAll(t) == 0
     let tMapped = best(3): doAssert f.readAll(t) == 0
-    var t64 = newTraceTensor[float64](ChunkTraces, f.maxSamples)
+    var t64 = newTraceTensor[float64](f.chunkTraces, f.maxSamples)
     let t64Mapped = best(3): doAssert f.readAll(t64) == 0
     f.close()
     rep.row [s.name, formatName(s), gb(size), cold, gbps(size, tFirst),
@@ -216,7 +240,7 @@ proc decode() =
     let size = float(getFileSize(p))
     evict(p)
     var f = openSeismic(p)
-    var t = newTraceTensor[float32](ChunkTraces, f.maxSamples)
+    var t = newTraceTensor[float32](f.chunkTraces, f.maxSamples)
     f.dropCache()
     let tCold = timed: doAssert f.readAll(t) == 0
     f.close()
@@ -300,7 +324,13 @@ proc latency(name: string) =
     let a = r.rand(n - 1000)
     xs.sample:
       for i in a ..< a + 1000: discard f.traceField(i, field)
-  rep.row(&"header column: {field} of 1000 traces, warm", xs)
+  rep.row(&"header field loop: traceField(i, {field}) for 1000 traces, warm", xs)
+  var col = newSeq[float64](1000)
+  xs.setLen 0
+  for _ in 0..<1000:
+    let a = r.rand(n - 1000)
+    xs.sample: f.traceFieldColumnInto(field, a ..< a + 1000, col)
+  rep.row(&"header column: traceFieldColumnInto({field}) of 1000 traces, warm", xs)
   # Cold: drop the pages, then each run touches pages no earlier run touched.
   f.dropCache()
   xs.setLen 0
@@ -339,13 +369,14 @@ type
   Job = object
     f: ptr SeismicFile
     first, stop: int
+    chunk: int
     failed: int
 
 proc readRange(j: ptr Job) {.thread.} =
-  var t = newTraceTensor[float32](256, j.f[].maxSamples)
+  var t = newTraceTensor[float32](j.chunk, j.f[].maxSamples)
   var i = j.first
   while i < j.stop:
-    let n = min(256, j.stop - i)
+    let n = min(j.chunk, j.stop - i)
     j.failed += j.f[].readTracesInto(i ..< i + n, t)
     i += n
 
@@ -353,17 +384,24 @@ proc parallelRead(f: var SeismicFile, threads: int): float =
   var jobs = newSeq[Job](threads)
   var th = newSeq[Thread[ptr Job]](threads)
   let per = (f.len + threads - 1) div threads
+  # Per-thread tensors of 1 MB, 256 KB from 16 threads: two SMT siblings
+  # share one 512 KB L2, and larger outputs spill from it (perf audit item 10).
+  let bytes = if threads >= 16: 256 shl 10 else: 1 shl 20
+  let chunk = max(1, bytes div (max(1, f.maxSamples) * sizeof(float32)))
   result = timed:
     for k in 0..<threads:
-      jobs[k] = Job(f: addr f, first: min(f.len, k * per), stop: min(f.len, (k + 1) * per))
+      jobs[k] = Job(f: addr f, first: min(f.len, k * per), stop: min(f.len, (k + 1) * per),
+        chunk: chunk)
       createThread(th[k], readRange, addr jobs[k])
     joinThreads(th)
   for j in jobs: doAssert j.failed == 0
 
 proc threads() =
   rep.heading "Multi-thread scaling: N threads, disjoint trace ranges, one SeismicFile"
-  rep.line "Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its " &
-    "own tensor. Warm: mapped, best of 3. Cold: pages dropped before each run."
+  rep.line "Aggregate GB/s of file bytes; each thread decodes into its own tensor: 1 MB " &
+    "(256 traces of 1000 samples) up to 8 threads, 256 KB (64 traces) from 16, so two " &
+    "SMT siblings' outputs fit their shared L2. Warm: mapped, best of 3. Cold: pages " &
+    "dropped before each run."
   rep.line()
   const counts = [1, 2, 4, 8, 16, 32]
   var cols = @["file", "state"]
@@ -393,8 +431,12 @@ proc threads() =
 # --------------------------------------------------------------- prefetch --
 
 proc prefetch() =
-  rep.heading "Prefetcher (one worker thread) vs readTracesInto on the caller's thread"
-  rep.table ["file", "mode", "chunk x depth", "GB/s", "seek -> first chunk p50 µs",
+  rep.heading "Prefetcher vs readTracesInto on the caller's thread"
+  rep.line "The consumer only takes chunks (`nextInto`, recycling its buffer). Depth: the " &
+    "ring depth used (capped at 4 MB of chunks). Seek: `seek` to a random trace, then " &
+    "wait for the first chunk; `quickFirst` makes that chunk a quarter of `chunkTraces`."
+  rep.line()
+  rep.table ["file", "mode", "chunk x depth", "workers", "GB/s", "seek -> first chunk p50 µs",
     "p99 µs"]
   for name in ["y-ieee", "y-ibm", "d21-8015"]:
     if not present(name): continue
@@ -402,20 +444,26 @@ proc prefetch() =
     let size = float(getFileSize(p))
     warm(p)
     var f = openSeismic(p)
-    var t = newTraceTensor[float32](ChunkTraces, f.maxSamples)
+    var t = newTraceTensor[float32](f.chunkTraces, f.maxSamples)
     discard f.readAll(t)
     let tDirect = best(3): discard f.readAll(t)
-    rep.row [name, "readTracesInto, caller thread", $ChunkTraces, gbps(size, tDirect), "-",
-      "-"]
-    for (chunk, depth) in [(64, 4), (256, 4), (1024, 4), (256, 16)]:
+    rep.row [name, "readTracesInto, caller thread", $f.chunkTraces, "-", gbps(size, tDirect),
+      "-", "-"]
+    for (chunk, depth, workers, quick) in [(64, 4, 1, false), (256, 4, 1, false),
+        (1024, 4, 1, false), (256, 16, 1, false), (256, 4, 2, false), (256, 4, 4, false),
+        (256, 4, 1, true), (1024, 4, 1, true)]:
+      var used = 0
       let tPre = best(3):
-        var pf = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth)
+        var pf = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth,
+          workers = workers, quickFirst = quick)
+        used = pf.depth
         var c: PrefetchChunk[float32]
         var got = 0
-        while pf.next(c): got += c.count
+        while pf.nextInto(c): got += c.count
         doAssert got == f.len
         pf.close()
-      var pf = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth)
+      var pf = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth,
+        workers = workers, quickFirst = quick)
       var r = initRand(5)
       var xs: seq[float]
       var c: PrefetchChunk[float32]
@@ -423,12 +471,12 @@ proc prefetch() =
         let a = r.rand(f.len - 1)
         let t0 = getMonoTime()
         pf.seek(a ..< f.len)
-        doAssert pf.next(c)
+        doAssert pf.nextInto(c)
         xs.add seconds(t0)
       pf.close()
       let s = stats(xs)
-      rep.row [name, "prefetcher, consumer only takes", &"{chunk} x {depth}",
-        gbps(size, tPre), us(s.p50), us(s.p99)]
+      rep.row [name, if quick: "prefetcher, quickFirst" else: "prefetcher",
+        &"{chunk} x {used}", $workers, gbps(size, tPre), us(s.p50), us(s.p99)]
     f.close()
 
 # ------------------------------------------------------------------ write --
@@ -531,7 +579,7 @@ when isMainModule:
   rep.line &"# parseSEG benchmarks ({sc} scale, {now().format(\"yyyy-MM-dd HH:mm\")})"
   rep.line()
   rep.line &"{cpuModel()}, {countProcessors()} hardware threads, {memTotalGb():.0f} GB RAM; " &
-    &"Nim {NimVersion}; data in {dir}."
+    &"Nim {NimVersion}; build {build}; data in {dir}."
   for s in sections:
     case s
     of "baseline": baseline()
@@ -544,4 +592,4 @@ when isMainModule:
     of "prefetch": prefetch()
     of "write": write()
     else: quit "unknown section " & s
-  writeFile(dir / &"results-{sc}.md", rep.text)
+  writeFile(dir / &"results-{sc}-{build}.md", rep.text)

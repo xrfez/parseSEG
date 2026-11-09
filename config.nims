@@ -110,13 +110,15 @@ task docs, "Generate HTML documentation":
 # ------------------------------------------------------- benchmarks (13.2) --
 
 task bench, "Benchmark suite (bench/, docs/benchmarks.md)":
-  ## Builds bench/gen and bench/suite with the nimRelease flags (or the
-  ## `nim cli` flags, -d:release for x86-64-v3, with PARSESEG_BENCH_BUILD=release;
-  ## baseline x86-64 with PARSESEG_BENCH_BUILD=portable), writes
-  ## the synthetic files (PARSESEG_BENCH_SCALE=small, the default, about
-  ## 2.5 GB, or full, about 52 GB; into PARSESEG_BENCH_DIR, default
-  ## bench/data) and runs the suite (PARSESEG_BENCH_SECTIONS: a space-separated
-  ## subset of baseline index decode latency threads prefetch write).
+  ## Builds bench/gen and bench/suite with the nimRelease flags (-d:danger,
+  ## -march=native; or the `nim cli` flags, -d:release for x86-64-v3, with
+  ## PARSESEG_BENCH_BUILD=release; baseline x86-64 with
+  ## PARSESEG_BENCH_BUILD=portable), writes the synthetic files that are
+  ## missing (PARSESEG_BENCH_SCALE=small, the default, about 2.6 GB, or full,
+  ## about 53 GB; into PARSESEG_BENCH_DIR, default bench/data) and runs the
+  ## suite (PARSESEG_BENCH_SECTIONS: a space-separated subset of baseline index
+  ## decode latency threads prefetch write; PARSESEG_BENCH_WARM_ONLY=1 skips
+  ## the cold runs). The report goes to `<dir>/results-<scale>-<build>.md`.
   let flags =
     case getEnv("PARSESEG_BENCH_BUILD")
     of "release": "c -d:release" & cpuTarget
