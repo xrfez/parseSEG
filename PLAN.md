@@ -2,6 +2,34 @@
 
 > **Resuming in a new session? Read this file first, then follow "Resume protocol".**
 
+## Handoff (2026-11-09) — start here
+- **Branch state:**
+  - `seg-library` at the "PLAN: handoff" commit; `main` is behind it with no commits of its
+    own, so a merge fast-forwards. No worktrees, nothing pushed.
+  - Full suite green: 44 test files, run as `TMPDIR=/tmp/pl nim test` (see the gotcha).
+- **Done since Phase 12:**
+  - 4.7, 6.8-6.10, 10.5, 11.1, 11.2;
+  - Phase 13: 13.1 docs, 13.2 benchmarks and performance fixes, 13.3 review, 13.4 Group I
+    fixes.
+- **New owner direction (2026-11-09):** parseSEG is a **Nim library**. Remove the C ABI and
+  the Python module, and stop shaping the library around an FFI. Stay lean in features and fast.
+  That is Phase 14 below. It replaces the C/Python items of Phase 13, and the merge to `main`
+  (13.5) moves after Phase 14.
+- **Next steps, in order:**
+  - 14.1: remove the FFI;
+  - 14.2: simplify what the FFI shaped;
+  - 14.3: decide the Nim-only API additions with the owner;
+  - 14.4: re-benchmark Nim only, then merge into `main` (13.5).
+- **Gotchas:**
+  - Run tests with a short `TMPDIR` (e.g. `TMPDIR=/tmp/pl nim test`). `theadernif`
+    `failed_journal_syncs` fails under a long TMPDIR, because its 100-byte RLIMIT is smaller
+    than the journal line. This could be fixed in 14.x by raising the limit in the test.
+  - Agent reports for 13.1, 13.2 and 13.4 were lost when the editor window crashed. Their work
+    was committed and merged (see the 2026-11-09 Log). Check `docs/benchmarks.md` and
+    `docs/guide/` rather than trusting a report.
+  - Parallel agents need their own worktree, `XDG_CACHE_HOME` and a short `TMPDIR`. A `deps/`
+    symlink to the main checkout's deps works.
+
 ## Goal
 An idiomatic, high-performance Nim library to **read and write** SEG seismic data on **disk and
 tape**, designed to back a future high-performance viewer and HPC processing. Priority formats:
@@ -20,6 +48,10 @@ from the history sections of the later documents.
   little-endian, keyword strings in the headers.
 
 ## Owner decisions (2026-11-07, revised)
+- **Nim library only (owner, 2026-11-09).** No C ABI, no Python module, no FFI-driven design.
+  This supersedes the Phase 8 / 12.5 boundary decisions below. API shape, naming and types follow
+  idiomatic Nim and performance alone. Stay lean: add a feature only when the viewer or the
+  processing library needs it.
 - **One data model, many revisions.** The revision is always identified from the headers
   (SEG-Y bytes 3501-3502; SEG-D GH2 bytes 11-12), so readers dispatch on it.
   - SEG-Y uses **one** `SegyFile` type for Rev 0-2.1, where revision-specific fields are optional.
@@ -807,12 +839,12 @@ Go through the project and make it read like idiomatic Nim, guided by the nim-* 
 ### Phase 13: Release readiness: usage docs, benchmarks, review, merge to main (owner, 2026-11-08)
 Goal: the library is ready to carry a high-performance signal-processing library and a
 high-performance viewer. Then `seg-library` is merged into `main`.
-- [ ] 13.1 Usage docs for the public API: task-oriented guides in `docs/guide/` (getting
+- [x] 13.1 Usage docs for the public API: task-oriented guides in `docs/guide/` (getting
       started; viewer recipes: open, index, gathers, random access, prefetch, header tab,
       patches; processing recipes: streaming whole files into tensors, threads, writing results,
       conversion, geometry; C and Python quick starts). Every code example is compiled or run
       by a test so the docs cannot go stale. `docs/api.md` stays the reference and links to them.
-- [ ] 13.2 Benchmark suite (`bench/`), on synthetic files up to tens of GB plus the samples:
+- [x] 13.2 Benchmark suite (`bench/`), on synthetic files up to tens of GB plus the samples:
       - cold and warm cache;
       - index build and keys at 10 M traces;
       - sequential decode throughput per format, against a memcpy / memory-bandwidth baseline;
@@ -901,9 +933,62 @@ high-performance viewer. Then `seg-library` is merged into `main`.
       - R2-5: the Nim `Prefetcher` uses freed memory after `f.close()` (SIGSEGV, proved). Fix it
         by sharing the map owner (close defers the unmap), or by having close raise.
       - R3-11b: `struct_size` first in the option structs, for ABI growth.
-- [ ] 13.4 Apply the 13.3 findings (and 13.2 fixes not yet applied); full suite green.
-- [ ] 13.5 Merge `seg-library` into `main` (owner asked, 2026-11-08), after 13.1-13.4. Do not
+- [x] 13.4 Apply the 13.3 findings (and 13.2 fixes not yet applied); full suite green.
+- [ ] 13.5 Merge `seg-library` into `main` (owner asked, 2026-11-08), after Phase 14. Do not
       push unless the owner asks.
+
+### Phase 14: Nim library only (owner, 2026-11-09)
+Remove the FFI and simplify what was bent around it. Keep behaviour and performance. Run
+`nim test` green after each task, then commit.
+- [ ] 14.1 Remove the C ABI and Python. Delete or replace each of these:
+      - the `src/parseSEG/abi/` modules: `api`, `pragmas`, `runtime`, `segapi` and `gen/`;
+      - `src/parseSEG/bindings.nim`, `include/`, `python/`;
+      - `tests/c/`, `tests/python/`, `tests/tcapi.nim`, `tests/tpython.nim`, and the library
+        parts of `tests/ttargets.nim` (keep the CLI build checks);
+      - in `config.nims`: the `lib`, `libLinux`, `libWindows`, `libMacos`, `staticlib`, `pylib`
+        and `csources` tasks with their helpers, plus `abiFlags`;
+      - `tools/macos-stubs` and the zig library wrappers, if nothing else uses them;
+      - `bench/capi_bench.c` and `bench/py_bench.py`, with their parts of `bench/suite.nim` and
+        `docs/benchmarks.md`;
+      - `docs/design/c_abi.md`, `docs/design/python.md`, `docs/guide/c.md` and
+        `docs/guide/python.md`, plus the README rows and links that point to them;
+      - every `{.segApi.}`, `{.segHandle.}` and `{.segField.}` pragma and its `hide=` arguments,
+        in 18 src files (`grep -rln "segApi\|segHandle\|segField" src`);
+      - `AbiVersion`.
+
+      Keep the CLI (`bin/parseSEG`) and the zig CLI builds. The `PackageVersion` stays. The
+      nimble version becomes 0.5.0, a breaking change.
+- [ ] 14.2 Simplify what the FFI shaped (an audit agent first, then the owner approves). Known
+      candidates:
+      - **Handles:** handle-style types (`HeaderListing`, `HeaderPatch` and others), where a
+        `seq`/iterator or plain proc would do.
+      - **Generated-API leftovers:** procs and overloads that exist only for the generated API,
+        such as the `SeismicFile` overloads of `writeGeometry` and `geometryChanges`, `seg2*`
+        string accessors by index, and `previewGeometry`.
+      - **Boundary-only code:**
+        - per-handle locks, `concurrent` markers and the in-flight counters;
+        - NUL-separated `seq[string]`;
+        - `FieldValue`/`SegValueRef` borrowing;
+        - `requireBuffer` / out-parameter shapes.
+      - **Hidden parameters:** parameters hidden only at the boundary (`demuxDir`, `writable`,
+        `join`).
+      - **Doc cleanup:** "C/Python" mentions in the docs and `##` comments.
+      - **R2-5:** the Nim `Prefetcher` uses freed memory after `f.close()`, which was only safe
+        through the ABI. Fix it with a shared map owner (close defers the unmap) or a destructor
+        rule.
+- [ ] 14.3 Nim-only API additions from the 13.3 review (Group II, now without the C/Python
+      forms). The owner picks which; the rest go to "Future". In order of need:
+      - **Bulk keys and header columns:** `traceKeysInto` and `traceFieldColumn(f, name,
+        traces)`. These resolve the field offset once, then read only those bytes per trace.
+      - **Viewer reads (R3-5):** sample windows in `readTracesInto`, the SEG-Y textual header as
+        text, and `sortTraces(f, keys)`.
+      - **Write path (R3-3):** `openSeismicWriter(path, like = f)` and `writeTrace(src, trace,
+        samples)`, which carry the headers over and encode to the target format.
+      - **Progress and cancel (R3-2):** a callback for open/index/convert/export, and an
+        optional index sidecar cache.
+      - **Editing (R3-4):** `openEditor(f: SeismicFile)` reusing the viewer's index.
+      - **Prefetch (R3-9):** chunk recycling, `recycle` / `nextInto`.
+- [ ] 14.4 Re-run `nim bench` (Nim only) and update `docs/benchmarks.md`, then do 13.5.
 
 ### Future (noted, not scheduled)
 - Sorting traces by header fields (offset, receiver, CMP, ...), decided 2026-11-07: a sort
@@ -1429,3 +1514,31 @@ high-performance viewer. Then `seg-library` is merged into `main`.
     - survey write-back to SEG-2;
     - patch import of SEG-2 strings (refused by design);
     - the 11.1 inference risks also apply to the writer, so 11.3 (a real file) is needed.
+- 2026-11-09: Phase 13 work merged into `seg-library`, then a handoff. The editor window crashed, so the agents' final reports were lost; the work below is read from their commits and files. Full suite green (44 test files, short TMPDIR).
+  - 13.1 (`wt-docs`, 8d848d2): usage guides in `docs/guide/`:
+    - getting-started, viewer, processing, editing, conversion, diagnostics, c, python;
+    - the examples are compiled or run by tests.
+  - 13.2 (`wt-bench`): the `nim bench` suite in `bench/` (generators, harness, specs), plus `docs/benchmarks.md` (machine, method, before/after tables). Fixes:
+    - R2-1/6/7/9: unchecked pointer loads, native-order `copyMem`, IBM float and SEG-D exponent tables (c198c50).
+      - Release decode went from 0.5-2.3 to 2-17 GB/s, e.g. SEG-Y IEEE BE from 2.06 to 11.1 GB/s and IBM from 0.54 to 5.5 GB/s.
+      - The memcpy baseline is 18.2 GB/s.
+    - R2-2: batched edits overlay pending bytes instead of flushing (dda108d). 2 fields × 2000 traces went from 10.6 s to 13 ms.
+    - R2-3: `componentGroupIds` from one table (c864106). 10M groups went from 6.5 s to 4.0 s; the table of 82-byte keys remains.
+    - R2-8/R2-10: index reserve and uninitialized `readTraces` (2db702d). Per trace, from 35 to 24 B, and with keys from 242 to 168 B.
+    - Read and conversion buffers are no longer zeroed (501a718, ec09d0a). SEG-Y → SEG-Y CPU went from 0.54 to 0.18 s per GB.
+  - 13.4 Group I (`wt-fix`):
+    - R3-1/R4-5: `segGuard` maps Defects; `copyBytes` overflow fixed (7c97c40).
+    - R4-1..R4-4 (c875b8e):
+      - SEG-2 sample counts and Rev 3 trailers are bounded by the file;
+      - the mux use-after-free is fixed;
+      - temp outputs are exclusive.
+    - R1-1..R1-6 (69f6ffb):
+      - the SEG-2 summary code;
+      - the SEG-Y time scalar;
+      - one century pivot;
+      - STACK descaling;
+      - empty outputs fatal;
+      - geometry counts.
+    - R3-7/8/10/11, at the boundary (da7136f). These become moot in 14.1.
+  - Group II (API additions) was not decided before the crash. It is re-scoped to Nim only as 14.3.
+  - Owner decision: the C ABI and Python are removed (Phase 14). 13.5 (merge to `main`) waits for Phase 14.
