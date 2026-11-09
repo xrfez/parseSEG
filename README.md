@@ -1,14 +1,34 @@
 # parseSEG
 
-Read, write, index, edit and convert SEG-Y (Rev 0, 1, 2.0, 2.1) and SEG-D (Rev 0 and 1 multiplexed
-or demultiplexed, 2.0, 2.1, 3.0, 3.1) seismic data, on disk and tape, for viewers and HPC processing, read,
-write, index and convert SEG-2, and the SPS and SEG P1 survey files that give traces their geometry. Files of any size are
-memory-mapped and indexed, never loaded whole. Problems are reported as diagnostics instead of
-stopping a read.
+A Nim library and command line tool to read, write, index, edit and convert seismic data:
+SEG-Y (Rev 0, 1, 2.0, 2.1) and SEG-D (Rev 0 and 1 multiplexed or demultiplexed, 2.0, 2.1,
+3.0, 3.1) on disk and tape, SEG-2 on disk, and the SPS and SEG P1 survey files that give
+traces their geometry. It is built for seismic viewers and for HPC processing.
+
+- **Any file size.** Files are memory-mapped and indexed in one header walk (about 24 bytes
+  per trace), never loaded whole. A `progress` hook shows the walk and can cancel it, and an
+  index cache (`saveIndex`, `openSeismic(cache = ...)`) makes the next open near-instant.
+- **Samples into tensors.** Any range, list (a gather, a sort order) or sample window
+  decodes straight from the map into Arraymancer tensors, `float32` or `float64`, also into
+  reused buffers and from several threads on one open file. A prefetcher reads ahead on a
+  worker thread and can recycle its buffers.
+- **Headers.** Any header field by name, a column of one field for many traces, per-trace
+  geometry keys (stored or made on demand), gathers derived from the geometry, sorting by
+  header fields, header listings with byte offsets, and the SEG-Y textual header as text.
+- **Writing.** `SeismicWriter` writes processed traces in the input's standard and format
+  (or another format), with the input's headers. Header edits happen in place, journaled and
+  undoable, also on a file that is already open (`openEditor(f)`); a viewer can save them as
+  a patch instead.
+- **Conversion and geometry.** Convert between SEG-Y, SEG-D and SEG-2 and between
+  revisions, with every loss reported. Join SPS or P1 geometry in memory, write it into the
+  file, or into a copy.
+- **Diagnostics, not crashes.** Problems in a file are reported as diagnostics (severity,
+  code, byte offset, location) instead of stopping a read. Vendor header blocks decode
+  through vendor maps.
 
 | Use it from | How | Docs |
 |---|---|---|
-| Nim | `import parseSEG` | [`docs/guide/`](docs/guide/README.md), `docs/api.md` |
+| Nim | `import parseSEG` | [`docs/guide/`](docs/guide/README.md), [`docs/api.md`](docs/api.md) |
 | The shell | `nim cli`, then `bin/parseSEG help` | below |
 
 New here? Start with the usage guides in [`docs/guide/`](docs/guide/README.md): getting

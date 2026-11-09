@@ -75,8 +75,9 @@ record-level headers, already decoded. It is built once at open and stays in mem
 **Keys.** `openSeismic(path, keys = true)` also collects each trace's geometry as
 `TraceKeys`: source and receiver line, point, index and coordinates, elevations, midpoint,
 offset, channel, component and the trace's UTC time. Values the headers do not give are NaN
-(numbers) or 0 (codes). Keys cost about 100 bytes per trace and are needed by `gathers`,
-`componentGroupIds`, `applySurvey` and the geometry write-back.
+(numbers) or 0 (codes). Keys cost 144 bytes per trace and are needed by `gathers`,
+`componentGroupIds`, `applySurvey` and the geometry write-back. Without `keys = true`,
+`traceKeys(traces)` makes the keys of a few traces on demand.
 
 **Gathers.** `f.gathers` splits the file into runs of traces and *derives* each run's kind
 (shot, receiver, CMP, offset, other, unknown) from the keys. Nothing assumes shot gathers:
@@ -132,14 +133,12 @@ moved; when it goes out of scope it unmaps itself, and `close` does that early.
 
 | After `close` | Still works | Raises `ValueError` ("the file is closed") |
 |---|---|---|
-| In-memory index | `len`, `kind`, `log`, `recordCount`, `maxSamples`, `traceEntry`, `traceKeys`, `gathers`, `componentGroupIds`, `f.index` | |
-| Reads from the map | | `readTraces`, `readTracesInto`, `traceField` & co, `traceHeaders` & co, `summary`, `sampleIntervalUs`, `copyBytes`, `newPrefetcher` |
+| In-memory index | `len`, `kind`, `log`, `recordCount`, `maxSamples`, `traceEntry`, `traceKeys(i)` (stored keys), `gathers`, `componentGroupIds`, `textHeader`, `f.index` | |
+| Reads from the map | | `readTraces`, `readTracesInto`, `traceField` & co, `traceFieldColumn` & co, `traceKeys(traces)` without stored keys, `sortTraces`, `traceHeaders` & co, `summary`, `sampleIntervalUs`, `copyBytes`, `newPrefetcher`, `saveIndex` |
 
 Everything a read returns is an owned copy: tensors, `FieldValue`s, header listings, byte
 copies and logs stay valid after the file is closed. The library never hands out pointers
-into the map. A `Prefetcher` keeps the map alive itself: closing (or dropping) the file while
-it runs is safe, and the unmap waits for the prefetcher's `close`. Do not change the file's
-index (`applySurvey`, `applyGeometry`) while a prefetcher runs.
+into the map.
 
 ```nim
 import parseSEG
@@ -159,16 +158,30 @@ echo "the tensor is still ours: ", kept.shape
 doAssert kept.shape == [10, 2001]
 ```
 
+Four contracts go beyond "values are copies":
+
+| Object | Contract |
+|---|---|
+| `Prefetcher` | It pins the file's map: closing (or dropping) the file while it runs is safe, and the unmap waits for the prefetcher's `close`. The file's index must not change while it runs (`applySurvey`, `applyGeometry`). |
+| `openEditor(f)`, `release(ed)` | Both take ownership (`sink`): the editor takes over the open file, and `release` gives it back. A variable at module top level is a global, so write `openEditor(move f)` and `f = release(move ed)` there ([editing.md](editing.md#editing-a-file-that-is-already-open)). |
+| `nextInto`, `tryNextInto`, `recycle` | You hand a chunk's buffer back to the prefetcher, which decodes later chunks into it. In a loop write `p.recycle(move c)`. Keep no raw pointer into a buffer you handed back; a copy or view you kept stays valid (that buffer is just not reused). |
+| `Progress` hook | It must be `gcsafe`: capture a parameter or a `ref`, not a global (see [viewer.md](viewer.md#open-a-file-progress-cancel-and-an-index-cache)). It runs on the thread that called the operation. |
+
 ## Thread rules
 
-- `readTraces` and `readTracesInto` on one open `SeismicFile` may run on several threads at
-  once: they only read the map and the index. Share the file by pointer and give each thread its own tensor and log. While any
-  thread reads, nothing may `close` the file or change its index (`applySurvey`,
-  `applyGeometry`). [processing.md](processing.md) has a complete example.
-- Everything else on a `SeismicFile` (and every `HeaderEditor` and `SurveyGeometry`) is
-  single-threaded: call it from one thread, or serialize the calls yourself.
+- `readTraces`, `readTracesInto` and their sample-window forms on one open `SeismicFile` may
+  run on several threads at once: they only read the map and the index. So may
+  `traceFieldColumnInto` and `traceKeysInto`.
+  Share the file by pointer and give each thread its own tensor (or buffer) and log. While
+  any thread reads, nothing may `close` the file or change its index (`applySurvey`,
+  `applyGeometry`). [processing.md](processing.md#read-in-parallel) has a complete example.
+- Everything else on a `SeismicFile` (and every `HeaderEditor`, `SeismicWriter` and
+  `SurveyGeometry`) is single-threaded: call it from one thread, or serialize the calls
+  yourself.
 - A `Prefetcher` decodes on its own worker thread; its consumer procs (`next`, `tryNext`,
-  `seek`, `close`) must all be called from one thread.
+  `nextInto`, `tryNextInto`, `recycle`, `seek`, `close`) must all be called from one thread.
+- A `Progress` hook is called on the thread that runs the operation (the opening or
+  converting thread), never on a worker.
 
 ## Where next
 

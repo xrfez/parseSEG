@@ -8,8 +8,10 @@ written into the file in place, or written into a copy.
 
 `convertFile(src, dst, opts)` detects the input standard and writes the one
 `opts.target` names. It never raises: everything, I/O failures included, is in the returned
-`DiagLog`. The output goes to `<dst>.tmp` and is renamed when complete, so a failed
-conversion leaves no partial file and an existing `dst` untouched.
+`DiagLog`. The output goes to a new temporary file next to `dst` (`<dst>.<random>.tmp`)
+and is renamed when complete, so a failed or cancelled conversion leaves no partial file
+and an existing `dst` untouched. A `progress` hook (the last parameter) reports and cancels
+long conversions ([processing.md](processing.md#batch-conversions-with-progress-and-cancel)).
 
 ```nim
 import parseSEG

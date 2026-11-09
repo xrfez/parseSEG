@@ -7,7 +7,7 @@ on as many cores as it has, and then a way to write its results. This page shows
 Two facts shape everything here:
 
 - **Nothing loads a whole file.** `openSeismic` maps the file and indexes it (24 bytes per
-  trace, plus about 100 with `keys`); samples are decoded only for the traces you ask for,
+  trace, plus 144 with `keys`); samples are decoded only for the traces you ask for,
   straight from the mapped bytes into your tensor. Files larger than RAM work: the OS pages
   them in and out. (`readSegy`/`readSegd` do load everything; they are for small files and
   tests.)
@@ -65,7 +65,9 @@ echo traces, " traces, peak amplitude ", peak
 doAssert traces == f.len and peak > 0
 ```
 
-Memory: a prefetcher holds `depth` chunks of `chunkTraces × cols` samples.
+Memory: a prefetcher holds `depth` chunks of `chunkTraces × cols` samples. A loop that is done with
+each chunk before the next can give the buffers back (`nextInto`, `recycle(p, move c)`), so
+it allocates nothing ([viewer.md](viewer.md#recycle-the-chunk-buffers)).
 
 ### Skip auxiliary traces, respect each trace's interval
 
@@ -285,6 +287,52 @@ for NaN in one).
 Picks, statics, or computed coordinates that fit existing header fields can be written in
 place, journaled and undoable, without rewriting the file: see [editing.md](editing.md).
 
+## Batch conversions with progress and cancel
+
+`convertFile`, `convertSegdRevision`, `convertWithGeometry` and `copyWithGeometry` take a
+`Progress` hook as their last parameter (`progress`). It is called with the input bytes
+done and the input's size, about every MiB and once at the end; a conversion that reads its
+input twice (a header scan first, SEG-2 input) spreads both passes over one `0 .. total`
+run. Returning false cancels: the conversion stops, the returned log holds a fatal
+`dcCancelled` diagnostic, and no output is left (an existing `dst` stays as it was). These
+procs never raise, so a batch job checks the log, not an exception.
+
+```nim
+import std/os
+import parseSEG
+
+type Job = ref object
+  name: string
+  lastPercent: int
+  stop: bool                  # set by a signal handler, a UI, a deadline ...
+
+proc hook(job: Job): Progress =
+  # gcsafe: the closure captures the `ref` parameter, not a global.
+  proc (done, total: int64): bool =
+    if total > 0: job.lastPercent = int(done * 100 div total)
+    not job.stop
+
+let inputs = ["SEG Spec/exampleFiles/inova_rev30_5traces.sgd",
+  "SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "SEG Spec/exampleFiles/63.sgd"]
+for k, input in inputs:
+  let job = Job(name: input.extractFilename, stop: k == 2)  # cancel the last one
+  let output = "batch_" & job.name.changeFileExt("sgy")
+  let log = convertFile(input, output, ConvertOptions(), hook(job))
+  if log.isFatal:
+    for d in log:
+      if d.code == dcCancelled: echo job.name, ": cancelled, nothing written"
+    doAssert not fileExists(output)
+  else:
+    echo job.name, ": done (", job.lastPercent, "%)"
+    doAssert job.lastPercent == 100 and fileExists(output)
+```
+
+`convertSegdRevision(src, dst, opts, progress)`, `convertWithGeometry(src, dst, g, opts,
+fields, overwrite, progress)` and `copyWithGeometry(src, dst, g, fields, overwrite,
+progress)` take the hook in the same place and report a cancel the same way
+(`copyWithGeometry` in `result.log`). `openSeismic` and `exportHeaders` raise
+`SegCancelledError` instead ([viewer.md](viewer.md#open-a-file-progress-cancel-and-an-index-cache)).
+
 ## Geometry for processing
 
 `openSeismic(path, keys = true)` gives each trace's source and receiver positions, offset
@@ -295,7 +343,7 @@ the keys as usual. `gathers` and `componentGroupIds` group the traces by what th
 ## Sizes and limits
 
 - All offsets are 64-bit; files over 4 GB are tested (sparse synthetic files).
-- Index memory: 24 B per trace, plus about 100 B with keys (10 M traces: 240 MB / 1.2 GB).
+- Index memory: 24 B per trace, plus 144 B with keys (10 M traces: 240 MB, or 1.7 GB with keys).
 - A tensor holds only what you asked for; size your chunks to your cache and core count.
 - Tape: `buildIndex` and the streaming readers work on tape images and devices, but range
   reads and the prefetcher need a plain disk file (`ValueError` otherwise).

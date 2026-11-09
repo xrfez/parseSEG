@@ -3,15 +3,17 @@
 Real seismic files break the standards in small ways all the time. parseSEG's rule is
 **never silent, never interrupting**: reading a file runs to completion whenever that is
 physically possible, and every problem becomes an entry in a log instead of an exception.
-Exceptions are reserved for mistakes in the *call* and for the operating system refusing.
+Exceptions are reserved for mistakes in the *call*, for the operating system refusing, and
+for a cancel you asked for.
 
-## Three kinds of outcome
+## Four kinds of outcome
 
 | What happened | How you learn it | Where |
 |---|---|---|
 | The file breaks a rule (bad value, unknown block, truncated data) | A `Diagnostic` in a `DiagLog` | `f.log`, a read's `log`, a result's `log` |
 | You passed a bad argument (trace out of range, closed file, unknown field name, missing keys) | An exception | `ValueError` |
 | The OS refused (missing file, permissions, disk full) | An exception | `IOError` / `OSError` |
+| Your `Progress` hook returned false (the user cancelled) | A fatal `dcCancelled` diagnostic from a conversion; `SegCancelledError` from `openSeismic`, `buildIndex` and `exportHeaders` | The returned log; the exception. No output is left either way |
 
 Opening a damaged or unrecognized file *succeeds*: you get a `SeismicFile` with what could be
 indexed and a log saying what could not.
@@ -103,6 +105,9 @@ policy:
 
 ## How to act on each code
 
+The table gives each code's stable name (as `$` and NIF print it); the `DiagCode` value is
+`dc` and the name capitalized (`cancelled` is `dcCancelled`, `badValue` is `dcBadValue`).
+
 | Code | Typical cause | What to do |
 |---|---|---|
 | `io` | The OS failed a read or write | Check the path, permissions, free space; usually `fatal` |
@@ -119,7 +124,7 @@ policy:
 | `tapeLayout` | Tape marks, labels or block sizes off the spec | Usually harmless on disk copies of tapes |
 | `validation` | A writer or converter found something the target cannot hold or forbids; also conversion loss notes (`info`) | `error`: nothing was written unless `lenient`. `info`: read the note, it says what was dropped |
 | `multiplexed` | The file holds multiplexed SEG-D, demultiplexed into a temporary copy | `warning`: reads and keys use the copy (`f.demuxPath`); edits need a demultiplexed file |
-| `cancelled` | A `Progress` hook returned false during a conversion | `fatal`: nothing was written; run it again to finish |
+| `cancelled` | A `Progress` hook returned false during a conversion (`dcCancelled`; opening and exporting raise `SegCancelledError` instead) | `fatal`: nothing was written; run it again to finish |
 | `indexCache` | `openSeismic(cache = ...)` did not use the index cache (none, stale, damaged; the message says which) | `info`: the file was indexed; `saveIndex` writes a fresh cache |
 | `internal` | A library bug | Please report it with the message |
 

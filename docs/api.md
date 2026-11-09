@@ -1,10 +1,14 @@
-# parseSEG public API (task 8.2)
+# parseSEG API reference
 
-`import parseSEG` gives the stable surface listed here. This page is the reference; for
+`import parseSEG` gives the surface listed here (`PackageVersion` is the package version). This page is the reference; for
 task-oriented guides with tested examples (viewers, processing, editing, conversion,
-diagnostics) see [`docs/guide/`](guide/README.md). Everything else is internal or
-low-level:
-- `parseSEG/codecs` holds the byte codecs and the field-layout pragmas;
+diagnostics) see [`docs/guide/`](guide/README.md). The main sections describe the
+everyday API; [Supporting types and lower-level names](#supporting-types-and-lower-level-names)
+at the end lists the rest of what the umbrella exports, one line per group. Procs whose doc
+comment starts with **Internal.** are exported for the library's own modules only and are
+not listed. Beyond the umbrella:
+- `parseSEG/codecs` holds the byte codecs (BCD, IBM float, EBCDIC) and the field-layout
+  pragmas;
 - the `parseSEG/<area>/<module>` paths can still be imported one by one.
 
 Conventions that hold throughout:
@@ -37,7 +41,7 @@ Conventions that hold throughout:
 | `saveIndex(f, path)`, `f.fromCache` | Write `f`'s index as an index cache: entries, codecs, file and record headers, the walk's diagnostics and keys (if opened with them), about 24 B per trace (+ 144 with keys), a NIF header with the file's stamps and a checksum. `openSeismic(path, cache = cachePath)` reads it instead of walking the file when it was saved for the same path, size, modification time and first/last 64 KiB, with the same `twosComplement8015` (and keys, when asked for), by the same parseSEG version, and is intact; otherwise it walks the file and logs why (`dcIndexCache`, info). `fromCache` says which. `saveIndex` raises `ValueError` for a closed or unrecognized file, a demultiplexed copy, keys changed by `applyGeometry`/`applySurvey`, a file changed since it was opened, or the file itself as `path`. |
 | `detectKind(bytes): SeismicKind` | Detection only (`skUnknown` when nothing fits). |
 | `buildIndex(src: RecordSource, kind, keys = false, progress = nil): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). SEG-2 needs a `MemFileSource` (`ValueError` otherwise). |
-| `f.len`, `f.kind` (`skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path`, `f.demuxPath` | File facts. |
+| `f.len`, `f.kind` (`SeismicKind`: `skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path`, `f.demuxPath` | File facts. |
 | `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval (`ValueError` for a trace out of range; `sampleIntervalUs` and `copyBytes` also for a closed file). |
 | `f.summary` (`FileSummary`), `f.channelSets` (`seq[ChannelSetSummary]`), `f.crsText` | Common metadata with no branch on the standard (task 6.8): standard and revision, byte order, format code, trace/record counts, first/last field record, sample interval, samples per trace and record length (NaN / -1 when not uniform), coordinate units (`CoordinateUnits`) and the CRS text's format (`CrsTextFormat`). `channelSets` gives each SEG-D channel set's interval, timing and trace count; `crsText` the CRS text (P1/11 or Location Data). |
 | `f.index.segy`, `f.index.segdRecords`, `f.index.seg2`, `f.seg2Trace(i)`, `f.close()` | The format's own headers (`seg2Trace` re-reads a SEG-2 Trace Descriptor Block from the map). A `SeismicFile` that goes out of scope unmaps itself; `close` does it early. |
@@ -51,7 +55,9 @@ Conventions that hold throughout:
 | `readTracesInto(f, traces, var tensor, row = 0[, log]): int` | Decode a range or a selection into an existing tensor; returns the number of traces left zero (logged in `log`). |
 | `readTraces(f, traces, samples: Slice[int][, log], T)`, `readTracesInto(f, traces, samples, var tensor, row = 0[, log]): int` | A **sample window** (`a..b`, 0-based) of a range or selection: `[traces, samples.len]`, and the tensor's width must be `samples.len`. Only the window's bytes are decoded (SEG-D 8015 and SEG-2 format 3, 4 samples in 10 bytes, also decode the rest of the group the window starts in); zero past a trace's end. `ValueError` for an empty window or one starting below 0. |
 | `maxSamples(f, traces)` | Longest trace of a range or selection. |
-| `newPrefetcher[T](f, traces, chunkTraces, depth, cols, firstSample = 0)` (a range or a list) | Read-ahead on a worker thread (rows hold samples `firstSample ..< firstSample + cols`): `tryNext` (never blocks), `next`, `for c in p.chunks`, `nextInto` / `tryNextInto` (the caller gives up `c.samples`: swapped into the slot, so a steady consumer allocates nothing), `recycle(p, chunk or tensor)` (a buffer for a later chunk; reused only if of the chunk shape and unshared, at most `depth` kept), `seek(span)`, `atEnd`, `traceAt`, `len` (positions), `close`. It keeps the file's map alive until its `close`. A `PrefetchChunk` has `first`, `count`, `samples`, `failed` and `log` (one error per trace left zero, with its trace index). |
+| `newTraceTensor[T](traces, samples)` | A zero-filled `[traces, samples]` tensor to decode into (`T` is a `SampleType`: `float32` or `float64`). |
+| `decodeTrace(t, row, format, src, samples, ...)`, `encodeTrace(t, row, format, dst, samples, ...)` | One row of a tensor from or to raw sample bytes, for a SEG-Y `SampleFormat`, a `SegdSampleFormat` or a `Seg2Format` (as `decodeSamples` & co). |
+| `newPrefetcher[T](f, traces, chunkTraces, depth, cols, firstSample = 0)` (a range or a list) | Read-ahead on a worker thread (rows hold samples `firstSample ..< firstSample + cols`): `tryNext` (never blocks), `next`, `for c in p.chunks`, `nextInto` / `tryNextInto` (the caller gives up `c.samples`: swapped into the slot, so a steady consumer allocates nothing), `recycle(p, chunk or tensor)` (a buffer for a later chunk; reused only if of the chunk shape and unshared, at most `depth` kept), `seek(span)`, `atEnd`, `traceAt`, `len` (positions), `close`. A `Prefetcher` is not copyable; it keeps the file's map alive until its `close`. A `PrefetchChunk` has `first`, `count`, `samples`, `failed` and `log` (one error per trace left zero, with its trace index). |
 
 Bad caller input (a trace, range or position out of range, a closed file) raises
 `ValueError` everywhere.
@@ -78,11 +84,13 @@ Sorting is a selection: a sort produces a list of trace indices, and no data is 
 | `f.traceKeys(traces): seq[TraceKeys]`, `f.traceKeysInto(traces, dst: var openArray[TraceKeys])` | Keys of a list or range of traces. Without `keys = true` they are made on demand from the mapped headers, the same as the index walk makes them (the file's own geometry: `applyGeometry`/`applySurvey` changes are only in stored keys); with it the stored keys are copied. |
 
 ## Gathers and components
-`gathers(f or index)`: a split into `Gather` (`kind`: shot, receiver, cmp, offset, other or
+`gathers(f or index)`: a split into `Gather` (`kind`, a `GatherKind`: shot, receiver, cmp, offset, other or
 unknown; `traces`; `sources`; `receivers`), derived from the geometry, never assumed.
 `classify(index, range)`. `componentGroups(f or index, traces)` returns a `ComponentGroup`
 (station, traces, components) per station and source; see `isMultiComponent`.
 `componentGroupIds(f, traces)` labels each trace with its group (-1 for none).
+`isSeismic(index, trace)` is false for SEG-D auxiliary traces (channel types other than
+seismic or EM) and SEG-2 `TEST_DATA` and `UPHOLE` traces.
 
 ## Survey files and external geometry (Phase 10)
 SPS (Rev 1.0, 2.1) and SEG P1 (1983) give the coordinates that SEG-D 2.x headers lack, and SPS
@@ -121,7 +129,8 @@ entry cannot be synced is refused, and its entry is cut from the journal again (
 fails too, the editor refuses every further edit). `beginBatch` / `endBatch` (false when the
 batch's journal sync fails) share one sync among many edits; `close` raises `IOError` when
 the final batch cannot be journaled. `currentTraceField` (...) read fields as edited so far
-(a batch's pending edits included, without a sync). Several fields of one header can be
+(a batch's pending edits included, without a sync; also `currentFileField`,
+`currentRecordField`). Several fields of one header can be
 edited in one batch without a flush. `openEditor`
 raises `ValueError` when the journal is the file itself.
 `openEditor(f: sink SeismicFile, journalPath = "")` takes over an open file: maps it
@@ -129,11 +138,12 @@ read-write and keeps its index (keys joined by `applySurvey` included), no secon
 `ValueError` for a closed file, a demultiplexed copy, or a file whose size changed since it
 was opened. `release(ed): SeismicFile` ends the session (as `close`) and returns the file,
 still mapped and as edited.
-`rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them.
+`rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them;
+`readJournal(journal)` lists its edits (`JournalEdit`, oldest first).
 
 Header documents (`model/headernif`): `exportHeaders(f, path, raw = true, progress = nil)` streams every named
 field (and raw bytes) as NIF; `importHeaders(path, nifPath, ImportOptions(outPath, journal,
-dryRun, force, onChange))` applies an edited document as a patch through the editor, in
+dryRun, force, onChange)): ImportResult` (`applied`, `refused`, `log`) applies an edited document as a patch through the editor, in
 place or into a copy (`dryRun` only lists the changes). A viewer saves its pending edits with
 `writeHeaderPatch(changes: openArray[HeaderChange], path)`, each change made with
 `initHeaderChange(scope, index, "<block>.<field>", value)` (which checks the name), in
@@ -232,6 +242,35 @@ fatal diagnostic.
   The stream form takes `scanSegdRecords` (a headers-only pass) for exact sample counts.
 
 ## Diagnostics
-`DiagLog` (`len`, `[]`, `items`, `count(severity)`, `hasErrors`, `isFatal`, `toNif`, `writeNif`), `Diagnostic`,
+`DiagLog` (`len`, `[]`, `items`, `pairs`, `add`, `report`, `count(severity)`, `hasErrors`, `isFatal`, `toNif`, `writeNif`), `Diagnostic`,
 `Severity`, `DiagCode`, `Location`, and `readDiagnostics` / `parseDiagnostics` for NIF round
-trips.
+trips. `recordException(log, loc, e)` turns a caught exception into a diagnostic, and
+`tryRecord(log, loc): body` runs `body` and records what it raises (false then).
+
+Exceptions: `SegError` (base) → `SegFormatError` → `SegTruncatedError` (data ran out) and
+`SegUnlocatableError` (the rest of the data cannot be located; readers stop);
+`SegCancelledError` (a `Progress` hook cancelled; not a `SegError`). `raiseFormat`,
+`raiseTruncated`, `raiseUnlocatable` and `raiseCancelled` raise them with a byte offset, for
+custom decoders and sources.
+
+## Supporting types and lower-level names
+The rest of what `import parseSEG` exports, grouped by module. Most are the types of the
+fields and results above, or building blocks for code that works on raw headers.
+
+| Area | Names |
+|---|---|
+| Index (`model/traceindex`, `model/keys`, `model/summary`) | `TraceCodec` (how one file, record or SEG-2 format encodes samples), `NoChannelSet`; per entry `channelSetIndex`, `sampleOffset`, `dataBytes`, `known` (decodable), `prefersFloat64`; `StationKey` / `stationKey` (a station's table key, rounded to 1/100), `Coordinates`, `initTraceKeys`, `deriveGeometry` (offset and midpoint from the coordinates), `hasSourceXY`, `hasReceiverXY`, `hash`; `StandardRevision` |
+| Header fields (`model/headerfields`) | `FieldValueKind`, `HeaderScope`, `BlockRef` (where a header block lies), `toFieldValue`, `toFloat` |
+| Byte order (`common/endians`) | `ByteOrder`, `hostOrder`, `ByteBuf` / `byteBuf`, `swapBytes`; big-endian readers `beU8` .. `beU64`, `beI8` .. `beI64`, `beU24`, `beI24`, `beF32`, `beF64` and writers `putBeU8` .. `putBeF64`; either order: `getNum`, `putNum`, `loadNum`, `loadU24` (unchecked) |
+| Field layouts (`common/fieldlayout`) | `FieldSpec`, `FieldKind`, `fieldTable(T)` (a header type's layout), `BcdInvalid`, `BcdAllF` |
+| SEG-Y headers (`segy/binheader`, `segy/traceheader`, `segy/textheader`) | `SegyBinaryHeader`, `SegyRevision`, `BinaryHeaderSize`, `binaryHeaderFields`, `decodeBinaryHeader`, `encode`, `validate`, `rulesRevision`, `bytesPerSample`, `detectByteOrder` (`ByteOrderDetection`), `ByteOrderMarker`, `effectiveSampleInterval`, `effectiveSamplesPerTrace` (and `...Orig`), `effectiveEnsembleFold`, `effectiveDataTracesPerEnsemble`, `effectiveAuxTracesPerEnsemble`; `SegyTraceHeader`, `SegyTraceHeaderExt1`, `TraceHeaderSize`, `traceHeaderFields`, `traceHeaderExt1Fields`, `decodeTraceHeader`, `decodeTraceHeaderExt1`, `initTraceHeaderExt1`, `applyScalar`, `scaleCoordinate`, `scaleElevation`, `scaleTime`, `shotpoint`, `headerBlockName`, `headerNameText`, `LastInEnsemble`, `LastInLine`, `LastInFile`, `LastInSurvey`; `SegyTextHeader`, `TextEncoding`, `TextHeaderSize`, `CardCount`, `CardWidth`, `CardNumber`, `initTextHeader`, `card`, `setCard`, `cardPrefix`, `decodeTextHeader`, `detectTextEncoding`, `decodeText`, `encodeText`, `looksLikeText` |
+| SEG-Y extended text (`segy/exttext`) | `ExtendedTextHeader` (`initExtendedTextHeader`, `add`, `finish`, `find`, `isComplete`, `needsMore`, `hasEndText`, `inBinaryStanza`, `continuesUserData`), `Stanza` (`stanzaText`, `stanzaBytes`, `isBinary`, `isEndText`, `isUserData`), `ExtTextIssue`, `UserDataBlock` (`userDataBytes`, `isRetained`), `UserDataItem`; writing: `addText`, `addStanza`, `addUserData`, `addEndText`, `toDescXml`; `startsStanza`, `startsStanzaRecord`, `normalizeStanzaName` |
+| SEG-Y layout and streaming (`segy/layout`, `segy/fields`, `segy/reader`, `segy/writer`, `segy/samples`) | `TraceLayout`, `LayoutEntry`, `LayoutType`, `standardLayout`, `parseLayout`, `merge`, `normalizeEntryName`; `GeometryReader`, `TraceGeometry`, `timeBasis`; `SegyFile`, `SegyReader`, `SegyTrace`, `SegyData`, `decodeInto`, `isDone`, `tracesRead`, `extractUserData`, `binaryAsRead`, `isBinaryAsRead`, `isExtendedAsRead`, `isTrailerAsRead`, `TapeLabelSize`, `DefaultMaxRetained`, `MaxLayoutBytes`; `SegyWriter`, `SegyWriteOptions`, `tracesWritten`; `SampleType`, `sampleSize`, `toSampleFormat`, `isRev2Format`, `definedSampleFormats`, `decodeSamples`, `encodeSamples`, `prefersFloat64` |
+| SEG-D headers (`segd/headers`, `segd/blocks`) | `SegdStorageUnitLabel` (`decodeLabel`, `isStorageUnitLabel`), `SegdGeneralHeader1`, `SegdGeneralHeader2`, `SegdGeneralHeaderN`, `SegdChannelSetDescriptor`, `SegdTraceHeader`, `SegdTraceHeaderExt1`, `SegdTrailerBlock`, `SegdHeaderBlock`, `SegdBlock`, their `segd...Fields` tables, `SegdBlockSize`, `SegdTraceHeaderSize`; `decodeBlock`, `encode`, `invalidBcdFields`, `asciiText`; accessors `generalHeaderCount`, `extendedHeaderBlocks`, `externalHeaderBlocks`, `skewBlocks`, `baseScanIntervalMs`, `recordLengthMs`, `sampleIntervalMs`, `channelSetNumber`, `endTimeMs`, `mpFactor`, `receiverLine`, `receiverPoint`, `isFixedRecord`, `bytesPerScan`, `scansPerBlock` |
+| SEG-D Rev 3 (`segd/rev3`) | `SegdGeneralHeader2Rev3`, `SegdGeneralHeader3`, `SegdChannelSetDescriptorRev3`, `SegdTraceHeaderExt1Rev3`, `SegdPositionBlock`, `SegdSourceDescription` (`vibratorType`, `phaseControl`, `phaseAngle`), `SegdAdditionalSourceInfo`, `SegdSensorInfo`, `SegdSensorCalibration`, `SegdTimeDrift`, `SegdTimestampHeader`, `SegdOrientation`, `SegdTrailerDescription`, `SegdRev3Block`, their `segd...Fields` tables, `BlockType...` constants, `blockTypeName`, `isDefinedBlock`, `isUserBlock`, `findBlock`, `blockText`, `descriptionText`, `traceNumber`, `traceBytes`, `recordLengthUs`, `crsFormat`; time: `timestampToUnix`, `unixToTimestamp`, `gpsMinusUtc`, `generalHeaderUtc`, `GpsEpochUnix`; tables of contents: `SegdToc`, `SegdTocEntry`, `decodeToc`, `isTocFile`, `tocEntryCount`, `TocIdentifier`, `TocHeaderSize`, `TocEntrySize` |
+| SEG-D streaming (`segd/reader`, `segd/writer`, `segd/samples`, `segd/revconvert`) | `SegdReader`, `SegdData`, `SegdRecordData`, `SegdLayout`, `SegdRevision`, `isRev3`, `isDone`, `decodeInto`, `announcedTraces`, `channelSetCount`, `DefaultMaxHeaderBytes`, `DefaultMaxTraceBytes`, `UnknownTrailerBlocks`; `SegdWriter`, `SegdWriteOptions`, `writeRecordHeaders`, `endRecord`, `setRev3Trailer`, `computeRev3Sizes`, `MaxFixedBlock`; `SegdSampleFormat`, `SegdSampleType`, `segdSampleFormats`, `toSegdFormat`, `decodeSegdSamples`, `encodeSegdSamples`, `dataBytes`, `isLittleEndian`, `bigEndianOf`, `prefersFloat64`; `SegdRecordScan` |
+| Multiplexed SEG-D (`segd/mux`, `segd/demux`) | `MuxScanLayout`, `MuxChannelSet`, `ScanHeader`, `ScanHeaderSize`, `timingMs`, `isMultiplexedCode`, `demuxFormat`, `muxBytes`, `muxTraceHeader`, `demultiplexedRecord` |
+| SEG-2 (`seg2/headers`, `seg2/reader`, `seg2/samples`, `seg2/writer`, `seg2convert`) | `Seg2Header`, `Seg2TraceType`, `Seg2TraceSort`, `Seg2Units`, `Seg2FixedSize`, `Seg2FileBlockId`, `Seg2TraceBlockId`, `Seg2MaxTraces`, `isSeg2`, `seg2Order`, `toSeg2String`, `find`; `dataOffset`, `stringListEnd`; `Seg2SampleType`, `toSeg2Format`, `samplesIn`, `dataBytes`, `prefersFloat64`; `Seg2Writer`; `Seg2TargetFormat` |
+| Survey files (`survey/sps`, `survey/p1`, `survey/textrec`) | `SpsRevision`, `SpsHeader`, `SpsPoint` (`initSpsPoint`), `SpsPointKind`, `SpsRelation` (`initSpsRelation`), `SpsEntry`, `SpsEntryKind`, `looksLikeSps`; `P1Record` (`initP1Record`), `PLogicalFile`, `PFormat`, `AngleUnit`; `TextRecord`, `TextLayout`, `detectLayout`, `openLayout`, `textRecords`, `CardWidth`, `MaxLineBytes` |
+| Vendor maps (`vendor/maps`, `vendor/scaffold`) | `VendorRegistry` (`addMap`), `VendorMap`, `loadVendorMap`, `checkVendorMap`, `vendorSearchPath`, `VendorContext`, `VendorArea`, `VendorDecoder`, `decodeTarget`, `VendorField`, `VendorValue`, `VendorValueKind`, `toFloat`; the compiled map: `VendorMatch`, `VendorRevision`, `VendorRevisionRange`, `VendorTarget`, `VendorTargetKind`, `VendorFieldPlan`, `VendorRepeatPlan`, `VendorEncoding`, `VendorTrim`, `VendorEnumLabel`, `VendorBitFlag`; `VendorScaffold` |
+| Records and media (`io/records`, `io/diskio`, `io/memsource`, `io/tapeimage`, `io/tapedevice`, `io/tape_linux`) | `RecordSink`, `RecordCursor` (`initRecordCursor`, `readExactly`, `skip`, `skipTapeMark`, `stoppedAt`, `remainingInRecord`, `atRecordStart`, `readRecordRest`, `preferSmallReads`), `readRecord`, `writeRecord`, `writeTapeMark`, `DefaultChunkSize`; a custom source or sink overrides the methods `readRecordImpl`, `seekForward`, `hasRecordBoundaries`, `writeRecordImpl`, `writeTapeMarkImpl`; `DiskSource`, `DiskSink`, `DefaultMapChunk`, `TapeImageSource`, `TapeImageSink`, `DeviceSource`, `DeviceSink`, `DefaultMaxBlockSize`, `TapeStatus`, `newMemoryTape` (`TapeItem`, `TapeItemKind`, `dataBlock`, `tapeMark`), `LinuxTape` / `openLinuxTape` (Linux) |

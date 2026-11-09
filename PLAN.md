@@ -1032,7 +1032,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
           `nim asan` task;
         - CI fails on any leak;
         - re-check the Nim runtime on a newer version and report upstream if it is still there.
-- [ ] 15.2 **Usage docs pass.** The guides are current and every ```nim block runs in `tdocs`
+- [x] 15.2 **Usage docs pass.** The guides are current and every ```nim block runs in `tdocs`
       (37 examples). No removed API is mentioned. The 14.3 additions were appended by several
       agents, so:
       - `guide/README.md`'s "Which page to read" table does not list them (columns, sorting,
@@ -1669,3 +1669,4 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
   - tprefetch under ASan: the 32 KB leak is gone.
   - New `nim asan` task (tprefetch, tsharedreads, tcolumns, tviewerreads, tdiagnostics under ASan/LSan; any leak fails), also run in CI.
   - Decode speed unchanged (small-scale bench, warm mapped: IEEE 25.5 GB/s, IBM 5.7, 8015 2.49, 8058 25.1).
+- 2026-11-09: 15.2 done. Guides: `guide/README.md` table lists the 14.3 features with section links; `getting-started.md` states the prefetch-pin, `openEditor(f)`/`release` (`move` at top level), `nextInto`/`recycle` hand-over and gcsafe-hook contracts, which reads may share a file across threads, and what still works after `close` (checked); `viewer.md` reordered (open/progress/cache, navigation, on-screen reads and windows, sorted views, columns/keys on demand, prefetch with `firstSample` and recycling, header tab + `textHeader`, geometry, edits); `processing.md` has a tested batch-conversion progress/cancel example; `diagnostics.md` covers `dcCancelled`/`SegCancelledError`; keys are 144 B/trace everywhere. tdocs: 39 examples. `docs/api.md` retitled, and every umbrella export not marked **Internal.** is named (new "Supporting types and lower-level names" table; coverage checked with `nim jsondoc` + a `declared()` probe). README intro rewritten. Open: `nim doc`/`jsondoc` report RST errors in `segy/textheader.nim:108` (backtick literal with a trailing space) and `convert.nim:36` (field-mapping table), so `nim docs` exits 1.

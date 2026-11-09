@@ -1,59 +1,33 @@
 # Recipes for a seismic viewer
 
-A viewer needs four things from a data library: a cheap overview of a file of any size,
-random access to any trace range or gather without blocking the UI, the headers of the
-trace under the cursor, and a way to keep the user's header changes without touching the
-file. This page shows each with parseSEG. Read [getting-started.md](getting-started.md)
-first for the concepts (trace numbers, records, channel sets, keys, gathers).
+A viewer needs a few things from a data library: a cheap overview of a file of any size,
+random access to any trace range, gather or sort order without blocking the UI, the
+headers of the trace under the cursor, and a way to keep the user's header changes without
+touching the file. This page shows each with parseSEG, in the order a viewer meets them.
+Read [getting-started.md](getting-started.md) first for the concepts (trace numbers,
+records, channel sets, keys, gathers).
 
-## Open a file and build the navigation tree
+| Section | Main names |
+|---|---|
+| [Open a file](#open-a-file-progress-cancel-and-an-index-cache) | `openSeismic(progress, cache)`, `saveIndex`, `SegCancelledError` |
+| [The navigation tree](#the-navigation-tree) | `summary`, `gathers`, `channelSets`, `componentGroupIds` |
+| [Read what is on screen](#read-what-is-on-screen) | `readTraces`, `readTracesInto`, sample windows |
+| [Sorted views](#sorted-views) | `sortTraces`, `sortOrder` |
+| [Header columns and keys on demand](#header-columns-and-keys-on-demand) | `traceFieldColumn`, `traceKeys(traces)` |
+| [Read ahead](#read-ahead-without-blocking-the-ui) | `newPrefetcher`, `tryNext`, `seek`, `nextInto`, `recycle` |
+| [The header tab](#the-header-tab-and-the-textual-header) | `traceHeaders`, `copyBytes`, `textHeader` |
+| [Geometry](#geometry-time-and-annotation) | `traceKeys`, inline and crossline |
+| [Edits](#keep-the-users-header-edits-as-a-patch) | `writeHeaderPatch`, `openEditor(f)`, `release` |
 
-Open with `keys = true` when the viewer shows geometry or gathers. The walk reads headers
-only, so this is fast even for files far larger than RAM.
+## Open a file: progress, cancel and an index cache
 
-```nim
-import std/[math, strutils]
-import parseSEG
-
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
-let s = f.summary
-echo s.standard, " rev ", s.revision.major, ".", s.revision.minor, ", ", s.traceCount,
-  " traces, ", s.recordCount, " record(s), ", s.sampleIntervalUs, " us, ",
-  s.recordLengthMs, " ms, coordinates in ", s.coordinateUnits
-
-# A tree: gathers, then the channel sets of each SEG-D record.
-for g in f.gathers:
-  echo "gather ", g.kind, ": traces ", g.traces
-for cs in f.channelSets:
-  echo "  record ", cs.record, " set ", cs.number, ": channel type 0x",
-    toHex(cs.channelType, 2), ", ", cs.traceCount, " traces, ", cs.startTimeMs, "..",
-    cs.endTimeMs, " ms"
-
-# Coordinate reference text, when the file has one (SEG-Y stanza, SEG-D Location Data).
-if s.crsFormat != ctNone:
-  echo "CRS (", s.crsFormat, "): ", f.crsText.splitLines[0]
-
-doAssert f.gathers.len == 1 and f.channelSets.len == 4 and s.crsFormat == ctStanza
-```
-
-Things worth knowing for the overview:
-
-- `summary` fields that differ between traces are NaN or -1 (`sampleIntervalUs`,
-  `samplesPerTrace`). For SEG-D, take intervals and windows per channel set
-  (`channelSets`) or per trace (`f.sampleIntervalUs(i)`).
-- SEG-D traces are in file order, which is not necessarily channel set order: in the sample
-  above, trace 1 is in channel set index 2 and trace 2 in index 1. Use `traceEntry(i).channelSetIndex`
-  instead of assuming.
-- Gather kinds are derived from the keys. A post-stack SEG-Y volume such as the Inglewood
-  sample is a single gather of kind `gkUnknown`: there is no source or receiver to group by.
-
-### A progress bar, a cancel button and an index cache
-
-Opening a 40 GB file walks every trace header first. Pass a `progress` hook to show how
-far it got and to let the user cancel, and an index cache so the next open of the same
-file is near-instant (10 M SEG-Y traces: 2.5 s to walk, 43 ms from the cache). The hook
-runs on the opening thread about every MiB and once at the end; returning false stops
-the walk with `SegCancelledError`. Files change only on an explicit write, so
+Open with `keys = true` when the viewer shows geometry or gathers for the whole file (or
+make keys on demand for what is on screen: [below](#header-columns-and-keys-on-demand)).
+The open walks every trace header once, which takes seconds on a 40 GB file. Pass a
+`progress` hook to show how far it got and to let the user cancel, and an index cache so the
+next open of the same file is near-instant (10 M SEG-Y traces: 2.5 s to walk, 43 ms from the
+cache). The hook runs on the opening thread about every MiB and once at the end; returning
+false stops the walk with `SegCancelledError`. Files change only on an explicit write, so
 `openSeismic` only reads the cache: `saveIndex` writes it.
 
 ```nim
@@ -100,8 +74,73 @@ except SegCancelledError:
   `applyGeometry` changed, a file changed since it was opened, and the temporary
   demultiplexed copy of multiplexed SEG-D (those files are never cached).
 - The same hook drives conversions and exports: `convertFile(src, dst, opts, progress)`
-  returns a fatal `cancelled` diagnostic and writes nothing; `exportHeaders(f, path,
-  progress = hook)` raises `SegCancelledError`.
+  returns a fatal `dcCancelled` diagnostic and writes nothing; `exportHeaders(f, path,
+  progress = hook)` raises `SegCancelledError` ([processing.md](processing.md#batch-conversions-with-progress-and-cancel)).
+
+## The navigation tree
+
+`summary` gives the facts every standard shares; `gathers` and `channelSets` give a tree to
+navigate.
+
+```nim
+import std/[math, strutils]
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
+let s = f.summary
+echo s.standard, " rev ", s.revision.major, ".", s.revision.minor, ", ", s.traceCount,
+  " traces, ", s.recordCount, " record(s), ", s.sampleIntervalUs, " us, ",
+  s.recordLengthMs, " ms, coordinates in ", s.coordinateUnits
+
+# A tree: gathers, then the channel sets of each SEG-D record.
+for g in f.gathers:
+  echo "gather ", g.kind, ": traces ", g.traces
+for cs in f.channelSets:
+  echo "  record ", cs.record, " set ", cs.number, ": channel type 0x",
+    toHex(cs.channelType, 2), ", ", cs.traceCount, " traces, ", cs.startTimeMs, "..",
+    cs.endTimeMs, " ms"
+
+# Coordinate reference text, when the file has one (SEG-Y stanza, SEG-D Location Data).
+if s.crsFormat != ctNone:
+  echo "CRS (", s.crsFormat, "): ", f.crsText.splitLines[0]
+
+doAssert f.gathers.len == 1 and f.channelSets.len == 4 and s.crsFormat == ctStanza
+```
+
+Things worth knowing for the overview:
+
+- `summary` fields that differ between traces are NaN or -1 (`sampleIntervalUs`,
+  `samplesPerTrace`). For SEG-D, take intervals and windows per channel set
+  (`channelSets`) or per trace (`f.sampleIntervalUs(i)`).
+- SEG-D traces are in file order, which is not necessarily channel set order: in the sample
+  above, trace 1 is in channel set index 2 and trace 2 in index 1. Use
+  `traceEntry(i).channelSetIndex` instead of assuming.
+- Gather kinds are derived from the keys. A post-stack SEG-Y volume such as the Inglewood
+  sample is a single gather of kind `gkUnknown`: there is no source or receiver to group by.
+
+### Gathers and multi-component stations
+
+A gather's `traces` is a range; pass it to `readTraces` as it is. To hide auxiliary traces,
+filter with `isSeismic`. For multi-component data, `componentGroupIds` labels each trace
+with its station group (-1 for traces in none), so the viewer can show one station's
+components side by side.
+
+```nim
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
+let g = f.gathers[0]
+var seismic: seq[int]
+for i in g.traces:
+  if isSeismic(f.index, i): seismic.add i
+let shot = f.readTraces(seismic)
+echo g.kind, " gather: ", seismic.len, " seismic traces of ", g.traces.len
+
+let groups = f.componentGroupIds(g.traces)
+echo "station group of each trace: ", groups
+doAssert seismic == @[3, 4] and shot.shape == [2, 4001]
+doAssert groups == @[-1, -1, -1, 0, 1]   # aux traces are in no group
+```
 
 ## Read what is on screen
 
@@ -151,15 +190,15 @@ doAssert view == zoom
 f.close()
 ```
 
-### Sorted views and the textual header
+## Sorted views
 
-`sortTraces(by)` sorts by header fields and returns trace indices; read the sorted view with
-the list form of `readTraces` (or `newPrefetcher`). The sort is stable, ascending, with NaN
-last. `sortOrder(columns)` does the same over columns of your own, such as `TraceKeys`.
-`textHeader` gives a SEG-Y textual header as 40 lines of text.
+A sort is a selection: `sortTraces(by)` sorts by header fields and returns trace indices,
+and no data moves. Read the sorted view with the list form of `readTraces` (or
+`newPrefetcher`). The sort is stable and ascending, with NaN last. `sortOrder(columns)`
+does the same over columns of your own, such as `TraceKeys` fields.
 
 ```nim
-import std/[sequtils, strutils]
+import std/sequtils
 import parseSEG
 
 var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
@@ -168,41 +207,44 @@ let firstColumn = f.readTraces(order[0 ..< 10], 0 .. 499)   # the sorted view, a
 doAssert order.len == f.len and firstColumn.shape == [10, 500]
 let byOffset = sortOrder([f.traceKeys(0 ..< f.len).mapIt(it.offset)]) # positions = traces here
 doAssert byOffset.len == f.len
-echo f.textHeader.splitLines[0]          # "C01 AREA    : Taranaki_Basin - ..."
-echo f.extendedTextHeaders.len, " extended textual records"
 f.close()
 ```
 
-### Gathers and multi-component stations
+`sortTraces(by, traces)` sorts a range or a list (one gather, say) instead of the whole file.
 
-A gather's `traces` is a range; pass it to `readTraces` as it is. To hide auxiliary traces,
-filter with `isSeismic`. For multi-component data, `componentGroupIds` labels each trace
-with its station group (-1 for traces in none), so the viewer can show one station's
-components side by side.
+## Header columns and keys on demand
+
+Stored keys (`keys = true`) cost about 144 bytes and 450 ns per trace at open. A viewer that
+shows geometry only for the traces on screen can open without them and ask for what it
+shows: `traceKeys(traces)` (or `traceKeysInto`, into a reused buffer) makes the keys on
+demand, exactly as `keys = true` would, and `traceFieldColumn(name, traces)` reads one
+numeric header field for many traces (a plot axis, a colour bar), resolving the field once.
 
 ```nim
+import std/math
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
-let g = f.gathers[0]
-var seismic: seq[int]
-for i in g.traces:
-  if isSeismic(f.index, i): seismic.add i
-let shot = f.readTraces(seismic)
-echo g.kind, " gather: ", seismic.len, " seismic traces of ", g.traces.len
-
-let groups = f.componentGroupIds(g.traces)
-echo "station group of each trace: ", groups
-doAssert seismic == @[3, 4] and shot.shape == [2, 4001]
-doAssert groups == @[-1, -1, -1, 0, 1]   # aux traces are in no group
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy") # no stored keys
+let ks = f.traceKeys(0 ..< 10)                 # the keys of what is on screen
+let sx = f.traceFieldColumn("trace.sourceX", 0 ..< 10)
+var buf = newSeq[float64](3)                   # reused across redraws
+f.traceFieldColumnInto("trace.cdpX", [9, 0, 5], buf)
+echo "trace 0: ensemble ", ks[0].ensemble, ", source x (raw) ", sx[0]
+doAssert not f.hasKeys and ks.len == 10 and sx.len == 10
+doAssert f.traceFieldColumn("ext1.extFieldRecord", [0])[0].isNaN # this file has no Ext1
+f.close()
 ```
+
+Keys made on demand are the file's own geometry: geometry joined with `applySurvey` or
+`applyGeometry` lives only in stored keys.
 
 ## Read ahead without blocking the UI
 
 A `Prefetcher` decodes chunks of traces on a worker thread into a bounded ring. The UI
 thread polls with `tryNext` (never blocks) or waits with `next`, and calls `seek` when the
 user jumps elsewhere: chunks decoded for the old position are dropped. Each chunk's
-`samples` tensor belongs to the caller; the worker never writes it again.
+`samples` tensor belongs to the caller; the worker never writes it again. `firstSample`
+and `cols` choose a sample window, as `readTraces(traces, samples)` does.
 
 ```nim
 import std/os
@@ -222,26 +264,36 @@ doAssert shown == f.len
 
 p.seek(150 ..< 200)                   # the user jumped to trace 150
 doAssert p.next(c) and c.first == 150
-p.close()                             # before the file goes: the worker reads its map
+p.close()                             # stops and joins the worker
+
+# A zoomed view: samples 1000..1499 of traces 90..119.
+var z = newPrefetcher[float32](f, 90 ..< 120, chunkTraces = 30, cols = 500,
+  firstSample = 1000)
+doAssert z.next(c) and c.samples == f.readTraces(90 ..< 120, 1000 .. 1499)
+z.close()
 f.close()
 ```
 
 - In range mode a prefetcher accepts any span of the file in `seek` (`p.len` is the trace
   count), so one prefetcher can serve a whole session. `newPrefetcher(f, @[...])` reads
-  a selection instead; its positions index the list (`traceAt` maps them back).
-- `cols` fixes the row width (default: the longest trace of the range).
+  a selection (a gather, a sort order) instead; its positions index the list (`traceAt`
+  maps them back).
+- `cols` fixes the row width (default: the longest trace of the range, less
+  `firstSample`). Rows are zero past a trace's end.
 - A trace that cannot be decoded is a zero row, counted in `c.failed`, with an error in
   `c.log` that names the trace.
 - Call the prefetcher's procs from one thread. It keeps the file's map alive until its own
   `close`, so the order in which the file and the prefetcher are closed does not matter.
+  The file's index must not change while it runs (`applySurvey`, `applyGeometry`).
+
+### Recycle the chunk buffers
 
 A viewer that is done with each chunk before it takes the next (it has copied it to the
 screen or a texture) can hand the buffer back, so scrolling allocates nothing: `nextInto`
 (and `tryNextInto`) swap `c.samples` into the slot the chunk came from, where a later chunk
-is decoded into it. `p.recycle(move c)` returns one for `next` to reuse.
-Only a tensor of the chunk shape that nothing else shares is reused: a copy or a view you
-kept stays intact (it is just not reused), but a raw pointer into it must not outlive the
-call.
+is decoded into it. `p.recycle(move c)` returns one for `next` to reuse. Only a tensor of
+the chunk shape that nothing else shares is reused: a copy or a view you kept stays intact
+(it is just not reused), but a raw pointer into it must not outlive the call.
 
 ```nim
 import parseSEG
@@ -253,11 +305,18 @@ var shown = 0
 while p.nextInto(c):                  # c's previous buffer becomes a decode target
   shown += c.count                    # draw c.samples before the next call
 doAssert shown == f.len
+
+p.seek(0 ..< 64)
+var d: PrefetchChunk[float32]
+while p.next(d):
+  shown += d.count
+  p.recycle(move d)                   # `move`: give the buffer up, keep no pointer into it
+doAssert shown == f.len + 64
 p.close()
 f.close()
 ```
 
-## The header tab
+## The header tab and the textual header
 
 `traceHeaders(i)`, `recordHeaders(r)` and `fileHeaders` list every header block of a trace,
 SEG-D record or file as rows: block name, field name, decoded value, and the byte offset and
@@ -301,6 +360,22 @@ doAssert gh1.blockName == "gh1" and hex.len == 32
 - `traceField(f, i, name)` raises `ValueError` for a name the trace does not have;
   `findTraceField` returns an `Option` instead, which suits optional columns.
 
+For a SEG-Y file, `textHeader` gives the textual file header decoded (EBCDIC or ASCII, as
+detected) as 40 lines of 80 characters, and `extendedTextHeaders` each extended textual
+record the same way. Both raise `ValueError` for another standard.
+
+```nim
+import std/strutils
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+let lines = f.textHeader.splitLines
+echo lines[0]                            # "C01 AREA    : Taranaki_Basin - ..."
+echo f.extendedTextHeaders.len, " extended textual records"
+doAssert lines.len == 40 and lines[0].len == 80
+f.close()
+```
+
 ## Geometry, time and annotation
 
 With `keys = true`, `traceKeys(i)` gives what an annotation bar or a base map needs.
@@ -343,31 +418,8 @@ echo "inline ", inlines[0], ", crosslines ", crosslines[0], "..", crosslines[^1]
 doAssert inlines.len == 200 and inlines[0] == 1001 and crosslines[^1] == 200
 ```
 
-`traceField(f, i, "trace.inlineNumber")` reads the standard bytes 189-192 only, which this
-file leaves at 0.
-
-### Keys and header columns without `keys = true`
-
-Stored keys cost about 144 bytes and 450 ns per trace at open. A viewer that shows geometry
-only for the traces on screen can open without them and ask for what it shows:
-`traceKeys(traces)` (or `traceKeysInto`, into a reused buffer) makes the keys on demand,
-exactly as `keys = true` would, and `traceFieldColumn(name, traces)` reads one numeric
-header field for many traces (a plot axis, a colour bar), resolving the field once.
-
-```nim
-import std/math
-import parseSEG
-
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy") # no stored keys
-let ks = f.traceKeys(0 ..< 10)                 # the keys of what is on screen
-let sx = f.traceFieldColumn("trace.sourceX", 0 ..< 10)
-var buf = newSeq[float64](3)                   # reused across redraws
-f.traceFieldColumnInto("trace.cdpX", [9, 0, 5], buf)
-echo "trace 0: ensemble ", ks[0].ensemble, ", source x (raw) ", sx[0]
-doAssert not f.hasKeys and ks.len == 10 and sx.len == 10
-doAssert f.traceFieldColumn("ext1.extFieldRecord", [0])[0].isNaN # this file has no Ext1
-f.close()
-```
+`traceField(f, i, "trace.inlineNumber")` (and `traceFieldColumn`, `sortTraces`) read the
+standard bytes 189-192 only, which this file leaves at 0.
 
 ## Keep the user's header edits as a patch
 

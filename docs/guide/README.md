@@ -16,11 +16,19 @@ match the code.
 | You want to | Read |
 |---|---|
 | Understand the model: index, trace numbers, records, channel sets, keys, gathers, lifetimes, threads | [getting-started.md](getting-started.md) (start here) |
-| Build a viewer: overview, random access, gathers, prefetch, header tab, patches | [viewer.md](viewer.md) |
-| Process data: stream files into tensors, threads, write results | [processing.md](processing.md) |
-| Change headers: in-place edits, journal and undo, header documents, patches | [editing.md](editing.md) |
+| Open a large file with a progress bar, a cancel button and an index cache | [viewer.md](viewer.md#open-a-file-progress-cancel-and-an-index-cache) |
+| Navigate a file: overview, gathers, channel sets, multi-component stations | [viewer.md](viewer.md#the-navigation-tree) |
+| Read what is on screen: ranges, selections, reused buffers, sample windows (deep zoom) | [viewer.md](viewer.md#read-what-is-on-screen) |
+| Show sorted views (`sortTraces`, `sortOrder`) | [viewer.md](viewer.md#sorted-views) |
+| Read header columns and keys on demand (`traceFieldColumn`, `traceKeys(traces)`) | [viewer.md](viewer.md#header-columns-and-keys-on-demand) |
+| Read ahead on a worker thread, and recycle its buffers (`nextInto`, `recycle`) | [viewer.md](viewer.md#read-ahead-without-blocking-the-ui) |
+| Show a header tab, a hex pane and the SEG-Y textual header (`textHeader`) | [viewer.md](viewer.md#the-header-tab-and-the-textual-header) |
+| Show geometry, time, inline and crossline | [viewer.md](viewer.md#geometry-time-and-annotation) |
+| Process data: stream files into tensors, threads, write results (`SeismicWriter`) | [processing.md](processing.md) |
+| Convert many files with progress and cancel | [processing.md](processing.md#batch-conversions-with-progress-and-cancel) |
+| Change headers: in-place edits, an already open file (`openEditor(f)`, `release`), journal and undo, header documents, patches | [editing.md](editing.md) |
 | Convert SEG-Y / SEG-D / SEG-2, join SPS or P1 geometry, write it back | [conversion.md](conversion.md) |
-| Understand and act on diagnostics and errors | [diagnostics.md](diagnostics.md) |
+| Understand and act on diagnostics and errors (cancelled operations included) | [diagnostics.md](diagnostics.md) |
 
 ## Related documents
 
