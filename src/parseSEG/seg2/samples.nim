@@ -85,11 +85,11 @@ proc decodeSeg2SamplesRaw*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte
     of s2Int32:
       for i in 0..<n: d[i] = T(loadNum[int32](s, 4*i, o))
     of s2Float32:
-      when T is float32 and o == hostOrder: copyMem(d, s, 4 * n)
+      when T is float32 and o == hostOrder: copyHostOrder(d, s, 4 * n)
       else:
         for i in 0..<n: d[i] = T(loadNum[float32](s, 4*i, o))
     of s2Float64:
-      when T is float64 and o == hostOrder: copyMem(d, s, 8 * n)
+      when T is float64 and o == hostOrder: copyHostOrder(d, s, 8 * n)
       else:
         for i in 0..<n: d[i] = T(loadNum[float64](s, 8*i, o))
     of s2Float20:

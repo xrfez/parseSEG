@@ -5,6 +5,8 @@
 ## buffer. Out-of-range access is an index defect: callers check record
 ## sizes before decoding a block.
 
+from std/os import parentDir, `/`
+
 func beU8*(b: openArray[byte], pos: int): uint8 {.inline.} = b[pos]
 
 func beI8*(b: openArray[byte], pos: int): int8 {.inline.} = cast[int8](b[pos])
@@ -177,5 +179,34 @@ func loadU24*(p: ByteBuf, pos: int, order: static ByteOrder): uint32 {.inline.} 
     uint32(p[pos]) or (uint32(p[pos + 1]) shl 8) or (uint32(p[pos + 2]) shl 16)
   else:
     (uint32(p[pos]) shl 16) or (uint32(p[pos + 1]) shl 8) or uint32(p[pos + 2])
+
+# ------------------------------------------------------ host-order copies --
+
+const cpuHeader = currentSourcePath().parentDir / "cpu.h"
+let avx2Target {.importc: "PARSESEG_AVX2", header: cpuHeader.}: cint
+  # 1 when the C compiler targets AVX2 (`-march=x86-64-v3`, or native on
+  # such a CPU), else 0: a C constant, so the branch below folds away.
+
+when defined(gcc):
+  # Keeps gcc from turning the loop back into a `memcpy` call.
+  {.pragma: plainLoop, codegenDecl:
+    "__attribute__((optimize(\"no-tree-loop-distribute-patterns\"))) $1 $2 $3".}
+else:
+  {.pragma: plainLoop.}
+
+func copyWords(d: ptr UncheckedArray[uint32], s: ByteBuf, n: int) {.plainLoop, raises: [].} =
+  for i in 0..<n:
+    var u: uint32
+    copyMem(addr u, addr s[4 * i], 4) # unaligned load
+    d[i] = u
+
+func copyHostOrder*(d: pointer, s: ByteBuf, bytes: int) {.inline, raises: [].} =
+  ## Copies `bytes` (a multiple of 4) of samples already in host order, e.g.
+  ## little-endian IEEE floats on x86-64. With AVX2 a plain vectorized loop
+  ## beats `memcpy` on trace-sized rows (Zen 2: 35 vs 25 GB/s at 4000 bytes,
+  ## where glibc picks `rep movsb`); without it `memcpy` is much faster.
+  {.cast(noSideEffect).}: # a C constant, not state
+    if avx2Target != 0: copyWords(cast[ptr UncheckedArray[uint32]](d), s, bytes div 4)
+    else: copyMem(d, s, bytes)
 
 {.pop.}

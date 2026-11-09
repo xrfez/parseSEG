@@ -129,12 +129,12 @@ proc decodeSamplesRaw*[T: SampleType](f: SampleFormat, src: openArray[byte],
           pow(2.0, -float64((w shr 16) and 0xFF)))
     of sfFloat32:
       when T is float32 and o == hostOrder:
-        copyMem(d, s, 4 * n)
+        copyHostOrder(d, s, 4 * n)
       else:
         for i in 0..<n: d[i] = T(loadNum[float32](s, 4*i, o))
     of sfFloat64:
       when T is float64 and o == hostOrder:
-        copyMem(d, s, 8 * n)
+        copyHostOrder(d, s, 8 * n)
       else:
         for i in 0..<n: d[i] = T(loadNum[float64](s, 8*i, o))
     of sfInt24:

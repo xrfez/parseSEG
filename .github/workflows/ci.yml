@@ -34,16 +34,24 @@ jobs:
       - name: Threaded tests under ASan/LSan (fails on any leak)
         run: nim asan
 
+      # `nim cli` targets x86-64-v3 (AVX2; GitHub's runners have it), the
+      # default; the zig build is the baseline x86-64 one for older CPUs.
       - name: Build the command line tool
         run: |
           nim zigPortable
+          mv bin/parseSEG bin/parseSEG-x86-64-v1
           nim cli
+
+      - name: CLI smoke test (both builds)
+        run: |
+          bin/parseSEG info "SEG Spec/exampleFiles/63.sgd"
+          bin/parseSEG-x86-64-v1 info "SEG Spec/exampleFiles/63.sgd"
 
       - name: Upload the Linux build
         uses: actions/upload-artifact@v4
         with:
           name: parseseg-linux-x64
-          path: bin/parseSEG
+          path: bin/parseSEG*
 
   # The command line tool on the other hosts.
   native:

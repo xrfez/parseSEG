@@ -32,17 +32,27 @@ proc dev(): string =
   ## Flags for a development build: IC when PARSESEG_IC=1.
   if getEnv("PARSESEG_IC") == "1": " --ic:on " else: " "
 
-task cli, "Build the parseSEG command line tool (bin/parseSEG; `bin/parseSEG help`)":
-  selfExec "c -d:release" & release("cli") & "-o:bin/parseSEG " & cliMain
+# The CPU baseline of the default builds (owner, 15.3): x86-64-v3 (AVX2,
+# Haswell 2013 / Zen 1 2017 and later) on x86-64 hosts, where it decodes
+# big-endian IEEE and SEG-D 8058 2x faster than baseline SSE2. Other CPUs
+# (arm64) keep the compiler's default. `nimPortable`/`zigPortable` are the
+# baseline x86-64 (v1, SSE2) builds for older CPUs; the *Release tasks
+# target the build host (-march=native).
+const
+  cpuTarget = when defined(amd64): " --passC:-march=x86-64-v3 " else: " "
+  baseTarget = when defined(amd64): " --passC:-march=x86-64 " else: " "
+
+task cli, "Build the parseSEG command line tool (bin/parseSEG, x86-64-v3; `bin/parseSEG help`)":
+  selfExec "c -d:release" & cpuTarget & release("cli") & "-o:bin/parseSEG " & cliMain
 
 task nimRelease, "Build native host-optimized binary (aggressive speed, march=native)":
   ## Compiles high-performance binary optimized strictly for the current host CPU.
   selfExec "c -d:release -d:danger --opt:speed --passC:\"-march=native -mtune=native\"" &
     release("nimRelease") & "-o:bin/parseSEG " & cliMain
 
-task nimPortable, "Build portable binary for generic CPUs (stripped, baseline instructions)":
-  ## Compiles stripped, portable binary targeting generic CPU baseline compatibility.
-  selfExec "c -d:release --opt:size --passC:\"-mtune=generic\" --passL:\"-s\"" &
+task nimPortable, "Build portable binary for any x86-64 CPU (stripped, baseline x86-64 v1/SSE2)":
+  ## Compiles stripped, portable binary for CPUs without AVX2 (slower decodes).
+  selfExec "c -d:release --opt:size --passC:\"-mtune=generic\" --passL:\"-s\"" & baseTarget &
     release("nimPortable") & "-o:bin/parseSEG " & cliMain
 
 task nimDebug, "Build debug binary with stack traces and assertions":
@@ -56,8 +66,8 @@ task zigRelease, "Build native host-optimized binary using Zig CC (O3, march=nat
     "\" -d:release -d:danger --opt:speed --passC:\"-O3 -march=native\"" & release("zigRelease") &
     "-o:bin/parseSEG " & cliMain
 
-task zigPortable, "Build portable binary for generic CPUs using Zig CC (stripped, baseline instructions)":
-  ## Compiles stripped binary using Zig toolchain targeting generic baseline CPUs and size reduction.
+task zigPortable, "Build portable binary for any CPU of its kind using Zig CC (stripped, baseline x86-64 v1/SSE2)":
+  ## Compiles stripped binary using Zig toolchain for baseline CPUs (no AVX2) and size reduction.
   selfExec "c --cc:clang --clang.exe:\"" & zigccExe & "\" --clang.linkerexe:\"" & zigccExe &
     "\" -d:release --opt:size --passC:\"-Oz\" --passC:\"-mcpu=baseline\" --passL:\"-s\"" &
     release("zigPortable") & "-o:bin/parseSEG " & cliMain
@@ -92,13 +102,16 @@ task docs, "Generate HTML documentation":
 
 task bench, "Benchmark suite (bench/, docs/benchmarks.md)":
   ## Builds bench/gen and bench/suite with the nimRelease flags (or the
-  ## shipped library's -d:release with PARSESEG_BENCH_BUILD=release), writes
+  ## `nim cli` flags, -d:release for x86-64-v3, with PARSESEG_BENCH_BUILD=release;
+  ## baseline x86-64 with PARSESEG_BENCH_BUILD=portable), writes
   ## the synthetic files (PARSESEG_BENCH_SCALE=small, the default, about
   ## 2.5 GB, or full, about 52 GB; into PARSESEG_BENCH_DIR, default
   ## bench/data) and runs the suite (PARSESEG_BENCH_SECTIONS: a space-separated
   ## subset of baseline index decode latency threads prefetch write).
   let flags =
-    if getEnv("PARSESEG_BENCH_BUILD") == "release": "c -d:release"
+    case getEnv("PARSESEG_BENCH_BUILD")
+    of "release": "c -d:release" & cpuTarget
+    of "portable": "c -d:release" & baseTarget
     else: "c -d:release -d:danger --opt:speed --passC:\"-march=native -mtune=native\""
   mkDir "bin/bench"
   selfExec flags & release("benchGen") & "-o:bin/bench/gen bench/gen.nim"

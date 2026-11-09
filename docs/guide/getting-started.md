@@ -14,6 +14,14 @@ nim test                # the test suite, these guides' examples included
 nim cli                 # bin/parseSEG (command line tool)
 ```
 
+**CPU target.** parseSEG is compiled into your application, so your build flags decide
+its speed. On x86-64, build with `--passC:-march=x86-64-v3` (AVX2, any CPU since Intel
+Haswell 2013 / AMD Zen 1 2017) or `--passC:-march=native` for the build machine: the
+sample decoders run up to about 2x faster than in a baseline x86-64 build (big-endian
+IEEE SEG-Y: 11 → 22 GB/s, SEG-D 8058: 11 → 23 GB/s, little-endian IEEE and 9058: 17 → 23
+GB/s, one thread). Use the baseline (no `-march`, or `-march=x86-64`) only for CPUs or VMs
+without AVX2. `nim cli` builds for x86-64-v3; `nim nimPortable` is the baseline build.
+
 The examples use the sample files in `SEG Spec/exampleFiles/`:
 
 | File | What it is |

@@ -229,3 +229,22 @@ block decode_fields_unchecked_loads_match_get_num:
   check[Seg2TraceFixed](0, Seg2FixedSize)
   var h: SegyTraceHeader
   doAssertRaises(SegTruncatedError): decodeFields(h, newSeq[byte](239), 1, boBig)
+
+block host_order_copy_is_exact:
+  # 15.3-5: a plain loop under AVX2 (`-march=x86-64-v3`), `copyMem` otherwise;
+  # both must copy every byte, from any source alignment, and nothing more.
+  var r = initRand(5)
+  var src = newSeq[byte](4 * 1100 + 3)
+  for b in src.mitems: b = byte(r.rand(255))
+  for shift in 0..3:
+    for words in [0, 1, 7, 8, 9, 31, 64, 1000, 1100]:
+      if shift + 4 * words > src.len: continue
+      var dst = newSeq[uint32](words + 1)
+      dst[words] = 0xDEADBEEF'u32
+      if words > 0:
+        copyHostOrder(addr dst[0], byteBuf(src.toOpenArray(shift, src.len - 1)), 4 * words)
+      for i in 0..<words:
+        var want: uint32
+        copyMem(addr want, addr src[shift + 4 * i], 4)
+        doAssert dst[i] == want
+      doAssert dst[words] == 0xDEADBEEF'u32

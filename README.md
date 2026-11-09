@@ -78,15 +78,19 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 ## Build Tasks
 
 `nim cli` builds the command line tool (`bin/parseSEG`). Six more build modes of it are
-defined in `config.nims`, also output to `bin/parseSEG`:
+defined in `config.nims`, also output to `bin/parseSEG`. On x86-64 the default target is
+**x86-64-v3** (AVX2: Intel Haswell 2013, AMD Zen 1 2017 and later), which decodes big-endian
+IEEE SEG-Y and SEG-D 8058 about twice as fast as baseline x86-64; the portable tasks build
+baseline x86-64 (v1, SSE2) for older CPUs and VMs that hide AVX.
 
 | Task | Toolchain | Profile Description | Key Flags |
 |---|---|---|---|
+| `nim cli` | GCC/Default | Default (x86-64-v3) | `-d:release -march=x86-64-v3` |
 | `nim nimRelease` | GCC/Default | Native Host Optimized | `-d:release -d:danger --opt:speed -march=native` |
-| `nim nimPortable` | GCC/Default | Generic Portable Size | `-d:release --opt:size -mtune=generic -s` |
+| `nim nimPortable` | GCC/Default | Baseline x86-64 (v1), Size | `-d:release --opt:size -march=x86-64 -mtune=generic -s` |
 | `nim nimDebug` | GCC/Default | Full Debug & Diagnostics | `--debuginfo:on --assertions:on --stackTrace:on` |
 | `nim zigRelease` | Zig CC | Native Host Optimized | `-d:release -d:danger --opt:speed -O3 -march=native` |
-| `nim zigPortable` | Zig CC | Generic Portable Size | `-d:release --opt:size -Oz -mcpu=baseline -s` |
+| `nim zigPortable` | Zig CC | Baseline x86-64 (v1), Size | `-d:release --opt:size -Oz -mcpu=baseline -s` |
 | `nim zigDebug` | Zig CC | Full Debug & Diagnostics | `--debuginfo:on` |
 
 Release builds get a fresh `nimcache/release-<task>` and `--ic:off`; `PARSESEG_IC=1` turns on

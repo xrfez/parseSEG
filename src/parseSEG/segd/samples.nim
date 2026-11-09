@@ -178,11 +178,11 @@ proc decodeSegdSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArra
   of sd8038:
     for i in 0..<n: d[i] = T(loadNum[int32](s, 4 * i, boBig))
   of sd8058:
-    when T is float32 and hostOrder == boBig: copyMem(d, s, 4 * n)
+    when T is float32 and hostOrder == boBig: copyHostOrder(d, s, 4 * n)
     else:
       for i in 0..<n: d[i] = T(loadNum[float32](s, 4 * i, boBig))
   of sd8080:
-    when T is float64 and hostOrder == boBig: copyMem(d, s, 8 * n)
+    when T is float64 and hostOrder == boBig: copyHostOrder(d, s, 8 * n)
     else:
       for i in 0..<n: d[i] = T(loadNum[float64](s, 8 * i, boBig))
   of sd9036:
@@ -190,11 +190,11 @@ proc decodeSegdSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArra
   of sd9038:
     for i in 0..<n: d[i] = T(loadNum[int32](s, 4 * i, boLittle))
   of sd9058:
-    when T is float32 and hostOrder == boLittle: copyMem(d, s, 4 * n)
+    when T is float32 and hostOrder == boLittle: copyHostOrder(d, s, 4 * n)
     else:
       for i in 0..<n: d[i] = T(loadNum[float32](s, 4 * i, boLittle))
   of sd9080:
-    when T is float64 and hostOrder == boLittle: copyMem(d, s, 8 * n)
+    when T is float64 and hostOrder == boLittle: copyHostOrder(d, s, 8 * n)
     else:
       for i in 0..<n: d[i] = T(loadNum[float64](s, 8 * i, boLittle))
 
