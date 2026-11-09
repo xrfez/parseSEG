@@ -40,6 +40,7 @@ block umbrella_except_lists_hide_what_they_name:
     "isLayoutField", "isNamedField", "fieldValueOf", "readFields",
     "flushPending", "batching", "logVar",
     "chooseScalar",
+    "adviseWillNeed", "isResident", "adviseTraces",
     "rowPtr"]
   macro assertHidden(names: static openArray[string]): untyped =
     result = newStmtList()

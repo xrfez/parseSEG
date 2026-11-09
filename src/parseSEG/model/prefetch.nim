@@ -62,6 +62,7 @@ type
     gen: int     # generation (see `seek`) the chunk was decoded for
     chunk: int   # chunk number since the last seek
     first, count: int
+    aheadLo, aheadHi: int # positions to advise read-ahead for (`adviseTraces`)
     failed: int  # rows that could not be decoded: `fails[0 ..< failed]`
     fails: ptr UncheckedArray[FailedRow] # `chunkTraces` entries
     data: ptr UncheckedArray[T]
@@ -145,6 +146,8 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) {.raises: [].} =
   # Runs without the lock: the slot is busy, so nobody else touches it.
   # `tryDecodeEntry` reports failures as a status: no exception is made on
   # this thread (one destroyed here would leak ORC's per-thread cycle buffer).
+  adviseTraces(sh.mem, sh.size, sh.entries, sh.codecs, sh.sel, s.aheadLo, s.aheadHi, sh.cols,
+    sh.firstSample)
   s.failed = 0
   for k in 0..<s.count:
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
@@ -168,6 +171,11 @@ proc worker[T](sh: ptr Shared[T]) {.thread.} =
       s.chunk = n
       s.first = sh.start + n * sh.chunkTraces
       s.count = min(sh.chunkTraces, sh.stop - s.first)
+      # Ask the OS for the next chunk's pages while this one decodes; after a
+      # start or `seek`, for this chunk's too.
+      let ahead = s.first + s.count
+      s.aheadLo = if n == 0: s.first else: ahead
+      s.aheadHi = min(sh.stop, ahead + sh.chunkTraces)
       inc sh.nextChunk
       release(sh.lock)
       {.cast(gcsafe).}:

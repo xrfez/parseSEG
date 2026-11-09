@@ -42,7 +42,8 @@ import ../seg2/[reader as seg2reader]
 import ./[tensors, keys]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples, ../seg2/samples as seg2samples
 
-export memsource, diagnostics, keys, seismickind, progress
+export memsource except adviseWillNeed, isResident
+export diagnostics, keys, seismickind, progress
 export tensors except rowPtr
 
 type
@@ -438,6 +439,57 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: 
   of dsOk: discard
   of dsUndecodable: raiseFormat(decodeMessages[dsUndecodable], e.offset)
   of dsTruncated: raiseTruncated(decodeMessages[dsTruncated], e.sampleOffset)
+
+const
+  AdviseMinTraces = 32       ## Smaller selections are advised only when they are large in bytes,
+  AdviseMinBytes = 1'i64 shl 20 ## at least this many.
+  AdviseGap = 64'i64 shl 10  ## Windows closer than this share one advice call.
+
+proc adviseTraces*(mem: ptr UncheckedArray[byte], size: int64,
+    entries: ptr UncheckedArray[TraceEntry], codecs: ptr UncheckedArray[TraceCodec],
+    sel: ptr UncheckedArray[int], lo, hi, cols: int, first = 0) {.raises: [].} =
+  ## **Internal.** Before decoding positions `lo ..< hi` (trace indices, or
+  ## indices into `sel` when it is not nil), samples `first ..< first + cols`
+  ## each: asks the OS to read their pages ahead (`adviseWillNeed`), so a
+  ## cold scattered read waits for the disk once instead of once per trace.
+  ## Skipped for small reads and when the first and last traces are
+  ## in memory (a warm read pays two `mincore` calls, ~1.5 µs). Windows of traces
+  ## that follow each other closely are advised as one span. Makes no
+  ## managed objects and raises nothing: the prefetch worker calls it.
+  let count = hi - lo
+  if count <= 0 or cols <= 0 or mem == nil: return
+  template entry(pos: int): TraceEntry =
+    entries[if sel == nil: pos else: sel[pos]]
+  template window(e: TraceEntry, a, b: var int64) =
+    let c = codecs[e.record]
+    let n = min(int(e.numSamples), first + cols)
+    a = e.sampleOffset + int64(c.dataBytes(min(first, n)))
+    b = e.sampleOffset + int64(c.dataBytes(n))
+  var a, b: int64
+  if count < AdviseMinTraces:
+    var bytes = 0'i64
+    for pos in lo..<hi:
+      window(entry(pos), a, b)
+      bytes += b - a
+    if bytes < AdviseMinBytes: return
+  var resident = true
+  for pos in [lo, hi - 1]:
+    window(entry(pos), a, b)
+    if b > a and not isResident(mem, size, a):
+      resident = false
+      break
+  if resident: return
+  var spanA, spanB = -1'i64
+  for pos in lo..<hi:
+    window(entry(pos), a, b)
+    if b <= a: continue
+    if spanB >= 0 and a >= spanA and a <= spanB + AdviseGap:
+      spanB = max(spanB, b)
+    else:
+      if spanB > spanA: adviseWillNeed(mem, size, spanA, spanB)
+      spanA = a
+      spanB = b
+  if spanB > spanA: adviseWillNeed(mem, size, spanA, spanB)
 
 # ---------------------------------------------------------- seismic file --
 
@@ -996,6 +1048,22 @@ proc checkRows[T](dst: Tensor[T], row, count: int) =
     raise newException(ValueError,
       "need a row-major [traces, samples] tensor with room for the traces")
 
+proc advise(f: SeismicFile, traces: Slice[int], cols, first: int) {.inline.} =
+  # Read-ahead advice for a checked range (see `adviseTraces`).
+  if traces.b - traces.a >= 0:
+    adviseTraces(f.unsafeMemory, f.mappedSize,
+      cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0]),
+      cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0]),
+      nil, traces.a, traces.b + 1, cols, first)
+
+proc advise(f: SeismicFile, traces: openArray[int], cols, first: int) {.inline.} =
+  # Read-ahead advice for a checked selection (see `adviseTraces`).
+  if traces.len > 0:
+    adviseTraces(f.unsafeMemory, f.mappedSize,
+      cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0]),
+      cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0]),
+      cast[ptr UncheckedArray[int]](addr traces[0]), 0, traces.len, cols, first)
+
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
     row = 0, log: var DiagLog): int =
   ## Decodes `traces` into rows `row ..< row + traces.len` of `dst` (a
@@ -1003,11 +1071,15 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   ## `dst.shape[1]`. A trace that cannot be decoded is left zero, logged in
   ## `log`, and counted in the result. Raises `ValueError` for traces outside
   ## the file (an empty range must still start in `0 .. f.len`), a closed
-  ## file or a tensor without room.
+  ## file or a tensor without room. A large or scattered read whose pages
+  ## are not in memory first asks the OS to read them all ahead (POSIX
+  ## `madvise(MADV_WILLNEED)`), so a cold gather waits for the disk once
+  ## rather than once per trace.
   let count = traces.spanLen
   f.checkReadable(count)
   f.checkSelection(traces)
   dst.checkRows(row, count)
+  f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces.a + k
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
   decodeLoop(f, count, trace, rowOf, dst.shape[1], 0, log, T)
@@ -1021,6 +1093,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   f.checkReadable(traces.len)
   f.checkSelection(traces)
   dst.checkRows(row, traces.len)
+  f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces[k]
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
   decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], 0, log, T)
@@ -1064,6 +1137,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   f.checkReadable(count)
   f.checkSelection(traces)
   dst.checkRows(row, count)
+  f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces.a + k
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
   decodeLoop(f, count, trace, rowOf, dst.shape[1], samples.a, log, T)
@@ -1076,6 +1150,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   f.checkReadable(traces.len)
   f.checkSelection(traces)
   dst.checkRows(row, traces.len)
+  f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces[k]
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
   decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], samples.a, log, T)

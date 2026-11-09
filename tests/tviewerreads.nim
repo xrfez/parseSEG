@@ -6,6 +6,9 @@
 
 import std/[algorithm, assertions, math, os, sequtils, strutils]
 import parseSEG
+from parseSEG/model/traceindex import unsafeMemory, mappedSize
+from parseSEG/io/memsource import adviseWillNeed, isResident
+when defined(posix): import std/posix
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 let tmp = getTempDir() / "parseseg_tviewerreads"
@@ -254,5 +257,50 @@ block sort_traces:
   let dk = ["ext1.receiverPointNumber", "trace.traceNumber"]
   doAssert d.sortTraces(dk) == referenceOrder(dk.mapIt(d.traceFieldColumn(it, 0 ..< d.len)))
   d.close()
+
+block cold_reads_with_readahead_advice:
+  # 15.3-4: large and scattered reads advise the kernel (madvise WILLNEED)
+  # when their pages are not resident; the result must not change.
+  let path = tmp / "bo_cold.sgy"
+  copyFile(bo, path)
+  var warmFile = openSeismic(path)
+  let n = warmFile.len
+  doAssert n >= 64 and getFileSize(path) > 1 shl 20 # above the advice thresholds
+  let scattered = toSeq(0 ..< n).filterIt(it mod 7 == 3).reversed
+  let wantAll = warmFile.readTraces(0 ..< n)
+  let wantSel = warmFile.readTraces(scattered)
+  let wantWin = warmFile.readTraces(scattered, 5..44)
+  warmFile.close()
+  proc evict(path: string) =
+    when defined(posix):
+      let fd = posix.open(path.cstring, O_RDONLY)
+      doAssert fd >= 0
+      discard posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)
+      discard posix.close(fd)
+  for round in 0..1:
+    evict(path)
+    var f = openSeismic(path)
+    doAssert f.readTraces(scattered) == wantSel
+    evict(path)
+    doAssert f.readTraces(scattered, 5..44) == wantWin
+    evict(path)
+    doAssert f.readTraces(0 ..< n) == wantAll
+    evict(path)
+    var p = newPrefetcher[float32](f, scattered, chunkTraces = 40, depth = 2)
+    for c in p.chunks:
+      for k in 0 ..< c.count:
+        for s in 0 ..< c.samples.shape[1]: doAssert c.samples[k, s] == wantSel[c.first + k, s]
+    p.close()
+    f.close()
+  # The advice itself: degenerate spans and a closed map are no-ops.
+  var f = openSeismic(path)
+  let mem = unsafeMemory(f)
+  let size = mappedSize(f)
+  adviseWillNeed(mem, size, size - 10, size + 4096)
+  adviseWillNeed(mem, size, -4096, 100)
+  adviseWillNeed(mem, size, 50, 10)
+  adviseWillNeed(nil, size, 0, size)
+  doAssert isResident(mem, size, size) and isResident(nil, 0, 0)
+  f.close()
 
 echo "tviewerreads: ok"
