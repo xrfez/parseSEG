@@ -53,6 +53,7 @@ import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/[reader as seg2reader]
 import ./[traceindex, headerfields]
+import ../private/fieldaccess
 
 type
   HeaderRow* = object

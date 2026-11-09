@@ -23,6 +23,7 @@ import std/[options, tables, strutils, math, sets]
 import ../common/diagnostics
 import ../model/[keys, traceindex]
 import ./[textrec, cards, sps, p1]
+import ../private/checks
 
 export keys
 

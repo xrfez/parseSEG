@@ -66,6 +66,7 @@ import ./segd/[reader as segdreader, writer as segdwriter, revconvert, rev3, hea
 import ./seg2/[reader as seg2reader, writer as seg2writer]
 import ./model/[traceindex, keys, headerfields]
 import ./version
+import ./private/[decodeentry, progressticker]
 
 type
   Seg2TargetFormat* = enum

@@ -45,6 +45,7 @@ import ../segd/[reader as segdreader]
 import ../model/[traceindex, keys, edit]
 import ../convert
 import ./join
+import ../private/[checks, coordscalar, progressticker]
 
 export join
 
@@ -284,38 +285,6 @@ proc slotValue(p: Planner, buf: openArray[byte], name: string): float64 =
           var present: bool
           x = applyScalar(x, p.scalarOf(buf, sn, present))
         result = x
-
-func rawOf(v: float64, s: int16): float64 {.inline.} =
-  # The stored integer of value `v` under SEG-Y scalar `s` (unrounded).
-  if s > 0: v / float64(s) elif s < 0: v * float64(-int32(s)) else: v
-
-func fitsScalar(vals: openArray[float64], s: int16): bool =
-  for v in vals:
-    if abs(round(rawOf(v, s))) > 2147483647.0: return false
-  true
-
-func exactScalar(vals: openArray[float64], s: int16): bool =
-  for v in vals:
-    let r = rawOf(v, s)
-    if abs(r - round(r)) > 1e-4: return false
-  true
-
-func chooseScalar*(vals: openArray[float64], current: int16, exact: var bool): int16 =
-  ## The SEG-Y scalar for `vals` (see the module doc): `current` when it
-  ## holds them exactly, else the coarsest exact one of 1, -10, ..., -10000,
-  ## else the finest that fits (`exact` tells whether it holds them
-  ## exactly). 0 when none fits.
-  exact = true
-  let cur = if current == 0: 1'i16 else: current
-  if exactScalar(vals, cur) and fitsScalar(vals, cur): return cur
-  for s in [1'i16, -10, -100, -1000, -10000]:
-    if exactScalar(vals, s) and fitsScalar(vals, s): return s
-  for s in [-10000'i16, -1000, -100, -10, 1, 10, 100, 1000, 10000]:
-    if fitsScalar(vals, s):
-      exact = exactScalar(vals, s)
-      return s
-  exact = false
-  0
 
 proc writeScaledGroup(p: var Planner, buf: var seq[byte], trace: int, kind: LayoutType,
     ups: var seq[Update]) =

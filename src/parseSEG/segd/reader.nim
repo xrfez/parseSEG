@@ -46,7 +46,7 @@ import ../model/tensors
 import ./[blocks, samples, mux]
 export blocks, diagnostics
 export samples except decodeSegdSamplesRaw
-export tensors except rowPtr
+export tensors
 
 const
   MaxCount = 65535 ## Bound for counts that size header areas.

@@ -64,6 +64,7 @@ import ../common/[endians, errors, diagnostics, fieldlayout, niftext]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ./[traceindex, headerfields]
+import ../private/fieldaccess
 
 
 type

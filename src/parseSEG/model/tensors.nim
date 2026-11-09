@@ -11,6 +11,7 @@ import ../segy/samples
 import ../segd/samples as segdsamples
 import ../seg2/samples as seg2samples
 import ../common/endians
+import ../private/tensorrows
 
 export tensor
 
@@ -18,12 +19,6 @@ proc newTraceTensor*[T: SampleType](traces, samples: Natural): Tensor[T] =
   ## A zero-filled `[traces, samples]` tensor. Traces shorter than `samples`
   ## leave their tail at zero.
   zeros[T](int(traces), int(samples))
-
-proc rowPtr*[T](t: Tensor[T], row: int): ptr UncheckedArray[T] {.inline.} =
-  ## **Internal** (not exported by `parseSEG`). The storage of row `row` of a
-  ## row-major `[traces, samples]` tensor; the caller checks the shape.
-  let base = cast[ptr UncheckedArray[T]](t.unsafe_raw_offset())
-  cast[ptr UncheckedArray[T]](addr base[row * t.strides[0]])
 
 proc checkedRow[T](t: Tensor[T], row, samples: int): ptr UncheckedArray[T] =
   doAssert t.rank == 2 and t.is_C_contiguous, "need a row-major [traces, samples] tensor"

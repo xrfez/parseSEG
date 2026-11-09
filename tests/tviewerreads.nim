@@ -8,7 +8,7 @@ import std/[algorithm, assertions, math, os, sequtils, strutils]
 import parseSEG
 import ./utils/testutils
 from parseSEG/model/traceindex import unsafeMemory, mappedSize
-from parseSEG/io/memsource import adviseWillNeed, isResident
+from parseSEG/private/pagehints import adviseWillNeed, isResident
 when defined(posix): import std/posix
 
 let tmp = scratchDir("parseseg_tviewerreads")

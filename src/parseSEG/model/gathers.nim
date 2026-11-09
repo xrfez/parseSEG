@@ -40,6 +40,7 @@
 
 import std/[tables, sets, math, options]
 import ./[traceindex, keys]
+import ../private/checks
 from ../seg2/headers import Seg2TraceType, Seg2TraceSort, traceSort
 from ../segd/reader import isRev3
 

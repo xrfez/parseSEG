@@ -37,23 +37,17 @@ export seg2convert
 
 import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif, summary, headerlist, sorting, writefile]
-export traceindex except unsafeMemory, decodeEntry, tryDecodeEntry, DecodeStatus, adviseTraces,
-  decodeMessages, mappedSize, flush,
-  requireKeys, checkSpan, spanLen, MapPin, pinMap, openSeismicRw, remapWritable,
-  raiseClosed, requireOpen, raiseNoTrace, requireTrace, requireKind,
-  ProgressTicker, initProgressTicker, tick, finish, progressPhase, reportCancelled
-export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
-  isLayoutField, isNamedField, fieldValueOf, readFields
+export traceindex except unsafeMemory, mappedSize, flush, MapPin, pinMap, openSeismicRw,
+  remapWritable, requireOpen, requireTrace, requireKind
+export headerfields
 export keys, gathers, prefetch, headernif, summary, headerlist, sorting, writefile
 export edit except writeBytes, flushPending, batching, logVar
 
 import parseSEG/survey/[textrec, sps, p1, join, writeback]
-export textrec, sps, p1, join
-export writeback except chooseScalar
+export textrec, sps, p1, join, writeback
 
 import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
-export records, diskio, tapeimage, tapedevice
-export memsource except adviseWillNeed, isResident
+export records, diskio, memsource, tapeimage, tapedevice
 when defined(linux):
   import parseSEG/io/tape_linux
   export tape_linux

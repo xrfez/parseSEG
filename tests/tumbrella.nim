@@ -1,8 +1,9 @@
 ## Compiles the umbrella module, so every public module (including the
 ## platform tape backend) stays importable together.
 
-import std/[assertions, os, macros]
+import std/[algorithm, assertions, os, macros]
 import parseSEG
+import ./utils/srcnames
 
 doAssert TraceHeaderSize == 240
 doAssert SegdTraceHeaderSize == 20 and traceHeaderFields.len > 0 and segdTraceHeaderFields.len > 0
@@ -17,33 +18,47 @@ doAssert not declared(bcdAt) and not declared(fix40)
 doAssert not declared(unsafeMemory)
 doAssert declared(copyBytes) and declared(isOpen)
 
-# Model internals (raw-pointer decoders, the map's size, shared checks) stay
-# inside the library.
-doAssert not declared(decodeEntry) and not declared(pinMap) and not declared(MapPin) and
-  not declared(mappedSize) and not declared(rowPtr) and not declared(requireKeys) and
-  not declared(checkSpan)
-doAssert not declared(locate) and not declared(readField) and not declared(withBlockType) and
-  not declared(FieldRef)
+block private_modules_stay_private:
+  # `src/parseSEG/private/` holds the library's internal helpers: library
+  # modules import them, no module re-exports them, so `import parseSEG`
+  # cannot reach them whatever the re-export graph does.
+  const privateMods = ["checks", "coordscalar", "decodeentry", "fieldaccess", "pagehints",
+    "progressticker", "tensorrows"]
+  doAssert sorted(privateModules()) == @privateMods,
+    "update privateMods (and the hidden-name check below) for " & $privateModules()
+  for path in sourceFiles():
+    for st in exportStatements(readFile(path)):
+      for w in words(st):
+        doAssert w notin privateMods and w != "private",
+          path & " re-exports a private module: " & st
+  # Every name a private module exports is undeclared here. Names that a
+  # public overload shares are checked by signature instead (below).
+  const shared = ["finish", "blockStrings"]
+  macro assertPrivateHidden(mods: static openArray[string],
+      skip: static openArray[string]): untyped =
+    result = newStmtList()
+    for m in mods:
+      for n in exportedNames(staticRead(srcDir / "parseSEG" / "private" / m & ".nim")):
+        if n notin skip:
+          result.add newCall(bindSym"doAssert",
+            newCall(bindSym"not", newCall(bindSym"declared", ident(n))),
+            newLit(m & "." & n & " leaks"))
+  assertPrivateHidden(privateMods, shared)
+  var sf: SeismicFile
+  doAssert not compiles(sf.blockStrings(BlockRef()))
+  doAssert not declared(ProgressTicker) # so `finish(var ProgressTicker)` is unreachable
 
 block umbrella_except_lists_hide_what_they_name:
-  # An `except` list filters one export path only: a leaf module that re-exports
-  # the same module whole undoes it. Keep this list equal to the union of the
-  # `except` lists in src/parseSEG.nim (update both together).
+  # The internals still exported by public modules (they need a type's
+  # private fields, or live in a codec module): an `except` list filters one
+  # export path only, so check each name from the umbrella. Keep this list
+  # equal to the `except` lists in src/parseSEG.nim (update both together).
   const hidden = [
     "decodeSamplesRaw", "decodeSegdSamplesRaw", "decodeSeg2SamplesRaw",
     "convertJoined", "convertSegdToSegyJoined", "GeometryJoin",
-    "unsafeMemory", "decodeEntry", "tryDecodeEntry", "DecodeStatus", "decodeMessages",
-    "mappedSize", "requireKeys", "checkSpan", "spanLen", "MapPin", "pinMap",
-    "openSeismicRw", "remapWritable",
-    "raiseClosed", "requireOpen", "raiseNoTrace", "requireTrace", "requireKind",
-    "ProgressTicker", "initProgressTicker", "tick",
-    "progressPhase", "reportCancelled",
-    "locate", "locateBlock", "readField", "FieldRef", "FieldRead", "withBlockType",
-    "isLayoutField", "isNamedField", "fieldValueOf", "readFields",
-    "flushPending", "batching", "logVar",
-    "chooseScalar",
-    "adviseWillNeed", "isResident", "adviseTraces",
-    "rowPtr"]
+    "unsafeMemory", "mappedSize", "MapPin", "pinMap", "openSeismicRw", "remapWritable",
+    "requireOpen", "requireTrace", "requireKind",
+    "flushPending", "batching", "logVar"]
   macro assertHidden(names: static openArray[string]): untyped =
     result = newStmtList()
     for n in names:
@@ -51,9 +66,8 @@ block umbrella_except_lists_hide_what_they_name:
         newCall(bindSym"not", newCall(bindSym"declared", ident(n))), newLit(n & " leaks"))
   assertHidden(hidden)
   # Names that public overloads elsewhere share (system's `flush(File)` and
-  # `writeBytes(File, ...)`, memsource's `flush`, exttext's `finish`): check
-  # the hidden overload itself. `finish(var ProgressTicker)` is unreachable
-  # because `ProgressTicker` is hidden (above).
+  # `writeBytes(File, ...)`, memsource's `flush`): check the hidden overload
+  # itself.
   var sf: SeismicFile
   var ed: HeaderEditor
   doAssert not compiles(sf.flush())

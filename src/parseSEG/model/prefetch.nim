@@ -49,6 +49,7 @@ import std/locks
 import ../common/diagnostics
 import ../segy/samples
 import ./traceindex
+import ../private/[checks, decodeentry]
 
 type
   SlotState = enum ssFree, ssBusy, ssReady

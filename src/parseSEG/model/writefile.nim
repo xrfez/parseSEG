@@ -53,6 +53,7 @@ import ../segd/[reader as segdreader, writer as segdwriter, revconvert]
 import ../seg2/[reader as seg2reader, writer as seg2writer]
 import ../[convert, seg2convert]
 import ./[traceindex, tensors]
+import ../private/tensorrows
 
 type
   NullSink = ref object of RecordSink

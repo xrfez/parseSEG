@@ -57,6 +57,7 @@ import std/[math, os, strutils]
 import ../common/[errors, diagnostics, endians, outputfile, years, progress]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer]
+import ../private/progressticker
 
 type
   SegdTargetFormat* = enum

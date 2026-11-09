@@ -32,133 +32,18 @@
 ## instead (`demuxPath`); the copy is deleted on `close`.
 
 import std/[os, times, strutils]
-import ../common/[endians, errors, diagnostics, bcd, seismickind, progress, binstore, niftext,
+import ../common/[errors, diagnostics, bcd, seismickind, progress, binstore, niftext,
   outputfile]
 import ../version
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader, mux, demux]
 import ../seg2/[reader as seg2reader]
-import ./[tensors, keys]
+import ./[tensors, keys, indextypes]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples, ../seg2/samples as seg2samples
+import ../private/[checks, decodeentry, progressticker, tensorrows]
 
-export memsource except adviseWillNeed, isResident
-export diagnostics, keys, seismickind, progress
-export tensors except rowPtr
-
-type
-  TraceEntry* = object
-    ## Where one trace lives (24 bytes).
-    offset*: int64       ## Medium offset of the trace header.
-    headerBytes*: uint32 ## Header bytes before the samples (incl. extensions).
-    numSamples*: uint32
-    record*: uint32
-      ## Indexes `codecs`: the SEG-D record index, 0 for SEG-Y, the codec of
-      ## the trace's sample format for SEG-2 (a SEG-2 file is one record).
-    channelSet*: uint16
-      ## 0-based SEG-D channel set index, `NoChannelSet` if unknown (and for
-      ## SEG-Y); see `channelSetIndex`.
-    scanType*: int8      ## 0-based SEG-D scan type index (BCD, < 100), -1 if unknown (SEG-Y).
-    channelType*: uint8
-      ## SEG-D channel type of the trace's channel set (Rev 1/2 nibble, 1 =
-      ## seismic; Rev 3 byte, 0x10 = seismic); 0 for SEG-Y and unknown sets.
-      ## SEG-2: 1 + the `Seg2TraceType` ordinal of TRACE_TYPE, 0 if none.
-
-  TraceCodec* = object
-    ## How the samples of one SEG-Y file, SEG-D record or SEG-2 sample
-    ## format are encoded.
-    kind*: SeismicKind
-    segyFormat*: Option[SampleFormat]
-      ## SEG-Y format, when `kind == skSegy`; none if not decodable.
-    order*: ByteOrder             ## SEG-Y and SEG-2 byte order.
-    segdFormat*: Option[SegdSampleFormat]
-      ## SEG-D format, when `kind == skSegd`; none if not decodable.
-    seg2Format*: Option[Seg2Format]
-      ## SEG-2 format, when `kind == skSeg2`; none if not decodable.
-    twosComplement8015*: bool
-      ## SEG-D 8015 (and SEG-2 format 3) mantissas read as two's complement.
-
-  TraceIndex* = object
-    ## Every trace's location plus the file-level headers.
-    kind*: SeismicKind
-    entries*: seq[TraceEntry]
-    codecs*: seq[TraceCodec]
-      ## One per SEG-D record; one for SEG-Y; one per sample format for SEG-2.
-    contiguous*: bool
-      ## Offsets are byte offsets in a plain file, so each trace's headers and
-      ## samples are contiguous there (false for tape images and devices, and
-      ## for multiplexed SEG-D).
-    maxSamples*: int          ## Largest `numSamples`.
-    segy*: SegyFile           ## SEG-Y file headers, when `kind == skSegy`.
-    segdLabel*: Option[SegdStorageUnitLabel] ## The SEG-D storage unit label, if any.
-    segdRecords*: seq[SegdRecord] ## SEG-D record headers and trailers, by record index.
-    segdToc*: seq[SegdToc]    ## SEG-D Rev 3 Table of Contents files met.
-    seg2*: Seg2File
-      ## The SEG-2 File Descriptor Block, when `kind == skSeg2` (trace
-      ## descriptors are re-read from the map: `SeismicFile.seg2Trace`).
-    log*: DiagLog             ## Diagnostics of the walk.
-    detected*: bool           ## The stream was identified as `kind` and walked.
-    keys*: seq[TraceKeys]
-      ## Per-trace geometry, parallel to `entries`; empty unless the index was
-      ## built with `keys = true` (144 bytes per trace).
-    segyIntervalUs*: float64
-      ## SEG-Y: the effective sample interval every trace shares (µs for time
-      ## data), NaN when traces differ or there are none; 0 for SEG-D (see
-      ## `summary`).
-    joined*: bool
-      ## `keys` were changed by `applyGeometry` or `applySurvey`, so they are
-      ## no longer the file's own (`saveIndex` refuses such an index).
-
-const NoChannelSet* = 0xFFFF'u16
-  ## `TraceEntry.channelSet` of a trace without a known channel set. The
-  ## reader allows at most 65535 sets per scan type, so index 65535 is free.
-
-static: doAssert sizeof(TraceEntry) == 24
-
-func channelSetIndex*(e: TraceEntry): int {.inline.} =
-  ## The 0-based channel set index, -1 if unknown.
-  if e.channelSet == NoChannelSet: -1 else: int(e.channelSet)
-
-func len*(ix: TraceIndex): int {.inline.} =
-  ## The number of traces indexed.
-  ix.entries.len
-
-func sampleOffset*(e: TraceEntry): int64 {.inline.} =
-  ## Medium offset of the trace's first sample byte.
-  e.offset + int64(e.headerBytes)
-
-func known*(c: TraceCodec): bool {.inline.} =
-  ## True when the samples are decodable (the format is known).
-  case c.kind
-  of skSegy: c.segyFormat.isSome
-  of skSegd: c.segdFormat.isSome
-  of skSeg2: c.seg2Format.isSome
-  of skUnknown: false
-
-func dataBytes*(c: TraceCodec, samples: int): int =
-  ## Bytes holding `samples` samples (0 for an undecodable format).
-  if not c.known: 0
-  else:
-    case c.kind
-    of skSegy: samples * sampleSize(c.segyFormat.get)
-    of skSegd: dataBytes(c.segdFormat.get, samples)
-    of skSeg2: dataBytes(c.seg2Format.get, samples)
-    of skUnknown: 0
-
-func dataBytes*(ix: TraceIndex, i: int): int {.inline.} =
-  ## Sample bytes of trace `i`.
-  ix.codecs[ix.entries[i].record].dataBytes(int(ix.entries[i].numSamples))
-
-func prefersFloat64*(ix: TraceIndex): bool =
-  ## True when some trace's format would lose precision in float32.
-  for c in ix.codecs:
-    if c.known:
-      let wide = case c.kind
-        of skSegy: prefersFloat64(c.segyFormat.get)
-        of skSegd: prefersFloat64(c.segdFormat.get)
-        of skSeg2: prefersFloat64(c.seg2Format.get)
-        of skUnknown: false
-      if wide: return true
+export memsource, diagnostics, keys, seismickind, progress, tensors, indextypes
 
 # ------------------------------------------------------------- detection --
 
@@ -358,139 +243,6 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
   result.detected = true
   if not tk.finish(): raiseCancelled()
 
-# ---------------------------------------------------------- range decode --
-
-proc decodeRun[T: SampleType](c: TraceCodec, src: openArray[byte], dst: var openArray[T]) =
-  # `dst.len` samples of codec `c` from the start of `src` (a known format).
-  case c.kind
-  # The unchecked forms: `tryDecodeEntry` checked the bytes and the order.
-  of skSegy: decodeSamplesRaw(c.segyFormat.get, src, dst, c.order)
-  of skSegd: decodeSegdSamplesRaw(c.segdFormat.get, src, dst, c.twosComplement8015)
-  of skSeg2: decodeSeg2SamplesRaw(c.seg2Format.get, src, dst, c.order, c.twosComplement8015)
-  of skUnknown: discard
-
-func packedInFours(c: TraceCodec): bool {.inline.} =
-  # 4 samples in 10 bytes (SEG-D 8015, SEG-2 format 3): a window must start
-  # on a group.
-  (c.kind == skSegd and c.segdFormat.get == sd8015) or
-    (c.kind == skSeg2 and c.seg2Format.get == s2Float20)
-
-type
-  DecodeStatus* = enum
-    ## **Internal.** The outcome of `tryDecodeEntry`.
-    dsOk          ## Decoded.
-    dsUndecodable ## The sample format is not decodable.
-    dsTruncated   ## The trace's samples lie past the end of the map.
-
-const decodeMessages*: array[DecodeStatus, string] = ["",
-  "the sample format is not decodable", "trace samples lie past the end of the file"]
-  ## **Internal.** The diagnostic text of each failure.
-
-proc tryDecodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
-    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0): DecodeStatus {.
-    raises: [].} =
-  ## **Internal.** Decodes samples `first ..< first + cols` of trace `e` from
-  ## the mapped bytes `mem[0 ..< size]` into `dst[0 ..< cols]`, zero past the
-  ## trace's end. Only the window's bytes are read; a window of SEG-D 8015 or
-  ## SEG-2 format 3 (4 samples in 10 bytes) that starts inside a group decodes
-  ## that whole group first. Reports an undecodable format or a trace past
-  ## `size` (the whole trace is checked, whatever the window) as a status and
-  ## leaves `dst` untouched then. Makes no managed objects, not even
-  ## exceptions, so a worker thread may call it: an exception destroyed on a
-  ## thread makes ORC allocate that thread's cycle buffer, which is never
-  ## freed (15.1).
-  let n = clamp(int(e.numSamples) - first, 0, cols)
-  if not c.known: return dsUndecodable
-  if c.kind == skSegy and c.order == boPairSwapped and c.segyFormat.get in {sfInt24, sfUInt24}:
-    return dsUndecodable # pair-swapped order is undefined for 3-byte samples
-  let nbytes = c.dataBytes(int(e.numSamples))
-  let start = e.sampleOffset
-  if start < 0 or start + nbytes > size: return dsTruncated
-  if n > 0:
-    let a = int(start)
-    let last = a + nbytes - 1
-    if first == 0:
-      c.decodeRun(mem.toOpenArray(a, last), dst.toOpenArray(0, n - 1))
-    elif not c.packedInFours:
-      let skip = c.dataBytes(first)
-      c.decodeRun(mem.toOpenArray(a + skip, last), dst.toOpenArray(0, n - 1))
-    else:
-      # The group holding `first`, then whole groups straight into `dst`.
-      let g = a + first div 4 * 10
-      let lead = first mod 4
-      var head = 0
-      if lead > 0:
-        var grp: array[4, T]
-        head = min(4 - lead, n)
-        c.decodeRun(mem.toOpenArray(g, last), grp.toOpenArray(0, lead + head - 1))
-        for k in 0..<head: dst[k] = grp[lead + k]
-      if head < n:
-        let b = if lead > 0: g + 10 else: g
-        c.decodeRun(mem.toOpenArray(b, last), dst.toOpenArray(head, n - 1))
-  for k in n..<cols: dst[k] = T(0)
-  dsOk
-
-proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
-    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0) =
-  ## **Internal.** `tryDecodeEntry` that raises `SegFormatError` for an
-  ## undecodable format and `SegTruncatedError` for a trace past `size`. For
-  ## the caller's thread (conversions); worker threads use `tryDecodeEntry`.
-  case tryDecodeEntry(mem, size, e, c, dst, cols, first)
-  of dsOk: discard
-  of dsUndecodable: raiseFormat(decodeMessages[dsUndecodable], e.offset)
-  of dsTruncated: raiseTruncated(decodeMessages[dsTruncated], e.sampleOffset)
-
-const
-  AdviseMinTraces = 32       ## Smaller selections are advised only when they are large in bytes,
-  AdviseMinBytes = 1'i64 shl 20 ## at least this many.
-  AdviseGap = 64'i64 shl 10  ## Windows closer than this share one advice call.
-
-proc adviseTraces*(mem: ptr UncheckedArray[byte], size: int64,
-    entries: ptr UncheckedArray[TraceEntry], codecs: ptr UncheckedArray[TraceCodec],
-    sel: ptr UncheckedArray[int], lo, hi, cols: int, first = 0) {.raises: [].} =
-  ## **Internal.** Before decoding positions `lo ..< hi` (trace indices, or
-  ## indices into `sel` when it is not nil), samples `first ..< first + cols`
-  ## each: asks the OS to read their pages ahead (`adviseWillNeed`), so a
-  ## cold scattered read waits for the disk once instead of once per trace.
-  ## Skipped for small reads and when the first and last traces are
-  ## in memory (a warm read pays two `mincore` calls, ~1.5 µs). Windows of traces
-  ## that follow each other closely are advised as one span. Makes no
-  ## managed objects and raises nothing: the prefetch worker calls it.
-  let count = hi - lo
-  if count <= 0 or cols <= 0 or mem == nil: return
-  template entry(pos: int): TraceEntry =
-    entries[if sel == nil: pos else: sel[pos]]
-  template window(e: TraceEntry, a, b: var int64) =
-    let c = codecs[e.record]
-    let n = min(int(e.numSamples), first + cols)
-    a = e.sampleOffset + int64(c.dataBytes(min(first, n)))
-    b = e.sampleOffset + int64(c.dataBytes(n))
-  var a, b: int64
-  if count < AdviseMinTraces:
-    var bytes = 0'i64
-    for pos in lo..<hi:
-      window(entry(pos), a, b)
-      bytes += b - a
-    if bytes < AdviseMinBytes: return
-  var resident = true
-  for pos in [lo, hi - 1]:
-    window(entry(pos), a, b)
-    if b > a and not isResident(mem, size, a):
-      resident = false
-      break
-  if resident: return
-  var spanA, spanB = -1'i64
-  for pos in lo..<hi:
-    window(entry(pos), a, b)
-    if b <= a: continue
-    if spanB >= 0 and a >= spanA and a <= spanB + AdviseGap:
-      spanB = max(spanB, b)
-    else:
-      if spanB > spanA: adviseWillNeed(mem, size, spanA, spanB)
-      spanA = a
-      spanB = b
-  if spanB > spanA: adviseWillNeed(mem, size, spanA, spanB)
-
 # ---------------------------------------------------------- seismic file --
 
 type
@@ -575,11 +327,6 @@ func mapped(f: SeismicFile): bool {.inline.} =
   # local copy of the ref: threads share one file for `readTracesInto`, and
   # ORC's reference counts are not atomic.
   f.map != nil and f.map.src != nil
-
-proc raiseClosed*() {.noinline, noreturn.} =
-  ## **Internal.** Raises `ValueError` "the file is closed". Not exported by
-  ## `parseSEG`.
-  raise newException(ValueError, "the file is closed")
 
 proc requireOpen*(f: SeismicFile) {.inline.} =
   ## **Internal.** Raises `ValueError` when `f` is closed (`isOpen`). Not
@@ -774,11 +521,6 @@ func maxSamples*(f: SeismicFile): int {.inline.} =
   ## Samples in the longest trace.
   f.index.maxSamples
 
-proc raiseNoTrace*(trace, len: int) {.noinline, noreturn.} =
-  ## **Internal.** Raises `ValueError` for trace `trace` of a file of `len`
-  ## traces. Not exported by `parseSEG`.
-  raise newException(ValueError, "no trace " & $trace & " (the file has " & $len & ")")
-
 proc requireTrace*(f: SeismicFile, trace: int) {.inline.} =
   ## **Internal.** Raises `ValueError` for a trace out of range. Not
   ## exported by `parseSEG`.
@@ -897,26 +639,6 @@ proc flush*(f: SeismicFile) =
   ## **Internal.** Writes modified pages of a writable map back to the file
   ## (`HeaderEditor.close`). Not exported by `parseSEG`.
   if f.mapped: f.map.src.flush()
-
-# ------------------------------------------------- checks shared by model --
-# Exported for the sibling model modules (gathers, prefetch, survey/join);
-# the `parseSEG` umbrella does not re-export them.
-
-proc requireKeys*(ix: TraceIndex) =
-  ## **Internal.** Raises `ValueError` unless the index holds per-trace keys.
-  if ix.keys.len != ix.entries.len:
-    raise newException(ValueError, "open the file with keys = true")
-
-proc checkSpan*(span: Slice[int], len: int, what = "traces") =
-  ## **Internal.** Raises `ValueError` unless `span` lies in `0 ..< len`; an
-  ## empty span must start in `0 .. len` (so `len .. len - 1` is allowed,
-  ## `len + 2 .. len + 1` is not).
-  if span.a < 0 or span.a > len or span.b >= len:
-    raise newException(ValueError, what & " " & $span & " lie outside 0.." & $(len - 1))
-
-func spanLen*(span: Slice[int]): int {.inline.} =
-  ## **Internal.** The number of elements of `span`; 0 when empty.
-  if span.b < span.a: 0 else: span.len
 
 # ------------------------------------------------------- keys on demand --
 

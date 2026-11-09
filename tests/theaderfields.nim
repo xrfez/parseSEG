@@ -5,6 +5,7 @@ import std/[assertions, os, macros, options, strutils, math]
 import parseSEG/segy/[reader as segyreader]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, headerfields, edit]
+import parseSEG/private/fieldaccess
 import ./utils/testutils
 
 let tmp = scratchDir("parseseg_theaderfields")

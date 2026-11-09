@@ -8,7 +8,7 @@ import std/[assertions, options, os, strutils, math]
 import parseSEG
 import parseSEG/survey/cards # column helpers (internal)
 import ./utils/testutils
-from parseSEG/survey/writeback import chooseScalar # internal
+from parseSEG/private/coordscalar import chooseScalar
 
 let tmp = getEnv("XDG_CACHE_HOME", getTempDir()) / "parseseg_tgeomwrite"
 removeDir(tmp)

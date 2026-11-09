@@ -17,6 +17,7 @@
 
 import std/math
 import ./[traceindex, headerfields]
+import ../private/checks
 
 const
   DigitBits = 11

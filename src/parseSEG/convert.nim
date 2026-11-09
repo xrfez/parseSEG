@@ -80,6 +80,7 @@ import ./survey/join
 import ./seg2convert
 export seg2convert.Seg2ConvertOptions, seg2convert.Seg2TargetFormat
 import ./version
+import ./private/[decodeentry, progressticker]
 
 const
   ConverterName = "parseSEG " & PackageVersion

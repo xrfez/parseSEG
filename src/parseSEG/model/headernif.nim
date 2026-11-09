@@ -44,6 +44,7 @@ import ../common/[errors, diagnostics, niftext, outputfile, progress]
 import ../segd/reader as segdreader
 from ../seg2/reader import Seg2String, fileBlockSize
 import ./[traceindex, headerfields, edit]
+import ../private/[fieldaccess, progressticker]
 
 type
   HeaderChange* = object
