@@ -3,8 +3,9 @@
 ##
 ## This umbrella module re-exports the stable public API; `docs/api.md`
 ## lists it. Modules that also export internals for the library's own use
-## (`traceindex`, `headerfields`, `edit`, `convert`) are re-exported by name,
-## an allowlist that no later re-export can widen; the rest whole. The
+## (`traceindex`, `headerfields`, `edit`, `convert`, `convert/tosegy`) are
+## re-exported by name, an allowlist that no later re-export can widen; the
+## rest whole. The
 ## library's helpers live in `parseSEG/private/`, which nothing re-exports.
 ## The low-level byte codecs (BCD, IBM float, EBCDIC, the field
 ## layout pragmas) are in `parseSEG/codecs`.
@@ -21,10 +22,10 @@ export textheader, binheader, traceheader, exttext, layout, reader, writer, fiel
 export samples except decodeSamplesRaw
 
 import parseSEG/segd/[headers as segdheaders, samples as segdsamples, rev3 as segdrev3,
-  reader as segdreader, writer as segdwriter, revconvert as segdrevconvert, mux as segdmux,
+  reader as segdreader, writer as segdwriter, mux as segdmux,
   demux as segddemux]
 export segdsamples except decodeSegdSamplesRaw
-export segdheaders, segdrev3, segdreader, segdwriter, segdrevconvert, segdmux,
+export segdheaders, segdrev3, segdreader, segdwriter, segdmux,
   segddemux
 
 import parseSEG/seg2/[headers as seg2headers, samples as seg2samples, reader as seg2reader,
@@ -35,16 +36,17 @@ export seg2headers, seg2reader, seg2writer
 import parseSEG/vendor/[maps, apply, scaffold]
 export maps, apply, scaffold
 
-import parseSEG/[convert, seg2convert]
-export convert.SegyTargetFormat, convert.ConvertOptions, convert.targetFormat,
-  convert.convertSegy, convert.convertSegdToSegy, convert.convertSeg2ToSegy, convert.convertFile
-export seg2convert
+import parseSEG/convert
+import parseSEG/convert/[tosegy, tosegd, toseg2]
+export tosegy.SegyTargetFormat, tosegy.ConvertOptions, tosegy.targetFormat, tosegy.convertSegy,
+  tosegy.convertSegdToSegy, tosegy.convertSeg2ToSegy, convert.convertFile
+export tosegd, toseg2
 
 import parseSEG/model/[keys, keytypes, indextypes, indexwalk, traceindex, gathers, prefetch,
   fieldvalues, headerfields, edit, headernif, summary, headerlist, sorting, writefile]
 import parseSEG/common/[seismickind, progress, tensors]
 export seismickind, progress, keys, keytypes, indextypes, indexwalk, tensors, fieldvalues
-# Allowlists: traceindex, edit and convert also export helpers that need
+# Allowlists: traceindex, edit, convert and tosegy also export helpers that need
 # their private fields (for the library's own modules), so their public
 # names are listed one by one, as are headerfields'. A new public name goes
 # here and in docs/api.md (tdocs checks both).

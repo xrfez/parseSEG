@@ -5,7 +5,8 @@
 import std/[assertions, os, math, strutils]
 import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/[records, diskio, tapeimage]
-import parseSEG/segd/[reader, writer, headers, samples, rev3, revconvert]
+import parseSEG/segd/[reader, writer, headers, samples, rev3]
+import parseSEG/convert/tosegd
 import parseSEG/model/traceindex
 import ./utils/testutils
 

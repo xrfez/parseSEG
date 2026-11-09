@@ -7,10 +7,10 @@ import parseSEG/common/[errors, years]
 import parseSEG/io/[diskio, memsource]
 import parseSEG/seg2/[reader as seg2reader, writer as seg2writer]
 import parseSEG/segy/[reader as segyreader, writer as segywriter, samples as segysamples]
-import parseSEG/segd/[reader as segdreader, revconvert]
+import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, gathers, headerfields, headernif, prefetch, summary,
   headerlist, edit]
-import parseSEG/[convert, seg2convert]
+import parseSEG/convert
 import parseSEG/survey/writeback
 import ./utils/testutils
 

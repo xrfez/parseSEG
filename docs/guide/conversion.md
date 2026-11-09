@@ -76,8 +76,8 @@ doAssert s2.kind == skSeg2 and s2.traceField(0, "trace.SAMPLE_INTERVAL").text ==
 ```
 
 The field mappings (which SEG-D field lands in which SEG-Y field, what SEG-2 keyword strings
-become) are tabulated in the module docs of `src/parseSEG/convert.nim`,
-`src/parseSEG/segd/revconvert.nim` and `src/parseSEG/seg2convert.nim`. Multiplexed SEG-D is
+become) are tabulated in the module docs of `src/parseSEG/convert/`: `tosegy.nim`,
+`tosegd.nim` and `toseg2.nim`, one per target standard. Multiplexed SEG-D is
 demultiplexed on the way (`demultiplexSegd` does only that).
 
 Streams: `convertSegy(src, sink)`, `convertSegdToSegy(src, sink)` and

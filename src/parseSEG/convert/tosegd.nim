@@ -1,4 +1,7 @@
-## SEG-D revision conversion (tasks 8.7, 5.5): Rev 1 / 2.x to Rev 3.0 or 3.1, Rev 3.x to
+## Conversion to SEG-D. `convertFile` (`convert.nim`) dispatches here for
+## `target = skSegd`.
+##
+## **SEG-D revisions** (`convertSegdRevision`, tasks 8.7, 5.5): Rev 1 / 2.x to Rev 3.0 or 3.1, Rev 3.x to
 ## Rev 2.0 / 2.1, and within a layout (2.x to 2.y, 3.x to 3.y, format
 ## changes). The conversion streams record by record, so files of any size
 ## convert in bounded memory.
@@ -52,12 +55,40 @@
 ##   set, a negative start time, a sample interval that is not the base scan
 ##   interval / 2^k (k = 0..9), more than 99 skew blocks, more than 65535
 ##   extended or external blocks.
+##
+## **SEG-2 to SEG-D** (`convertSeg2ToSegd`): one Rev 3 record (Rev 3.0 or
+## 3.1 written directly; Rev 2.x through a Rev 3.0 temporary file and
+## `convertSegdRevision`, whose notes apply). Traces sharing a sample
+## interval, sample count, delay, trace type, stack, descaling factor and
+## filters form a channel set; traces are written set by set (an info note
+## says when that changes their order).
+##
+## | SEG-D | From SEG-2 |
+## |---|---|
+## | GH#1 file number (GH#2 extended) | SHOT_SEQUENCE_NUMBER (file, else trace 0), else 1 |
+## | GH#1 date and time, GH#3 time zero | ACQUISITION_DATE / _TIME (UTC assumed) |
+## | GH#2 dominant sampling interval, record length | the first set's interval; the longest set's end time |
+## | Source Description (0x15 VIBRATOR, 0x16 DYNAMITE, 0x17 GUN, else 0x1F) + Position | SOURCE, source station / line, SOURCE_LOCATION: in the general header when every trace has the same source, else in each trace's extensions |
+## | CSD | channel type (0x10 seismic and DEAD, 0x11 RADAR_DATA, 0x30 UPHOLE, 0x70 TEST_DATA), DELAY, interval (whole µs), samples, DESCALING_FACTOR / STACK as the descale multiplier (else 1), STACK, ALIAS_FILTER, LOW_CUT_FILTER, NOTCH_FREQUENCY |
+## | demux header | CHANNEL_NUMBER (else the position in the file), trace edit 2 for DEAD |
+## | THE#1 | LINE_ID and RECEIVER_STATION_NUMBER (when numeric), RECEIVER type as sensor type (1 HYDROPHONE, 2 `VERTICAL_`, 3 `SV_` (inline), 4 SH_HORIZONTAL_GEOPHONE (crossline), 6 ACCELEROMETER) |
+## | Position (trace extension) | RECEIVER_LOCATION (z plus DATUM) |
+## | external header | every file string, as `KEYWORD value` lines |
+##
+## Coordinates are SEG-2's local ones (in its UNITS); no CRS block is
+## written. Trace strings without a slot are listed in one info note.
+## Format (`SegdConvertOptions.format`, "keep"): 8036 for 16-bit integers,
+## 8038 for 32-bit, 8058 for formats 3 and 4 (and 16-bit integers mixed
+## with them), 8080 for doubles or 32-bit integers mixed with floats (8058
+## before Rev 3).
 
-import std/[math, os, strutils]
-import ../common/[errors, diagnostics, endians, outputfile, years, progress]
+import std/[math, os, strutils, times, tables]
+import ../common/[errors, diagnostics, endians, outputfile, years, progress, fieldlayout]
 import ../io/[records, diskio]
-import ./[headers, samples, reader, writer]
-import ../private/progressticker
+import ../segd/[headers, samples, reader, writer, rev3, blocks]
+import ../seg2/[reader as seg2reader]
+import ../model/[traceindex, keys, headerfields]
+import ../private/[progressticker, seg2conv]
 
 type
   SegdTargetFormat* = enum
@@ -856,3 +887,354 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions(),
     except CatchableError as e:
       result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)
+
+# ---------------------------------------------------------- SEG-2 to SEG-D --
+
+type
+  SetKey = object
+    # What the traces of one channel set share.
+    dtUs, ns: int
+    startUs: int32
+    channelType: uint8
+    stack: uint8
+    descale: float32
+    alias, aliasSlope, lowCut, lowCutSlope, notch: float32
+
+  OutTrace = object
+    index: int     # SEG-2 trace
+    set: int       # channel set (0-based)
+    edit: uint8
+    t: Seg2Trace
+
+const MappedSegdKeys = ["CHANNEL_NUMBER", "SAMPLE_INTERVAL", "DELAY", "SHOT_SEQUENCE_NUMBER",
+  "SOURCE_LOCATION", "RECEIVER_LOCATION", "SOURCE_STATION_NUMBER", "RECEIVER_STATION_NUMBER",
+  "LINE_ID", "RECEIVER", "SOURCE", "TRACE_TYPE", "STACK", "DESCALING_FACTOR", "ALIAS_FILTER",
+  "LOW_CUT_FILTER", "NOTCH_FREQUENCY", "DATUM"]
+
+func segdFormatFor(formats: set[Seg2Format], rev3: bool): SegdSampleFormat =
+  if formats.card == 0: sd8058
+  elif formats <= {s2Int16}: sd8036
+  elif formats <= {s2Int16, s2Int32}: sd8038
+  elif s2Float64 in formats or s2Int32 in formats: (if rev3: sd8080 else: sd8058)
+  else: sd8058
+
+func pair(t: Seg2Trace, key: string): (float32, float32) =
+  let n = t.numbers(key)
+  result[0] = if n.len > 0: float32(n[0]) else: 0'f32
+  result[1] = if n.len > 1: float32(n[1]) else: 0'f32
+
+func channelTypeOf(t: Seg2Trace): uint8 =
+  let tt = t.traceType
+  if tt.isNone: 0x10
+  else:
+    case tt.get
+    of ttSeismicData, ttDead: 0x10
+    of ttRadarData: 0x11
+    of ttUphole: 0x30
+    of ttTestData: 0x70
+
+func sensorTypeOf(t: Seg2Trace): uint8 =
+  let r = t.value("RECEIVER")
+  if r.isNone: return 0
+  let w = r.get.splitWhitespace
+  if w.len == 0: return 0
+  case w[0].toUpperAscii
+  of "HYDROPHONE": 1
+  of "VERTICAL_GEOPHONE": 2
+  of "SV_HORIZONTAL_GEOPHONE": 3
+  of "SH_HORIZONTAL_GEOPHONE": 4
+  of "ACCELEROMETER": 6
+  else: 0
+
+func sourceBlockType(f: Seg2File, t: Seg2Trace): uint8 =
+  var v = t.value("SOURCE")
+  if v.isNone: v = f.value("SOURCE")
+  let w = if v.isSome: v.get.splitWhitespace else: @[]
+  if w.len == 0: 0x1F
+  else:
+    case w[0].toUpperAscii
+    of "VIBRATOR": 0x15
+    of "DYNAMITE": 0x16
+    of "GUN": 0x17
+    else: 0x1F
+
+func positionBlock(x, y, z: float64): seq[byte] =
+  let ok = finite(x) and finite(y)
+  var p = SegdPositionBlock(tuple1Coord1: (if ok: x else: Inf), tuple1Coord2: (if ok: y else: Inf),
+    tuple1Coord3: (if finite(z): z else: Inf), position1Valid: uint8(ord(ok)),
+    tuple2Coord1: Inf, tuple2Coord2: Inf, tuple2Coord3: Inf,
+    blockType1: BlockTypePosition1, blockType2: BlockTypePosition2, blockType3: BlockTypePosition3)
+  @(p.encoded)
+
+func fix40Fits(x: float64): bool = finite(x) and abs(x) < 8388607.0
+
+func sourceBlock(fileNo: int64, k: TraceKeys, blockType: uint8): seq[byte] =
+  var s = SegdSourceDescription(extFileNumber: uint32(clamp(fileNo, 0, 0xFFFFFF)),
+    sourceLineNumber: (if fix40Fits(k.srcLine): k.srcLine else: 0.0),
+    sourcePointNumber: (if fix40Fits(k.srcPoint): k.srcPoint else: 0.0), blockType: blockType)
+  @(s.encoded)
+
+func sameSource(a, b: TraceKeys): bool =
+  template eq(x, y: float64): bool = (x.isNaN and y.isNaN) or x == y
+  eq(a.srcLine, b.srcLine) and eq(a.srcPoint, b.srcPoint) and eq(a.srcX, b.srcX) and
+    eq(a.srcY, b.srcY) and eq(a.srcZ, b.srcZ)
+
+proc writeSeg2AsSegd(c: var Seg2Conv, f: SeismicFile, sink: RecordSink, opts: SegdConvertOptions) =
+  let fdb = f.index.seg2
+  let rev3Minor = if opts.revision.major == 3: opts.revision.minor else: 0'u8
+  # The traces that can be converted, and their channel sets.
+  var outs: seq[OutTrace]
+  var sets: seq[SetKey]
+  var counts: seq[int]
+  var formats: set[Seg2Format]
+  for i in 0..<f.len:
+    let e = f.index.entries[i]
+    let codec = f.index.codecs[e.record]
+    let tl = Location(file: c.loc.file, trace: i)
+    if not codec.known or e.headerBytes == 0:
+      c.log.report(sevError, dcUnsupportedFormat, "the samples cannot be decoded; the trace " &
+        "is skipped", e.offset, tl)
+    else:
+      let t = f.seg2Trace(i)
+      let dt = f.sampleIntervalUs(i)
+      if not (finite(dt) and dt > 0 and dt < 16_777_216):
+        c.log.report(sevError, dcValidation, "the trace has no usable SAMPLE_INTERVAL, which " &
+          "SEG-D needs; it is skipped", e.offset, tl)
+      else:
+        if dt != round(dt):
+          c.note(snIntervalRounded, "SEG-D Rev 3 holds sample intervals as whole µs; " &
+            "intervals were rounded (" & $dt & " µs)")
+        let delay = t.delay.get(0.0) * 1e6
+        if delay != round(delay):
+          c.note(snDelayRounded, "SEG-D holds start times as whole µs; delays were rounded")
+        let (al, als) = t.pair("ALIAS_FILTER")
+        let (lc, lcs) = t.pair("LOW_CUT_FILTER")
+        let key = SetKey(dtUs: int(round(dt)), ns: int(e.numSamples),
+          startUs: int32(clamp(round(delay), -2147483648.0, 2147483647.0)),
+          channelType: channelTypeOf(t), stack: uint8(clamp(t.number("STACK").get(1), 0, 255)),
+          # mV per shot (SEG-D's descale) = DESCALING_FACTOR / STACK.
+          descale: float32(t.number("DESCALING_FACTOR").get(1) /
+            max(t.number("STACK").get(1), 1)), alias: al, aliasSlope: als,
+          lowCut: lc, lowCutSlope: lcs, notch: float32(t.number("NOTCH_FREQUENCY").get(0)))
+        var s = sets.find(key)
+        if s < 0:
+          sets.add key
+          counts.add 0
+          s = sets.high
+        inc counts[s]
+        formats.incl codec.seg2Format.get
+        let edit = if t.traceType == some(ttDead): 2'u8 else: 0'u8
+        for x in t.strings:
+          if x.key.toUpperAscii notin MappedSegdKeys: c.unmappedKey(x.key)
+        outs.add OutTrace(index: i, set: s, edit: edit, t: t)
+  if outs.len == 0:
+    raiseFormat("the SEG-2 file has no convertible traces; nothing written")
+  # Traces go out set by set (stable).
+  var order: seq[OutTrace]
+  for s in 0..<sets.len:
+    for o in outs:
+      if o.set == s: order.add o
+  for k in 0..<order.len:
+    if order[k].index != outs[k].index:
+      c.note(snReordered, "SEG-D writes traces channel set by channel set; the SEG-2 traces " &
+        "were reordered (CHANNEL_NUMBER and the demux trace numbers keep their identity)")
+      break
+  let fmt = if opts.format != tfKeep: segdSampleFormats[ord(opts.format) - 1]
+            else: segdFormatFor(formats, opts.revision.major >= 3)
+  # Geometry: one source for the record, or one per trace.
+  var keysOf = newSeq[TraceKeys](order.len)
+  for k, o in order: keysOf[k] = f.traceKeys(o.index)
+  var oneSource = true
+  for k in 1..<order.len:
+    if not sameSource(keysOf[k], keysOf[0]): oneSource = false
+  var anyRcv, anySrc = false
+  for k in keysOf:
+    if k.hasReceiverXY: anyRcv = true
+    if k.hasSourceXY: anySrc = true
+  if anyRcv or anySrc:
+    c.note(snLocalCoordinates, "SEG-2 coordinates are local (UNITS " &
+      fdb.value("UNITS").get("unknown") & "); the Position blocks carry them without a CRS block")
+  let ext = 1 + (if anyRcv: 3 else: 0) + (if oneSource: 0 else: 1 + (if anySrc: 3 else: 0))
+  # File number and time.
+  var shot = fdb.integer("SHOT_SEQUENCE_NUMBER")
+  if shot.isNone: shot = order[0].t.integer("SHOT_SEQUENCE_NUMBER")
+  let fileNo = if shot.isSome and shot.get in 0'i64..0xFFFFFF: shot.get else: 1'i64
+  let bcdFile = if fileNo <= 9999: int(fileNo) else: BcdAllF
+  var rec = SegdRecord(layout: slRev3, format: some(fmt),
+    revision: SegdRevision(major: 3, minor: rev3Minor))
+  if oneSource:
+    rec.generalBlocks.add sourceBlock(fileNo, keysOf[0], sourceBlockType(fdb, order[0].t))
+    if anySrc: rec.generalBlocks.add positionBlock(keysOf[0].srcX, keysOf[0].srcY, keysOf[0].srcZ)
+  var external = "SEG-2 FILE STRINGS\n"
+  for s in fdb.strings: external.add (if s.value.len > 0: s.key & " " & s.value else: s.key) & "\n"
+  while external.len mod SegdBlockSize != 0: external.add ' '
+  for ch in external: rec.external.add byte(ch)
+  let nExternal = rec.external.len div SegdBlockSize
+  let nGeneral = rec.generalBlocks.len div SegdBlockSize
+  let nSets = sets.len
+  rec.gh1 = SegdGeneralHeader1(fileNumber: bcdFile, formatCode: ord(fmt),
+    additionalGhBlocks: uint8(2 + nGeneral), manufacturerCode: 0, baseScanInterval16: 0xFF,
+    recordType: 8, recordLength: BcdAllF, scanTypesPerRecord: 1,
+    channelSetsPerScanType: (if nSets <= 99: nSets else: BcdAllF), skewBlocks: 0,
+    extendedHeaderBlocks: 0, externalHeaderBlocks: (if nExternal <= 99: nExternal else: BcdAllF))
+  let acq = fdb.acquisitionTime
+  if acq.isSome:
+    let dt = fromUnix(int64(floor(acq.get))).utc
+    rec.gh1.year = dt.year mod 100
+    rec.gh1.julianDay = dt.yearday + 1
+    rec.gh1.hour = dt.hour
+    rec.gh1.minute = dt.minute
+    rec.gh1.second = dt.second
+    rec.gh3.timeZero = unixToTimestamp(acq.get)
+  var recordUs = 0'i64
+  for s in sets: recordUs = max(recordUs, int64(s.startUs) + int64(s.ns) * int64(s.dtUs))
+  rec.gh2Rev3 = SegdGeneralHeader2Rev3(extFileNumber: uint32(fileNo),
+    extChannelSetsPerScanType: uint16(nSets), revisionMajor: 3, revisionMinor: rev3Minor,
+    extRecordLength: uint32(clamp(recordUs, 0, int64(high(uint32)))),
+    dominantSamplingInterval: uint32(sets[0].dtUs), extExternalHeaderBlocks: uint32(nExternal),
+    blockType: BlockTypeGeneralHeader2)
+  rec.gh3.blockType = BlockTypeGeneralHeader3
+  var descs: seq[SegdChannelSetDescriptorRev3]
+  for k, s in sets:
+    var d = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: uint16(k + 1),
+      channelType: s.channelType, startTime: s.startUs,
+      endTime: int32(clamp(int64(s.startUs) + int64(max(s.ns - 1, 0)) * s.dtUs, 0,
+        int64(high(int32)))),
+      numSamples: uint32(s.ns), descaleMultiplier: s.descale, channelsInSet: uint32(counts[k]),
+      samplingInterval: uint32(s.dtUs), traceHeaderExtensions: uint8(ext), verticalStack: s.stack,
+      aliasFilterFreq: s.alias, aliasFilterSlope: s.aliasSlope, lowCutFilterFreq: s.lowCut,
+      lowCutFilterSlope: s.lowCutSlope, notch1Freq: s.notch, blockType1: BlockTypeChannelSet1,
+      blockType2: BlockTypeChannelSet2, blockType3: BlockTypeChannelSet3)
+    for i, ch in "SEG-2": d.description[i] = ch
+    descs.add d
+  rec.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: descs)]
+  # Sizes: headers, then every trace.
+  let header = rec.headerBytes
+  var data = header
+  for o in order:
+    data += SegdTraceHeaderSize + SegdBlockSize * ext + dataBytes(fmt, sets[o.set].ns)
+  rec.gh3.headerSize = uint32(header)
+  rec.gh3.dataSize = uint64(data)
+  rec.gh3.recordSize = uint64(data)
+  rec.gh2Rev3.generalTrailerBlocks = 0
+  rec.traceCount = order.len
+  var w = openSegdWriter(sink)
+  w.writeRecordHeaders(rec)
+  var vals, back: seq[float64]
+  for k, o in order:
+    c.tickTrace(f, k)
+    let kk = keysOf[k]
+    let s = sets[o.set]
+    let ch = o.t.channelNumber
+    let traceNo = if ch.isSome and ch.get in 1'i64..0xFFFFFF: ch.get else: int64(o.index + 1)
+    var t = SegdTrace(layout: slRev3, index: k, numSamples: s.ns, scanType: 0, channelSet: o.set)
+    t.header = SegdTraceHeader(fileNumber: bcdFile, scanTypeNumber: 1,
+      channelSetNumber: (if o.set < 99: o.set + 1 else: BcdAllF),
+      extChannelSetNumber: uint16(o.set + 1),
+      traceNumber: (if traceNo <= 9999: int(traceNo) else: BcdAllF),
+      traceHeaderExtensions: uint8(ext), traceEdit: o.edit, extFileNumber: uint32(fileNo))
+    var e1 = SegdTraceHeaderExt1Rev3(numSamples: uint32(s.ns), sensorType: sensorTypeOf(o.t),
+      extTraceNumber: uint32(traceNo), blockType: BlockTypeTraceHeaderExt1)
+    template station(x: float64, short, long: untyped) =
+      if finite(x) and x == round(x) and x >= -8388608 and x <= 8388607 and x != -1:
+        e1.short = int32(x)
+      elif fix40Fits(x):
+        e1.short = -1
+        e1.long = x
+    station(kk.rcvLine, receiverLineNumber, extReceiverLineNumber)
+    station(kk.rcvPoint, receiverPointNumber, extReceiverPointNumber)
+    t.ext1Rev3 = some e1
+    if anyRcv: t.extensions.add positionBlock(kk.rcvX, kk.rcvY, kk.rcvZ)
+    if not oneSource:
+      t.extensions.add sourceBlock(fileNo, kk, sourceBlockType(fdb, o.t))
+      if anySrc: t.extensions.add positionBlock(kk.srcX, kk.srcY, kk.srcZ)
+    f.decodeFloat64(o.index, vals)
+    vals.setLen s.ns
+    t.samples = newSeq[byte](dataBytes(fmt, s.ns))
+    try:
+      encodeSegdSamples(fmt, vals, t.samples)
+      back.setLen s.ns
+      decodeSegdSamples(fmt, t.samples, back)
+      for q in 0..<s.ns:
+        if back[q] != vals[q] and not (back[q].isNaN and vals[q].isNaN):
+          c.inexactTrace(o.index)
+          break
+    except SegFormatError as x:
+      c.log.report(sevError, dcValidation, "samples do not fit SEG-D format " & $ord(fmt) &
+        " (" & x.msg & "); the trace is written as zeros", loc = Location(file: c.loc.file,
+        trace: o.index))
+      t.samples = newSeq[byte](dataBytes(fmt, s.ns))
+    w.writeTrace(t)
+  if not c.tk.finish(): raiseCancelled()
+  w.endRecord()
+  w.close()
+  c.log.add w.log
+  c.reportInexact("SEG-D format " & $ord(fmt))
+  c.reportUnmapped("SEG-D")
+
+proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions(),
+    progress: Progress = nil): DiagLog {.raises: [].} =
+  ## Converts the SEG-2 file `srcPath` to the SEG-D file `dstPath`, Rev 2.0,
+  ## 2.1, 3.0 or 3.1 (`opts.revision`; see the module doc). Never raises:
+  ## problems, including I/O failures, are in the result. The output is
+  ## written to a new temporary file next to `dstPath` and renamed when
+  ## complete. `progress` spans every pass (see `convertFile`); when it
+  ## cancels, the result holds a fatal `dcCancelled` diagnostic and nothing
+  ## is written.
+  var c = Seg2Conv(loc: Location(file: dstPath))
+  if sameAsInput(srcPath, dstPath, result): return
+  let r = opts.revision
+  let passes = if r.major == 3: 2 else: 3 # Rev 2: through a Rev 3.0 file
+  if not (r.major == 2 and r.minor in {0'u8, 1} or r.major == 3 and r.minor in {0'u8, 1}):
+    result.report(sevFatal, dcValidation, "target revision " & $r & " is not 2.0, 2.1, 3.0 " &
+      "or 3.1", loc = c.loc)
+    return
+  var f: SeismicFile
+  try:
+    f = openSeismic(srcPath, keys = true, progress = progressPhase(progress, 0, passes))
+  except SegCancelledError:
+    result.reportCancelled(dstPath)
+    return
+  except CatchableError as e:
+    result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
+    return
+  result.add f.index.log
+  let inSize = f.mappedSize
+  if f.index.log.isFatal or f.kind != skSeg2:
+    if f.kind != skSeg2 and not f.index.log.isFatal:
+      result.report(sevFatal, dcUnsupportedFormat, srcPath & " is not SEG-2", loc = c.loc)
+    f.closeQuietly()
+    return
+  # Rev 3 is written directly; Rev 2 through a Rev 3.0 file.
+  let direct = r.major == 3
+  let rev3Path = createTempFor(if direct: dstPath else: dstPath & ".rev3", result)
+  if rev3Path.len == 0:
+    f.closeQuietly()
+    return
+  var sink: RecordSink
+  try:
+    try:
+      sink = openDiskSink(rev3Path)
+      var o3 = opts
+      if not direct: o3.revision = SegdRevision(major: 3, minor: 0)
+      c.tk = initProgressTicker(progressPhase(progress, 1, passes), f.mappedSize)
+      c.writeSeg2AsSegd(f, sink, o3)
+    finally:
+      if sink != nil: sink.close()
+  except CatchableError as e:
+    c.reportFailure(e)
+  f.closeQuietly()
+  result.add c.log
+  if direct:
+    finishOutput(rev3Path, dstPath, keep = not result.isFatal, result)
+  else:
+    if not result.isFatal:
+      var o2 = opts
+      o2.format = tfKeep # chosen by the first pass
+      try:
+        result.add convertSegdRevision(rev3Path, dstPath, o2,
+          progressPhase(progress, 2, 3, inSize))
+      except CatchableError as e: # it logs its own failures; this is a safety net
+        result.report(sevFatal, dcIo, e.msg, loc = c.loc)
+    try: removeFile(rev3Path)
+    except OSError: discard

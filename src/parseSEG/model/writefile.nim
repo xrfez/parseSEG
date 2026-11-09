@@ -49,9 +49,9 @@ import ../common/[diagnostics, endians, outputfile, seismickind]
 import ../io/[records, diskio]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
   samples as segysamples]
-import ../segd/[reader as segdreader, writer as segdwriter, revconvert]
+import ../segd/[reader as segdreader, writer as segdwriter]
 import ../seg2/[reader as seg2reader, writer as seg2writer]
-import ../[convert, seg2convert]
+import ../convert
 import ./traceindex
 import ../common/tensors
 import ../private/tensorrows

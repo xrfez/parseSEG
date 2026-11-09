@@ -7,7 +7,8 @@
 import std/[assertions, os, math, options]
 import parseSEG/common/[diagnostics, endians, errors]
 import parseSEG/io/[records, tapeimage]
-import parseSEG/segd/[reader, writer, headers, samples, mux, demux, revconvert]
+import parseSEG/segd/[reader, writer, headers, samples, mux, demux]
+import parseSEG/convert/tosegd
 import parseSEG/model/[traceindex, edit]
 import parseSEG/survey/writeback
 import ./utils/testutils

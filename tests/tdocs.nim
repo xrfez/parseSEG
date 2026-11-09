@@ -93,7 +93,8 @@ block umbrella_allowlists_match_api_md:
       "mappedSize", "flush"]),
     ("headerfields", "model/headerfields.nim", newSeq[string]()),
     ("edit", "model/edit.nim", @["logVar", "writeBytes", "batching", "flushPending"]),
-    ("convert", "convert.nim", @["GeometryJoin", "convertSegdToSegyJoined", "convertJoined"])]
+    ("tosegy", "convert/tosegy.nim", @["GeometryJoin", "convertSegdToSegyJoined"]),
+    ("convert", "convert.nim", @["convertJoined"])]
   for (module, file, internal) in allowlisted:
     let listed = allowlist(umbrella, module)
     let exported = exportedNames(readFile(srcDir / "parseSEG" / file))
