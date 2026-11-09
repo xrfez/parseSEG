@@ -137,7 +137,78 @@ read-ahead likes. Splitting by gather (`f.gathers`, with `keys = true`) works th
 
 ## Write results
 
-### SEG-Y in, SEG-Y out
+### Write like the input
+
+`openSeismicWriter(path, like = f)` writes a file in `f`'s standard, revision and byte order,
+with `f`'s file headers; `writeTrace(w, f, i, samples)` writes trace `i` of `f` with its
+headers and your samples, encoded in the file's format. Only what the samples change is
+changed. `close` writes the final counts and renames the output into place: until then the
+output is a temporary file, and a writer dropped without `close` leaves nothing behind. The
+same code works for SEG-Y, SEG-D and SEG-2.
+
+```nim
+import std/os
+import parseSEG
+
+for input in ["SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy",
+    "SEG Spec/exampleFiles/inova_rev30_5traces.sgd"]:
+  var f = openSeismic(input)
+  let output = "gain_" & input.extractFilename
+  var w = openSeismicWriter(output, like = f)
+  const Chunk = 64
+  var buf = newTraceTensor[float64](Chunk, f.maxSamples)
+  var first = 0
+  while first < f.len:
+    let last = min(first + Chunk, f.len) - 1
+    discard f.readTracesInto(first .. last, buf)
+    buf.apply_inline(2 * x)                     # the "processing": a gain of 2
+    for i in first .. last: w.writeTrace(f, i, buf, i - first)  # row i - first
+    first = last + 1
+  let log = w.close()
+  doAssert not log.isFatal
+
+  var g = openSeismic(output)
+  let (a, b) = (f.readTraces(0 ..< f.len, float64), g.readTraces(0 ..< g.len, float64))
+  echo output, ": ", g.len, " traces, largest error ", max(abs(b - 2.0 * a))
+  doAssert g.len == f.len and max(abs(b - 2.0 * a)) <= 1e-6 * max(abs(b))
+```
+
+Options and rules:
+
+- **Sample format.** `openSeismicWriter(path, f, segyFormat = st5)` (or `segdFormat = tf8048`,
+  `seg2Format = s2t4`, for the input's standard) writes another format; the format code is
+  the only header change (SEG-D Rev 3 also updates General Header #3's sizes). A value the
+  format cannot hold (an integer overflow, NaN in an integer format) raises
+  `SegFormatError` and writes nothing.
+- **Sample count.** A SEG-Y or SEG-2 trace may get more or fewer samples than it had (the
+  tensor form takes `samples = n`: the first `n` of the row). The trace header follows, and
+  so does the SEG-Y binary header when every trace has the same count. A fixed-length SEG-Y
+  file needs one count for all traces. A SEG-D trace keeps its count: its channel set
+  descriptor holds it.
+- **Which traces.** SEG-Y and SEG-2 traces can be written in any order and any subset (a
+  declared Rev 2 trace count becomes the number written). SEG-D records are written
+  whole, each record's traces in input order: a record ends when a trace of another record
+  arrives, or at `close`, and must then be complete. Records may be skipped or reordered.
+  Multiplexed SEG-D is refused: convert it to a demultiplexed file first.
+- **Errors.** Caller mistakes raise `ValueError` and write nothing: a trace out of range,
+  another standard, a closed file, a broken SEG-D rule. Spec-invalid output raises
+  `SegFormatError`, as with the per-standard writers.
+
+```nim
+import parseSEG
+
+# Keep the first 1000 samples of each trace: the headers follow.
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var w = openSeismicWriter("inglewood_1000.sgy", like = f)
+let x = f.readTraces(0 ..< f.len)
+for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = 1000)
+discard w.close()
+var g = openSeismic("inglewood_1000.sgy")
+doAssert g.maxSamples == 1000 and g.fileField("binary.samplesPerTrace").intVal == 1000
+```
+
+### Streaming SEG-Y (tape, or without an index)
+
 
 The streaming SEG-Y reader and writer pass every header through unchanged. Decode a trace's
 samples, process them, encode them back in the file's format, and write the trace. The
@@ -208,13 +279,6 @@ doAssert b.summary.formatCode == 5 and b.readTraces(0 ..< b.len) == a.readTraces
 
 `encodeSamples` raises `SegFormatError` when a value does not fit an integer format (and
 for NaN in one).
-
-### SEG-D or SEG-2 in
-
-Convert to SEG-Y first (`convertFile`, lossless by default), then process the SEG-Y as
-above; or process in memory and keep the results in your own format. Writing processed
-samples back into SEG-D needs the full SEG-D writer (`openSegdWriter`, `writeSegd`), which
-works on whole decoded records.
 
 ### Results that belong in the headers
 

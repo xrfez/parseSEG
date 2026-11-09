@@ -102,6 +102,13 @@ X records name the stations each channel was recorded from. Spec notes: `docs/sp
 
 CLI: `parseSEG survey-apply <file> --sps=... [-o out | --in-place]`.
 
+## Writing results like the input
+| Proc | What |
+|---|---|
+| `openSeismicWriter(path, like: SeismicFile, segyFormat = stKeep, segdFormat = tfKeep, seg2Format = s2tKeep): SeismicWriter` (`model/writefile`) | A writer in `like`'s standard, revision and byte order, with its file headers (SEG-Y label, textual, binary, extended text and trailer; SEG-D storage unit label; SEG-2 File Descriptor Block). A format other than "keep" (for `like`'s standard only) changes the format code. `ValueError` for an unknown or multiplexed `like`, a format for another standard or one the revision lacks, `path` = `like`'s file; `SegFormatError` for headers the writer refuses; `IOError` when the output cannot be created. |
+| `w.writeTrace(src, trace, samples: openArray[T])`, `w.writeTrace(src, trace, x: Tensor[T], row, samples = -1)` | Trace `trace` of `src` (open, the same standard; usually `like`) with its headers and the samples encoded in the output format (the tensor form: the row's first `samples` values, -1 = the trace's own count). SEG-Y and SEG-2 traces may change sample count (trace header; the SEG-Y binary header when all agree; fixed-length files need one count) and come in any order. SEG-D: a trace keeps its count; records are written whole, each one's traces in input order, and a record ends when another record's trace arrives or at `close` (`ValueError` when incomplete). `ValueError` for caller errors (nothing is written), `SegFormatError` for a value the format cannot hold. |
+| `w.close(): DiagLog`, `w.len`, `w.path` | Finishes (ends the SEG-D record, SEG-Y trailer and final counts: samples per trace when uniform, the Rev 2 trace count when declared; SEG-2 pointers) and renames the temporary output into place; on a raise the output is discarded. A writer dropped without `close` leaves no output file. Not copyable. |
+
 ## In-place edits
 `openEditor(path, journalPath)` and `setTraceField(trace, "trace.<f>", v)` /
 `setFileField("binary.<f>", v)` / `setRecordField(record, "gh1.<f>", v)` (each `false` when
