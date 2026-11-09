@@ -44,7 +44,8 @@ import ../common/[errors, diagnostics]
 import ../io/[records, diskio, pushback]
 import ../model/tensors
 import ./[blocks, samples, mux]
-export blocks, samples, diagnostics
+export blocks, diagnostics
+export samples except decodeSegdSamplesRaw
 export tensors except rowPtr
 
 const

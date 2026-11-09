@@ -36,7 +36,8 @@ import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio, pushback]
 import ../model/tensors
 import ./[textheader, binheader, traceheader, samples, exttext, layout]
-export textheader, binheader, traceheader, samples, exttext, layout
+export textheader, binheader, traceheader, exttext, layout
+export samples except decodeSamplesRaw
 
 const
   TapeLabelSize* = 128 ## Bytes in a SEG-Y tape label.

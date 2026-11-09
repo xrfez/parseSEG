@@ -40,6 +40,7 @@ import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader, mux, demux]
 import ../seg2/[reader as seg2reader]
 import ./[tensors, keys]
+import ../segy/samples as segysamples, ../segd/samples as segdsamples, ../seg2/samples as seg2samples
 
 export memsource, diagnostics, keys, seismickind, progress
 export tensors except rowPtr

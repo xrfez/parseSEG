@@ -20,7 +20,8 @@
 import std/[algorithm, math, options, parseutils, strutils, times]
 import ../common/[endians, fieldlayout, years]
 import ./samples
-export options, endians, samples
+export options, endians
+export samples except decodeSeg2SamplesRaw
 
 const
   Seg2FileBlockId* = 0x3A55'u16  ## File Descriptor Block ID, in file byte order.

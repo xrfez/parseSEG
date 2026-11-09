@@ -38,7 +38,8 @@
 import std/strutils
 import ../common/[errors, diagnostics]
 import ./[headers, samples]
-export headers, samples, diagnostics
+export headers, diagnostics
+export samples except decodeSeg2SamplesRaw
 
 type
   Seg2WriteOptions* = object

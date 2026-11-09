@@ -1083,7 +1083,7 @@ Audits: `docs/design/phase15_idiom_audit.md` (I-items) and `docs/design/phase15_
 
 Steps, in order. Each is one commit or a few, with `nim test` green (and `nim asan` for the
 threaded paths):
-- [ ] 15.3-1 I 15.3a: the umbrella leak quick fix (exclude the `*Raw` decoders in the
+- [x] 15.3-1 I 15.3a: the umbrella leak quick fix (exclude the `*Raw` decoders in the
       re-exports) and a `tumbrella` test of every name in the `except` lists
 - [ ] 15.3-2 P7: branchless 8015/8024 (and 8022/8042/8044, SEG-2 format 3) decoders, with a
       randomized equivalence test
@@ -1719,3 +1719,4 @@ threaded paths):
     - x86-64-v3 release build: big-endian IEEE 8.2 → 25.5 GB/s.
   - Owner decisions needed: the build target, O(1) open for fixed-length SEG-Y, and a smaller first prefetch chunk after a seek.
 - 2026-11-09: owner decisions on the 15.3 audits: v3 build default, sampled fixed-length open by default, opt-in `quickFirst`, all [do] and optional items. Steps 15.3-1..14 recorded.
+- 2026-11-09: 15.3-1 done: `segy/reader`, `segd/reader`, `seg2/{headers,reader,writer}` re-export `samples except decode*SamplesRaw` (seg2/reader was a fifth leak the audit missed); `traceindex` imports the codecs directly. `tumbrella` checks all 41 umbrella `except` names plus `rowPtr`: `not declared` for 39, by signature for the shared `flush`/`writeBytes`, and `finish` via its hidden `ProgressTicker`. Suite green.

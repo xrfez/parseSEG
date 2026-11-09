@@ -1,7 +1,7 @@
 ## Compiles the umbrella module, so every public module (including the
 ## platform tape backend) stays importable together.
 
-import std/[assertions, os]
+import std/[assertions, os, macros]
 import parseSEG
 
 doAssert TraceHeaderSize == 240
@@ -24,6 +24,37 @@ doAssert not declared(decodeEntry) and not declared(pinMap) and not declared(Map
   not declared(checkSpan)
 doAssert not declared(locate) and not declared(readField) and not declared(withBlockType) and
   not declared(FieldRef)
+
+block umbrella_except_lists_hide_what_they_name:
+  # An `except` list filters one export path only: a leaf module that re-exports
+  # the same module whole undoes it. Keep this list equal to the union of the
+  # `except` lists in src/parseSEG.nim (update both together).
+  const hidden = [
+    "decodeSamplesRaw", "decodeSegdSamplesRaw", "decodeSeg2SamplesRaw",
+    "convertJoined", "convertSegdToSegyJoined", "GeometryJoin",
+    "unsafeMemory", "decodeEntry", "tryDecodeEntry", "DecodeStatus", "decodeMessages",
+    "mappedSize", "requireKeys", "checkSpan", "spanLen", "MapPin", "pinMap",
+    "openSeismicRw", "remapWritable", "ProgressTicker", "initProgressTicker", "tick",
+    "progressPhase", "reportCancelled",
+    "locate", "locateBlock", "readField", "FieldRef", "FieldRead", "withBlockType",
+    "isLayoutField", "isNamedField", "fieldValueOf", "readFields",
+    "flushPending", "batching", "logVar",
+    "chooseScalar",
+    "rowPtr"]
+  macro assertHidden(names: static openArray[string]): untyped =
+    result = newStmtList()
+    for n in names:
+      result.add newCall(bindSym"doAssert",
+        newCall(bindSym"not", newCall(bindSym"declared", ident(n))), newLit(n & " leaks"))
+  assertHidden(hidden)
+  # Names that public overloads elsewhere share (system's `flush(File)` and
+  # `writeBytes(File, ...)`, memsource's `flush`, exttext's `finish`): check
+  # the hidden overload itself. `finish(var ProgressTicker)` is unreachable
+  # because `ProgressTicker` is hidden (above).
+  var sf: SeismicFile
+  var ed: HeaderEditor
+  doAssert not compiles(sf.flush())
+  doAssert not compiles(ed.writeBytes(0'i64, [1'u8], "x", Location()))
 
 block copy_bytes_is_a_bounds_checked_copy:
   const sample = currentSourcePath().parentDir.parentDir / "SEG Spec" / "exampleFiles" / "63.sgd"
