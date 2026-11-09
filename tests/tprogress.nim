@@ -109,7 +109,7 @@ block open_cancels_and_unmaps:
     for at in [1, 2]:
       let c = Calls(cancelAt: at)
       doAssertRaises(SegCancelledError):
-        discard openSeismic(p, progress = c.hook, verify = vfFull)
+        discard openSeismic(p, progress = c.hook, opts = OpenOptions(verify: vfFull))
       doAssert c.done.len == at, p
       doAssert not mapped(p), p & " is still mapped"
   let c = Calls(cancelAt: 1)

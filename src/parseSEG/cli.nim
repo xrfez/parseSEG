@@ -198,7 +198,7 @@ proc checkInput(path: string) =
 
 proc openFile(path: string, keys = false, verify = vfSampled): SeismicFile =
   checkInput(path)
-  result = openSeismic(path, keys = keys, verify = verify)
+  result = openSeismic(path, keys = keys, opts = OpenOptions(verify: verify))
   if not result.index.detected:
     printLog(result.index.log, sevError)
     cannot(path & " is not SEG-Y, SEG-D or SEG-2")

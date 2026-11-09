@@ -16,6 +16,18 @@ type
     vfSampled ## Index computed from the file size; a sample of headers checked.
     vfFull    ## Every trace header walked, as for any other file.
 
+  OpenOptions* = object
+    ## The rarely changed settings of `openSeismic` (see there). The
+    ## defaults suit almost every open.
+    verify*: VerifyMode = vfSampled
+      ## `vfSampled`: a fixed-length SEG-Y file is indexed from its size,
+      ## with a sample of its headers checked; `vfFull` walks every header.
+    cache*: string ## An index cache written by `saveIndex`; "" for none.
+    demuxDir*: string
+      ## Where a multiplexed SEG-D file's demultiplexed copy goes; "" for the
+      ## OS temp directory.
+    twosComplement8015*: bool ## Read SEG-2 format-3 mantissas as two's complement.
+
   TraceEntry* = object
     ## Where one trace lives (24 bytes).
     offset*: int64       ## Medium offset of the trace header.

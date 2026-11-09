@@ -30,7 +30,7 @@ headers (the first, the last and 62 between) are checked against the binary head
 traces open in about 20 ms warm and 40 ms cold, against 1.8 s and 21 s for the walk. The log
 then has an `indexSampled` info. A sampled header that disagrees, keys, Rev 2 extension
 headers or trailers, and a size that is not a whole number of traces all fall back to the
-walk; `verify = vfFull` always walks, and also reports a mismatch in a header that was not
+walk; `OpenOptions(verify: vfFull)` always walks, and also reports a mismatch in a header that was not
 sampled (`parseSEG diag` opens that way). Pass a
 `progress` hook to show how far it got and to let the user cancel, and an index cache so the
 next open of the same file is near-instant (10 M SEG-Y traces: 2.5 s to walk, 43 ms from the
@@ -56,12 +56,12 @@ let path = "SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy"
 let cache = getTempDir() / "inglewood.pidx" # anywhere writable; one cache per file
 removeFile(cache)
 let bar = Bar()
-var f = openSeismic(path, keys = true, progress = progressOf(bar), cache = cache)
+var f = openSeismic(path, keys = true, progress = progressOf(bar), opts = OpenOptions(cache: cache))
 doAssert bar.percent == 100 and not f.fromCache  # no cache yet: indexed, with an info note
 f.saveIndex(cache)
 f.close()
 
-var g = openSeismic(path, keys = true, cache = cache)   # the second open
+var g = openSeismic(path, keys = true, opts = OpenOptions(cache: cache))   # the second open
 doAssert g.fromCache and g.len == 200
 g.close()
 
@@ -78,7 +78,7 @@ except SegCancelledError:
   you ask for them), by the same parseSEG version, and is intact. Anything else walks
   the file and says why in `f.log` (`indexCache`, info), so a stale cache never gives a
   wrong index. Save again after such an open. A cache saved from a sampled open does not
-  serve `verify = vfFull`.
+  serve `verify: vfFull`.
 - Save right after opening: `saveIndex` refuses an index whose keys `applySurvey` or
   `applyGeometry` changed, a file changed since it was opened, and the temporary
   demultiplexed copy of multiplexed SEG-D (those files are never cached).

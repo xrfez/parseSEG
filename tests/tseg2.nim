@@ -296,7 +296,7 @@ block format3_twos_complement_and_ragged_count:
   let ones = f.readTraces(0..0, float64)
   doAssert ones[0, 0] == -2.0 and ones[0, 1] == 5.0 and ones[0, 2] == -32766.0
   f.close()
-  var g = openSeismic(path, twosComplement8015 = true)
+  var g = openSeismic(path, opts = OpenOptions(twosComplement8015: true))
   let twos = g.readTraces(0..0, float64)
   doAssert twos[0, 0] == -4.0 and twos[0, 1] == 5.0 and twos[0, 2] == -32767.0
   g.close()

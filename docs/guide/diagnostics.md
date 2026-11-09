@@ -125,7 +125,7 @@ The table gives each code's stable name (as `$` and NIF print it); the `DiagCode
 | `validation` | A writer or converter found something the target cannot hold or forbids; also conversion loss notes (`info`) | `error`: nothing was written unless `lenient`. `info`: read the note, it says what was dropped |
 | `multiplexed` | The file holds multiplexed SEG-D, demultiplexed into a temporary copy | `warning`: reads and keys use the copy (`f.demuxPath`); edits need a demultiplexed file |
 | `cancelled` | A `Progress` hook returned false during a conversion (`dcCancelled`; opening and exporting raise `SegCancelledError` instead) | `fatal`: nothing was written; run it again to finish |
-| `indexCache` | `openSeismic(cache = ...)` did not use the index cache (none, stale, damaged; the message says which) | `info`: the file was indexed; `saveIndex` writes a fresh cache |
+| `indexCache` | `openSeismic(opts = OpenOptions(cache: ...))` did not use the index cache (none, stale, damaged; the message says which) | `info`: the file was indexed; `saveIndex` writes a fresh cache |
 | `indexSampled` | `openSeismic` indexed a fixed-length SEG-Y file from its size and checked a sample of its trace headers (the default `verify = vfSampled`; the message says how many) | `info`: nothing to do. Open with `verify = vfFull` to check every header |
 | `internal` | A library bug | Please report it with the message |
 

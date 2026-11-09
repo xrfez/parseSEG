@@ -55,7 +55,7 @@ proc headerAt(f: SeismicFile, trace: int): int64 = f.index.entries[trace].offset
 proc patchNs(src, dst: string, trace: int) =
   # A copy of `src` whose trace `trace` has another sample count in its header.
   var s = readFile(src)
-  var f = openSeismic(src, verify = vfFull)
+  var f = openSeismic(src, opts = OpenOptions(verify: vfFull))
   let at = int(f.headerAt(trace)) + 114
   f.close()
   s[at] = char(byte(s[at]) xor 0x01)
@@ -66,7 +66,7 @@ block sampled_equals_full_walk:
   for p in fixtures():
     var a = openSeismic(p)
     if a.kind == skSegy:
-      var b = openSeismic(p, verify = vfFull)
+      var b = openSeismic(p, opts = OpenOptions(verify: vfFull))
       let what = p.extractFilename
       doAssert not b.log.sampled, what
       doAssert a.index.entries == b.index.entries, what
@@ -123,7 +123,7 @@ block unsampled_mismatch_needs_vfFull:
   patchNs(tmp / "bo_rev1.sgy", p, 1)
   var a = openSeismic(p)
   doAssert a.log.sampled and not a.log.has("fixed-length file", sevWarning), $a.log
-  var b = openSeismic(p, verify = vfFull)
+  var b = openSeismic(p, opts = OpenOptions(verify: vfFull))
   doAssert not b.log.sampled and b.log.has("fixed-length file", sevWarning), $b.log
   doAssert a.index.entries == b.index.entries
   a.close()
@@ -134,7 +134,7 @@ block size_that_does_not_fit_walks:
     let p = tmp / "longer.sgy"
     writeFile(p, readFile(bo) & extra)
     var a = openSeismic(p)
-    var b = openSeismic(p, verify = vfFull)
+    var b = openSeismic(p, opts = OpenOptions(verify: vfFull))
     doAssert not a.log.sampled and $a.log == $b.log, $a.log
     doAssert a.index.entries == b.index.entries
     a.close()
@@ -150,7 +150,7 @@ block keys_vfFull_and_buildIndex_walk:
   var k = openSeismic(bo, keys = true)
   doAssert not k.log.sampled and k.hasKeys
   k.close()
-  var f = openSeismic(bo, verify = vfFull)
+  var f = openSeismic(bo, opts = OpenOptions(verify: vfFull))
   doAssert not f.log.sampled
   f.close()
   let m = openMemFileSource(bo)
@@ -169,20 +169,20 @@ block sampled_cache_and_vfFull:
   doAssert a.log.sampled
   a.saveIndex(sc)
   a.close()
-  var b = openSeismic(p, cache = sc)
+  var b = openSeismic(p, opts = OpenOptions(cache: sc))
   doAssert b.fromCache and b.log.sampled
   b.close()
-  var c = openSeismic(p, cache = sc, verify = vfFull)
+  var c = openSeismic(p, opts = OpenOptions(cache: sc, verify: vfFull))
   doAssert not c.fromCache and not c.log.sampled
   doAssert c.log.has("saved from a sampled open", sevInfo), $c.log
   c.close()
   # A cache of a full walk serves both.
   let fc = tmp / "full.pidx"
-  var d = openSeismic(p, verify = vfFull)
+  var d = openSeismic(p, opts = OpenOptions(verify: vfFull))
   d.saveIndex(fc)
   d.close()
   for v in [vfSampled, vfFull]:
-    var e = openSeismic(p, cache = fc, verify = v)
+    var e = openSeismic(p, opts = OpenOptions(cache: fc, verify: v))
     doAssert e.fromCache and not e.log.sampled, $v
     e.close()
 

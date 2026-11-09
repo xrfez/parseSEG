@@ -7,7 +7,8 @@ traces their geometry. It is built for seismic viewers and for HPC processing.
 
 - **Any file size.** Files are memory-mapped and indexed in one header walk (about 24 bytes
   per trace), never loaded whole. A `progress` hook shows the walk and can cancel it, and an
-  index cache (`saveIndex`, `openSeismic(cache = ...)`) makes the next open near-instant.
+  index cache (`saveIndex`, `openSeismic(opts = OpenOptions(cache: ...))`) makes the next open
+  near-instant.
 - **Samples into tensors.** Any range, list (a gather, a sort order) or sample window
   decodes straight from the map into Arraymancer tensors, `float32` or `float64`, also into
   reused buffers and from several threads on one open file. A prefetcher reads ahead on a

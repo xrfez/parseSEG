@@ -412,7 +412,7 @@ block open_seismic_demultiplexes_into_a_temp_copy:
     MuxSet(channels: 8, subExp: 1, channelType: 1)]], @[8])
   let dir = tmp / "demux"
   createDir(dir)
-  var f = openSeismic(tmp / "m15.sgd", keys = true, demuxDir = dir)
+  var f = openSeismic(tmp / "m15.sgd", keys = true, opts = OpenOptions(demuxDir: dir))
   doAssert f.demuxPath.len > 0 and f.demuxPath.parentDir == dir and fileExists(f.demuxPath)
   doAssert f.log.has("demultiplexed into the temporary copy", sevWarning), $f.log
   doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0
@@ -431,7 +431,7 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   let k = f.traceKeys(6)
   doAssert k.record == 12 and k.channel == 3
   # Keys on demand (14.3a) come from the demultiplexed copy's headers too.
-  var plain = openSeismic(tmp / "m15.sgd", demuxDir = dir)
+  var plain = openSeismic(tmp / "m15.sgd", opts = OpenOptions(demuxDir: dir))
   doAssert not plain.hasKeys and $plain.traceKeys(0..11) == $f.traceKeys(0..11)
   plain.close()
   let copy = f.demuxPath
@@ -443,7 +443,7 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   g.close()
   # A copy left to the destructor is deleted too.
   block:
-    let h = openSeismic(tmp / "w.sgd", demuxDir = dir)
+    let h = openSeismic(tmp / "w.sgd", opts = OpenOptions(demuxDir: dir))
     doAssert h.len == 4 and fileExists(h.demuxPath)
   for p in walkDir(dir): doAssert false, "left behind: " & p.path
   # An index of the multiplexed file itself refuses range reads.
@@ -469,7 +469,7 @@ block open_seismic_demultiplexes_into_a_temp_copy:
 block demultiplexed_copies_are_not_cached:
   # 14.3e: the index belongs to a temporary copy, so there is no cache.
   let cache = tmp / "m15.pidx"
-  var f = openSeismic(tmp / "m15.sgd", cache = cache)
+  var f = openSeismic(tmp / "m15.sgd", opts = OpenOptions(cache: cache))
   doAssert not f.fromCache and f.log.has("was not used", sevInfo), $f.log
   doAssertRaises(ValueError): f.saveIndex(cache)
   doAssert not fileExists(cache)

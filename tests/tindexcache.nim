@@ -72,7 +72,7 @@ proc sameIndex(a, b: SeismicFile, what: string) =
   doAssert snapshot(ia) == snapshot(ib), what & ": the snapshots differ"
 
 proc reopen(p, cache: string, keys = false): SeismicFile =
-  openSeismic(p, keys = keys, cache = cache)
+  openSeismic(p, keys = keys, opts = OpenOptions(cache: cache))
 
 # ---------------------------------------------------------------- round trip --
 
@@ -82,7 +82,7 @@ block cached_index_equals_rebuilt:
       let what = p.extractFilename & (if keys: " keys" else: "")
       let cache = tmp / (p.extractFilename & ".pidx")
       removeFile(cache)
-      var built = openSeismic(p, keys = keys, cache = cache)
+      var built = openSeismic(p, keys = keys, opts = OpenOptions(cache: cache))
       doAssert not built.fromCache and built.log.has(dcIndexCache, "there is no such file"), what
       built.saveIndex(cache)
       var walked = openSeismic(p, keys = keys) # without the cache diagnostic
@@ -106,7 +106,7 @@ block cached_index_equals_rebuilt:
         var nk = reopen(p, kc)
         doAssert nk.fromCache and (not nk.hasKeys or nk.len == 0), what
         # Keys walk every header: the log is that of a full walk.
-        var full = openSeismic(p, verify = vfFull)
+        var full = openSeismic(p, opts = OpenOptions(verify: vfFull))
         sameIndex(nk, full, what & " from a keys cache")
         full.close()
         nk.close()
@@ -126,11 +126,12 @@ block progress_on_a_cached_open:
     proc (d, t: int64): bool =
       calls[].add (d, t)
       true
-  var c = openSeismic(bo, cache = cache, progress = recorder(calls))
+  var c = openSeismic(bo, progress = recorder(calls), opts = OpenOptions(cache: cache))
   doAssert c.fromCache and calls[] == @[(getFileSize(bo), getFileSize(bo))]
   c.close()
   doAssertRaises(SegCancelledError):
-    discard openSeismic(bo, cache = cache, progress = proc (d, t: int64): bool = false)
+    let cancel: Progress = proc (d, t: int64): bool = false
+    discard openSeismic(bo, progress = cancel, opts = OpenOptions(cache: cache))
 
 # ----------------------------------------------------------------- staleness --
 
@@ -145,10 +146,10 @@ proc fresh(name: string): (string, string) =
   (p, cache)
 
 proc rebuiltBecause(p, cache, why: string, keys = false, twos = false) =
-  var f = openSeismic(p, keys = keys, twosComplement8015 = twos, cache = cache)
+  var f = openSeismic(p, keys = keys, opts = OpenOptions(twosComplement8015: twos, cache: cache))
   doAssert not f.fromCache, p & ": the stale cache was used"
   doAssert f.log.has(dcIndexCache, why), p & ": " & $f.log
-  var g = openSeismic(p, keys = keys, twosComplement8015 = twos)
+  var g = openSeismic(p, keys = keys, opts = OpenOptions(twosComplement8015: twos))
   doAssert f.index.entries == g.index.entries
   f.close()
   g.close()
@@ -230,10 +231,10 @@ block damaged_caches:
   rebuiltBecause(p, cache, "")
   removeDir(cache)
   # The rebuilt index saves a cache without the miss diagnostic.
-  var f = openSeismic(p, cache = cache)
+  var f = openSeismic(p, opts = OpenOptions(cache: cache))
   doAssert f.log.has(dcIndexCache)
   f.saveIndex(cache)
-  var g = openSeismic(p, cache = cache)
+  var g = openSeismic(p, opts = OpenOptions(cache: cache))
   doAssert g.fromCache and not g.log.has(dcIndexCache), $g.log
   f.close()
   g.close()

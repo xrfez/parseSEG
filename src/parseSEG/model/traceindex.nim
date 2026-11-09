@@ -213,34 +213,21 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
       why & "); the file was indexed", 0, Location(file: path))
   f
 
-proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
-    demuxDir = "", progress: Progress = nil, cache = "", verify = vfSampled): SeismicFile =
+proc openSeismic*(path: string, keys = false, progress: Progress = nil,
+    opts = OpenOptions()): SeismicFile =
   ## Maps the disk file `path` read-only, detects SEG-Y, SEG-D or SEG-2, and
-  ## builds the trace index (with per-trace geometry when `keys`;
-  ## `twosComplement8015` also reads SEG-2 format-3 mantissas as two's
-  ## complement). Format problems are in `index.log`; an undetectable file
-  ## gives a fatal diagnostic and an empty index. Raises `IOError`/`OSError`
-  ## if the file cannot be opened or mapped. To change headers in place, use
+  ## builds the trace index (with per-trace geometry when `keys`). Format
+  ## problems are in `index.log`; an undetectable file gives a fatal
+  ## diagnostic and an empty index. Raises `IOError`/`OSError` if the file
+  ## cannot be opened or mapped. To change headers in place, use
   ## `openEditor` (`model/edit`).
-  ##
-  ## A SEG-D file with multiplexed records is demultiplexed once into a
-  ## temporary copy in `demuxDir` (default: the OS temp directory), which is
-  ## mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
-  ## on `close`; the file itself is never changed.
   ##
   ## `progress` is called about every MiB of the index walk with the bytes
   ## walked and the file's size, and once at the end (a multiplexed file:
   ## of the demultiplexed copy's walk). When it returns false the walk stops
   ## and `SegCancelledError` is raised; the file is unmapped.
   ##
-  ## `cache` names an index cache that `saveIndex` wrote: when it was saved
-  ## for this file as it is now (path, size, modification time, its first
-  ## and last 64 KiB, the same `twosComplement8015`, keys when asked for)
-  ## by this version of parseSEG, and is intact, the index is read from it
-  ## instead of walking the file (`fromCache`). Otherwise the file is
-  ## indexed as without `cache`, with an info diagnostic (`dcIndexCache`)
-  ## saying why; the cache is never written here. A cache saved from a
-  ## sampled open (below) is not used with `verify = vfFull`.
+  ## `opts` holds the rarely changed settings (`OpenOptions`):
   ##
   ## `verify` (`vfSampled` by default): a fixed-length SEG-Y file (Rev 1 or
   ## later, binary bytes 3503-3504 = 1) is indexed from its size, without
@@ -254,7 +241,25 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
   ## and for Rev 2 additional headers or trailer records, a trace count or
   ## file size that does not fit, `keys`, and every other file, the headers
   ## are walked. `vfFull` always walks them.
-  openMapped(path, twosComplement8015, keys, false, demuxDir, progress, cache, verify)
+  ##
+  ## `cache` names an index cache that `saveIndex` wrote: when it was saved
+  ## for this file as it is now (path, size, modification time, its first
+  ## and last 64 KiB, the same `twosComplement8015`, keys when asked for)
+  ## by this version of parseSEG, and is intact, the index is read from it
+  ## instead of walking the file (`fromCache`). Otherwise the file is
+  ## indexed as without `cache`, with an info diagnostic (`dcIndexCache`)
+  ## saying why; the cache is never written here. A cache saved from a
+  ## sampled open is not used with `verify = vfFull`.
+  ##
+  ## A SEG-D file with multiplexed records is demultiplexed once into a
+  ## temporary copy in `demuxDir` (default: the OS temp directory), which is
+  ## mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
+  ## on `close`; the file itself is never changed.
+  ##
+  ## `twosComplement8015` also reads SEG-2 format-3 mantissas as two's
+  ## complement.
+  openMapped(path, opts.twosComplement8015, keys, false, opts.demuxDir, progress, opts.cache,
+    opts.verify)
 
 proc openSeismicRw*(path: string): SeismicFile =
   ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`
@@ -829,8 +834,8 @@ proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode
   readIndexCache(cache, f.cacheKey, keys, verify, f.index)
 
 proc saveIndex*(f: SeismicFile, path: string) =
-  ## Writes `f`'s index to the index cache `path`, for `openSeismic(...,
-  ## cache = path)` to read back instead of walking the file again: a
+  ## Writes `f`'s index to the index cache `path`, for `openSeismic(path,
+  ## opts = OpenOptions(cache: path))` to read back instead of walking the file again: a
   ## viewer's second open of a large file is then about as fast as reading
   ## the cache. The cache holds everything the walk found (entries, codecs,
   ## file and record headers, the walk's diagnostics, keys when the file
