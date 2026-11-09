@@ -986,7 +986,15 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
         through the ABI. Fix it with a shared map owner (close defers the unmap) or a destructor
         rule.
 - [ ] 14.3 Nim-only API additions from the 13.3 review (Group II, now without the C/Python
-      forms). The owner picks which; the rest go to "Future". In order of need:
+      forms). The owner picks which; the rest go to "Future". In order of need.
+      **Owner decision (2026-11-09): all of them.** Steps, each committed with `nim test` green:
+      - [ ] 14.3a bulk keys and header columns
+      - [ ] 14.3b viewer reads: sample windows, SEG-Y text header as text, `sortTraces`
+      - [ ] 14.3c `openEditor(f: SeismicFile)` reusing the index
+      - [ ] 14.3d write path: `openSeismicWriter(path, like = f)`, `writeTrace`
+      - [ ] 14.3e progress/cancel callback; index sidecar cache
+      - [ ] 14.3f prefetch chunk recycling (`recycle` / `nextInto`)
+      The candidates:
       - **Bulk keys and header columns:** `traceKeysInto` and `traceFieldColumn(f, name,
         traces)`. These resolve the field offset once, then read only those bytes per trace.
       - **Viewer reads (R3-5):** sample windows in `readTracesInto`, the SEG-Y textual header as
