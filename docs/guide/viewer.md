@@ -249,10 +249,10 @@ Keys made on demand are the file's own geometry: geometry joined with `applySurv
 
 ## Read ahead without blocking the UI
 
-A `Prefetcher` decodes chunks of traces on a worker thread into a bounded ring. The UI
-thread polls with `tryNext` (never blocks) or waits with `next`, and calls `seek` when the
-user jumps elsewhere: chunks decoded for the old position are dropped. Each chunk's
-`samples` tensor belongs to the caller; the worker never writes it again. `firstSample`
+A `Prefetcher` decodes chunks of traces on worker threads (one by default) into a bounded
+ring. The UI thread polls with `tryNext` (never blocks) or waits with `next`, and calls `seek`
+when the user jumps elsewhere: chunks decoded for the old position are dropped. Each chunk's
+`samples` tensor belongs to the caller; no worker writes it again. `firstSample`
 and `cols` choose a sample window, as `readTraces(traces, samples)` does.
 
 ```nim
@@ -273,7 +273,7 @@ doAssert shown == f.len
 
 p.seek(150 ..< 200)                   # the user jumped to trace 150
 doAssert p.next(c) and c.first == 150
-p.close()                             # stops and joins the worker
+p.close()                             # stops and joins the workers
 
 # A zoomed view: samples 1000..1499 of traces 90..119.
 var z = newPrefetcher[float32](f, 90 ..< 120, chunkTraces = 30, cols = 500,
@@ -291,6 +291,14 @@ f.close()
   `firstSample`). Rows are zero past a trace's end.
 - A trace that cannot be decoded is a zero row, counted in `c.failed`, with an error in
   `c.log` that names the trace.
+- One worker decodes IEEE at about 21 GB/s, but IBM float (6) and SEG-D 8015 (4.5) at one
+  core's speed: `workers = 4` gives about 22 and 16 GB/s. Chunks still arrive in order.
+- The ring is capped at `maxRingBytes` (default `DefaultRingBytes`, 4 MiB; at least
+  `workers + 1` chunks), so a chunk is still in the CPU cache when you take it: a 16 MB ring
+  ran at 60 % of the speed. `p.depth` is the depth used.
+- `quickFirst = true` makes the first chunk of the range and of each `seek` a quarter of
+  `chunkTraces`, so the first rows after a jump arrive sooner (1024-trace chunks: 0.55 ms ->
+  0.25-0.32 ms for IEEE, 1.4 -> 0.84 ms for IBM); the full-size chunks follow from there.
 - Call the prefetcher's procs from one thread. It keeps the file's map alive until its own
   `close`, so the order in which the file and the prefetcher are closed does not matter.
   The file's index must not change while it runs (`applySurvey`, `applyGeometry`).

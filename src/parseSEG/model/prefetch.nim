@@ -1,10 +1,18 @@
-## Read-ahead on a worker thread (task 6.3).
+## Read-ahead on worker threads (task 6.3; workers, ring cap and
+## `quickFirst` 15.3-11).
 ##
 ## A `Prefetcher` decodes a trace range of a `SeismicFile` in chunks of
 ## `chunkTraces` traces, ahead of the consumer, into a bounded ring of
-## `depth` chunks. The consumer (e.g. a viewer's UI thread) polls with
+## `depth` chunks, on `workers` threads (1 by default; more for the slow
+## formats: IBM float, SEG-D 8015/8024). Chunks still reach the consumer in
+## order. The ring is capped at `maxRingBytes` (4 MiB by default), so the
+## chunk just decoded is still in the CPU cache when it is taken. The
+## consumer (e.g. a viewer's UI thread) polls with
 ## `tryNext` (never blocks) or waits with `next`; `seek` jumps elsewhere
-## (chunks decoded for the old position are dropped).
+## (chunks decoded for the old position are dropped). With `quickFirst`, the
+## first chunk of the range and of every `seek` holds a quarter of
+## `chunkTraces`, so it is decoded about 4 times sooner; the rest follow
+## at full size.
 ##
 ## ```nim
 ## var f = openSeismic("survey.sgd")
@@ -26,11 +34,12 @@
 ##   show(c.first, c.samples)
 ## ```
 ##
-## Ownership: the worker shares no managed memory with the consumer, and
-## makes no managed objects at all (decode failures are statuses). It reads
-## the file's map and index through raw pointers, decodes into slot buffers
-## that the consumer thread allocated (`tryDecodeEntry`), and
-## notes the rows that failed in a plain array of the slot; the consumer
+## Ownership: the workers share no managed memory with the consumer, and
+## make no managed objects at all (decode failures are statuses). They read
+## the file's map and index through raw pointers, decode into slot buffers
+## that the consumer thread allocated (`tryDecodeEntry`), one chunk per
+## slot claimed under the lock, and note the rows that failed in a plain
+## array of the slot; the consumer
 ## turns those into the chunk's diagnostics. When the consumer takes a chunk,
 ## it takes the slot's tensor and gives the slot another one, so a tensor
 ## returned by `next` is never written again. That one is fresh, or one the
@@ -70,13 +79,13 @@ type
 
   Shared[T] = object
     lock: Lock
-    work: Cond   # the worker waits here for a free slot or a stop
+    work: Cond   # the workers wait here for a free slot or a stop
     ready: Cond  # the consumer waits here for a ready chunk
     slots: ptr UncheckedArray[Slot[T]]
     depth: int
     gen: int
     start, stop: int # trace range [start, stop) of the current generation
-    nextChunk: int   # next chunk the worker decodes
+    nextChunk: int   # next chunk a worker claims
     takeChunk: int   # next chunk the consumer takes
     quit: bool
     chunkTraces, cols: int
@@ -86,12 +95,15 @@ type
     entries: ptr UncheckedArray[TraceEntry]
     codecs: ptr UncheckedArray[TraceCodec]
     sel: ptr UncheckedArray[int] # selection mode: positions index this list; nil = ranges
-    thread: Thread[ptr Shared[T]]
+    quick: bool      # `quickFirst`: chunk 0 of each range holds `head` rows
+    head: int        # rows of chunk 0 of the current range
+    workers: int
+    threads: ptr UncheckedArray[Thread[ptr Shared[T]]]
 
   Prefetcher*[T: SampleType] = object
     ## Read-ahead state; not copyable. Call `close` when done.
     sh: ptr Shared[T]
-    pin: MapPin             # keeps the map (and a destroyed file's index) alive for the worker
+    pin: MapPin             # keeps the map (and a destroyed file's index) alive for the workers
     tensors: seq[Tensor[T]] # slot storage, consumer side
     spare: seq[Tensor[T]]   # recycled slot-shaped buffers, at most `depth`
     last: int               # end of the whole range (exclusive)
@@ -112,12 +124,13 @@ type
       ## (`loc.trace`), record, byte offset and the reason.
 
 proc shutdown[T](sh: ptr Shared[T]) =
-  # Stops and joins the worker, then frees the shared state.
+  # Stops and joins the workers, then frees the shared state.
   acquire(sh.lock)
   sh.quit = true
-  signal(sh.work)
+  broadcast(sh.work)
   release(sh.lock)
-  joinThread(sh.thread)
+  for i in 0..<sh.workers: joinThread(sh.threads[i])
+  freeShared(sh.threads)
   deinitCond(sh.work)
   deinitCond(sh.ready)
   deinitLock(sh.lock)
@@ -129,16 +142,26 @@ proc `=destroy`*[T](p: Prefetcher[T]) =
   # A forgotten `close` must not leave a worker writing into freed buffers:
   # join it before the slot tensors go.
   if p.sh != nil: shutdown(p.sh)
-  `=destroy`(p.pin) # after the shutdown: the worker reads the map
+  `=destroy`(p.pin) # after the shutdown: the workers read the map
   `=destroy`(p.tensors)
   `=destroy`(p.spare)
-  `=destroy`(p.selection) # after the shutdown: the worker reads it
+  `=destroy`(p.selection) # after the shutdown: the workers read it
   `=destroy`(p.path)
 
 proc `=copy`*[T](dst: var Prefetcher[T], src: Prefetcher[T]) {.error.}
 
 func chunkCount[T](sh: ptr Shared[T]): int {.inline.} =
-  (sh.stop - sh.start + sh.chunkTraces - 1) div sh.chunkTraces
+  # Chunk 0 holds `head` rows, the others `chunkTraces`.
+  let n = sh.stop - sh.start
+  if n <= 0: 0
+  elif n <= sh.head: 1
+  else: 1 + (n - sh.head + sh.chunkTraces - 1) div sh.chunkTraces
+
+func chunkFirst[T](sh: ptr Shared[T], n: int): int {.inline.} =
+  sh.start + (if n == 0: 0 else: sh.head + (n - 1) * sh.chunkTraces)
+
+func headRows[T](sh: ptr Shared[T]): int {.inline.} =
+  if sh.quick: max(1, sh.chunkTraces div 4) else: sh.chunkTraces
 
 proc traceOf[T](sh: ptr Shared[T], pos: int): int {.inline.} =
   if sh.sel != nil: sh.sel[pos] else: pos
@@ -170,8 +193,8 @@ proc worker[T](sh: ptr Shared[T]) {.thread.} =
       s.state = ssBusy
       s.gen = sh.gen
       s.chunk = n
-      s.first = sh.start + n * sh.chunkTraces
-      s.count = min(sh.chunkTraces, sh.stop - s.first)
+      s.first = sh.chunkFirst(n)
+      s.count = min(if n == 0: sh.head else: sh.chunkTraces, sh.stop - s.first)
       # Ask the OS for the next chunk's pages while this one decodes; after a
       # start or `seek`, for this chunk's too.
       let ahead = s.first + s.count
@@ -182,8 +205,12 @@ proc worker[T](sh: ptr Shared[T]) {.thread.} =
       {.cast(gcsafe).}:
         decodeChunk(sh, s)
       acquire(sh.lock)
-      s.state = if s.gen == sh.gen: ssReady else: ssFree # dropped by a seek
-      broadcast(sh.ready)
+      if s.gen == sh.gen:
+        s.state = ssReady
+        broadcast(sh.ready)
+      else:
+        s.state = ssFree # dropped by a seek: another worker may wait for the slot
+        broadcast(sh.work)
     else:
       wait(sh.work, sh.lock)
   release(sh.lock)
@@ -194,21 +221,32 @@ proc rawData[T](t: Tensor[T]): ptr UncheckedArray[T] {.inline.} =
 proc raiseArg(msg: string) {.noinline, noreturn.} =
   raise newException(ValueError, msg)
 
+const DefaultRingBytes* = 4 shl 20
+  ## `newPrefetcher`'s default cap on the ring's slot buffers: decoded
+  ## chunks stay in the CPU cache until taken (16 MB rings fell to about 60 %
+  ## of the throughput).
+
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTraces = 256,
-    depth = 4, cols = -1, firstSample = 0): Prefetcher[T] =
-  ## Starts decoding `traces` on a worker thread, `chunkTraces` at a time, at
-  ## most `depth` chunks ahead. Rows hold samples `firstSample ..< firstSample
+    depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
+    maxRingBytes = DefaultRingBytes): Prefetcher[T] =
+  ## Starts decoding `traces` on `workers` threads, `chunkTraces` at a time,
+  ## at most `depth` chunks ahead. The ring holds at most `maxRingBytes` of
+  ## chunks (`chunkTraces * cols * sizeof(T)` each), but at least `workers +
+  ## 1` and at most `depth`: `p.depth` is the depth used. With `quickFirst`,
+  ## the first chunk of the range and after each `seek` has `chunkTraces div
+  ## 4` traces (at least 1), so it arrives sooner; later chunks start right
+  ## after it. Rows hold samples `firstSample ..< firstSample
   ## + cols` of each trace, zero past its end (`cols` -1: up to the end of
   ## the range's largest trace), as the windowed `readTracesInto`. `f` may
   ## be closed meanwhile (the prefetcher keeps the map until its `close`),
   ## but its index must not change. Raises `ValueError` for traces outside
   ## the file (an empty range must still start in `0 .. f.len`), a closed or
-  ## tape file, a non-positive chunk size or depth, or a negative
-  ## `firstSample`.
+  ## tape file, a non-positive chunk size, depth or worker count, or a
+  ## negative `firstSample`.
   if f.len > 0: f.requireOpen()
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
-  if chunkTraces <= 0 or depth <= 0 or cols < -1 or firstSample < 0:
-    raiseArg("need chunkTraces > 0, depth > 0, cols >= -1 and firstSample >= 0")
+  if chunkTraces <= 0 or depth <= 0 or cols < -1 or firstSample < 0 or workers <= 0:
+    raiseArg("need chunkTraces > 0, depth > 0, cols >= -1, firstSample >= 0 and workers > 0")
   checkSpan(traces, f.len)
   let first = traces.a
   let stop = if traces.b >= first: traces.b + 1 else: first
@@ -217,12 +255,17 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
     else: 0
   # No range (even after a seek) holds more traces than the file.
   let rows = max(1, min(chunkTraces, f.len))
+  let chunkBytes = rows * width * sizeof(T)
+  let depth = if chunkBytes == 0: depth
+              else: min(depth, max(workers + 1, maxRingBytes div chunkBytes))
   let sh = createShared(Shared[T])
   sh.slots = cast[ptr UncheckedArray[Slot[T]]](createShared(Slot[T], depth))
   sh.depth = depth
   sh.start = first
   sh.stop = stop
   sh.chunkTraces = rows
+  sh.quick = quickFirst
+  sh.head = sh.headRows
   sh.cols = width
   sh.firstSample = firstSample
   sh.mem = f.unsafeMemory
@@ -239,10 +282,14 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
     result.tensors.add newTensorUninit[T](rows, width)
     sh.slots[i].data = rawData(result.tensors[i])
     sh.slots[i].fails = cast[ptr UncheckedArray[FailedRow]](createShared(FailedRow, rows))
-  createThread(sh.thread, worker[T], sh)
+  sh.workers = workers
+  sh.threads = cast[ptr UncheckedArray[Thread[ptr Shared[T]]]](
+    createShared(Thread[ptr Shared[T]], workers))
+  for i in 0..<workers: createThread(sh.threads[i], worker[T], sh)
 
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
-    depth = 4, cols = -1, firstSample = 0): Prefetcher[T] =
+    depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
+    maxRingBytes = DefaultRingBytes): Prefetcher[T] =
   ## Read-ahead over a list of trace indices (a gather, a component group, a
   ## sort order), decoded in list order. Positions (`seek`) index the list;
   ## `traceAt` maps them to traces. The list is fixed for the prefetcher's
@@ -250,9 +297,10 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkT
   for i in traces:
     if i notin 0 ..< f.len: raiseArg("trace " & $i & " lies outside the file")
   let width = if cols >= 0: cols else: max(f.maxSamples(traces) - firstSample, 0)
-  # Build in range mode over positions, then switch the worker to the list
-  # before it can run: the lock orders the hand-over.
-  result = newPrefetcher[T](f, 0 .. -1, chunkTraces, depth, width, firstSample)
+  # Build in range mode over positions, then switch the workers to the list
+  # before they can run: the lock orders the hand-over.
+  result = newPrefetcher[T](f, 0 .. -1, chunkTraces, depth, width, firstSample, workers,
+    quickFirst, maxRingBytes)
   result.selection = traces
   result.last = result.selection.len
   let sh = result.sh
@@ -261,8 +309,13 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkT
     sh.sel = cast[ptr UncheckedArray[int]](addr result.selection[0])
   sh.stop = result.selection.len
   result.untaken = sh.chunkCount
-  signal(sh.work)
+  broadcast(sh.work)
   release(sh.lock)
+
+func depth*[T](p: Prefetcher[T]): int {.inline.} =
+  ## The ring's depth: `newPrefetcher`'s `depth`, or less under its
+  ## `maxRingBytes` cap (0 after `close`).
+  if p.sh == nil: 0 else: p.sh.depth
 
 func len*[T](p: Prefetcher[T]): int {.inline.} =
   ## The number of positions `seek` accepts: the file's trace count, or the
@@ -333,7 +386,7 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool) =
   s.state = ssFree
   inc sh.takeChunk
   dec p.untaken
-  signal(sh.work)
+  broadcast(sh.work)
   release(sh.lock)
 
 proc headReady[T](sh: ptr Shared[T]): bool {.inline.} =
@@ -411,14 +464,15 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   sh.stop = stop
   sh.nextChunk = 0
   sh.takeChunk = 0
+  sh.head = sh.headRows
   p.untaken = sh.chunkCount
   for i in 0..<sh.depth:
     if sh.slots[i].state == ssReady: sh.slots[i].state = ssFree
-  signal(sh.work)
+  broadcast(sh.work)
   release(sh.lock)
 
 proc close*[T](p: var Prefetcher[T]) =
-  ## Stops and joins the worker and frees the ring. Idempotent.
+  ## Stops and joins the workers and frees the ring. Idempotent.
   if p.sh != nil:
     shutdown(p.sh)
     p.sh = nil

@@ -1,4 +1,4 @@
-## Read-ahead on a worker thread (task 6.3).
+## Read-ahead on worker threads (task 6.3; workers, ring cap, quickFirst 15.3-11).
 
 import std/[assertions, os, random, strutils]
 import parseSEG/model/[traceindex, prefetch]
@@ -383,4 +383,151 @@ block steady_next_into_allocates_nothing:
       if into: doAssert a == 0, $a
       else: doAssert a >= chunks, $a # a fresh slot buffer per chunk
     p.close()
+  f.close()
+
+# ------------------------------------- workers, ring cap, quickFirst (15.3-11) --
+
+proc drain(p: var Prefetcher[float32]): seq[PrefetchChunk[float32]] =
+  var c: PrefetchChunk[float32]
+  while p.next(c): result.add c
+
+proc sameChunks(a, b: seq[PrefetchChunk[float32]], what: string) =
+  doAssert a.len == b.len, what
+  for i in 0..<a.len:
+    doAssert a[i].first == b[i].first and a[i].count == b[i].count, what
+    doAssert a[i].samples == b[i].samples and a[i].failed == b[i].failed, what
+    doAssert $a[i].log == $b[i].log, what
+
+block workers_match_one_worker:
+  # In order and identical, whatever the worker count, ranges and lists.
+  for n in files:
+    if fileExists(exampleDir / n):
+      var f = openSeismic(exampleDir / n)
+      var sel: seq[int]
+      for i in countdown(f.len - 1, 0, 3): sel.add i
+      # The large local file: chunks of 64 only (one per trace is slow).
+      let shapes = if f.len > 1000: @[(64, 2)] else: @[(1, 1), (7, 3), (16, 8), (64, 2)]
+      for (chunk, depth) in shapes:
+        var one = newPrefetcher[float32](f, 0 ..< f.len, chunk, depth)
+        let a = one.drain
+        one.close()
+        var oneSel = newPrefetcher[float32](f, sel, chunk, depth)
+        let aSel = oneSel.drain
+        oneSel.close()
+        for w in [2, 3, 8]:
+          let what = n & " " & $chunk & "x" & $depth & " workers " & $w
+          var many = newPrefetcher[float32](f, 0 ..< f.len, chunk, depth, workers = w)
+          sameChunks(a, many.drain, what)
+          many.close()
+          var manySel = newPrefetcher[float32](f, sel, chunk, depth, workers = w)
+          sameChunks(aSel, manySel.drain, what & " list")
+          manySel.close()
+      f.close()
+
+block workers_with_failed_rows:
+  # Undecodable rows are zero and logged alike on every worker.
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  for t in [3, 50, 51, 199]: f.index.entries[t].numSamples = 1_000_000_000
+  var one = newPrefetcher[float32](f, 0 ..< f.len, 7, 3, cols = 16)
+  let a = one.drain
+  one.close()
+  var failed = 0
+  for c in a: failed += c.failed
+  doAssert failed == 4
+  var many = newPrefetcher[float32](f, 0 ..< f.len, 7, 3, cols = 16, workers = 4)
+  sameChunks(a, many.drain, "failed rows")
+  many.close()
+  f.close()
+
+block random_seeks_with_workers_and_quick_first:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  var rng = initRand(7)
+  for quick in [false, true]:
+    var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 9, depth = 5, workers = 4,
+      quickFirst = quick)
+    var c: PrefetchChunk[float32]
+    var expect = 0
+    for step in 0..<3000:
+      case rng.rand(9)
+      of 0:
+        expect = rng.rand(f.len)
+        p.seek(expect ..< p.len)
+      of 1..4:
+        if p.tryNextInto(c):
+          doAssert c.first == expect and c.samples == all.rows(c.first, c.count)
+          expect += c.count
+      else:
+        if p.nextInto(c):
+          doAssert c.first == expect and c.samples == all.rows(c.first, c.count)
+          expect += c.count
+        else:
+          doAssert expect == f.len
+    p.close()
+  f.close()
+
+block ring_cap:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  let chunkBytes = 64 * f.maxSamples * sizeof(float32) # 512 KB
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 16)
+  doAssert p.depth == DefaultRingBytes div chunkBytes and p.depth in 2..15, $p.depth
+  for c in p.chunks: doAssert c.samples == all.rows(c.first, c.count)
+  p.close()
+  doAssert p.depth == 0
+  # At least a slot per worker and one ready; never more than `depth`.
+  var q = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 16, workers = 3,
+    maxRingBytes = 1)
+  doAssert q.depth == 4
+  doAssert q.drain.len == 4
+  q.close()
+  var r = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 16,
+    maxRingBytes = 64 shl 20)
+  doAssert r.depth == 16
+  r.close()
+  var s = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 2, depth = 5)
+  doAssert s.depth == 5
+  s.close()
+  var z = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 16, cols = 0)
+  doAssert z.depth == 16 # empty rows: nothing to cap
+  z.close()
+  f.close()
+
+block quick_first_after_seek:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  proc spans(p: var Prefetcher[float32]): seq[(int, int)] =
+    var c: PrefetchChunk[float32]
+    while p.nextInto(c):
+      doAssert c.samples == all.rows(c.first, c.count)
+      result.add (c.first, c.count)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 40, depth = 3, quickFirst = true)
+  var c: PrefetchChunk[float32]
+  doAssert p.next(c) and (c.first, c.count) == (0, 10) # the start is a range too
+  doAssert p.next(c) and (c.first, c.count) == (10, 40)
+  p.seek(105 ..< p.len)
+  doAssert p.spans == @[(105, 10), (115, 40), (155, 40), (195, 5)]
+  p.seek(195 ..< p.len)
+  doAssert p.spans == @[(195, 5)]
+  p.seek(10 ..< 50)
+  doAssert p.spans == @[(10, 10), (20, 30)]
+  p.seek(20 ..< 20)
+  doAssert p.atEnd and p.spans.len == 0
+  p.close()
+  # Off by default: full chunks from the seek.
+  var q = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 40, depth = 3)
+  q.seek(105 ..< q.len)
+  doAssert q.spans == @[(105, 40), (145, 40), (185, 15)]
+  q.close()
+  # Lists, chunks of 1-3 traces (a first chunk of 1), and several workers.
+  var sel = @[5, 3, 9, 1, 0, 7]
+  for chunk in 1..3:
+    var s = newPrefetcher[float32](f, sel, chunkTraces = chunk, depth = 2, quickFirst = true,
+      workers = 2)
+    doAssert s.next(c) and (c.first, c.count) == (0, 1)
+    doAssert c.samples == all.rows(5, 1)
+    s.seek(2 ..< 6)
+    doAssert s.next(c) and (c.first, c.count) == (2, 1)
+    doAssert c.samples == all.rows(9, 1)
+    s.close()
   f.close()
