@@ -1066,6 +1066,10 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
         - the multi-thread fall-off beyond 8 threads.
         Profile with `perf` and measure each fix before and after with `nim bench`, and run the
         full scale once at the end.
+      - **Docs build:** `nim docs` (`nim doc --project`) exits 1. Arraymancer's `tensor.nim`
+        imports its CUDA/OpenCL backends `when defined(nimdoc)`, and `--project` documents
+        `deps/` too. The HTML for our modules is still written. Options: import narrower
+        Arraymancer modules in `model/tensors.nim`, or doc our modules without `--project`.
 
 ### Future (noted, not scheduled)
 - From the 14.2 audit, declined for now: a bounds-checked `mapped(f)` view for internal map
@@ -1670,3 +1674,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
   - New `nim asan` task (tprefetch, tsharedreads, tcolumns, tviewerreads, tdiagnostics under ASan/LSan; any leak fails), also run in CI.
   - Decode speed unchanged (small-scale bench, warm mapped: IEEE 25.5 GB/s, IBM 5.7, 8015 2.49, 8058 25.1).
 - 2026-11-09: 15.2 done. Guides: `guide/README.md` table lists the 14.3 features with section links; `getting-started.md` states the prefetch-pin, `openEditor(f)`/`release` (`move` at top level), `nextInto`/`recycle` hand-over and gcsafe-hook contracts, which reads may share a file across threads, and what still works after `close` (checked); `viewer.md` reordered (open/progress/cache, navigation, on-screen reads and windows, sorted views, columns/keys on demand, prefetch with `firstSample` and recycling, header tab + `textHeader`, geometry, edits); `processing.md` has a tested batch-conversion progress/cancel example; `diagnostics.md` covers `dcCancelled`/`SegCancelledError`; keys are 144 B/trace everywhere. tdocs: 39 examples. `docs/api.md` retitled, and every umbrella export not marked **Internal.** is named (new "Supporting types and lower-level names" table; coverage checked with `nim jsondoc` + a `declared()` probe). README intro rewritten. Open: `nim doc`/`jsondoc` report RST errors in `segy/textheader.nim:108` (backtick literal with a trailing space) and `convert.nim:36` (field-mapping table), so `nim docs` exits 1.
+- 2026-11-09: 15.2 follow-up.
+  - The `...Raw` sample decoders are out of the umbrella.
+  - Fixed the RST in two doc comments (`textheader.nim` `"C 1 "`, `convert.nim` `ext*`); our modules' docs now build without errors.
+  - The remaining `nim docs` failure is Arraymancer's CUDA imports under `nimdoc`; it is logged in 15.3.

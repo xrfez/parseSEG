@@ -34,7 +34,7 @@
 ## | traceNumberInField, traceInEnsemble | trace number (Rev 3: with extTraceNumber) / index in record |
 ## | energySourcePoint, shotpointNumber (with shotpointScalar) | source point |
 ## | traceIdCode | channel type (seismic: by sensor type, 11-14) |
-## | numSamples, sampleInterval (Ext1 ext*) | trace sample count, channel set interval (µs) |
+## | numSamples, sampleInterval (Ext1 `ext*`) | trace sample count, channel set interval (µs) |
 ## | delayRecordingTime | channel set start time (ms) |
 ## | sourceX/Y, groupX/Y, cdpX/Y, offset (scaled; Ext1 f64) | `TraceKeys` coordinates, offset, midpoint |
 ## | receiverElevation, sourceSurfaceElevation (scaled; Ext1 f64) | `TraceKeys` z |

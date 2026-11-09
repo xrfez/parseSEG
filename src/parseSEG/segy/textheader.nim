@@ -105,8 +105,8 @@ proc `text=`*(h: var SegyTextHeader, text: openArray[char]) =
     h.data[i] = if i < bytes.len: bytes[i] else: blank
 
 func initTextHeader*(encoding = teEbcdic): SegyTextHeader =
-  ## A blank header whose cards carry only the standard prefixes `C 1 ` ..
-  ## `C40 `.
+  ## A blank header whose cards carry only the standard prefixes `"C 1 "` ..
+  ## `"C40 "`.
   result = SegyTextHeader(encoding: encoding)
   var text = newStringOfCap(TextHeaderSize)
   for n in CardNumber.low..CardNumber.high:

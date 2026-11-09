@@ -13,17 +13,20 @@ export errors, diagnostics, endians
 
 import parseSEG/segy/[textheader, binheader, traceheader, samples, exttext, layout, reader,
   writer, fields]
-export textheader, binheader, traceheader, samples, exttext, layout, reader, writer, fields
+export textheader, binheader, traceheader, exttext, layout, reader, writer, fields
+export samples except decodeSamplesRaw
 
 import parseSEG/segd/[headers as segdheaders, samples as segdsamples, rev3 as segdrev3,
   reader as segdreader, writer as segdwriter, revconvert as segdrevconvert, mux as segdmux,
   demux as segddemux]
-export segdheaders, segdsamples, segdrev3, segdreader, segdwriter, segdrevconvert, segdmux,
+export segdsamples except decodeSegdSamplesRaw
+export segdheaders, segdrev3, segdreader, segdwriter, segdrevconvert, segdmux,
   segddemux
 
 import parseSEG/seg2/[headers as seg2headers, samples as seg2samples, reader as seg2reader,
   writer as seg2writer]
-export seg2headers, seg2samples, seg2reader, seg2writer
+export seg2samples except decodeSeg2SamplesRaw
+export seg2headers, seg2reader, seg2writer
 
 import parseSEG/vendor/[maps, apply, scaffold]
 export maps, apply, scaffold
