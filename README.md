@@ -51,6 +51,8 @@ The library does not set `-march` itself, because a library's `passC` applies to
 
 ## Usage
 
+The file names below match the small demo files that `nim c -r --path:src tools/demofiles.nim demo` writes into `demo/`. To try the examples, `cd demo` first.
+
 ### Open a file and read samples
 
 ```nim
@@ -205,7 +207,7 @@ nim bench              # benchmarks (docs/benchmarks.md)
 nim docs               # API docs into htmldocs/
 ```
 
-- **Sample files:** tests that need real-world sample files are skipped when `SEG Spec/exampleFiles/` is absent; everything else runs on generated files.
+- **Sample files:** the real-world sample files are not distributed. Tests that need them are skipped when `SEG Spec/exampleFiles/` is absent, and everything else, including the guide examples and CI, runs on files that `tools/demofiles.nim` generates.
 - **Layout:**
   - `src/parseSEG.nim` is the umbrella module;
   - `src/parseSEG/` holds the modules, by area: `common`, `io`, `segy`, `segd`, `seg2`, `model`, `convert`, `survey` and `vendor`, plus `private` for internals;
