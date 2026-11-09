@@ -53,7 +53,6 @@ import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/[reader as seg2reader]
 import ./[traceindex, headerfields]
-import ../abi/pragmas
 
 type
   HeaderRow* = object
@@ -69,15 +68,15 @@ type
     blockOffset*: int64 ## File offset of the block (`copyBytes(blockOffset, blockSize)`).
     blockSize*: int    ## Bytes in the block.
 
-  HeaderListing* {.segHandle.} = object
+  HeaderListing* = object
     ## The ordered header rows of one trace, record or file.
     rows: seq[HeaderRow]
 
-func len*(l: HeaderListing): int {.inline, segApi.} =
+func len*(l: HeaderListing): int {.inline.} =
   ## The number of rows.
   l.rows.len
 
-func `[]`*(l: HeaderListing; i: int): lent HeaderRow {.inline, segApi.} =
+func `[]`*(l: HeaderListing; i: int): lent HeaderRow {.inline.} =
   ## Row `i`, in file order. As for a `seq`, an `i` outside `0 ..< len` is a
   ## bug (`IndexDefect`).
   l.rows[i]
@@ -193,7 +192,7 @@ func traceEnd(f: SeismicFile, i: int): int64 =
   let e = f.index.entries[i]
   e.sampleOffset + int64(f.index.dataBytes(i))
 
-proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing {.segApi.} =
+proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing =
   ## Every header block of trace `trace`, as rows in file order: `trace`,
   ## `ext1` and any further extensions (see the module documentation).
   ## Raises `ValueError` for a trace out of range or a closed file.
@@ -225,7 +224,7 @@ proc traceHeaders*(f: SeismicFile, trace: int): HeaderListing {.segApi.} =
             SegdBlockSize)
   HeaderListing(rows: move L.rows)
 
-proc recordHeaders*(f: SeismicFile, record: int): HeaderListing {.segApi.} =
+proc recordHeaders*(f: SeismicFile, record: int): HeaderListing =
   ## Every header block of SEG-D record `record`, as rows in file order:
   ## general headers, channel set descriptors, skew, extended and external
   ## headers, and the trailer (see the module documentation). Empty for
@@ -279,7 +278,7 @@ proc recordHeaders*(f: SeismicFile, record: int): HeaderListing {.segApi.} =
     if last >= 0: L.addRaw("trailer", "general trailer", f.traceEnd(last), trailer)
   HeaderListing(rows: move L.rows)
 
-proc fileHeaders*(f: SeismicFile): HeaderListing {.segApi.} =
+proc fileHeaders*(f: SeismicFile): HeaderListing =
   ## The file-level header blocks, as rows in file order: SEG-Y tape label,
   ## textual, binary, extended textual headers and data trailer; SEG-D the
   ## storage unit label; SEG-2 the File Descriptor Block (fixed fields and

@@ -79,7 +79,6 @@ import ./model/[traceindex, keys, headerfields]
 import ./survey/join
 import ./seg2convert
 export seg2convert.Seg2ConvertOptions, seg2convert.Seg2TargetFormat
-import ./abi/pragmas
 import ./version
 
 const
@@ -1072,7 +1071,7 @@ proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
     result = {}
 
 proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
-    join = GeometryJoin()): DiagLog {.segApi(hide = join), raises: [].} =
+    join = GeometryJoin()): DiagLog {.raises: [].} =
   ## Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
   ## `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
   ## `convertSegdToSegy`, `convertSeg2ToSegy`), SEG-D (`convertSegdRevision`

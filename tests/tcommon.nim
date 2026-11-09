@@ -2,7 +2,6 @@
 
 import std/[assertions, os, strutils]
 import parseSEG/common/[endians, bcd, ibmfloat, ebcdic, errors, diagnostics, outputfile]
-from parseSEG/abi/pragmas import segApi
 
 block endian_roundtrip:
   var b = newSeq[byte](16)
@@ -74,13 +73,6 @@ block ebcdic_roundtrip:
     0xC8, 0xC5, 0xC1, 0xC4, 0xC5, 0xD9]
   for i in 0..255:
     doAssert latin1ToEbcdic[ebcdicToLatin1[i]] == uint8(i)
-
-block seg_api_options_checked_in_every_build:
-  # Without -d:segCapi too: a misspelt boundary option fails to compile.
-  template exportWith(flag: untyped): untyped =
-    proc probe(): int {.segApi(flag).} = 1
-  doAssert compiles(exportWith(concurrent))
-  doAssert not compiles(exportWith(concurent))
 
 block output_files_through_tmp:
   # 12.3: one helper renames complete outputs into place for every writer.

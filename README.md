@@ -10,8 +10,6 @@ stopping a read.
 |---|---|---|
 | Nim | `import parseSEG` | [`docs/guide/`](docs/guide/README.md), `docs/api.md` |
 | The shell | `nim cli`, then `bin/parseSEG help` | below |
-| C, C++, any FFI | `nim lib` → `libparseseg.so` + `include/parseseg.h` | [`docs/guide/c.md`](docs/guide/c.md), `docs/design/c_abi.md` |
-| Python | `nim pylib` → `import parseseg` (zero-copy numpy) | [`docs/guide/python.md`](docs/guide/python.md), `docs/design/python.md` |
 
 New here? Start with the usage guides in [`docs/guide/`](docs/guide/README.md): getting
 started, recipes for viewers and for signal processing, editing, conversion and
@@ -46,19 +44,13 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 ## Directory Layout
 
 - `src/parseSEG.nim`: the public API (umbrella module); `src/parseSEG/`: the library, by
-  area (`common`, `io`, `segy`, `segd`, `model`, `vendor`, `survey`, `abi`), plus `cli.nim`
-  and `bindings.nim` (the shared library). Every C and Python function comes from a
-  `{.segApi.}` core proc (or one of the few adapters in `abi/api.nim`); the generator
-  (`abi/segapi.nim`) writes the C exports, the header and the Python module, and
-  `abi/runtime.nim` holds what the generated exports call at run time.
-- `include/parseseg.h`, `python/parseseg/__init__.py`: the generated C header and Python
-  (ctypes) module, rewritten by `nim lib` and committed.
-- `tests/`: `nim test` runs every `tests/t*.nim` (C ABI, Python module, CLI, build targets and
-  the guides' examples included).
+  area (`common`, `io`, `segy`, `segd`, `seg2`, `model`, `vendor`, `survey`), plus `cli.nim`.
+- `tests/`: `nim test` runs every `tests/t*.nim` (the CLI and the guides' examples included).
+- `bench/`: the `nim bench` suite (`docs/benchmarks.md`).
 - `docs/`: usage guides (`guide/`), `api.md`, design notes (`design/`), distilled spec notes
   (`spec/`).
 - `vendormaps/`: built-in vendor maps (NIF), searched with `PARSESEG_VENDOR_PATH`.
-- `tools/`: zig wrappers, macOS link stubs, Python oracles for the samples.
+- `tools/`: zig wrappers, Python oracles for the samples (test tooling only).
 - `bin/`: build outputs.
 - `SEG Spec/`: the standards and sample files.
 - `.github/workflows/`: GitHub Actions CI pipeline.
@@ -77,30 +69,13 @@ defined in `config.nims`, also output to `bin/parseSEG`:
 | `nim zigPortable` | Zig CC | Generic Portable Size | `-d:release --opt:size -Oz -mcpu=baseline -s` |
 | `nim zigDebug` | Zig CC | Full Debug & Diagnostics | `--debuginfo:on` |
 
-## Library Targets (C ABI, Python, C sources)
-
-Every embeddable artifact has a task in `config.nims` (all use `--mm:atomicArc --threads:on
--d:useMalloc -d:release`; Windows adds `--tlsEmulation:off`). `tests/ttargets.nim` builds them
-all and runs the C ABI test against them. Release builds (these and the CLI builds) get a
-fresh `nimcache/release-<task>` and `--ic:off`; `PARSESEG_IC=1` turns on Nim 2.4's
-experimental incremental compilation for `nim test`, `nimDebug` and `zigDebug`.
-
-| Task | Output | Notes |
-|---|---|---|
-| `nim lib` | `bin/libparseseg.so` / `parseseg.dll` / `libparseseg.dylib` | C ABI for this host; header `include/parseseg.h` (`docs/design/c_abi.md`) |
-| `nim staticlib` | `bin/libparseseg.a` (also on Windows: a MinGW ar archive) | Link with `-lpthread -lm -ldl` (Linux); call `seg_init()` first |
-| `nim pylib` | `bin/python/parseseg/` (the generated module + the C ABI library) | Python package, `import parseseg` with `bin/python` on `sys.path` (`docs/design/python.md`) |
-| `nim libLinux` | `bin/linux-x64/`, `bin/linux-arm64/` | zig cross-build (glibc 2.28) |
-| `nim libWindows` | `bin/windows-x64/parseseg.dll` + `parseseg.dll.lib` | zig cross-build (MinGW ABI, UCRT) |
-| `nim libMacos` | `bin/macos-arm64/`, `bin/macos-x64/` `libparseseg.dylib` | zig cross-build; links `tools/macos-stubs` in place of the SDK's Security.framework |
-| `nim csources` | `bin/csources/<triple>/` | Generated C + `nimbase.h` + header + Makefile + CMakeLists.txt, one bundle per triple (the C is target-specific); builds with GCC or Clang alone |
-
-The zig Linux builds need glibc 2.17 or later. The host builds (`nim lib`) need the glibc they were
-built against. macOS builds load on macOS 11 (arm64) and 10.15 (x64) or later.
+Release builds get a fresh `nimcache/release-<task>` and `--ic:off`; `PARSESEG_IC=1` turns on
+Nim 2.4's experimental incremental compilation for `nim test`, `nimDebug` and `zigDebug`.
 
 ## Development Commands
 
 - Run test suite: `nim test`
+- Run the benchmarks: `nim bench`
 - Format codebase: `nim fmt`
 - Generate documentation: `nim docs`
 

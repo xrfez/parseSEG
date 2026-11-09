@@ -45,7 +45,6 @@ import ../segd/[reader as segdreader]
 import ../model/[traceindex, keys, edit]
 import ../convert
 import ./join
-import ../abi/pragmas
 
 export join
 
@@ -699,7 +698,7 @@ proc geometryChanges*(f: SeismicFile, fields: GeometryFields, log: var DiagLog):
   log.add p.log
   p.changes
 
-proc geometryChanges*(f: SeismicFile, fields = GeometryFields()): GeometryChanges {.segApi.} =
+proc geometryChanges*(f: SeismicFile, fields = GeometryFields()): GeometryChanges =
   ## What `writeGeometry` would change in `f` (opened with `keys = true`, its
   ## keys joined by `applySurvey`); nothing is written. `previewGeometry`
   ## gives the reports. Raises `ValueError` for a file without keys, a closed
@@ -707,7 +706,7 @@ proc geometryChanges*(f: SeismicFile, fields = GeometryFields()): GeometryChange
   var log: DiagLog
   f.geometryChanges(fields, log)
 
-proc previewGeometry*(f: SeismicFile, fields = GeometryFields()): DiagLog {.segApi.} =
+proc previewGeometry*(f: SeismicFile, fields = GeometryFields()): DiagLog =
   ## The reports `writeGeometry` would make on `f` (values without a slot,
   ## values that do not fit), plus an info summary of what would change;
   ## nothing is written. Raises like `geometryChanges`.
@@ -765,7 +764,7 @@ proc writeGeometry*(ed: var HeaderEditor, ix: TraceIndex,
         "journal could not be synced", loc = Location(file: ed.file.path))
 
 proc writeGeometry*(ed: var HeaderEditor, f: SeismicFile,
-    fields = GeometryFields()): GeometryChanges {.segApi.} =
+    fields = GeometryFields()): GeometryChanges =
   ## `writeGeometry` with the joined keys of `f`: the editor's file, opened
   ## again with `keys = true` and joined by `applySurvey`.
   ed.writeGeometry(f.index, fields)
@@ -826,7 +825,7 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry,
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)
 
 proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = GeometryFields(),
-    overwrite = false): DiagLog {.segApi.} =
+    overwrite = false): DiagLog =
   ## Writes a copy of `srcPath` to `dstPath` (same standard and layout;
   ## multiplexed SEG-D demultiplexed) with the survey geometry `g` joined and
   ## written (see `writeGeometry`). Never raises: problems are in the result,
@@ -835,7 +834,7 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = Geo
   copyWithGeometry(srcPath, dstPath, g, c, fields, overwrite)
 
 proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = ConvertOptions(),
-    fields = GeometryFields(), overwrite = false): DiagLog {.segApi.} =
+    fields = GeometryFields(), overwrite = false): DiagLog =
   ## `convertFile` with the survey geometry `g` joined (`applySurvey`,
   ## `overwrite` as there) and written into the SEG-Y output: SEG-D keys are
   ## joined before they become SEG-Y headers; SEG-Y output is written with

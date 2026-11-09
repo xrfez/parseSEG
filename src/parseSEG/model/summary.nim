@@ -37,7 +37,6 @@ import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/headers as seg2headers
 import ./[traceindex, headerfields]
-import ../abi/pragmas
 
 type
   CoordinateUnits* = enum
@@ -140,7 +139,7 @@ func crsUnits(text: string, format: CrsTextFormat): CoordinateUnits =
         return unitsOf(parts[^1])
   cuUnknown
 
-proc crsText*(f: SeismicFile): string {.segApi.} =
+proc crsText*(f: SeismicFile): string =
   ## The coordinate reference system text, as stored: SEG-Y, the first P1/11
   ## or Location Data stanza of the extended textual header (its data);
   ## SEG-D Rev 3, the 0x55 blocks of the first record that has them (from
@@ -185,7 +184,7 @@ func uniformSamples(ix: TraceIndex): int =
     if i == 0: result = int(e.numSamples)
     elif int(e.numSamples) != result: return -1
 
-proc summary*(f: SeismicFile): FileSummary {.segApi.} =
+proc summary*(f: SeismicFile): FileSummary =
   ## The file's common metadata: standard, revision, byte order, sample
   ## format, trace and record counts, first and last field record, sample
   ## interval, samples per trace, record length, coordinate units and the
@@ -268,7 +267,7 @@ proc summary*(f: SeismicFile): FileSummary {.segApi.} =
         result.recordLengthMs = float64(max(result.samplesPerTrace - 1, 0)) *
           result.sampleIntervalUs / 1000
 
-proc channelSets*(f: SeismicFile): seq[ChannelSetSummary] {.segApi.} =
+proc channelSets*(f: SeismicFile): seq[ChannelSetSummary] =
   ## Every channel set of every SEG-D record, in record, scan type and
   ## channel set order, with its sample interval, timing and the traces the
   ## index holds for it. Empty for SEG-Y.

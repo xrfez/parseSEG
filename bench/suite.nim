@@ -5,7 +5,7 @@
 ##   suite [--scale=small|full] [--dir=DIR] [section ...]
 ##
 ## Sections: `baseline`, `index`, `decode`, `latency`, `threads`, `prefetch`,
-## `write`, `abi` (C and Python); all of them when none is named. `nim bench` builds this with the
+## `write`; all of them when none is named. `nim bench` builds this with the
 ## release flags (`-d:danger`, `-march=native`) and runs it; see
 ## `docs/benchmarks.md` for the method.
 ##
@@ -513,39 +513,6 @@ proc write() =
     removeFile(journal)
     removeFile(copy)
 
-# -------------------------------------------------------------- C, Python --
-
-proc abi() =
-  ## Runs bench/capi_bench (built by `nim bench` against bin/libparseseg.so)
-  ## and bench/py_bench.py (against bin/python) on the same files.
-  rep.heading "C ABI and Python overhead (warm, the shipped -d:release library)"
-  let root = currentSourcePath().parentDir.parentDir
-  var files: seq[string]
-  for name in ["y-ieee", "d21-8058", "y-ieee-10m"]:
-    if present(name): files.add pathOf(name)
-  let args = files.mapIt(it.quoteShell).join(" ")
-  let capi = root / "bin" / "bench" / "capi_bench"
-  if fileExists(capi):
-    for p in files: warm(p)
-    let (o, code) = execCmdEx(capi.quoteShell & " " & args)
-    rep.line "C (bench/capi_bench.c):"
-    rep.line()
-    for l in o.strip.splitLines: rep.line l
-    if code != 0: rep.line &"(exit code {code})"
-  else:
-    rep.line "bench/capi_bench was not built (`nim bench` builds it); skipped."
-  rep.line()
-  let pkg = root / "bin" / "python"
-  if dirExists(pkg / "parseseg"):
-    let (o, code) = execCmdEx("PYTHONPATH=" & pkg.quoteShell & " python3 " &
-      quoteShell(root / "bench" / "py_bench.py") & " " & args)
-    rep.line "Python (bench/py_bench.py, numpy):"
-    rep.line()
-    for l in o.strip.splitLines: rep.line l
-    if code != 0: rep.line &"(exit code {code})"
-  else:
-    rep.line "bin/python/parseseg was not built (`nim bench` builds it); skipped."
-
 # ------------------------------------------------------------------- main --
 
 when isMainModule:
@@ -560,8 +527,7 @@ when isMainModule:
     of cmdArgument: sections.add key
     else: quit "unknown option -" & key
   if sections.len == 0:
-    sections = @["baseline", "index", "decode", "latency", "threads", "prefetch", "write",
-      "abi"]
+    sections = @["baseline", "index", "decode", "latency", "threads", "prefetch", "write"]
   rep.line &"# parseSEG benchmarks ({sc} scale, {now().format(\"yyyy-MM-dd HH:mm\")})"
   rep.line()
   rep.line &"{cpuModel()}, {countProcessors()} hardware threads, {memTotalGb():.0f} GB RAM; " &
@@ -577,6 +543,5 @@ when isMainModule:
     of "threads": threads()
     of "prefetch": prefetch()
     of "write": write()
-    of "abi": abi()
     else: quit "unknown section " & s
   writeFile(dir / &"results-{sc}.md", rep.text)

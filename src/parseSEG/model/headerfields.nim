@@ -37,7 +37,6 @@ import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/[headers as seg2headers, reader as seg2reader]
 import ./traceindex
-import ../abi/pragmas
 
 type
   FieldValueKind* = enum
@@ -262,7 +261,7 @@ template isNamedField*(f: untyped): bool =
   ## not.
   isLayoutField(f) and (when f is array: typeof(f[0]) is char else: true)
 
-proc fieldNames*(kind: HeaderBlock): seq[string] {.segApi.} =
+proc fieldNames*(kind: HeaderBlock): seq[string] =
   ## The named fields of block kind `kind`, in layout order (raw byte fields
   ## excluded; none for `hbRaw`).
   withBlockType(kind):
@@ -471,20 +470,20 @@ proc required(r: sink FieldRead, name: string): FieldValue {.inline.} =
 func optional(r: sink FieldRead): Option[FieldValue] {.inline.} =
   if r.error.len > 0: none(FieldValue) else: some(r.value)
 
-proc traceField*(f: SeismicFile, trace: int, name: string): FieldValue {.segApi.} =
+proc traceField*(f: SeismicFile, trace: int, name: string): FieldValue =
   ## A trace header field by name, e.g. "trace.sourceX" or
   ## "ext1.receiverLine" (SEG-2: "trace.numSamples", "trace.SAMPLE_INTERVAL").
   ## Raises `ValueError` for an unknown field, a trace
   ## out of range or a closed file; the message says which.
   f.lookup(hsTrace, trace, name).required(name)
 
-proc recordField*(f: SeismicFile, record: int, name: string): FieldValue {.segApi.} =
+proc recordField*(f: SeismicFile, record: int, name: string): FieldValue =
   ## A SEG-D record (general header) field by name, e.g. "gh1.formatCode" or
   ## "gh3.sourcePointNumber" (Rev 1/2 source headers). Raises `ValueError`
   ## for an unknown field or record, or a closed file.
   f.lookup(hsRecord, record, name).required(name)
 
-proc fileField*(f: SeismicFile, name: string): FieldValue {.segApi.} =
+proc fileField*(f: SeismicFile, name: string): FieldValue =
   ## A file-level field by name, e.g. "binary.formatCode" (SEG-Y) or
   ## "file.UNITS" (SEG-2). Raises
   ## `ValueError` for an unknown field or a closed file.
@@ -521,7 +520,7 @@ proc seg2Strings*(f: SeismicFile, trace: int): seq[Seg2String] =
   if trace == -1: f.index.seg2.strings
   else: f.seg2Trace(trace).strings
 
-proc seg2StringCount*(f: SeismicFile, trace: int): int {.segApi.} =
+proc seg2StringCount*(f: SeismicFile, trace: int): int =
   ## How many keyword strings SEG-2 trace `trace` has (-1: the File
   ## Descriptor Block); read them with `seg2Keyword` and `seg2Value`. Raises
   ## `ValueError` like `seg2Strings`.
@@ -533,13 +532,13 @@ proc seg2String(f: SeismicFile, trace, n: int): Seg2String =
     raise newException(ValueError, "no string " & $n & " (the block has " & $s.len & ")")
   s[n]
 
-proc seg2Keyword*(f: SeismicFile, trace, n: int): string {.segApi.} =
+proc seg2Keyword*(f: SeismicFile, trace, n: int): string =
   ## The keyword of string `n` of SEG-2 trace `trace` (-1: the File
   ## Descriptor Block), as written. Raises `ValueError` like `seg2Strings`,
   ## and for `n` out of range.
   f.seg2String(trace, n).key
 
-proc seg2Value*(f: SeismicFile, trace, n: int): string {.segApi.} =
+proc seg2Value*(f: SeismicFile, trace, n: int): string =
   ## The value of string `n` of SEG-2 trace `trace` (-1: the File
   ## Descriptor Block), terminators stripped (NOTE lines are separated by
   ## the file's Line Terminator). Raises `ValueError` like `seg2Keyword`.
@@ -547,7 +546,7 @@ proc seg2Value*(f: SeismicFile, trace, n: int): string {.segApi.} =
 
 # ---------------------------------------------------------- sample timing --
 
-proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 {.segApi.} =
+proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 =
   ## The trace's sample interval in µs (Hz or m/ft for SEG-Y non-time
   ## data), resolved as the readers do. SEG-Y: Ext1 bytes 145-152 when
   ## non-zero, else trace bytes 117-118; fixed-length Rev 1+ files use the

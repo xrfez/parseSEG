@@ -23,7 +23,7 @@ type
 
   Role* = enum
     ## What the suite uses the file for.
-    rFormat      ## Sequential decode throughput, threads, C and Python.
+    rFormat      ## Sequential decode throughput and threads.
     rIndex       ## Index build and keys; viewer latency (10 M).
     rBig         ## Streaming a file larger than the free page cache.
 

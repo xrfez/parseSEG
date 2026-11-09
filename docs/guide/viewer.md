@@ -6,10 +6,6 @@ trace under the cursor, and a way to keep the user's header changes without touc
 file. This page shows each with parseSEG. Read [getting-started.md](getting-started.md)
 first for the concepts (trace numbers, records, channel sets, keys, gathers).
 
-The same calls exist in C (`seg_seismic_file_*`, [c.md](c.md)) and Python
-([python.md](python.md)); the names map mechanically (`f.traceHeaders(i)` is
-`seg_seismic_file_trace_headers` and `f.trace_headers(i)`).
-
 ## Open a file and build the navigation tree
 
 Open with `keys = true` when the viewer shows geometry or gathers. The walk reads headers
@@ -144,8 +140,7 @@ f.close()
 - `cols` fixes the row width (default: the longest trace of the range).
 - A trace that cannot be decoded is a zero row, counted in `c.failed`, with an error in
   `c.log` that names the trace.
-- Nim: close the prefetcher before the file, and call its procs from one thread. In C and
-  Python the prefetcher holds the map open itself.
+- Close the prefetcher before the file, and call its procs from one thread.
 
 ## The header tab
 

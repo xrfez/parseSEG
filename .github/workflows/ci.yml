@@ -7,9 +7,8 @@ on:
     branches: [ main, master ]
 
 jobs:
-  # Tests, sanitizers and every target buildable from Linux: the host C ABI
-  # (shared and static), the Python module, the zig cross-builds and the C
-  # source bundles (task 8.9; tests/ttargets.nim builds them all).
+  # The test suite and the command line tool, built with Nim's default C
+  # compiler and with zig.
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -21,71 +20,29 @@ jobs:
         with:
           nim-version: '2.4.0' # the build uses its bundled atlas and nimony NIF library
 
-      - name: Set up Zig (cross builds)
+      - name: Set up Zig (zig CLI builds)
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
 
-      - name: Set up Python with numpy (Python module tests)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m pip install numpy
-
       - name: Fetch dependencies (Atlas)
         run: atlas rep atlas.lock
 
-      - name: Run test suite (C ABI, Python module and build targets included)
+      - name: Run test suite
         run: nim test
 
-      - name: C ABI under ASan and TSan
-        run: nim c -r --hints:off -d:capiSanitize tests/tcapi.nim
-
-      - name: Build every target
+      - name: Build the command line tool
         run: |
+          nim zigPortable
           nim cli
-          nim lib
-          nim staticlib
-          nim pylib
-          nim libLinux
-          nim libWindows
-          nim libMacos
-          nim csources
-          cp include/parseseg.h bin/
-          # The builds regenerate the header and the Python module: they must
-          # match what is committed.
-          git diff --exit-code include/parseseg.h python/parseseg/__init__.py
 
-      - name: Upload the Linux host build
+      - name: Upload the Linux build
         uses: actions/upload-artifact@v4
         with:
-          name: parseseg-linux-x64-host
-          path: |
-            bin/parseSEG
-            bin/libparseseg.so
-            bin/libparseseg.a
-            bin/python/
-            bin/parseseg.h
+          name: parseseg-linux-x64
+          path: bin/parseSEG
 
-      - name: Upload the cross builds
-        uses: actions/upload-artifact@v4
-        with:
-          name: parseseg-cross
-          path: |
-            bin/linux-x64/
-            bin/linux-arm64/
-            bin/windows-x64/
-            bin/macos-arm64/
-            bin/macos-x64/
-
-      - name: Upload the C source bundles
-        uses: actions/upload-artifact@v4
-        with:
-          name: parseseg-csources
-          path: bin/csources/
-
-  # Native builds on the other hosts: the C ABI and the Python module built by
-  # their own toolchains (the macOS cross build links a Security stub instead).
+  # The command line tool on the other hosts.
   native:
     strategy:
       fail-fast: false
@@ -101,29 +58,11 @@ jobs:
         with:
           nim-version: '2.4.0' # the build uses its bundled atlas and nimony NIF library
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Fetch dependencies (Atlas)
         run: atlas rep atlas.lock
 
-      - name: Build the C ABI and the Python module
-        shell: bash # -e: every command's failure fails the step (pwsh checks only the last)
-        run: |
-          set -e
-          nim cli
-          nim lib
-          nim staticlib
-          nim pylib
-
-      - name: Python module smoke test
-        shell: bash
-        run: >
-          python -I -c "import sys; sys.path.insert(0, 'bin/python'); import parseseg;
-          f = parseseg.open_seismic('SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy');
-          assert len(f) == 200 and f.read_traces(range(2)).shape == (2, 2001); print('ok')"
+      - name: Build the command line tool
+        run: nim cli
 
       - name: CLI smoke test
         shell: bash
@@ -136,8 +75,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: parseseg-${{ matrix.os }}
-          path: |
-            bin/parseSEG*
-            bin/*parseseg*
-            bin/python/
-            include/parseseg.h
+          path: bin/parseSEG*

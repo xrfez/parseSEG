@@ -6,7 +6,7 @@
 - **Branch state:**
   - `seg-library` at the "PLAN: handoff" commit; `main` is behind it with no commits of its
     own, so a merge fast-forwards. No worktrees, nothing pushed.
-  - Full suite green: 44 test files, run as `TMPDIR=/tmp/pl nim test` (see the gotcha).
+  - Full suite green: 41 test files (44 before 14.1), run as `TMPDIR=/tmp/pl nim test` (see the gotcha).
 - **Done since Phase 12:**
   - 4.7, 6.8-6.10, 10.5, 11.1, 11.2;
   - Phase 13: 13.1 docs, 13.2 benchmarks and performance fixes, 13.3 review, 13.4 Group I
@@ -16,7 +16,7 @@
   That is Phase 14 below. It replaces the C/Python items of Phase 13, and the merge to `main`
   (13.5) moves after Phase 14.
 - **Next steps, in order:**
-  - 14.1: remove the FFI;
+  - ~~14.1: remove the FFI~~ (done 2026-11-09);
   - 14.2: simplify what the FFI shaped;
   - 14.3: decide the Nim-only API additions with the owner;
   - 14.4: re-benchmark Nim only, then merge into `main` (13.5).
@@ -940,7 +940,7 @@ high-performance viewer. Then `seg-library` is merged into `main`.
 ### Phase 14: Nim library only (owner, 2026-11-09)
 Remove the FFI and simplify what was bent around it. Keep behaviour and performance. Run
 `nim test` green after each task, then commit.
-- [ ] 14.1 Remove the C ABI and Python. Delete or replace each of these:
+- [x] 14.1 Remove the C ABI and Python. Delete or replace each of these:
       - the `src/parseSEG/abi/` modules: `api`, `pragmas`, `runtime`, `segapi` and `gen/`;
       - `src/parseSEG/bindings.nim`, `include/`, `python/`;
       - `tests/c/`, `tests/python/`, `tests/tcapi.nim`, `tests/tpython.nim`, and the library
@@ -1542,3 +1542,16 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
     - R3-7/8/10/11, at the boundary (da7136f). These become moot in 14.1.
   - Group II (API additions) was not decided before the crash. It is re-scoped to Nim only as 14.3.
   - Owner decision: the C ABI and Python are removed (Phase 14). 13.5 (merge to `main`) waits for Phase 14.
+- 2026-11-09: 14.1 done. The C ABI and Python are removed:
+  - deleted `src/parseSEG/abi/`, `bindings.nim`, `include/`, `python/`, `tests/c/`, `tests/python/`,
+    `tcapi`, `tpython`, `ttargets` (it held only library checks, no CLI checks), `tools/macos-stubs`,
+    `bench/capi_bench.c`, `bench/py_bench.py`, and the C/Python design docs and guides;
+  - every `segApi`/`segHandle`/`segField` pragma is stripped (12 src files); `tcommon` and `tdocs`
+    no longer test them, and `tdocs` runs only `nim` blocks;
+  - `config.nims` keeps the CLI tasks (gcc and zig), `test`, `fmt`, `docs` and `bench`; the
+    library tasks are gone, and so is the bench `abi` section;
+  - CI runs the tests and the CLI builds only; README, `docs/api.md`, guides and benchmarks no
+    longer mention C or Python (benchmarks.md notes that 14.4 re-runs it);
+  - `AbiVersion` was already gone with `abi/`; nimble version 0.5.0.
+  - Left for 14.2: `##` comments that still say "C ABI" (prefetch.nim:310, traceindex.nim:473/664,
+    headerfields.nim:4, and some test headers) and the procs they describe.

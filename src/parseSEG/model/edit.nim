@@ -61,7 +61,6 @@ import ../common/[endians, errors, diagnostics, fieldlayout, niftext]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ./[traceindex, headerfields]
-import ../abi/pragmas
 
 
 type
@@ -70,11 +69,11 @@ type
     ## `close` does not leak its descriptor (the file unmaps on its own).
     f: File
 
-  HeaderEditor* {.segHandle.} = object
+  HeaderEditor* = object
     ## An open file with its journal. Call `close` to flush both.
     file*: SeismicFile   ## The mapped file and its index (headers as opened).
-    log* {.segField(readonly = true).}: DiagLog ## Refused edits and journal problems.
-    journalPath* {.segField(readonly = true).}: string ## Where the edits are journaled.
+    log*: DiagLog ## Refused edits and journal problems.
+    journalPath*: string ## Where the edits are journaled.
     journal: JournalFile ## Unbuffered: entries wait in `unsynced` (see `syncJournal`).
     unsynced: string     ## Journal lines not yet written and synced.
     journalDead: bool    ## The journal could not be cut back after a failed write.
@@ -436,13 +435,13 @@ proc replay(path, journalPath: string, undo: bool): DiagLog =
   summarize(log, conflicts, "conflicts", Location(file: path))
   log
 
-proc rollbackJournal*(path, journalPath: string): DiagLog {.segApi.} =
+proc rollbackJournal*(path, journalPath: string): DiagLog =
   ## Undoes the journal's edits on `path`, newest first. Locations already
   ## holding their original bytes are skipped (so a rollback can be
   ## repeated); conflicts are logged and left alone.
   replay(path, journalPath, undo = true)
 
-proc applyJournal*(path, journalPath: string): DiagLog {.segApi.} =
+proc applyJournal*(path, journalPath: string): DiagLog =
   ## Replays the journal's edits on `path`, oldest first: redo after a
   ## rollback, or the same edits on a copy of the file. Locations already
   ## holding the edited bytes are skipped; conflicts are logged and left alone.
@@ -450,7 +449,7 @@ proc applyJournal*(path, journalPath: string): DiagLog {.segApi.} =
 
 # ------------------------------------------------------------------ edits --
 
-proc openEditor*(path: string, journalPath = ""): HeaderEditor {.segApi.} =
+proc openEditor*(path: string, journalPath = ""): HeaderEditor =
   ## Maps `path` read-write, builds its trace index and opens the journal
   ## (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
   ## if either cannot be opened, and `ValueError` if the journal is the file
@@ -464,7 +463,7 @@ proc openEditor*(path: string, journalPath = ""): HeaderEditor {.segApi.} =
   result = HeaderEditor(file: openSeismic(path, writable = true), journalPath: jp)
   result.openJournal()
 
-proc close*(ed: var HeaderEditor) {.segApi.} =
+proc close*(ed: var HeaderEditor) =
   ## Ends a batch, flushes the map and closes it and the journal. Both are
   ## closed even when something fails. Raises `IOError` when the map cannot
   ## be flushed, or when the batch's journal entries cannot be synced: then
@@ -482,7 +481,7 @@ proc close*(ed: var HeaderEditor) {.segApi.} =
     raise newException(IOError, "the journal " & ed.journalPath &
       " cannot be synced; the batch's pending edits were not written")
 
-func edits*(ed: HeaderEditor): int {.inline, segApi.} =
+func edits*(ed: HeaderEditor): int {.inline.} =
   ## Edits written in this session (no-op edits excluded).
   ed.edits
 
@@ -704,8 +703,7 @@ proc setLocated(ed: var HeaderEditor, scope: HeaderScope, index: int, name: stri
   b = r.blk
   ed.editLocated(r.blk, r.field, value, loc)
 
-proc setTraceField*(ed: var HeaderEditor, trace: int, name: string, value: FieldValue): bool {.
-    segApi.} =
+proc setTraceField*(ed: var HeaderEditor, trace: int, name: string, value: FieldValue): bool =
   ## Sets field `name` (`trace.<field>` or `ext1.<field>`) of trace `trace`.
   ## False, with a diagnostic in `log`, if the edit is refused.
   var loc = Location(file: ed.file.path, trace: trace)
@@ -713,7 +711,7 @@ proc setTraceField*(ed: var HeaderEditor, trace: int, name: string, value: Field
   var b: BlockRef
   ed.setLocated(hsTrace, trace, name, value, loc, b)
 
-proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool {.segApi.} =
+proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool =
   ## Sets a SEG-Y binary header field (`binary.<field>`); the index's copy of
   ## the binary header is refreshed. False, with a diagnostic in `log`, if
   ## the edit is refused.
@@ -725,7 +723,7 @@ proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool 
       int(b.offset) + b.size - 1), b.order)
 
 proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
-    value: FieldValue): bool {.segApi.} =
+    value: FieldValue): bool =
   ## Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
   ## for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
   ## copy of the record's headers is refreshed. False, with a diagnostic in

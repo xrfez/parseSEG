@@ -3,11 +3,13 @@
 What a high-performance processing library and an interactive viewer need from parseSEG,
 measured on synthetic files from 0.26 GB to 24 GB and up to 10 M traces: index build and
 keys, time to first trace, sequential decode per format against memory bandwidth, viewer
-latencies (p50/p99/max), multi-thread scaling, the prefetcher, the C ABI and Python
-overhead, conversion, in-place edits and geometry write-back. The fixes this task made
-are measured before and after, in both the `-d:danger -march=native` build (`nim
-nimRelease`) and the `-d:release` build that the C library, the Python package and the
-CLI ship with.
+latencies (p50/p99/max), multi-thread scaling, the prefetcher, conversion, in-place
+edits and geometry write-back. The fixes this task made are measured before and after, in
+both the `-d:danger -march=native` build (`nim nimRelease`) and the `-d:release` build
+(`nim cli`).
+
+> Measured on 2026-11-08, before the C ABI and Python module were removed (Phase 14); task
+> 14.4 re-runs the suite.
 
 ## Machine
 
@@ -36,9 +38,6 @@ CLI ship with.
   Cold: the file's pages are unmapped from the process (`madvise(MADV_DONTNEED)`) and
   dropped from the page cache (`posix_fadvise(POSIX_FADV_DONTNEED)`); `drop_caches` is
   not writable in the container. Memory: growth of the Nim heap (`getOccupiedMem`).
-- `bench/capi_bench.c` and `bench/py_bench.py` repeat the decode and latency operations
-  through `include/parseseg.h` and the `parseseg` package, against the shipped
-  `-d:release` library.
 - Profiles: `perf record` (installed in the container) on the hot loops; the fixes below
   came from those profiles and from the R2 performance review.
 
@@ -52,11 +51,10 @@ PARSESEG_BENCH_BUILD=release nim bench      # the suite in the shipped -d:releas
 PARSESEG_BENCH_WARM_ONLY=1 nim bench        # skip the disk-bound cold runs
 ```
 
-`nim bench` builds `bench/gen` and `bench/suite` (nimRelease flags by default), the C
-library and the Python package (`nim lib`, `nim pylib`) and `bin/bench/capi_bench`,
-writes the files that are missing, and runs the suite. The data directory defaults to
+`nim bench` builds `bench/gen` and `bench/suite` (nimRelease flags by default), writes
+the files that are missing, and runs the suite. The data directory defaults to
 `bench/data` (gitignored). Sections: `baseline index decode latency threads prefetch
-write abi`.
+write`.
 
 ## Fixes made, before and after
 
@@ -93,24 +91,6 @@ big-endian IEEE about half, which is the byte swap without AVX2 in the release b
 the remaining bottlenecks, 1). float64 output costs 10 to 20 % more (twice the bytes
 written).
 
-### C ABI and Python (shipped `-d:release` library, warm)
-
-| | before | after |
-|---|---:|---:|
-| C: `read_traces_into_range`, 1000-trace chunks, y-ieee | 1.62 GB/s | **10.82 GB/s** |
-| C: random single trace into a caller buffer, y-ieee-10m, p50 / p99 | 1.04 / 1.41 µs | 0.49 / 0.86 µs |
-| C: random single trace as a new `SegTensor`, p50 / p99 | 1.27 / 1.59 µs | 0.69 / 1.06 µs |
-| Python: `read_traces_into` (numpy array), 1000-trace chunks, y-ieee | 1.59 GB/s | **10.12 GB/s** |
-| Python: single trace into a numpy array, p50 / p99 | 7.9 / 13.2 µs | 7.3 / 8.8 µs |
-| Python: single trace, `read_traces(...).numpy()`, p50 / p99 | 8.3 / 10.4 µs | 7.7 / 9.6 µs |
-| Python: `trace_field`, p50 | 4.4 µs | 4.5 µs |
-| Python: 1000-trace list read (`read_traces(list)`) | 1.12 ms | 0.96 ms |
-
-Zero-copy holds: `read_traces(...).numpy()` shares the library tensor's memory (checked by
-pointer), and `read_traces_into` decodes straight into the numpy array. Large reads from C
-and Python run at native speed; small calls cost about 0.3 µs in C (handle lock, error
-slot) and 7 µs in Python (ctypes, argument conversion).
-
 ### Index memory (heap per trace)
 
 | | before | after |
@@ -137,8 +117,7 @@ faster disk the conversion would now run at 1.3 to 5 GB/s of CPU.
 
 ## Full results after the fixes (danger build, full scale)
 
-`PARSESEG_BENCH_SCALE=full nim bench`, 2026-11-08; the C and Python rows use the shipped
-`-d:release` library. Notes on reading them:
+`PARSESEG_BENCH_SCALE=full nim bench`, 2026-11-08. Notes on reading them:
 - warm decode of big-endian IEEE (22 GB/s) beats `memcpy` (18 to 22 GB/s): the decoder
   writes into a 4 MB tensor that stays in cache, while the `memcpy` baseline streams 1 GiB
   to DRAM. Host-order data is copied with `memcpy`, whose `rep movsb` path is slower on
@@ -285,28 +264,9 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
 | setTraceField ext1.receiverPointNumber, every trace in one batch | d21-8058-1m | - | 5.74 | - | 174309. edits/s |
 | writeGeometry (journaled, batched) | d21-8058-1m | - | 7.00 | - | 142759. traces/s (1000000 changed) |
 
-#### C ABI and Python overhead (warm, the shipped -d:release library)
-
-C (bench/capi_bench.c):
-
-| file | decode GB/s | single trace into µs p50 / p99 | single trace new tensor µs p50 / p99 | header listing µs p50 | trace_field µs p50 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| y-ieee.sgy | 10.85 | 0.73 / 1.12 | 0.88 / 1.25 | 4.86 | 0.76 |
-| d21-8058.sgd | 10.63 | 0.75 / 1.12 | 0.91 / 1.28 | 1.23 | 0.41 |
-| y-ieee-10m.sgy | 10.24 | 0.49 / 0.86 | 0.66 / 1.02 | 4.88 | 0.83 |
-
-Python (bench/py_bench.py, numpy):
-
-| file | decode GB/s | single trace into µs p50 / p99 | single trace .numpy() µs p50 / p99 | header listing µs p50 | trace_field µs p50 | 1000-trace list ms | zero-copy |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| y-ieee.sgy | 10.40 | 7.6 / 11.9 | 8.0 / 13.7 | 7.3 | 4.4 | 1.21 | yes |
-| d21-8058.sgd | 10.33 | 7.3 / 9.7 | 7.9 / 10.6 | 3.7 | 3.9 | 1.06 | yes |
-| y-ieee-10m.sgy | 9.54 | 7.2 / 8.7 | 7.8 / 12.4 | 7.7 | 4.6 | 0.59 | yes |
-
-
 ## Remaining bottlenecks, ranked, with proposed fixes
 
-1. **The shipped library is built for baseline x86-64 (SSE2).** The release build decodes
+1. **The `-d:release` build targets baseline x86-64 (SSE2).** The release build decodes
    big-endian IEEE at 11 GB/s; the same code with `-march=native` (AVX2 byte shuffles)
    reaches 22 GB/s (int32 10 vs 22, IBM float 5.5 vs 6.5). Proposal (owner decision, build
    policy): build the x86-64 library for `x86-64-v2` (SSSE3, every x86-64 CPU since about
@@ -338,16 +298,14 @@ Python (bench/py_bench.py, numpy):
    (fine for every format now except 8015/8024 at about 2 GB/s); after a `seek` the first
    chunk arrives after a whole chunk's decode (chunk 1024: about 1 ms at 4 MB). Proposals:
    N workers over the ring; a smaller first chunk after a seek.
-7. **Per-call overhead in Python** (7 µs per call; `_ids` converts lists element by
-   element). Proposal (R2-4): accept int64 numpy arrays for trace lists and add bulk calls.
-8. **Release builds keep checks in the header and index code.** The index walk is about
+7. **Release builds keep checks in the header and index code.** The index walk is about
    1.7 times slower in `-d:release` (450 ns per trace) than in danger (245 ns). Proposal:
    the same pattern as the decoders in `fieldlayout.decodeFields` (check the block
    length once, then unchecked loads).
-9. **Batched edits are bound by the journal.** 70 k to 130 k edits/s (one fsync per 4096
+8. **Batched edits are bound by the journal.** 70 k to 130 k edits/s (one fsync per 4096
    edits plus a NIF line per edit, about 10 µs each); CPU is a small part. A binary or
    coalesced journal would be faster; fine for header patches as they are.
-10. **Multi-thread scaling flattens at memory bandwidth**: about 50 GB/s aggregate from
+9. **Multi-thread scaling flattens at memory bandwidth**: about 50 GB/s aggregate from
     4 threads (IEEE, int16) or 8 threads (IBM), and drops at 32 threads (SMT plus the
     other load on this machine); 8015 scales to 37 GB/s at 16 threads. No lock is taken
     on the read path (R2 confirmed no refcount contention), so nothing in the library

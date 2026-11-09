@@ -44,7 +44,6 @@ import ../common/[errors, diagnostics, niftext, outputfile]
 import ../segd/reader as segdreader
 from ../seg2/reader import Seg2String, fileBlockSize
 import ./[traceindex, headerfields, edit]
-import ../abi/pragmas
 
 type
   HeaderChange* = object
@@ -570,7 +569,7 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
 # ------------------------------------------------------------------ patch --
 
 type
-  HeaderPatch* {.segHandle.} = object
+  HeaderPatch* = object
     ## A pending change set (a viewer's edits), saved with `writeHeaderPatch`.
     changes*: seq[HeaderChange]
 
@@ -587,12 +586,12 @@ proc checkChange(scope: HeaderScope, index: int, name: string) =
     raise newException(ValueError, name & ": index " & $index & " is not a " & $scope &
       " index")
 
-func initHeaderPatch*(): HeaderPatch {.segApi.} =
+func initHeaderPatch*(): HeaderPatch =
   ## An empty change set.
   HeaderPatch()
 
 proc add*(p: var HeaderPatch, scope: HeaderScope, index: int, name: string,
-    value: FieldValue) {.segApi.} =
+    value: FieldValue) =
   ## Adds a change of field `name` (`<block>.<field>`, as in the listings)
   ## of the file (`hsFile`, index 0), record `index` or trace `index` to
   ## `value`. A later change of the same field wins when the patch is
@@ -600,7 +599,7 @@ proc add*(p: var HeaderPatch, scope: HeaderScope, index: int, name: string,
   checkChange(scope, index, name)
   p.changes.add HeaderChange(scope: scope, index: index, name: name, new: value)
 
-func len*(p: HeaderPatch): int {.inline, segApi.} =
+func len*(p: HeaderPatch): int {.inline.} =
   ## The number of changes.
   p.changes.len
 
@@ -637,7 +636,7 @@ proc writeHeaderPatch*(changes: openArray[HeaderChange], path: string) =
     raise
   moveFile(tmp, path)
 
-proc write*(p: HeaderPatch, path: string) {.segApi.} =
+proc write*(p: HeaderPatch, path: string) =
   ## Writes the change set as a NIF patch (`writeHeaderPatch`): the
   ## `exportHeaders` layout, for an explicit `importHeaders`. Raises
   ## `IOError` if `path` cannot be written.

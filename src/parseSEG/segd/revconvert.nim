@@ -57,7 +57,6 @@ import std/[math, os, strutils]
 import ../common/[errors, diagnostics, endians, outputfile, years]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer]
-import ../abi/pragmas
 
 type
   SegdTargetFormat* = enum
@@ -800,8 +799,7 @@ proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions
   for d in c.log: result.add d
   for d in w.log: result.add d
 
-proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions()): DiagLog {.
-    segApi.} =
+proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions()): DiagLog =
   ## Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
   ## version). Never raises: problems, including I/O failures, are in the
   ## result. The output is written to a new temporary file next to

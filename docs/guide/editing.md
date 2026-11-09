@@ -164,8 +164,7 @@ var f = openSeismic("survey.sgy")
 doAssert f.fileField("binary.jobId").intVal == 7
 ```
 
-The C ABI and the Python module can write a patch (`seg_header_patch_*`, `HeaderPatch`)
-but not import one; apply it from Nim or with the command line tool
+The command line tool applies a patch too
 (`parseSEG headers import <file> <patch> [-o copy]`).
 
 ## Geometry write-back

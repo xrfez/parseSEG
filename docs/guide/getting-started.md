@@ -1,8 +1,7 @@
 # Getting started
 
 This page takes you from nothing to decoded samples, and explains the model that every
-other guide builds on. The examples are Nim; [c.md](c.md) and [python.md](python.md) show
-the same steps from C and Python.
+other guide builds on.
 
 ## Build and import
 
@@ -12,8 +11,6 @@ on a fresh clone run `atlas rep atlas.lock`). From Nim, add `src/` to the search
 
 ```sh
 nim test                # the test suite, these guides' examples included
-nim lib                 # bin/libparseseg.so + include/parseseg.h (C ABI)
-nim pylib               # bin/python/parseseg (Python package)
 nim cli                 # bin/parseSEG (command line tool)
 ```
 
@@ -141,8 +138,7 @@ moved; when it goes out of scope it unmaps itself, and `close` does that early.
 Everything a read returns is an owned copy: tensors, `FieldValue`s, header listings, byte
 copies and logs stay valid after the file is closed. The library never hands out pointers
 into the map. A `Prefetcher` reads the map through raw pointers, so in Nim the file must stay
-open (and its index unchanged) until the prefetcher is closed. In C and Python a prefetcher
-keeps the map alive itself.
+open (and its index unchanged) until the prefetcher is closed.
 
 ```nim
 import parseSEG
@@ -162,19 +158,16 @@ echo "the tensor is still ours: ", kept.shape
 doAssert kept.shape == [10, 2001]
 ```
 
-## Thread rules (Nim)
+## Thread rules
 
 - `readTraces` and `readTracesInto` on one open `SeismicFile` may run on several threads at
-  once: they only read the map and the index (the C ABI relies on this for its parallel
-  reads). Share the file by pointer and give each thread its own tensor and log. While any
+  once: they only read the map and the index. Share the file by pointer and give each thread its own tensor and log. While any
   thread reads, nothing may `close` the file or change its index (`applySurvey`,
   `applyGeometry`). [processing.md](processing.md) has a complete example.
 - Everything else on a `SeismicFile` (and every `HeaderEditor` and `SurveyGeometry`) is
   single-threaded: call it from one thread, or serialize the calls yourself.
 - A `Prefetcher` decodes on its own worker thread; its consumer procs (`next`, `tryNext`,
   `seek`, `close`) must all be called from one thread.
-- The C ABI and the Python module lock each handle for you (see [c.md](c.md),
-  [python.md](python.md)).
 
 ## Where next
 

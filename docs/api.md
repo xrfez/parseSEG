@@ -1,18 +1,11 @@
 # parseSEG public API (task 8.2)
 
 `import parseSEG` gives the stable surface listed here. This page is the reference; for
-task-oriented guides with tested examples (viewers, processing, editing, conversion, C,
-Python, diagnostics) see [`docs/guide/`](guide/README.md). Everything else is internal or
+task-oriented guides with tested examples (viewers, processing, editing, conversion,
+diagnostics) see [`docs/guide/`](guide/README.md). Everything else is internal or
 low-level:
 - `parseSEG/codecs` holds the byte codecs and the field-layout pragmas;
 - the `parseSEG/<area>/<module>` paths can still be imported one by one.
-
-C, C++, Python and other hosts use the same model through the C ABI: `include/parseseg.h`,
-the `seg_*` functions, and the `parseseg` Python package over the same library. Both are
-generated from this API itself: the procs below marked `{.segApi.}` are exported, and their
-C and Python names are derived from the Nim ones (`f.traceKeys(i)` is
-`seg_seismic_file_trace_keys` in C and `f.trace_keys(i)` in Python; see
-`docs/design/c_abi.md` and `docs/design/python.md`).
 
 Conventions that hold throughout:
 - **Reads never raise on file content.** Problems go into a `DiagLog` (`log` /
@@ -20,7 +13,7 @@ Conventions that hold throughout:
   truncation or I/O failure, and that is logged as `fatal`.
 - **Bad arguments raise `ValueError`.** An out-of-range trace or range, a closed file, or a
   file opened without `keys` where keys are needed, raise a catchable `ValueError` from the
-  public procs (the C ABI returns `SEG_ERR_ARGUMENT`).
+  public procs.
 - **Lookups: a raising form for required data, an `Option` for optional data.**
   `traceField(f, trace, name): FieldValue` raises `ValueError` (with the reason) when the
   field cannot be read; `findTraceField(f, trace, name): Option[FieldValue]` returns none.
@@ -98,15 +91,7 @@ X records name the stations each channel was recorded from. Spec notes: `docs/sp
 | `copyWithGeometry(src, dst, g, [changes,] fields, overwrite)`, `convertWithGeometry(src, dst, g, opts, fields, overwrite)` | A copy in the same standard (multiplexed SEG-D demultiplexed), or a `convertFile` SEG-Y output, with `g` joined and written; a `DiagLog` with an info summary. |
 | `GeometryTable`, `addSource`/`addReceiver`, `applyGeometry` | The coordinate table alone (a host's database). Keys are rounded to 1/100; a trace without a point index also matches index 1. |
 
-C: `seg_survey_geometry_new`, `seg_survey_geometry_add_sps`, `..._add_p1`, `..._map_line`,
-`..._set_trailing_digits`, then `seg_seismic_file_apply_survey`. Python:
-`SurveyGeometry()`, `add_sps`, `add_p1`, `map_line`, `trailing_digits = True`, then
-`SeismicFile.apply_survey`. Write-back: C `seg_seismic_file_geometry_changes`,
-`seg_seismic_file_preview_geometry`, `seg_header_editor_write_geometry`,
-`seg_copy_with_geometry`, `seg_convert_with_geometry` (`SegGeometryFields`,
-`seg_init_geometry_fields`; `SegGeometryChanges`); Python `f.geometry_changes(fields)`,
-`f.preview_geometry(fields)`, `editor.write_geometry(f, fields)`, `copy_with_geometry`,
-`convert_with_geometry`. CLI: `parseSEG survey-apply <file> --sps=... [-o out | --in-place]`.
+CLI: `parseSEG survey-apply <file> --sps=... [-o out | --in-place]`.
 
 ## In-place edits
 `openEditor(path, journalPath)` and `setTraceField(trace, "trace.<f>", v)` /
@@ -204,8 +189,8 @@ fatal diagnostic.
   kind), are in `convert.nim` and `seg2convert.nim`.
   `ConvertOptions.format` is a `SegyTargetFormat`: `stKeep` (the default: keep a SEG-Y
   input's format, or choose a lossless one for SEG-D) or `st1` .. `st16` (a format code;
-  `targetFormat(sfFloat32)` gives `st5`). Each value's ordinal is its format code (C:
-  `SEG_SEGY_TARGET_FORMAT_15` is 15; 13 and 14 are refused).
+  `targetFormat(sfFloat32)` gives `st5`). Each value's ordinal is its format code
+  (`ord(st15) == 15`; 13 and 14 are refused).
 - `convertSegy(src, sink, opts)` converts SEG-Y to SEG-Y: a new revision (0, 1, 2.0, 2.1),
   byte order or sample format. It drops what the target cannot hold and reports each kind of
   loss once.
@@ -220,7 +205,7 @@ fatal diagnostic.
   between revisions (Rev 1/2 → 3.0, Rev 3 → 2.0/2.1, within a layout), streaming, with
   samples copied byte for byte; the mapping and what is dropped are in `segd/revconvert.nim`.
   `format` is a `SegdTargetFormat` (`tfKeep`, or `tf8058` ...; `targetFormat(sd8058)`);
-  its ordinals are not format codes (C: use the `SEG_SEGD_TARGET_FORMAT_*` names).
+  its ordinals are not format codes.
   The stream form takes `scanSegdRecords` (a headers-only pass) for exact sample counts.
 
 ## Diagnostics

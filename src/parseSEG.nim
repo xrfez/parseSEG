@@ -3,9 +3,7 @@
 ##
 ## This umbrella module re-exports the stable public API; `docs/api.md`
 ## lists it. The low-level byte codecs (BCD, IBM float, EBCDIC, the field
-## layout pragmas) are in `parseSEG/codecs`; the C ABI and the Python module
-## are generated from `parseSEG/abi/api` (`include/parseseg.h`,
-## `python/parseseg`).
+## layout pragmas) are in `parseSEG/codecs`.
 
 import parseSEG/version
 export version

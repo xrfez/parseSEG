@@ -25,7 +25,6 @@
 import std/strutils
 import nifbuilder, nifreader, nifcore, stringviews
 import errors, diagcodes
-import ../abi/pragmas
 
 export diagcodes
 
@@ -48,7 +47,7 @@ type
     loc*: Location
     msg*: string
 
-  DiagLog* {.segHandle.} = object
+  DiagLog* = object
     ## Ordered list of diagnostics with per-severity counts.
     entries: seq[Diagnostic]
     counts: array[Severity, int]
@@ -90,11 +89,11 @@ proc report*(log: var DiagLog; severity: Severity; code: DiagCode; msg: string;
   ## Appends a new diagnostic built from the arguments.
   log.add Diagnostic(severity: severity, code: code, offset: offset, loc: loc, msg: msg)
 
-func len*(log: DiagLog): int {.inline, segApi.} =
+func len*(log: DiagLog): int {.inline.} =
   ## The number of diagnostics.
   log.entries.len
 
-func `[]`*(log: DiagLog; i: int): lent Diagnostic {.inline, segApi.} =
+func `[]`*(log: DiagLog; i: int): lent Diagnostic {.inline.} =
   ## Diagnostic `i`, oldest first. As for a `seq`, an `i` outside
   ## `0 ..< len` is a bug (`IndexDefect`; unchecked under `-d:danger`).
   log.entries[i]
@@ -107,15 +106,15 @@ iterator pairs*(log: DiagLog): (int, lent Diagnostic) =
   ## Yields `(index, diagnostic)` pairs, oldest first.
   for i, d in log.entries: yield (i, d)
 
-func count*(log: DiagLog; severity: Severity): int {.inline, segApi.} =
+func count*(log: DiagLog; severity: Severity): int {.inline.} =
   ## Number of entries with exactly `severity`.
   log.counts[severity]
 
-func hasErrors*(log: DiagLog): bool {.inline, segApi.} =
+func hasErrors*(log: DiagLog): bool {.inline.} =
   ## True if any entry is `sevError` or `sevFatal`.
   log.counts[sevError] + log.counts[sevFatal] > 0
 
-func isFatal*(log: DiagLog): bool {.inline, segApi.} =
+func isFatal*(log: DiagLog): bool {.inline.} =
   ## True if the operation stopped early.
   log.counts[sevFatal] > 0
 
@@ -183,7 +182,7 @@ proc addNif(b: var Builder; log: DiagLog) =
           b.withTree "field":
             b.addStrLit d.loc.field
 
-proc toNif*(log: DiagLog): string {.segApi.} =
+proc toNif*(log: DiagLog): string =
   ## Serializes `log` as a NIF document.
   var b = nifbuilder.open(64 + 96 * log.len)
   b.addNif log

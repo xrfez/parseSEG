@@ -7,11 +7,11 @@ Exceptions are reserved for mistakes in the *call* and for the operating system 
 
 ## Three kinds of outcome
 
-| What happened | How you learn it | Nim | C | Python |
-|---|---|---|---|---|
-| The file breaks a rule (bad value, unknown block, truncated data) | A `Diagnostic` in a `DiagLog` | `f.log`, a read's `log`, a result's `log` | `seg_*_log`, `SegDiagLog **` results | `f.log`, `DiagLog` results |
-| You passed a bad argument (trace out of range, closed file, unknown field name, missing keys) | An exception | `ValueError` | `SEG_ERR_ARGUMENT` | `parseseg.ArgumentError` (a `ValueError`) |
-| The OS refused (missing file, permissions, disk full) | An exception | `IOError` / `OSError` | `SEG_ERR_IO` | `parseseg.IOError` (an `OSError`) |
+| What happened | How you learn it | Where |
+|---|---|---|
+| The file breaks a rule (bad value, unknown block, truncated data) | A `Diagnostic` in a `DiagLog` | `f.log`, a read's `log`, a result's `log` |
+| You passed a bad argument (trace out of range, closed file, unknown field name, missing keys) | An exception | `ValueError` |
+| The OS refused (missing file, permissions, disk full) | An exception | `IOError` / `OSError` |
 
 Opening a damaged or unrecognized file *succeeds*: you get a `SeismicFile` with what could be
 indexed and a log saying what could not.
@@ -49,7 +49,7 @@ A `Diagnostic` has:
 - `severity`: `sevInfo` (noteworthy but valid, e.g. a vendor block kept raw), `sevWarning`
   (spec-invalid or suspicious, but decoded), `sevError` (a part could not be decoded and
   was kept raw, or a trace was left as zeros), `sevFatal` (the operation stopped early);
-- `code`: a `DiagCode` (stable names, also in NIF and C as `SEG_DIAG_CODE_*`);
+- `code`: a `DiagCode` (stable names, also in NIF);
 - `offset`: the absolute byte offset in the file (-1 if unknown);
 - `loc`: file, record, channel set, trace, header block index and field name, each -1 or
   empty when not applicable;
@@ -133,10 +133,6 @@ policy:
 | `importHeaders` | `result.log` | The document was refused or unreadable |
 | `convertFile`, `convertSegdRevision`, `copyWithGeometry`, `convertWithGeometry`, `rollbackJournal`, `applyJournal` | the returned `DiagLog` | Nothing usable was written (`dst` is untouched) |
 | `SurveyGeometry.addSps` / `addP1`, `readSps`, `readP1` | `g.log`, the file's `log` | |
-
-In C and Python, a call that returns a `DiagLog` *fails* when the log is fatal
-(`SEG_ERR_IO` or `SEG_ERR_FORMAT`; Python raises with the log in `e.diagnostics`), and still
-hands you the log.
 
 ## Logs as files
 

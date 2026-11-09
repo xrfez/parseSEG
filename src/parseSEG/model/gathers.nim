@@ -42,7 +42,6 @@ import std/[tables, sets, math, options]
 import ./[traceindex, keys]
 from ../seg2/headers import Seg2TraceType, Seg2TraceSort, traceSort
 from ../segd/reader import isRev3
-import ../abi/pragmas
 
 type
   GatherKind* = enum
@@ -221,7 +220,7 @@ func isMultiComponent*(g: ComponentGroup): bool =
   for c in g.components:
     if c != g.components[0]: return true
 
-proc gathers*(f: SeismicFile): seq[Gather] {.segApi.} =
+proc gathers*(f: SeismicFile): seq[Gather] =
   ## The file's gathers: `f.index.gathers`.
   f.index.gathers
 
@@ -229,7 +228,7 @@ proc componentGroups*(f: SeismicFile, traces: Slice[int]): seq[ComponentGroup] {
   ## `f.index.componentGroups(traces)`.
   f.index.componentGroups(traces)
 
-proc componentGroupIds*(f: SeismicFile, traces: Slice[int]): seq[int] {.segApi.} =
+proc componentGroupIds*(f: SeismicFile, traces: Slice[int]): seq[int] =
   ## The component group of each trace of `traces` (see `componentGroups`),
   ## numbered from 0 in order of first appearance; -1 for a trace in none
   ## (an auxiliary trace).

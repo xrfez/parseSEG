@@ -38,7 +38,6 @@ import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader, mux, demux]
 import ../seg2/[reader as seg2reader]
 import ./[tensors, keys]
-import ../abi/pragmas
 
 export memsource, diagnostics, keys, seismickind
 export tensors except rowPtr
@@ -390,11 +389,11 @@ proc `=destroy`(m: MapOwner) =
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
 
 type
-  SeismicFile* {.segHandle.} = object
+  SeismicFile* = object
     ## A memory-mapped disk file with its trace index.
     index*: TraceIndex
-    path* {.segField(readonly = true).}: string ## The file's path, as opened.
-    demuxPath* {.segField(readonly = true).}: string
+    path*: string ## The file's path, as opened.
+    demuxPath*: string
       ## The temporary demultiplexed copy that is mapped and indexed instead
       ## of a multiplexed SEG-D file ("" for any other file); deleted on
       ## `close`. Index offsets and `copyBytes` refer to it.
@@ -439,8 +438,7 @@ proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: 
   f.index.log = log
 
 proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
-    writable = false, demuxDir = ""): SeismicFile {.segApi(hide = writable,
-    hide = demuxDir).} =
+    writable = false, demuxDir = ""): SeismicFile =
   ## Maps the disk file `path`, detects SEG-Y, SEG-D or SEG-2, and builds the trace
   ## index (with per-trace geometry when `keys`; `twosComplement8015` also
   ## reads SEG-2 format-3 mantissas as two's complement). Format problems are in
@@ -482,43 +480,43 @@ proc close*(f: var SeismicFile) =
     discard tryRemoveFile(f.map.tempPath)
     f.map.tempPath = ""
 
-func len*(f: SeismicFile): int {.inline, segApi.} =
+func len*(f: SeismicFile): int {.inline.} =
   ## The number of traces.
   f.index.entries.len
 
-func kind*(f: SeismicFile): SeismicKind {.inline, segApi.} =
+func kind*(f: SeismicFile): SeismicKind {.inline.} =
   ## SEG-Y, SEG-D or SEG-2; `skUnknown` when the file was not recognized.
   if f.index.detected: f.index.kind else: skUnknown
 
-func log*(f: SeismicFile): lent DiagLog {.inline, segApi.} =
+func log*(f: SeismicFile): lent DiagLog {.inline.} =
   ## Every problem found while indexing.
   f.index.log
 
-func recordCount*(f: SeismicFile): int {.segApi.} =
+func recordCount*(f: SeismicFile): int =
   ## SEG-D records; 1 for SEG-Y and SEG-2; 0 for an unrecognized file.
   if not f.index.detected: 0
   elif f.index.kind == skSegd: f.index.segdRecords.len
   else: 1
 
-func maxSamples*(f: SeismicFile): int {.inline, segApi.} =
+func maxSamples*(f: SeismicFile): int {.inline.} =
   ## Samples in the longest trace.
   f.index.maxSamples
 
 proc raiseNoTrace(f: SeismicFile, trace: int) {.noinline, noreturn.} =
   raise newException(ValueError, "no trace " & $trace & " (the file has " & $f.len & ")")
 
-func traceEntry*(f: SeismicFile, trace: int): TraceEntry {.segApi.} =
+func traceEntry*(f: SeismicFile, trace: int): TraceEntry =
   ## Where trace `trace` lives: header offset, header bytes, samples, record,
   ## channel set, scan type and channel type. Raises `ValueError` for a trace
   ## out of range.
   if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
   f.index.entries[trace]
 
-func hasKeys*(f: SeismicFile): bool {.inline, segApi.} =
+func hasKeys*(f: SeismicFile): bool {.inline.} =
   ## The index holds per-trace geometry (`openSeismic(keys = true)`).
   f.index.keys.len == f.index.entries.len
 
-func traceKeys*(f: SeismicFile, trace: int): TraceKeys {.segApi.} =
+func traceKeys*(f: SeismicFile, trace: int): TraceKeys =
   ## A trace's geometry (NaN or 0 where unknown). Raises `ValueError` for a
   ## trace out of range or a file opened without `keys`.
   if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
@@ -545,7 +543,7 @@ proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
   ## or `traceField`/`fileField` instead.
   if f.map.src != nil: f.map.src.memory else: nil
 
-func isOpen*(f: SeismicFile): bool {.inline, segApi.} =
+func isOpen*(f: SeismicFile): bool {.inline.} =
   ## The file is still mapped (range reads work).
   f.map.src != nil
 

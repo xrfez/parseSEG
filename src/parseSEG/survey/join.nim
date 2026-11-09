@@ -23,7 +23,6 @@ import std/[options, tables, strutils, math, sets]
 import ../common/diagnostics
 import ../model/[keys, traceindex]
 import ./[textrec, cards, sps, p1]
-import ../abi/pragmas
 
 export keys
 
@@ -36,18 +35,18 @@ type
     rcvLine, fromRcv, toRcv: float64
     rcvIndex: int16
 
-  SurveyGeometry* {.segHandle.} = object
+  SurveyGeometry* = object
     ## Station coordinates and channel relations from survey files.
     table*: GeometryTable
     runs: Table[int64, seq[RelationRun]]
-    multiComponent* {.segField.}: bool
+    multiComponent*: bool
       ## X records with a channel increment k > 1 cover k consecutive
       ## channels per station (components 1..k, SPS 1.0 §"X" note); else
       ## only every k-th channel is in the run.
-    tape* {.segField.}: string ## Only X records of this field tape ("" = all).
+    tape*: string ## Only X records of this field tape ("" = all).
     lineNames*: Table[string, float64] ## Text line name → line number (see `mapLine`).
-    trailingDigits* {.segField.}: bool ## Unmapped line names use their trailing digits.
-    log* {.segField(readonly = true).}: DiagLog ## Problems met while adding survey files.
+    trailingDigits*: bool ## Unmapped line names use their trailing digits.
+    log*: DiagLog ## Problems met while adding survey files.
 
   GeometryFields* = object
     ## Which joined values are written to a file (`writeGeometry`,
@@ -64,33 +63,33 @@ type
     source*, receiver*: StationKey
     component*: int ## 1-based within the station (multi-component), else 0.
 
-func relationCount*(g: SurveyGeometry): int {.segApi.} =
+func relationCount*(g: SurveyGeometry): int =
   ## The number of X runs loaded.
   for runs in g.runs.values: result += runs.len
 
-func initSurveyGeometry*(): SurveyGeometry {.segApi.} =
+func initSurveyGeometry*(): SurveyGeometry =
   ## An empty geometry: no stations, no relations.
   SurveyGeometry()
 
-func sourceCount*(g: SurveyGeometry): int {.inline, segApi.} =
+func sourceCount*(g: SurveyGeometry): int {.inline.} =
   ## Source stations held.
   g.table.sources.len
 
-func receiverCount*(g: SurveyGeometry): int {.inline, segApi.} =
+func receiverCount*(g: SurveyGeometry): int {.inline.} =
   ## Receiver stations held.
   g.table.receivers.len
 
 proc addSource*(g: var SurveyGeometry, line, point: float64, index: int16, x, y: float64,
-    z = NaN) {.inline, segApi.} =
+    z = NaN) {.inline.} =
   ## Adds or replaces a source station; index 0 matches any point index.
   g.table.addSource(line, point, index, x, y, z)
 
 proc addReceiver*(g: var SurveyGeometry, line, point: float64, index: int16, x, y: float64,
-    z = NaN) {.inline, segApi.} =
+    z = NaN) {.inline.} =
   ## Adds or replaces a receiver station; index 0 matches any point index.
   g.table.addReceiver(line, point, index, x, y, z)
 
-proc mapLine*(g: var SurveyGeometry, name: string, line: float64) {.segApi.} =
+proc mapLine*(g: var SurveyGeometry, name: string, line: float64) =
   ## Maps a text line name (SPS 1.0, P1) to a line number, for the files
   ## added later. Raises `ValueError` for an empty name or a NaN line.
   if name.strip.len == 0: raise newException(ValueError, "empty line name")
@@ -203,7 +202,7 @@ proc addLog(g: var SurveyGeometry, log: DiagLog) =
   if log.isFatal: raise newException(IOError, log[log.len - 1].msg)
   g.log.add log
 
-proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions()) {.segApi.} =
+proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions()) =
   ## Reads the SPS file (Rev 1.0 or 2.1) at `path` and adds it; its
   ## diagnostics go to `g.log`. Raises `IOError` if it cannot be read.
   let f = readSps(path, opts)
@@ -211,7 +210,7 @@ proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions()) {.segApi.
   g.addSps(f)
 
 proc addP1*(g: var SurveyGeometry, path: string, gridDecimals = 0, depthDecimals = 0,
-    elevation = false) {.segApi.} =
+    elevation = false) =
   ## Reads the SEG P1 file at `path` and adds its shotpoints. The decimals are
   ## the implicit decimals of the grid and depth/elevation fields (the file's
   ## header says); with `elevation`, columns 62-66 are z. Raises `IOError` if
@@ -267,7 +266,7 @@ proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, overwrite = false): int
   for k in ix.keys.mitems:
     if k.applySurvey(g, overwrite): inc result
 
-proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, overwrite = false): int {.segApi.} =
+proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, overwrite = false): int =
   ## Fills the trace keys from the survey, in memory only: the file does not
   ## change. Returns the traces changed. Raises `ValueError` for a file opened
   ## without `keys = true`.
