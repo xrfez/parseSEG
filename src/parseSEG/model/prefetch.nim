@@ -15,14 +15,28 @@
 ## p.close()
 ## ```
 ##
+## A consumer that is done with each chunk before it takes the next can hand
+## its buffer back, so a steady scroll allocates nothing: `nextInto` /
+## `tryNextInto` swap the caller's previous `samples` into the slot, and
+## `recycle` returns a tensor for a later `next` to reuse.
+##
+## ```nim
+## var c: PrefetchChunk[float32]
+## while p.nextInto(c):           # c's previous buffer becomes a decode target
+##   show(c.first, c.samples)
+## ```
+##
 ## Ownership: the worker shares no managed memory with the consumer (the
 ## only managed objects it makes are exceptions it raises and catches
 ## itself). It reads the file's map and index through raw pointers, decodes
 ## into slot buffers that the consumer thread allocated (`decodeEntry`), and
 ## notes the rows that failed in a plain array of the slot; the consumer
 ## turns those into the chunk's diagnostics. When the consumer takes a chunk,
-## it takes the slot's tensor and allocates a fresh one for the slot, so a
-## returned tensor is never written again.
+## it takes the slot's tensor and gives the slot another one, so a tensor
+## returned by `next` is never written again. That one is fresh, or one the
+## caller gave up: the previous chunk's with `nextInto`, a `recycle`d one.
+## Only tensors of the slot shape whose storage they own alone (no copy,
+## view or `fromBuffer` shares it) are reused; others are dropped.
 ##
 ## Lifetime: the prefetcher pins the file's map, so `f.close()` (or the file
 ## going out of scope) while it runs is safe: the map, and if the file is
@@ -77,6 +91,7 @@ type
     sh: ptr Shared[T]
     pin: MapPin             # keeps the map (and a destroyed file's index) alive for the worker
     tensors: seq[Tensor[T]] # slot storage, consumer side
+    spare: seq[Tensor[T]]   # recycled slot-shaped buffers, at most `depth`
     last: int               # end of the whole range (exclusive)
     selection: seq[int]     # selection mode: the trace list (fixed for the prefetcher's life)
     path: string            # the file's, for diagnostics
@@ -114,6 +129,7 @@ proc `=destroy`*[T](p: Prefetcher[T]) =
   if p.sh != nil: shutdown(p.sh)
   `=destroy`(p.pin) # after the shutdown: the worker reads the map
   `=destroy`(p.tensors)
+  `=destroy`(p.spare)
   `=destroy`(p.selection) # after the shutdown: the worker reads it
   `=destroy`(p.path)
 
@@ -250,10 +266,32 @@ proc traceAt*[T](p: Prefetcher[T], pos: int): int =
   if pos notin 0 ..< p.last: raiseArg("position " & $pos & " is outside 0.." & $(p.last - 1))
   if p.selection.len > 0: p.selection[pos] else: pos
 
-proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
+proc reusable[T](p: Prefetcher[T], t: Tensor[T]): bool =
+  # `t` can be a slot buffer: the slot's shape, row-major from its storage's
+  # start, and that storage is its own and held by nobody else (a copy or a
+  # view of the tensor shares it).
+  let sh = p.sh
+  sh.cols > 0 and t.rank == 2 and t.shape[0] == sh.chunkTraces and t.shape[1] == sh.cols and
+    t.offset == 0 and t.is_C_contiguous and not t.storage.isNil and
+    t.storage.isMemOwner and isUniqueRef(t.storage)
+
+proc recycle*[T](p: var Prefetcher[T], t: sink Tensor[T]) =
+  ## Gives a chunk's tensor back: a later chunk is decoded into it instead of
+  ## a fresh allocation. The caller gives the buffer up (pass it with `move`;
+  ## its raw data must not be used again). Dropped, as if destroyed, unless it
+  ## has the chunk shape `[chunkTraces, cols]` and nothing else shares its
+  ## storage (a copy, a view), or when `depth` buffers are already spare.
+  if p.sh != nil and p.spare.len < p.sh.depth and p.reusable(t): p.spare.add t
+
+proc recycle*[T](p: var Prefetcher[T], c: sink PrefetchChunk[T]) {.inline.} =
+  ## `recycle(p, c.samples)`.
+  p.recycle(move c.samples)
+
+proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool) =
   # Called with the head slot ready; hands its tensor over and gives the slot
-  # a fresh buffer. The worker does not touch ready slots, so the swap runs
-  # unlocked.
+  # another buffer: with `into`, the caller's previous one if reusable, else
+  # a spare or a fresh one. The worker does not touch ready slots, so the
+  # swap runs unlocked.
   let sh = p.sh
   let i = sh.takeChunk mod sh.depth
   let s = addr sh.slots[i]
@@ -271,12 +309,16 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
         # SEG-2: `record` indexes the codecs; the file is one record.
         record: if sh.codecs[e.record].kind == skSeg2: 0 else: int(e.record)))
   if s.count == sh.chunkTraces:
-    c.samples = move(p.tensors[i])
-    p.tensors[i] = newTensorUninit[T](sh.chunkTraces, sh.cols)
-  elif sh.cols == 0:
-    c.samples = newTensor[T](s.count, 0)
+    if into and p.reusable(c.samples):
+      swap(c.samples, p.tensors[i])
+    else:
+      c.samples = move(p.tensors[i])
+      p.tensors[i] = if p.spare.len > 0: p.spare.pop
+        else: newTensorUninit[T](sh.chunkTraces, sh.cols)
   else:
-    c.samples = p.tensors[i][0..<s.count, _].clone() # the slot keeps its buffer
+    if into: p.recycle(move c.samples)
+    c.samples = if sh.cols == 0: newTensor[T](s.count, 0)
+      else: p.tensors[i][0..<s.count, _].clone() # the slot keeps its buffer
   acquire(sh.lock)
   s.data = rawData(p.tensors[i])
   s.state = ssFree
@@ -295,27 +337,47 @@ func atEnd*[T](p: Prefetcher[T]): bool {.inline.} =
   ## True when every chunk of the range has been taken (or after `close`).
   p.sh == nil or p.untaken <= 0
 
-proc tryNext*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
-  ## Takes the next chunk if it is decoded; never blocks. False if it is not
-  ## ready yet, the range is done (see `atEnd`) or the prefetcher is closed.
+proc pollTake[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool): bool =
   if p.sh == nil: return false
   acquire(p.sh.lock)
   let ok = p.sh.takeChunk < p.sh.chunkCount and p.sh.headReady
   release(p.sh.lock)
-  if ok: p.take(c)
+  if ok: p.take(c, into)
   ok
+
+proc waitTake[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool): bool =
+  if p.sh == nil: return false
+  acquire(p.sh.lock)
+  let more = p.sh.takeChunk < p.sh.chunkCount
+  while more and not p.sh.headReady:
+    wait(p.sh.ready, p.sh.lock)
+  release(p.sh.lock)
+  if more: p.take(c, into)
+  more
+
+proc tryNext*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
+  ## Takes the next chunk if it is decoded; never blocks. False if it is not
+  ## ready yet, the range is done (see `atEnd`) or the prefetcher is closed.
+  p.pollTake(c, into = false)
 
 proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   ## Takes the next chunk, waiting until it is decoded. False when the range
   ## is done (or the prefetcher is closed).
-  if p.sh == nil: return false
-  acquire(p.sh.lock)
-  var more = p.sh.takeChunk < p.sh.chunkCount
-  while more and not p.sh.headReady:
-    wait(p.sh.ready, p.sh.lock)
-  release(p.sh.lock)
-  if more: p.take(c)
-  more
+  p.waitTake(c, into = false)
+
+proc tryNextInto*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
+  ## `tryNext`, but the caller gives up `c`'s previous `samples`: when the
+  ## next chunk is taken, that buffer becomes a decode target (as `recycle`).
+  ## On false, `c` is unchanged.
+  p.pollTake(c, into = true)
+
+proc nextInto*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
+  ## `next`, but the caller gives up `c`'s previous `samples`: if it has the
+  ## chunk shape and nothing else shares it, the slot decodes into it next
+  ## (no allocation); otherwise it is recycled or dropped. A copy or view of
+  ## it that the caller kept only prevents the reuse (they share its
+  ## storage), but a raw pointer into it must not outlive the call.
+  p.waitTake(c, into = true)
 
 iterator chunks*[T](p: var Prefetcher[T]): PrefetchChunk[T] =
   ## Yields the chunks of the current range in order, waiting for each
@@ -353,4 +415,5 @@ proc close*[T](p: var Prefetcher[T]) =
     p.sh = nil
     p.pin = MapPin() # the last pin unmaps a file closed meanwhile
     p.tensors.setLen 0
+    p.spare.setLen 0
     p.selection.setLen 0

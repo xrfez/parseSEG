@@ -235,3 +235,152 @@ block chunks_iterator:
   doAssert n == f.len and p.atEnd
   p.close()
   f.close()
+
+proc buf(t: Tensor[float32]): uint = cast[uint](t.unsafe_raw_offset())
+
+block next_into_matches_and_reuses_buffers:
+  # R3-9: `nextInto` swaps the caller's previous buffer into the slot, so the
+  # chunks cycle through `depth + 1` buffers and nothing else is allocated.
+  for n in files:
+    if fileExists(exampleDir / n):
+      var f = openSeismic(exampleDir / n)
+      let all = f.readTraces(0..<f.len)
+      for (chunk, depth) in [(1, 1), (3, 2), (7, 3), (100_000, 4)]:
+        var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth)
+        var c: PrefetchChunk[float32]
+        var bufs: seq[uint]
+        for round in 0..<3: # seeks keep the buffers
+          p.seek(0 ..< p.len)
+          var expect = 0
+          while p.nextInto(c):
+            doAssert c.first == expect and c.failed == 0
+            doAssert c.samples == all.rows(c.first, c.count), n
+            if c.count == chunk and buf(c.samples) notin bufs: bufs.add buf(c.samples)
+            expect += c.count
+          doAssert expect == f.len and p.atEnd and not p.nextInto(c)
+        doAssert bufs.len <= depth + 1, n & ": " & $bufs.len
+        p.close()
+      f.close()
+
+block next_into_random_seeks_selections_and_partial_chunks:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  var sel: seq[int]
+  for i in countdown(199, 0, 2): sel.add i
+  var rng = initRand(7)
+  for useSel in [false, true]:
+    let depth = 3
+    var p = if useSel: newPrefetcher[float32](f, sel, chunkTraces = 9, depth = depth)
+      else: newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 9, depth = depth)
+    let want = if useSel: f.readTraces(sel) else: all
+    var c: PrefetchChunk[float32]
+    var bufs: seq[uint]
+    var expect = 0
+    for step in 0..<3000:
+      case rng.rand(9)
+      of 0:
+        let a = rng.rand(p.len)
+        let b = if rng.rand(1) == 0: p.len else: a + rng.rand(p.len - a)
+        expect = a
+        p.seek(a ..< b) # often short: partial chunks
+      of 1..4:
+        if p.tryNextInto(c):
+          doAssert c.first == expect and c.samples == want.rows(c.first, c.count)
+          expect += c.count
+      else:
+        if p.nextInto(c):
+          doAssert c.first == expect and c.samples == want.rows(c.first, c.count)
+          expect += c.count
+      if c.count == 9 and buf(c.samples) notin bufs: bufs.add buf(c.samples)
+    doAssert bufs.len <= depth + 1, $bufs.len
+    p.close()
+  f.close()
+
+block next_into_never_overwrites_shared_buffers:
+  # A copy or a view the caller kept shares the storage: not reused.
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, depth = 2)
+  var kept: seq[PrefetchChunk[float32]]
+  var views: seq[(int, Tensor[float32])]
+  var c: PrefetchChunk[float32]
+  while p.nextInto(c):
+    if c.first mod 16 == 0: kept.add c
+    else: views.add (c.first, c.samples[1..2, _])
+  p.close()
+  for k in kept: doAssert k.samples == all.rows(k.first, k.count)
+  for (first, v) in views: doAssert v == all.rows(first + 1, 2)
+  f.close()
+
+block recycle_feeds_next:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  let cols = all.shape[1]
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 10, depth = 2)
+  # Recycled before the first take: dropped (wrong shape, shared, a view) or
+  # kept (own, unshared) for a later chunk.
+  var shared = newTensor[float32](10, cols)
+  shared.apply_inline(7'f32)
+  let alias = shared
+  p.recycle(move shared)
+  var big = newTensor[float32](20, cols)
+  p.recycle(big[0..<10, _])
+  p.recycle(newTensor[float32](10, cols + 1))
+  var own = newTensorUninit[float32](10, cols)
+  let ownBuf = buf(own)
+  p.recycle(move own)
+  var c: PrefetchChunk[float32]
+  var bufs: seq[uint]
+  var expect = 0
+  for round in 0..<3:
+    p.seek(0 ..< p.len)
+    expect = 0
+    while p.next(c):
+      doAssert c.first == expect and c.samples == all.rows(c.first, c.count)
+      if buf(c.samples) notin bufs: bufs.add buf(c.samples)
+      expect += c.count
+      p.recycle(move c)
+  doAssert ownBuf in bufs and bufs.len <= 2 + 1 + 1, $bufs.len # depth + 1 + `own`
+  for x in alias: doAssert x == 7 # never decoded into
+  for x in big: doAssert x == 0
+  p.close()
+  p.recycle(newTensor[float32](10, cols)) # after close: dropped
+  f.close()
+
+block next_into_zero_columns:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var p = newPrefetcher[float32](f, 0 ..< 25, chunkTraces = 10, cols = 0)
+  var c: PrefetchChunk[float32]
+  var n = 0
+  while p.nextInto(c):
+    doAssert c.samples.shape == [c.count, 0]
+    n += c.count
+  doAssert n == 25
+  p.close()
+  f.close()
+
+proc allocs(): int =
+  ## Allocations so far (`tprefetch.nims` turns the counter on).
+  cast[tuple[allocs, deallocs: int]](getAllocStats()).allocs
+
+block steady_next_into_allocates_nothing:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let all = f.readTraces(0..<f.len)
+  for into in [false, true]:
+    var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 10, depth = 3)
+    var c: PrefetchChunk[float32]
+    doAssert p.nextInto(c) and p.nextInto(c) # warm up
+    var a = 0
+    var chunks = 0
+    for round in 0..<20:
+      let a0 = allocs()
+      p.seek(0 ..< p.len) # 20 full chunks a round
+      while (if into: p.nextInto(c) else: p.next(c)):
+        inc chunks
+      a += allocs() - a0
+      doAssert c.samples == all.rows(c.first, c.count)
+    when defined(nimAllocStats):
+      if into: doAssert a == 0, $a
+      else: doAssert a >= chunks, $a # a fresh slot buffer per chunk
+    p.close()
+  f.close()

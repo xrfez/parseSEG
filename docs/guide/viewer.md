@@ -235,6 +235,28 @@ f.close()
 - Call the prefetcher's procs from one thread. It keeps the file's map alive until its own
   `close`, so the order in which the file and the prefetcher are closed does not matter.
 
+A viewer that is done with each chunk before it takes the next (it has copied it to the
+screen or a texture) can hand the buffer back, so scrolling allocates nothing: `nextInto`
+(and `tryNextInto`) swap `c.samples` into the slot the chunk came from, where a later chunk
+is decoded into it. `p.recycle(move c)` returns one for `next` to reuse.
+Only a tensor of the chunk shape that nothing else shares is reused: a copy or a view you
+kept stays intact (it is just not reused), but a raw pointer into it must not outlive the
+call.
+
+```nim
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 32, depth = 4)
+var c: PrefetchChunk[float32]
+var shown = 0
+while p.nextInto(c):                  # c's previous buffer becomes a decode target
+  shown += c.count                    # draw c.samples before the next call
+doAssert shown == f.len
+p.close()
+f.close()
+```
+
 ## The header tab
 
 `traceHeaders(i)`, `recordHeaders(r)` and `fileHeaders` list every header block of a trace,
