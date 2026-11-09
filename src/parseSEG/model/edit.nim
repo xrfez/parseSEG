@@ -523,7 +523,7 @@ proc release*(ed: sink HeaderEditor): SeismicFile =
   if not synced:
     raise newException(IOError, "the journal " & e.journalPath &
       " cannot be synced; the batch's pending edits were not written")
-  result = move e.file
+  result = ensureMove e.file
 
 func file*(ed: HeaderEditor): lent SeismicFile {.inline.} =
   ## The mapped file and its index (cached headers refreshed by the edits).

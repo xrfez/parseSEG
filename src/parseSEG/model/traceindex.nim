@@ -135,7 +135,7 @@ proc indexFixed(ix: var TraceIndex, r: var SegyReader, src: RecordSource): bool 
     ix.maxSamples = int(b.effectiveSamplesPerTrace)
     ix.segyIntervalUs = b.effectiveSampleInterval
     ix.segy = r.file
-    ix.log = move r.log
+    ix.log = r.takeLog()
     ix.log.report(sevInfo, dcIndexSampled, "fixed-length traces: the " & $ix.entries.len &
       " traces were indexed from the file size, and " & $checked & " of their headers " &
       "checked against the binary header's sample count and interval (verify = vfFull " &
@@ -164,7 +164,7 @@ proc indexSegy(src: RecordSource, keys: bool, verify: VerifyMode,
     if result.entries.len == 1:
       result.reserveFor(src, result.entries[0], result.codecs[0].dataBytes(t.numSamples), keys)
   result.segy = r.file
-  result.log = r.log
+  result.log = r.takeLog()
 
 proc indexSegd(src: RecordSource, twosComplement8015, keys: bool,
     tk: var ProgressTicker): TraceIndex =

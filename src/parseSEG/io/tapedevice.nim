@@ -145,10 +145,17 @@ proc newMemoryTape*(items: sink seq[TapeItem] = @[]; name = "memory"): MemoryTap
   let used = blockBytes(items)
   MemoryTape(items: items, used: used, name: name)
 
-func items*(t: MemoryTape): lent seq[TapeItem] {.inline.} =
-  ## The blocks and tape marks on the tape, from BOT. Change them only
-  ## through the device methods.
-  t.items
+func len*(t: MemoryTape): int {.inline.} =
+  ## The number of blocks and tape marks on the tape.
+  t.items.len
+
+func `[]`*(t: MemoryTape, i: Natural): lent TapeItem {.inline.} =
+  ## Item `i` from BOT. Change items only through the device methods.
+  t.items[i]
+
+iterator items*(t: MemoryTape): lent TapeItem =
+  ## The blocks and tape marks on the tape, from BOT.
+  for it in t.items: yield it
 
 proc clampHead(t: MemoryTape) {.inline.} =
   # `pos` is writable: keep it a valid head position.

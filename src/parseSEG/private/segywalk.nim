@@ -5,7 +5,7 @@
 ## `ext1` hold nothing else.
 
 import std/importutils
-import ../common/endians
+import ../common/[diagnostics, endians]
 import ../io/records
 import ../segy/reader
 import ./segykeys
@@ -22,3 +22,7 @@ func walkHeaders*(r: SegyReader, t: SegyTrace): RawHeaders {.inline.} =
   RawHeaders(std: cast[ByteBuf](unsafeAddr r.rawStd[0]),
     ext1: if t.hasExt1: cast[ByteBuf](unsafeAddr r.rawExt1[0]) else: nil,
     prop: byteBuf(t.proprietary), propLen: t.proprietary.len)
+
+proc takeLog*(r: var SegyReader): DiagLog {.inline.} =
+  ## Moves the walk's log out of the reader (it is not read again).
+  move r.log

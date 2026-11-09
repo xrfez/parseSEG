@@ -92,9 +92,9 @@ type
     offset*: int64                  ## Medium offset of the trace header.
 
   SegyReader* = object
-    ## Streaming reader state. `file` is filled by `openSegy`.
-    file*: SegyFile
-    log*: DiagLog
+    ## Streaming reader state; create with `openSegy`.
+    file: SegyFile
+    log: DiagLog
     input: PushbackInput
     lookahead: seq[byte] ## Reused buffer of `trailerStartsHere`.
     name: string
@@ -114,6 +114,14 @@ type
       ## fields this module reads.
     rawStd, rawExt1: array[TraceHeaderSize, byte]
       ## The last trace's header and Extension 1 bytes, as read.
+
+func file*(r: SegyReader): lent SegyFile {.inline.} =
+  ## The file-level headers, filled by `openSegy`.
+  r.file
+
+func log*(r: SegyReader): lent DiagLog {.inline.} =
+  ## Every diagnostic of the read so far.
+  r.log
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
   # Storage unit sequence number (digits or blanks) and "SY" in bytes 5-6;
@@ -574,8 +582,8 @@ proc readSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
   if not headersOnly:
     for i in 0..<result.traces.len:
       discard r.log.tryRecord(r.loc(i), r.file.decodeInto(result.traces[i], result.samples, i))
-  result.file = move r.file
-  result.log = move r.log
+  result.file = ensureMove r.file
+  result.log = ensureMove r.log
 
 proc readSegy*(path: string, maxRetained = DefaultMaxRetained, headersOnly = false): SegyData =
   ## Reads a SEG-Y disk file into memory; see `readSegy(RecordSource)`. A file

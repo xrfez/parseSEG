@@ -181,7 +181,7 @@ proc traceHeaders*(f: SeismicFile, trace: int): seq[HeaderRow] =
   let e = f.index.entries[trace]
   if f.kind == skSeg2:
     L.addSeg2Block(f, "trace", hbSeg2Trace, e.offset, int(e.headerBytes))
-    return move L.rows
+    return ensureMove L.rows
   discard L.located(f, hsTrace, trace, "trace")
   let hasExt1 = L.located(f, hsTrace, trace, "ext1")
   if f.kind == skSegy:
@@ -201,7 +201,7 @@ proc traceHeaders*(f: SeismicFile, trace: int): seq[HeaderRow] =
         for k in 0 ..< n:
           L.addRaw("ext" & $(k + 2), "traceHeaderExtension", first + int64(k) * SegdBlockSize,
             SegdBlockSize)
-  move L.rows
+  ensureMove L.rows
 
 proc recordHeaders*(f: SeismicFile, record: int): seq[HeaderRow] =
   ## Every header block of SEG-D record `record`, as rows in file order:
@@ -255,7 +255,7 @@ proc recordHeaders*(f: SeismicFile, record: int): seq[HeaderRow] =
     for i, e in f.index.entries:
       if int(e.record) == record: last = i
     if last >= 0: L.addRaw("trailer", "general trailer", f.traceEnd(last), trailer)
-  move L.rows
+  ensureMove L.rows
 
 proc fileHeaders*(f: SeismicFile): seq[HeaderRow] =
   ## The file-level header blocks, as rows in file order: SEG-Y tape label,
@@ -282,4 +282,4 @@ proc fileHeaders*(f: SeismicFile): seq[HeaderRow] =
     L.addSeg2Block(f, "file", hbSeg2File, 0,
       fileBlockSize(L.mem.toOpenArray(0, int(L.size) - 1), f.index.seg2))
   of skUnknown: discard
-  move L.rows
+  ensureMove L.rows

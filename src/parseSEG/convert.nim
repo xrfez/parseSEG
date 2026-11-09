@@ -742,7 +742,7 @@ proc convertSegdToSegyJoined*(src: RecordSource, sink: RecordSink, opts: Convert
   var w: SegyWriter
   var opened = false
   template stop() =
-    result = move c.log
+    result = ensureMove c.log
     result.add r.log
     return
   var tk = initProgressTicker(progress, inputSize(src))
@@ -780,7 +780,7 @@ proc convertSegdToSegyJoined*(src: RecordSource, sink: RecordSink, opts: Convert
             loc = Location(file: sink.name, trace: c.nOut))
           stop()
         inc c.nOut
-  result = move c.log
+  result = ensureMove c.log
   result.add r.log
   result.report(c.losses, c.outFmt, c.loc)
   if not opened:
@@ -1008,7 +1008,7 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
   var unmapped: seq[string]
   var polarity = none(int64)
   template stop() =
-    result = move c.log
+    result = ensureMove c.log
     result.add f.index.log
     return
   let size = f.mappedSize
@@ -1075,7 +1075,7 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
   if unmapped.len > 0:
     c.log.report(sevInfo, dcValidation, "SEG-2 trace strings with no SEG-Y slot are not " &
       "carried: " & unmapped.join(", "), loc = c.loc)
-  result = move c.log
+  result = ensureMove c.log
   result.add f.index.log
   result.report(c.losses, c.outFmt, c.loc)
   if not opened:

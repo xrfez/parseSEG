@@ -41,9 +41,13 @@ type
     wasRead: bool        ## The file came from the reader (not built in memory).
     cur: seq[byte]       ## The binary header as it will be written, in the file's byte order.
     lastFlagged: bool    ## A trace flagged "last in file" was written.
-    log*: DiagLog
+    log: DiagLog
     tracesWritten: int
     rec: seq[byte]       ## Reused trace record buffer.
+
+func log*(w: SegyWriter): lent DiagLog {.inline.} =
+  ## Every diagnostic of the write so far.
+  w.log
 
 func initSegyWriteOptions*(file: SegyFile, lenient = false): SegyWriteOptions =
   ## Options that keep `file`'s byte order.

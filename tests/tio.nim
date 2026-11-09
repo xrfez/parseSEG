@@ -39,7 +39,7 @@ block memory_tape_round_trip:
   let sink = newDeviceSink(tape)
   sink.writeSample
   doAssert sink.recordIndex == 4 and sink.fileIndex == 4
-  doAssert tape.items.len == 8
+  doAssert tape.len == 8
   tape.rewind
   let src = newDeviceSource(tape)
   doAssert src.drain == sampleKinds
@@ -63,7 +63,7 @@ block memory_tape_positioning:
   doAssert tape.readBlock(buf, n) == rkData and n == 7
   doAssert tape.status.fileNumber == 2 and tape.status.blockNumber == 1
   tape.spaceFiles -1
-  doAssert tape.items[tape.pos].kind == tiMark, "BSF stops on the BOT side of the mark"
+  doAssert tape[tape.pos].kind == tiMark, "BSF stops on the BOT side of the mark"
   doAssert tape.readBlock(buf, n) == rkTapeMark and n == 0
   doAssert tape.status.atTapeMark
   doAssertRaises IOError:
@@ -78,7 +78,7 @@ block memory_tape_overwrite_truncates:
   tape.rewind
   tape.spaceFiles 1
   tape.writeBlock bytes(3)
-  doAssert tape.items.len == 3 and tape.status.atEndOfData
+  doAssert tape.len == 3 and tape.status.atEndOfData
 
 block memory_tape_media_limits:
   let tape = newMemoryTape()
@@ -247,7 +247,7 @@ block memory_tape_head_is_clamped:
   doAssert tape.status.atEndOfData and tape.status.fileNumber == 1
   tape.pos = 99
   tape.writeBlock(bytes(3)) # appends at the end
-  doAssert tape.items.len == 4 and tape.pos == 4
+  doAssert tape.len == 4 and tape.pos == 4
   tape.pos = -5
   var buf = newSeq[byte](16)
   var n = 0
