@@ -20,16 +20,16 @@
     counts are not atomic, and threads share files (`tests/tsharedreads.nim`).
   - **Commits:** commit as a separate command after checking the suite. A commit on the
     line after a heredoc runs even when the check before it failed.
-  - **Known leak:** ASan reports a 32 KB leak in 2 allocations in the prefetcher tests. It
-    predates Phase 14 (Nim thread runtime) and has not been investigated.
+  - **Known leak:** ASan reports a 32 KB leak in the prefetcher tests. The cause is found;
+    see 15.1.
   - **Parallel agents:** they need their own worktree, `XDG_CACHE_HOME` and a short
     `TMPDIR`. Phase 14.3 ran one agent at a time on the main checkout instead.
 - **Open (from the 14.3 logs):**
   - the SEG-D writer cannot change sample counts and refuses multiplexed input;
   - the full-scale bench (`PARSESEG_BENCH_SCALE=full`) was not re-run;
   - "Open questions for the owner" below still stand.
-- **Next:** nothing is scheduled after Phase 14. Ask the owner (candidates: Phase 11.3 needs
-  a real SEG-2 file; "Future").
+- **Next:** Phase 15 (owner, 2026-11-09): 15.1 leak (cause found), 15.2 docs pass, 15.3
+  idiomatic Nim and performance review.
 
 ## Goal
 An idiomatic, high-performance Nim library to **read and write** SEG seismic data on **disk and
@@ -1008,6 +1008,64 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
       - **Prefetch (R3-9):** chunk recycling, `recycle` / `nextInto`.
 - [x] 14.4 Re-run `nim bench` (Nim only) and update `docs/benchmarks.md`, then do 13.5.
 
+### Phase 15: Leak, usage docs, idiomatic Nim and performance review (owner, 2026-11-09)
+- [ ] 15.1 **The 32 KB leak.** It was found under ASan in `tests/tprefetch.nim`.
+      - **Cause** (2026-11-09, ASan with `fast_unwind_on_malloc=0`):
+        - When a trace cannot be decoded, the prefetcher worker raises and catches a `SegError`
+          (`decodeChunk` → `decodeEntry`).
+        - Freeing that exception ref registers a possible cycle (`nimDecRefIsLastCyclicDyn`
+          → `registerCycle`), which allocates the thread's ORC cycle-root buffer: 16 KB,
+          `allocShared`, `cellseqs_v2.init`.
+        - The buffer is never freed when the thread exits. That is a Nim runtime behaviour.
+      - **Impact:**
+        - 16 KB per thread that ever destroys a cyclic ref: each prefetcher worker that met an
+          undecodable trace, and any caller thread whose `readTracesInto` caught one.
+        - It does not grow per chunk, but it does grow per prefetcher on damaged files.
+        - A plain open → prefetch → close leaks nothing.
+      - **Fix:** make the decode path report failures without exceptions, e.g. `decodeEntry`
+        returns a status that `decodeLoop` and the worker map to diagnostics. That also keeps
+        exception machinery out of the hot loop, and the worker then makes no managed objects
+        at all. Optionally mark the exception types `{.acyclic.}` if Nim allows it.
+      - **Tracking:**
+        - add an ASan/LSan run of the threaded tests (tprefetch, tsharedreads, tcolumns) as a
+          `nim asan` task;
+        - CI fails on any leak;
+        - re-check the Nim runtime on a newer version and report upstream if it is still there.
+- [ ] 15.2 **Usage docs pass.** The guides are current and every ```nim block runs in `tdocs`
+      (37 examples). No removed API is mentioned. The 14.3 additions were appended by several
+      agents, so:
+      - `guide/README.md`'s "Which page to read" table does not list them (columns, sorting,
+        windows, index cache, progress/cancel, `SeismicWriter`, `openEditor(f)`, recycling);
+      - `getting-started.md` "Lifetimes" and "Thread rules" do not state the new contracts:
+        - `openEditor(f)`/`release` take ownership (`move` at top level);
+        - `nextInto`/`recycle` give a buffer up, and `recycle(move c)` is needed in loops;
+        - the progress hook must be `gcsafe`;
+        - the prefetcher pins the map;
+      - `processing.md` has no progress/cancel for batch conversions;
+      - the guides do not mention `newPrefetcher(firstSample)` or `dcCancelled`;
+      - `viewer.md` (390 lines) needs a reorganization pass: sorting sits under "Read what is
+        on screen", and keys/columns under "Geometry";
+      - check that `docs/api.md` covers every exported symbol (a script over `nim jsondoc`
+        output), and retitle it (it still says "task 8.2");
+      - the README feature summary.
+- [ ] 15.3 **Idiomatic Nim and performance review** of the whole codebase. Process as in 14.2:
+      audit agents report to files, the owner approves, then commit-sized fixes.
+      - **Idiom:** check against the `nim-*` skills (api-design, style-guide, error-handling,
+        ownership-hooks, code-organization, doc-comments). Look at naming, `func`/`raises`,
+        `lent`/`sink`, enums and ranges vs ints, module boundaries and internal exports, and
+        the many `**Internal.**` exported procs (a `private` submodule or `include`?).
+      - **Performance:** start from `docs/benchmarks.md` "Remaining bottlenecks":
+        - SSE2 release build vs `x86-64-v2/v3`;
+        - O(1) open for fixed-length SEG-Y;
+        - `madvise(WILLNEED)` for cold reads;
+        - N prefetch workers;
+        - checks in the release-mode index walk;
+        - SEG-D 8015/8024 decode at 2 GB/s;
+        - SEG-2 at half the SEG-Y speed;
+        - the multi-thread fall-off beyond 8 threads.
+        Profile with `perf` and measure each fix before and after with `nim bench`, and run the
+        full scale once at the end.
+
 ### Future (noted, not scheduled)
 - From the 14.2 audit, declined for now: a bounds-checked `mapped(f)` view for internal map
   reads (item 20); `Option` fields instead of -1/NaN sentinels in `FileSummary` (item 23).
@@ -1603,3 +1661,4 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 - 2026-11-09: 14.3f done. Prefetch buffer recycling: `nextInto(p, c)` / `tryNextInto(p, c)` (the caller gives up `c.samples`: if it has the chunk shape `[chunkTraces, cols]`, owns its storage from offset 0 and nothing else shares it (`isUniqueRef` on the Arraymancer storage, so a kept copy or view is never overwritten, only not reused), it is swapped into the slot as its next decode target), `recycle(p, t: sink Tensor[T])` / `recycle(p, c: sink PrefetchChunk[T])` (a spare list of at most `depth` reusable buffers that `next` takes before allocating; others are dropped). Partial chunks still clone (with `into` the old buffer goes to the spare list). `next`/`tryNext`/`chunks` unchanged. Tests in tprefetch: data across files/chunk sizes/seeks, random seeks with short spans and selections, kept copies and views intact, recycle of shared/view/wrong-shape/own tensors, cols = 0; allocation counter (new `tests/tprefetch.nims` sets `-d:nimAllocStats`): 0 allocations over 400 steady `nextInto` chunks vs >= 1 per chunk with `next`. ASan clean (only the known 32 KB thread-runtime leak). Measured (`-d:danger`, warm, y-ieee-1m first 300 k traces = 300 MB float32, depth 4): chunk 4096 (4 MB) `next` 1 930 chunks/s 7.8 GB/s vs `nextInto` 1 910 chunks/s 7.7 GB/s; chunk 256: 31 300 vs 31 300 chunks/s, 8.0 GB/s both: throughput is bound by the one decoding worker, so recycling saves the 4 MB allocation (and its page faults) per chunk, not wall time. Docs: api.md prefetcher row, viewer.md (tested example), module doc.
 - 2026-11-09: 14.4 done. Ran `nim bench` at small scale; it passed. `docs/benchmarks.md` has a "Phase 14 re-run" section: the same per-trace index cost (218 vs 244 ns/trace), keys (648 vs 682), heap, IBM/8015 decode and single-trace latency as before, plus the 14.3 rows (sample window, header column) and the agents' cache/hook/recycling numbers. Full scale was not re-run.
 - 2026-11-09: 13.5 done. `main` was fast-forwarded to `seg-library` at the end of Phase 14; nothing is pushed. Handoff rewritten.
+- 2026-11-09: Phase 15 planned (owner: track the leak, the state of the usage docs, a review for idiomatic Nim and performance). Leak cause: exceptions destroyed on worker threads make ORC allocate a per-thread 16 KB cycle-root buffer that is never freed at thread exit (see 15.1).
