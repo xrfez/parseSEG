@@ -76,14 +76,29 @@ func putLeI24(b: var openArray[byte], pos: int, v: int32) {.inline.} =
   b[pos + 1] = byte((u shr 8) and 0xFF)
   b[pos + 2] = byte((u shr 16) and 0xFF)
 
-func onesFraction(q, mask: uint32, negative: bool): int {.inline.} =
-  # One's complement fraction: a negative value stores the inverted magnitude.
-  # Negative zero (all bits set) reads as 0.
-  if negative: -int((not q) and mask) else: int(q)
+template pow2(T: typedesc, k: int32): untyped =
+  # 2^k, exact, built from the exponent bits (k stays in the normal range).
+  when T is float32: cast[float32](uint32(127'i32 + k) shl 23)
+  else: cast[float64](uint64(1023'i32 + k) shl 52)
 
-const
-  pow4 = [1.0, 4.0, 16.0, 64.0, 256.0, 1024.0, 4096.0, 16384.0] ## 4^e, e in 0..7.
-  pow16 = [1.0, 16.0, 256.0, 4096.0]                           ## 16^e, e in 0..3.
+template onesComplement(w: int32): int32 =
+  # A sign-extended 16-bit one's complement word as an integer, without a
+  # branch: a negative word is one less than its value, so add the sign.
+  # Negative zero (0xFFFF) reads as 0.
+  w - (w shr 31)
+
+template onesField(w, signBit, mask: uint32): int32 =
+  # The one's complement fraction under `mask`, signed by bit `signBit`, without a
+  # branch: `sm` is 0 or -1; xor with it inverts a negative fraction and negates.
+  let sm = -cast[int32]((w shr signBit) and 1)
+  let mag = (cast[int32](w) xor sm) and cast[int32](mask)
+  (mag xor sm) - sm
+
+template withSign(T: typedesc, v: untyped, sign: uint32): untyped =
+  # `v` (>= 0) with its sign bit set when `sign` is 1: sign-magnitude formats,
+  # so a negative zero stays -0.0.
+  when T is float32: cast[float32](cast[uint32](v) or (sign shl 31))
+  else: cast[float64](cast[uint64](v) or (uint64(sign) shl 63))
 
 {.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
 # Lengths are checked once, up front; the loops then load through unchecked
@@ -101,41 +116,59 @@ proc decodeSegdSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArra
   template be16(pos: int): uint32 = uint32(loadNum[uint16](s, pos, boBig))
   case f
   of sd8015:
-    # Groups of 4 samples in 10 bytes: 4 exponent nibbles, 4 fraction words.
-    template one(g, k: int, twos: static bool): T =
-      let e = (s[10 * g + k div 2] shr (4 * (1 - k mod 2))) and 0xF
-      let w = be16(10 * g + 2 + 2 * k)
-      let m = when twos: int(cast[int16](uint16(w)))
-              else: onesFraction(w and 0x7FFF, 0x7FFF, (w and 0x8000) != 0)
-      T(float64(m) * (float64(1 shl e) / 32768.0))
+    # Groups of 4 samples in 10 bytes: 4 exponent nibbles, 4 fraction words;
+    # a sample is fraction * 2^(e - 15). The group is loaded before any store
+    # (`d` may alias `s`, a byte pointer, so a store in between forces reloads).
+    template frac(pos: int, twos: static bool): int32 =
+      let w = int32(loadNum[int16](s, pos, boBig))
+      when twos: w else: onesComplement(w)
     template groups(twos: static bool) =
       for g in 0..<n div 4:
-        d[4 * g] = one(g, 0, twos)
-        d[4 * g + 1] = one(g, 1, twos)
-        d[4 * g + 2] = one(g, 2, twos)
-        d[4 * g + 3] = one(g, 3, twos)
-      for i in n div 4 * 4 ..< n: d[i] = one(i div 4, i mod 4, twos)
+        let a = 10 * g
+        let e = uint32(loadNum[uint16](s, a, boBig))
+        let m0 = frac(a + 2, twos)
+        let m1 = frac(a + 4, twos)
+        let m2 = frac(a + 6, twos)
+        let m3 = frac(a + 8, twos)
+        let v0 = T(m0) * pow2(T, cast[int32](e shr 12) - 15)
+        let v1 = T(m1) * pow2(T, cast[int32]((e shr 8) and 0xF) - 15)
+        let v2 = T(m2) * pow2(T, cast[int32]((e shr 4) and 0xF) - 15)
+        let v3 = T(m3) * pow2(T, cast[int32](e and 0xF) - 15)
+        d[4 * g] = v0
+        d[4 * g + 1] = v1
+        d[4 * g + 2] = v2
+        d[4 * g + 3] = v3
+      for i in n div 4 * 4 ..< n:
+        let k = i mod 4
+        let e = (uint32(s[10 * (i div 4) + k div 2]) shr (4 * (1 - k mod 2))) and 0xF
+        d[i] = T(frac(10 * (i div 4) + 2 + 2 * k, twos)) * pow2(T, cast[int32](e) - 15)
     if twosComplement8015: groups(true) else: groups(false)
   of sd8022:
+    # Sign bit 7, exponent bits 4-6, one's complement fraction bits 0-3:
+    # fraction * 4^e / 16.
     for i in 0..<n:
       let b = uint32(s[i])
-      let m = onesFraction(b and 0xF, 0xF, (b and 0x80) != 0)
-      d[i] = T(float64(m) / 16.0 * pow4[(b shr 4) and 7])
+      d[i] = T(onesField(b, 7, 0xF)) * pow2(T, 2 * cast[int32]((b shr 4) and 7) - 4)
   of sd8024:
+    # Sign bit 15, exponent bits 12-14, one's complement fraction bits 0-11:
+    # fraction * 4^e / 4096.
     for i in 0..<n:
       let w = be16(2 * i)
-      let m = onesFraction(w and 0xFFF, 0xFFF, (w and 0x8000) != 0)
-      d[i] = T(float64(m) / 4096.0 * pow4[(w shr 12) and 7])
+      d[i] = T(onesField(w, 15, 0xFFF)) * pow2(T, 2 * cast[int32]((w shr 12) and 7) - 12)
   of sd8042:
+    # Sign-magnitude: sign bit 7, exponent bits 5-6, fraction bits 0-4:
+    # fraction * 16^e / 32.
     for i in 0..<n:
       let b = uint32(s[i])
-      let v = float64(b and 0x1F) / 32.0 * pow16[(b shr 5) and 3]
-      d[i] = T(if (b and 0x80) != 0: -v else: v)
+      let v = T(b and 0x1F) * pow2(T, 4 * cast[int32]((b shr 5) and 3) - 5)
+      d[i] = withSign(T, v, b shr 7)
   of sd8044:
+    # Sign-magnitude: sign bit 15, exponent bits 13-14, fraction bits 0-12:
+    # fraction * 16^e / 8192.
     for i in 0..<n:
       let w = be16(2 * i)
-      let v = float64(w and 0x1FFF) / 8192.0 * pow16[(w shr 13) and 3]
-      d[i] = T(if (w and 0x8000) != 0: -v else: v)
+      let v = T(w and 0x1FFF) * pow2(T, 4 * cast[int32]((w shr 13) and 3) - 13)
+      d[i] = withSign(T, v, w shr 15)
   of sd8048:
     for i in 0..<n:
       when T is float64: d[i] = ibmToFloat64(loadNum[uint32](s, 4 * i, boBig))

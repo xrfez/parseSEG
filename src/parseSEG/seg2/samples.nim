@@ -62,13 +62,10 @@ func prefersFloat64*(f: Seg2Format): bool {.inline.} =
   ## precision: IEEE double.
   f == s2Float64
 
-func float20Value(e, w: uint16, twosComplement: bool): float64 {.inline.} =
-  # One format-3 sample: mantissa word `w` scaled by 2^e.
-  let m =
-    if twosComplement: int(cast[int16](w))
-    elif (w and 0x8000) != 0: -int((not w) and 0x7FFF) # one's complement
-    else: int(w)
-  float64(m * (1 shl int(e)))
+template pow2(T: typedesc, e: uint32): untyped =
+  # 2^e for e in 0..15, exact, built from the exponent bits.
+  when T is float32: cast[float32]((127'u32 + e) shl 23)
+  else: cast[float64](uint64(1023'u32 + e) shl 52)
 
 proc decodeSeg2SamplesRaw*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
     dst: var openArray[T], order: ByteOrder, twosComplement = false) {.raises: [].} =
@@ -96,11 +93,36 @@ proc decodeSeg2SamplesRaw*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte
       else:
         for i in 0..<n: d[i] = T(loadNum[float64](s, 8*i, o))
     of s2Float20:
-      for i in 0..<n:
-        let g = 10 * (i div 4)
-        let k = i mod 4
-        let e = (loadNum[uint16](s, g, o) shr (4 * k)) and 0xF
-        d[i] = T(float20Value(e, loadNum[uint16](s, g + 2 + 2 * k, o), twosComplement))
+      # Groups of 4 samples in 10 bytes: a word of 4 exponent nibbles (sample 0
+      # in the low nibble), then 4 mantissa words; a sample is mantissa * 2^e.
+      # One's complement without a branch: a negative word is one less than its
+      # value, so add the sign (0xFFFF reads as 0). The group is loaded before
+      # any store, since `d` may alias `s`.
+      template mant(pos: int, twos: static bool): int32 =
+        let w = int32(loadNum[int16](s, pos, o))
+        when twos: w else: w - (w shr 31)
+      template groups(twos: static bool) =
+        for g in 0..<n div 4:
+          let a = 10 * g
+          let e = uint32(loadNum[uint16](s, a, o))
+          let m0 = mant(a + 2, twos)
+          let m1 = mant(a + 4, twos)
+          let m2 = mant(a + 6, twos)
+          let m3 = mant(a + 8, twos)
+          let v0 = T(m0) * pow2(T, e and 0xF)
+          let v1 = T(m1) * pow2(T, (e shr 4) and 0xF)
+          let v2 = T(m2) * pow2(T, (e shr 8) and 0xF)
+          let v3 = T(m3) * pow2(T, e shr 12)
+          d[4 * g] = v0
+          d[4 * g + 1] = v1
+          d[4 * g + 2] = v2
+          d[4 * g + 3] = v3
+        for i in n div 4 * 4 ..< n:
+          let a = 10 * (i div 4)
+          let k = i mod 4
+          let e = (uint32(loadNum[uint16](s, a, o)) shr (4 * k)) and 0xF
+          d[i] = T(mant(a + 2 + 2 * k, twos)) * pow2(T, e)
+      if twosComplement: groups(true) else: groups(false)
     {.pop.}
   if order == boLittle: loop(boLittle) else: loop(boBig)
 

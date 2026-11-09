@@ -1085,7 +1085,7 @@ Steps, in order. Each is one commit or a few, with `nim test` green (and `nim as
 threaded paths):
 - [x] 15.3-1 I 15.3a: the umbrella leak quick fix (exclude the `*Raw` decoders in the
       re-exports) and a `tumbrella` test of every name in the `except` lists
-- [ ] 15.3-2 P7: branchless 8015/8024 (and 8022/8042/8044, SEG-2 format 3) decoders, with a
+- [x] 15.3-2 P7: branchless 8015/8024 (and 8022/8042/8044, SEG-2 format 3) decoders, with a
       randomized equivalence test
 - [ ] 15.3-3 P3: unchecked `decodeFields`, with the byte order picked once
 - [ ] 15.3-4 P12: `madvise(WILLNEED)` for scattered/large reads and the prefetcher's next chunk
@@ -1720,3 +1720,4 @@ threaded paths):
   - Owner decisions needed: the build target, O(1) open for fixed-length SEG-Y, and a smaller first prefetch chunk after a seek.
 - 2026-11-09: owner decisions on the 15.3 audits: v3 build default, sampled fixed-length open by default, opt-in `quickFirst`, all [do] and optional items. Steps 15.3-1..14 recorded.
 - 2026-11-09: 15.3-1 done: `segy/reader`, `segd/reader`, `seg2/{headers,reader,writer}` re-export `samples except decode*SamplesRaw` (seg2/reader was a fifth leak the audit missed); `traceindex` imports the codecs directly. `tumbrella` checks all 41 umbrella `except` names plus `rowPtr`: `not declared` for 39, by signature for the shared `flush`/`writeBytes`, and `finish` via its hidden `ProgressTicker`. Suite green.
+- 2026-11-09: 15.3-2 done: branchless SEG-D 8015/8022/8024 (one's complement by sign arithmetic), 8042/8044 (sign bit or-ed into the float) and SEG-2 format 3; exact 2^k scales from exponent bits, computed in the output type; 8015/format-3 groups loaded before the stores. `tests/tbranchless.nim`: bit-exact against the old formulas on 5 MB of random words and every 16-bit word, f32/f64, both complements, both SEG-2 orders. Random words, GB/s danger(-march=native)/release, before -> after: 8015 0.68->4.82 / 0.66->3.61; 8022 0.28->3.89 / 0.27->2.63; 8024 0.50->6.99 / 0.51->4.89; 8042 0.29->3.08 / 0.28->2.78; 8044 0.55->5.88 / 0.52->4.69; SEG-2 f20 LE 0.57->5.84 / 0.50->3.47 (f32 out; f64 out about half the f32 gain). Full-scale bench files, readTracesInto: d21-8015 2.57->4.75 / 2.27->3.47; d21-8024 1.94->7.16 / 2.14->4.82. Suite and asan green.
