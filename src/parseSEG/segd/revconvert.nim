@@ -818,7 +818,7 @@ proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions
   for d in w.log: result.add d
 
 proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions(),
-    progress: Progress = nil): DiagLog =
+    progress: Progress = nil): DiagLog {.raises: [].} =
   ## Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
   ## version). Never raises: problems, including I/O failures, are in the
   ## result. The output is written to a new temporary file next to
@@ -845,6 +845,13 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions(),
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finally:
-    if src != nil: src.close()
-    if sink != nil: sink.close()
+    # A failed close of the output (its last flush) loses data: fatal.
+    try:
+      if src != nil: src.close()
+    except CatchableError as e:
+      result.report(sevWarning, dcIo, e.msg, loc = Location(file: srcPath))
+    try:
+      if sink != nil: sink.close()
+    except CatchableError as e:
+      result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)

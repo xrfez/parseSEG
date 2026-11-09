@@ -58,8 +58,9 @@ type
     journal*: string   ## Journal path; default `<target>.edits.nif`.
     dryRun*: bool      ## Only list the changes.
     force*: bool       ## Apply a document made from another file.
-    onChange*: proc (c: HeaderChange) {.closure.}
+    onChange*: proc (c: HeaderChange) {.closure, raises: [CatchableError].}
       ## Called for each change the editor accepts (in a dry run: finds).
+      ## An exception it raises stops the import as a fatal diagnostic.
       ## Accepted edits reach the file when their journal entries are synced;
       ## if that later fails, they are dropped, reported in the log and not
       ## counted in `ImportResult.applied`.
@@ -455,9 +456,12 @@ func normalized(v, cur: FieldValue): FieldValue =
     result = toFieldValue(float64(v.intVal))
 
 proc sameFileAs(a, b: string): bool =
-  a.len > 0 and b.len > 0 and (a == b or (fileExists(a) and fileExists(b) and sameFile(a, b)))
+  # An unreadable path is not the same file (its open fails later).
+  a.len > 0 and b.len > 0 and (a == b or (fileExists(a) and fileExists(b) and
+    (try: sameFile(a, b) except OSError: false)))
 
-proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult =
+proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult {.
+    raises: [].} =
   ## Applies the headers document `nifPath` to `path` as a patch: each entry
   ## is compared with the file as edited so far and written only when it
   ## differs, through the journaled editor (batched: one journal sync per few
@@ -475,7 +479,9 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
     result.log.report(sevFatal, dcValidation, msg, loc = Location(file: at))
     return
   if not fileExists(nifPath): fatal("no such document")
-  if getFileSize(nifPath) == 0: fatal("the document is empty")
+  let size = try: getFileSize(nifPath) except OSError: -1
+  if size < 0: fatal("cannot read the document")
+  if size == 0: fatal("the document is empty")
   let target = if opts.outPath.len > 0 and not opts.dryRun: opts.outPath else: path
   let journal = if opts.journal.len > 0: opts.journal else: target & ".edits.nif"
   if opts.outPath.len > 0:

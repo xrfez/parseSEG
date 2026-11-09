@@ -817,7 +817,7 @@ proc copyReporting(src, dst: string, progress: Progress) =
     i.close()
 
 proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = GeometryFields(),
-    overwrite = false, progress: Progress = nil): GeometryCopy =
+    overwrite = false, progress: Progress = nil): GeometryCopy {.raises: [].} =
   ## Writes a copy of `srcPath` to `dstPath`, in the same standard and
   ## layout, with the survey geometry `g` joined (`applySurvey`, `overwrite`
   ## as there) and written (`writeGeometry`; `result.changes` says what changed).
@@ -859,7 +859,8 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = Geo
   finishOutput(tmp, dstPath, keep = not result.log.isFatal, result.log)
 
 proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = ConvertOptions(),
-    fields = GeometryFields(), overwrite = false, progress: Progress = nil): DiagLog =
+    fields = GeometryFields(), overwrite = false, progress: Progress = nil): DiagLog {.
+    raises: [].} =
   ## `convertFile` with the survey geometry `g` joined (`applySurvey`,
   ## `overwrite` as there) and written into the SEG-Y output: SEG-D keys are
   ## joined before they become SEG-Y headers; SEG-Y output is written with
