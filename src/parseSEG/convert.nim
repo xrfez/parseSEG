@@ -204,9 +204,11 @@ proc encodeExact(fmt: SampleFormat, vals: openArray[float64], dst: var seq[byte]
     order: ByteOrder, scratch: var seq[float64]): bool =
   # Encodes, then decodes back: false if any value changed (rounding, float32
   # narrowing, overflow to infinity). Raises like `encodeSamples`.
-  dst.setLen vals.len * sampleSize(fmt)
+  # Both buffers are overwritten whole: no zero-fill (it was half of a
+  # SEG-D -> SEG-Y conversion's CPU time).
+  dst.setLenUninit vals.len * sampleSize(fmt)
   encodeSamples(fmt, vals, dst, order)
-  scratch.setLen vals.len
+  scratch.setLenUninit vals.len
   decodeSamples(fmt, dst, scratch, order)
   for i in 0..<vals.len:
     if scratch[i] != vals[i] and not (scratch[i].isNaN and vals[i].isNaN): return false
@@ -678,7 +680,7 @@ proc toSegySamples(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, twosComplem
     if f == sd8048 and c.outFmt == sfIbm32 and not c.opts.applyDescale:
       # IBM words are copied: going through float64/float32 would lose
       # values outside float32's range.
-      dst.setLen 4 * t.numSamples
+      dst.setLenUninit 4 * t.numSamples # every word is written below
       for i in 0..<t.numSamples:
         putNum(dst, 4 * i, getNum[uint32](t.samples, 4 * i, boBig), c.opts.byteOrder)
     else:

@@ -173,17 +173,15 @@ when defined(linux):
     doAssert seen == 1 and r.applied == 0 and r.refused == 1, $r.applied & " " & $r.log
     doAssert r.log.has("1 accepted edits were not written", sevFatal)
     doAssert readFile(p) == readFile(ex / name) and not readFile(p & ".edits.nif").contains("(edit")
-    # A change followed by more fields of the same header: reading them
-    # needs the sync, whose failure stops the import (an I/O error).
+    # A change followed by more fields of the same header: since 13.2 they
+    # are read with the pending edit laid over the map, without a sync, so
+    # the import runs to the end and the failed final sync drops the edit.
     p = fresh(name)
     let g = d.find("(f groupX ")
     writeFile(tmp / "sync3.nif", d[0 ..< g] & "(f groupX 901" & d[d.find(")", g) .. ^1])
     r = importLimited(p, tmp / "sync3.nif", seen)
     doAssert seen == 1 and r.applied == 0 and r.refused == 1, $r.applied & " " & $r.log
-    var ioFatal = false
-    for x in r.log:
-      if x.severity == sevFatal and x.code == dcIo and "cannot be synced" in x.msg: ioFatal = true
-    doAssert ioFatal
+    doAssert r.log.has("1 accepted edits were not written", sevFatal), $r.log
     doAssert not r.log.has("fields the file does not have", sevError)
     doAssert readFile(p) == readFile(ex / name)
 

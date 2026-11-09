@@ -323,12 +323,43 @@ when defined(linux):
     doAssertRaises(IOError): ed.close()
     doAssert readBytes(path) == original and editLines(journal) == 0
 
-  block current_field_raises_ioerror_on_a_failed_sync:
+  block current_field_needs_no_sync:
+    # Since 13.2 a batch's pending edits are read without a sync, so a
+    # journal that fails shows only when the batch ends.
     let (path, journal) = fresh("Sweep0.sgy")
+    let original = readBytes(path)
     var ed = openEditor(path)
     ed.beginBatch()
     doAssert ed.setTraceField(0, "trace.groupX", 77)
     failJournal(journal)
-    doAssertRaises(IOError): discard ed.currentTraceField(0, "trace.groupX")
-    doAssert ed.edits == 0
-    ed.close()
+    doAssert ed.currentTraceField(0, "trace.groupX").intVal == 77
+    doAssertRaises(IOError): ed.close()
+    doAssert ed.edits == 0 and readBytes(path) == original
+
+block batch_edits_several_fields_of_one_header_without_a_flush:
+  # Task 13.2 (review R2-2): a second field of a header with a pending edit
+  # used to flush the batch (one fsync per trace). The edit now decodes the
+  # header with the pending bytes laid over it, so nothing reaches the map
+  # before `endBatch`, and the journal still holds every step.
+  let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+  let orig = readBytes(path)
+  var ed = openEditor(path, journal)
+  let n = ed.file.len
+  let x0 = ed.file.traceField(0, "trace.sourceX").intVal
+  ed.beginBatch()
+  for i in 0..<n:
+    doAssert ed.setTraceField(i, "trace.sourceX", 1000 + i)
+    doAssert ed.setTraceField(i, "trace.sourceY", 2000 + i)
+    doAssert ed.setTraceField(i, "trace.sourceX", 3000 + i) # the same field again
+    doAssert ed.currentTraceField(i, "trace.sourceX").intVal == 3000 + i
+  # Not flushed: the map still holds the original values.
+  doAssert ed.file.traceField(0, "trace.sourceX").intVal == x0
+  doAssert ed.file.traceField(n - 1, "trace.sourceY").intVal != 2000 + n - 1 or n == 0
+  doAssert ed.endBatch()
+  for i in 0..<n:
+    doAssert ed.file.traceField(i, "trace.sourceX").intVal == 3000 + i
+    doAssert ed.file.traceField(i, "trace.sourceY").intVal == 2000 + i
+  ed.close()
+  doAssert editLines(journal) == 3 * n
+  doAssert rollbackJournal(path, journal).len == 0
+  doAssert readBytes(path) == orig

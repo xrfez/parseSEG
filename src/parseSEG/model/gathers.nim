@@ -191,6 +191,11 @@ proc gathers*(ix: TraceIndex): seq[Gather] =
         result.add g
         first = i
 
+type GroupKey = (StationId, StationId, uint8, uint8)
+
+func groupKey(k: TraceKeys): GroupKey {.inline.} =
+  (sourceId(k), receiverId(k), k.depthIndex, k.reshootIndex)
+
 proc componentGroups*(ix: TraceIndex, traces: Slice[int]): seq[ComponentGroup] =
   ## Groups the seismic traces of `traces` by (source, receiver station,
   ## depth index, reshoot index), in order of first appearance. Raises
@@ -198,11 +203,11 @@ proc componentGroups*(ix: TraceIndex, traces: Slice[int]): seq[ComponentGroup] =
   ## start in `0 .. ix.len`) or an index built without `keys = true`.
   ix.requireKeys()
   checkSpan(traces, ix.len)
-  var at: Table[(StationId, StationId, uint8, uint8), int]
+  var at: Table[GroupKey, int]
   for i in traces:
     if ix.isSeismic(i):
       template k: untyped = ix.keys[i]
-      let key = (sourceId(k), receiverId(k), k.depthIndex, k.reshootIndex)
+      let key = groupKey(k)
       var g = at.getOrDefault(key, -1)
       if g < 0:
         g = result.len
@@ -228,8 +233,19 @@ proc componentGroupIds*(f: SeismicFile, traces: Slice[int]): seq[int] {.segApi.}
   ## The component group of each trace of `traces` (see `componentGroups`),
   ## numbered from 0 in order of first appearance; -1 for a trace in none
   ## (an auxiliary trace).
-  let groups = f.index.componentGroups(traces) # checks the range first
+  # One table from group key to id, no per-group objects: 10 M traces with
+  # 10 M groups would otherwise build 10 M groups of seqs and key copies.
+  template ix: untyped = f.index
+  ix.requireKeys()
+  checkSpan(traces, ix.len)
   result = newSeq[int](traces.spanLen)
-  for k in 0 ..< result.len: result[k] = -1
-  for g, grp in groups:
-    for i in grp.traces: result[i - traces.a] = g
+  var at: Table[GroupKey, int]
+  for i in traces:
+    var g = -1
+    if ix.isSeismic(i):
+      let key = groupKey(ix.keys[i])
+      g = at.getOrDefault(key, -1)
+      if g < 0:
+        g = at.len
+        at[key] = g
+    result[i - traces.a] = g

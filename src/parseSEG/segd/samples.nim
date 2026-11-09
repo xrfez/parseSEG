@@ -70,10 +70,6 @@ func prefersFloat64*(f: SegdSampleFormat): bool =
   ## True when float32 would lose precision: 8080 and 32-bit integers.
   f in {sd8080, sd8038, sd9080, sd9038}
 
-func leI24(b: openArray[byte], pos: int): int32 {.inline.} =
-  let u = uint32(b[pos]) or (uint32(b[pos + 1]) shl 8) or (uint32(b[pos + 2]) shl 16)
-  cast[int32](u shl 8) shr 8
-
 func putLeI24(b: var openArray[byte], pos: int, v: int32) {.inline.} =
   let u = cast[uint32](v)
   b[pos] = byte(u and 0xFF)
@@ -85,6 +81,14 @@ func onesFraction(q, mask: uint32, negative: bool): int {.inline.} =
   # Negative zero (all bits set) reads as 0.
   if negative: -int((not q) and mask) else: int(q)
 
+const
+  pow4 = [1.0, 4.0, 16.0, 64.0, 256.0, 1024.0, 4096.0, 16384.0] ## 4^e, e in 0..7.
+  pow16 = [1.0, 16.0, 256.0, 4096.0]                           ## 16^e, e in 0..3.
+
+{.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+# Lengths are checked once, up front; the loops then load through unchecked
+# pointers, in every build.
+
 proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
     dst: var openArray[T], twosComplement8015 = false) =
   ## Decodes `dst.len` samples of format `f` from the start of `src`.
@@ -95,59 +99,77 @@ proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[b
   if src.len < dataBytes(f, n):
     raiseTruncated("trace data has " & $src.len & " bytes, " & $dataBytes(f, n) &
       " needed for " & $n & " samples")
+  if n == 0: return
+  let s = byteBuf(src)
+  let d = cast[ptr UncheckedArray[T]](addr dst[0])
+  template be16(pos: int): uint32 = uint32(loadNum[uint16](s, pos, boBig))
   case f
   of sd8015:
-    var i = 0
-    while i < n:
-      let g = 10 * (i div 4)
-      for k in 0..3:
-        if i + k < n:
-          let e = if k mod 2 == 0: src[g + k div 2] shr 4 else: src[g + k div 2] and 0xF
-          let w = uint32(beU16(src, g + 2 + 2 * k))
-          let m = if twosComplement8015: int(beI16(src, g + 2 + 2 * k))
-                  else: onesFraction(w and 0x7FFF, 0x7FFF, (w and 0x8000) != 0)
-          dst[i + k] = T(float64(m) / 32768.0 * float64(1 shl e))
-      i += 4
+    # Groups of 4 samples in 10 bytes: 4 exponent nibbles, 4 fraction words.
+    template one(g, k: int, twos: static bool): T =
+      let e = (s[10 * g + k div 2] shr (4 * (1 - k mod 2))) and 0xF
+      let w = be16(10 * g + 2 + 2 * k)
+      let m = when twos: int(cast[int16](uint16(w)))
+              else: onesFraction(w and 0x7FFF, 0x7FFF, (w and 0x8000) != 0)
+      T(float64(m) * (float64(1 shl e) / 32768.0))
+    template groups(twos: static bool) =
+      for g in 0..<n div 4:
+        d[4 * g] = one(g, 0, twos)
+        d[4 * g + 1] = one(g, 1, twos)
+        d[4 * g + 2] = one(g, 2, twos)
+        d[4 * g + 3] = one(g, 3, twos)
+      for i in n div 4 * 4 ..< n: d[i] = one(i div 4, i mod 4, twos)
+    if twosComplement8015: groups(true) else: groups(false)
   of sd8022:
     for i in 0..<n:
-      let b = uint32(src[i])
+      let b = uint32(s[i])
       let m = onesFraction(b and 0xF, 0xF, (b and 0x80) != 0)
-      dst[i] = T(float64(m) / 16.0 * pow(4.0, float64((b shr 4) and 7)))
+      d[i] = T(float64(m) / 16.0 * pow4[(b shr 4) and 7])
   of sd8024:
     for i in 0..<n:
-      let w = uint32(beU16(src, 2 * i))
+      let w = be16(2 * i)
       let m = onesFraction(w and 0xFFF, 0xFFF, (w and 0x8000) != 0)
-      dst[i] = T(float64(m) / 4096.0 * pow(4.0, float64((w shr 12) and 7)))
+      d[i] = T(float64(m) / 4096.0 * pow4[(w shr 12) and 7])
   of sd8042:
     for i in 0..<n:
-      let b = uint32(src[i])
-      let v = float64(b and 0x1F) / 32.0 * pow(16.0, float64((b shr 5) and 3))
-      dst[i] = T(if (b and 0x80) != 0: -v else: v)
+      let b = uint32(s[i])
+      let v = float64(b and 0x1F) / 32.0 * pow16[(b shr 5) and 3]
+      d[i] = T(if (b and 0x80) != 0: -v else: v)
   of sd8044:
     for i in 0..<n:
-      let w = uint32(beU16(src, 2 * i))
-      let v = float64(w and 0x1FFF) / 8192.0 * pow(16.0, float64((w shr 13) and 3))
-      dst[i] = T(if (w and 0x8000) != 0: -v else: v)
+      let w = be16(2 * i)
+      let v = float64(w and 0x1FFF) / 8192.0 * pow16[(w shr 13) and 3]
+      d[i] = T(if (w and 0x8000) != 0: -v else: v)
   of sd8048:
     for i in 0..<n:
-      when T is float64: dst[i] = ibmToFloat64(beU32(src, 4 * i))
-      else: dst[i] = ibmToFloat32(beU32(src, 4 * i))
+      when T is float64: d[i] = ibmToFloat64(loadNum[uint32](s, 4 * i, boBig))
+      else: d[i] = ibmToFloat32(loadNum[uint32](s, 4 * i, boBig))
   of sd8036:
-    for i in 0..<n: dst[i] = T(beI24(src, 3 * i))
+    for i in 0..<n: d[i] = T(cast[int32](loadU24(s, 3 * i, boBig) shl 8) shr 8)
   of sd8038:
-    for i in 0..<n: dst[i] = T(beI32(src, 4 * i))
+    for i in 0..<n: d[i] = T(loadNum[int32](s, 4 * i, boBig))
   of sd8058:
-    for i in 0..<n: dst[i] = T(beF32(src, 4 * i))
+    when T is float32 and hostOrder == boBig: copyMem(d, s, 4 * n)
+    else:
+      for i in 0..<n: d[i] = T(loadNum[float32](s, 4 * i, boBig))
   of sd8080:
-    for i in 0..<n: dst[i] = T(beF64(src, 8 * i))
+    when T is float64 and hostOrder == boBig: copyMem(d, s, 8 * n)
+    else:
+      for i in 0..<n: d[i] = T(loadNum[float64](s, 8 * i, boBig))
   of sd9036:
-    for i in 0..<n: dst[i] = T(leI24(src, 3 * i))
+    for i in 0..<n: d[i] = T(cast[int32](loadU24(s, 3 * i, boLittle) shl 8) shr 8)
   of sd9038:
-    for i in 0..<n: dst[i] = T(getNum[int32](src, 4 * i, boLittle))
+    for i in 0..<n: d[i] = T(loadNum[int32](s, 4 * i, boLittle))
   of sd9058:
-    for i in 0..<n: dst[i] = T(getNum[float32](src, 4 * i, boLittle))
+    when T is float32 and hostOrder == boLittle: copyMem(d, s, 4 * n)
+    else:
+      for i in 0..<n: d[i] = T(loadNum[float32](s, 4 * i, boLittle))
   of sd9080:
-    for i in 0..<n: dst[i] = T(getNum[float64](src, 8 * i, boLittle))
+    when T is float64 and hostOrder == boLittle: copyMem(d, s, 8 * n)
+    else:
+      for i in 0..<n: d[i] = T(loadNum[float64](s, 8 * i, boLittle))
+
+{.pop.}
 
 proc expFraction(x: float64, base: float64, maxExp, fracBits: int, i: int):
     tuple[e: int, mag: uint32] =

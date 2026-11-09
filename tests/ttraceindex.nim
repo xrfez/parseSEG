@@ -301,3 +301,31 @@ block empty_ranges_must_start_in_the_file:
   doAssertRaises(ValueError): discard f.readTraces(7..6)
   doAssertRaises(ValueError): discard f.maxSamples(-1 .. -2)
   f.close()
+
+block index_memory_is_reserved_from_the_file_size:
+  # Task 13.2 (review R2-8): after the first trace the index reserves room
+  # for the rest of the file, so entries and keys cost 24 + 144 bytes per
+  # trace, not up to 1.5x that from a growing seq.
+  const n = 20_000
+  let path = getTempDir() / "parseseg_reserve.sgy"
+  var b = newSeq[byte](3600 + n * 244)
+  b[0] = 0x43 # 'C', ASCII text
+  for i in 1..<3200: b[i] = 0x20
+  b[3220] = 0; b[3221] = 1 # 1 sample
+  b[3224] = 0; b[3225] = 5 # IEEE float
+  b[3502] = 0; b[3503] = 1 # fixed length
+  for t in 0..<n:
+    let at = 3600 + t * 244
+    b[at + 3] = byte(t and 0xFF)
+    b[at + 115] = 1 # 1 sample
+  var s = newString(b.len)
+  for i, c in b: s[i] = char(c)
+  writeFile(path, s)
+  let before = getOccupiedMem()
+  var f = openSeismic(path, keys = true)
+  let grown = getOccupiedMem() - before
+  doAssert f.len == n and f.index.log.count(sevError) == 0
+  doAssert sizeof(TraceEntry) == 24 and sizeof(TraceKeys) == 144
+  doAssert grown < n * (24 + 144) + n * 12 + 65536, $grown
+  f.close()
+  removeFile(path)
