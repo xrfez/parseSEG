@@ -1101,7 +1101,9 @@ threaded paths):
       `tensors` to `common/`), `nim docs` in CI
 - [ ] 15.3-13 I optionals: D1, D4, G2, A3 splits, D2 `OpenOptions`, D3 codec overloads, F4
 - [ ] 15.3-14 P9/P10/P14 bench and docs fixes; a full-scale `nim bench` re-run;
-      `docs/benchmarks.md` updated
+      `docs/benchmarks.md` updated;
+      also revisit the 15.3-4 cost on warm gathers (median +6 µs on 1000-trace gathers from the
+      two `mincore` probes): one probe, or skip the probe for contiguous spans
 
 ### Future (noted, not scheduled)
 - From the 14.2 audit, declined for now: a bounds-checked `mapped(f)` view for internal map
