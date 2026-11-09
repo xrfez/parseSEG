@@ -3,7 +3,7 @@
 import std/[assertions, os, math, random]
 import parseSEG/common/errors
 import parseSEG/segd/samples
-import parseSEG/model/tensors
+import parseSEG/common/tensors
 import ./utils/testutils
 
 

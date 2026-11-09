@@ -395,8 +395,8 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
 proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
   ## Whether `s` holds SPS rather than SEG P1 records, judged from the data
   ## records of its first `maxRecords` records: SPS point records have a
-  ## record letter (R, S) and grid coordinates in columns 47-65, relations
-  ## (X) channel numbers in 39-48; P1 data records start with a blank and
+  ## record letter (R, S) and grid coordinates in columns 47-65, relation
+  ## records (X) channel numbers in 39-48; P1 data records start with a blank and
   ## have hemisphere letters in columns 35 and 45. Rewinds `s`.
   let start = s.getPosition
   var sps, p1 = 0

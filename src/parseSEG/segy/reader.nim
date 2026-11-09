@@ -34,7 +34,7 @@
 import std/[hashes, os]
 import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio, pushback]
-import ../model/tensors
+import ../common/tensors
 import ./[textheader, binheader, traceheader, samples, exttext, layout]
 export textheader, binheader, traceheader, exttext, layout
 export samples except decodeSamplesRaw

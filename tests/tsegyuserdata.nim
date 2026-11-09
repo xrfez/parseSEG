@@ -3,7 +3,7 @@
 import std/[assertions, os, strutils]
 import parseSEG/common/[errors, diagnostics, endians]
 import parseSEG/io/[records, diskio, tapeimage]
-import parseSEG/model/tensors
+import parseSEG/common/tensors
 import parseSEG/segy/[reader, writer]
 import ./utils/testutils
 

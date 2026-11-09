@@ -58,7 +58,7 @@
 ## | numVertSummed, instrumentGainConstant | STACK, FIXED_GAIN |
 ## | delayRecordingTime; source/group/totalStatic | DELAY; STATIC_CORRECTIONS (s to whole ms) |
 ## | alias, low-cut, high-cut, notch filter fields | ALIAS_FILTER, LOW_CUT_FILTER, HIGH_CUT_FILTER, NOTCH_FREQUENCY |
-## | coordinates, offset, elevations | `TraceKeys` (SOURCE_ / RECEIVER_LOCATION, z plus DATUM); receiver/sourceDatumElevation: DATUM |
+## | coordinates, offset, elevations | `TraceKeys` (`SOURCE_` / RECEIVER_LOCATION, z plus DATUM); receiver/sourceDatumElevation: DATUM |
 ## | transduction constant, units (mV) | DESCALING_FACTOR / STACK |
 ## | year ... second | ACQUISITION_DATE / _TIME (time basis left 0: SEG-2 gives no zone) |
 ## | binary traceSorting, measurementSystem, impulsePolarity | TRACE_SORT, UNITS (METERS 1, FEET 2), trace 0's POLARITY (1 → 2, -1 → 1) |

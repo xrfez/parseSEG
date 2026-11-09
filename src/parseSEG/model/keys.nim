@@ -21,8 +21,8 @@
 ## The trace time (`time`, UTC POSIX seconds, task 6.9):
 ## - SEG-Y: trace bytes 157-166 (year, day of year, hour, minute, second;
 ##   Ext1 bytes 141-144 add nanoseconds) in the time basis of bytes 167-168,
-##   or of binary bytes 3511-3512 (Rev 2 and later) when those are 0. GMT
-##   (2) and UTC (4) are taken as they are, GPS (5) is converted to UTC with
+##   or of binary bytes 3511-3512 (Rev 2 and later) when those are 0.
+##   GMT (2) and UTC (4) are taken as they are, GPS (5) is converted to UTC with
 ##   the leap second table, and an unset basis (0) is read as UTC, as most
 ##   files leave it unset; local (1) and other (3) times are unknown (NaN).
 ##   Year 0 is unknown; years 1-99 (Rev 0 files) are 1950-2049.
@@ -146,9 +146,9 @@ proc traceKeys*(f: Seg2File, t: Seg2Trace): TraceKeys =
   ## The keys of a SEG-2 trace, from its keyword strings (`seg2.md` §7.2):
   ## - `record`: SHOT_SEQUENCE_NUMBER (the trace's, else the file's);
   ## - `ensemble`: CDP_NUMBER; `channel`: CHANNEL_NUMBER;
-  ## - `srcPoint` / `rcvPoint`: SOURCE_ / RECEIVER_STATION_NUMBER;
+  ## - `srcPoint` / `rcvPoint`: `SOURCE_` / RECEIVER_STATION_NUMBER;
   ## - `srcLine` = `rcvLine`: LINE_ID when it is a number;
-  ## - source and receiver x, y, z: SOURCE_ / RECEIVER_LOCATION, in the
+  ## - source and receiver x, y, z: `SOURCE_` / RECEIVER_LOCATION, in the
   ##   file's UNITS (a one-value location is x along the line, y = 0, so
   ##   offsets still follow); z plus DATUM when DATUM is given;
   ## - `component`: RECEIVER's type as a SEG-Y trace identification code:

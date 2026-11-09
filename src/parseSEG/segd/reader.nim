@@ -42,7 +42,7 @@
 import std/[math, tables, strutils]
 import ../common/[errors, diagnostics]
 import ../io/[records, diskio, pushback]
-import ../model/tensors
+import ../common/tensors
 import ./[blocks, samples, mux]
 export blocks, diagnostics
 export samples except decodeSegdSamplesRaw

@@ -4,7 +4,7 @@
 import std/[assertions, os, math, strutils]
 import parseSEG/common/[endians, errors]
 import parseSEG/segy/[textheader, binheader, traceheader, samples, exttext]
-import parseSEG/model/tensors
+import parseSEG/common/tensors
 import ./utils/testutils
 
 

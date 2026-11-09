@@ -102,8 +102,10 @@ task fmt, "Format codebase via nimpretty":
   exec "nimpretty --indent:2 src/parseSEG.nim"
 
 task docs, "Generate HTML documentation":
-  ## Emits HTML documentation into htmldocs directory.
-  selfExec "doc --project --outdir:htmldocs src/parseSEG.nim"
+  ## Emits HTML documentation into htmldocs directory. A broken link or an
+  ## RST style warning fails the build (CI runs it).
+  selfExec "doc --project --warningAsError:BrokenLink:on --warningAsError:warnRstStyle:on " &
+    "--outdir:htmldocs src/parseSEG.nim"
 
 # ------------------------------------------------------- benchmarks (13.2) --
 

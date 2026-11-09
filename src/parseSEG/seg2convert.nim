@@ -12,13 +12,13 @@
 ## | CHANNEL_NUMBER | `TraceKeys.channel` (SEG-Y bytes 13-16, SEG-D trace number), else the trace's position |
 ## | SHOT_SEQUENCE_NUMBER | `TraceKeys.record` (field record / file number) |
 ## | CDP_NUMBER | `TraceKeys.ensemble` |
-## | SOURCE_ / RECEIVER_STATION_NUMBER, LINE_ID | `TraceKeys` source / receiver point, receiver (else source) line |
-## | SOURCE_ / RECEIVER_LOCATION | `TraceKeys` x y (z when known) |
-## | RECEIVER | component 11 HYDROPHONE, 12 VERTICAL_GEOPHONE, 13 SH_, 14 SV_HORIZONTAL_GEOPHONE |
+## | `SOURCE_` / RECEIVER_STATION_NUMBER, LINE_ID | `TraceKeys` source / receiver point, receiver (else source) line |
+## | `SOURCE_` / RECEIVER_LOCATION | `TraceKeys` x y (z when known) |
+## | RECEIVER | component 11 HYDROPHONE, 12 VERTICAL_GEOPHONE, 13 `SH_`, 14 SV_HORIZONTAL_GEOPHONE |
 ## | SAMPLE_INTERVAL, DELAY | `sampleIntervalUs`; SEG-Y delay recording time (time scalar applied, Rev 1 on), SEG-D channel set start time |
 ## | TRACE_TYPE | SEG-Y trace id 2 DEAD, 5 UPHOLE, seismic codes SEISMIC_DATA, other auxiliary codes TEST_DATA; SEG-D seismic / EM SEISMIC_DATA (trace edit 1-2: DEAD), uphole UPHOLE, other channel types TEST_DATA |
-## | STACK, FIXED_GAIN, ALIAS_ / LOW_CUT_ / HIGH_CUT_FILTER, NOTCH_FREQUENCY, STATIC_CORRECTIONS | SEG-Y trace header (vertical sum, gain constant, filters, statics with the time scalar) |
-## | STACK, DESCALING_FACTOR, ALIAS_ / LOW_CUT_FILTER, NOTCH_FREQUENCY | SEG-D channel set (Rev 3 filters; MP factor or descale multiplier × STACK: SEG-D descales to the mV of one shot, SEG-2 gives it as sample × DESCALING_FACTOR / STACK) |
+## | STACK, FIXED_GAIN, `ALIAS_` / `LOW_CUT_` / HIGH_CUT_FILTER, NOTCH_FREQUENCY, STATIC_CORRECTIONS | SEG-Y trace header (vertical sum, gain constant, filters, statics with the time scalar) |
+## | STACK, DESCALING_FACTOR, `ALIAS_` / LOW_CUT_FILTER, NOTCH_FREQUENCY | SEG-D channel set (Rev 3 filters; MP factor or descale multiplier × STACK: SEG-D descales to the mV of one shot, SEG-2 gives it as sample × DESCALING_FACTOR / STACK) |
 ## | file: ACQUISITION_DATE / _TIME | trace 0's `TraceKeys.time`: SEG-Y date and time in its time basis; SEG-D trace timestamp, GH#3 time zero or GH#1 (two-digit years 1950-2049) |
 ## | file: TRACE_SORT, UNITS | SEG-Y sorting code and measurement system (SEG-D: AS_ACQUIRED, NONE) |
 ## | file: NOTE | where the data came from, then the SEG-Y textual header's non-blank cards |
@@ -46,7 +46,7 @@
 ## | Source Description (0x15 VIBRATOR, 0x16 DYNAMITE, 0x17 GUN, else 0x1F) + Position | SOURCE, source station / line, SOURCE_LOCATION: in the general header when every trace has the same source, else in each trace's extensions |
 ## | CSD | channel type (0x10 seismic and DEAD, 0x11 RADAR_DATA, 0x30 UPHOLE, 0x70 TEST_DATA), DELAY, interval (whole µs), samples, DESCALING_FACTOR / STACK as the descale multiplier (else 1), STACK, ALIAS_FILTER, LOW_CUT_FILTER, NOTCH_FREQUENCY |
 ## | demux header | CHANNEL_NUMBER (else the position in the file), trace edit 2 for DEAD |
-## | THE#1 | LINE_ID and RECEIVER_STATION_NUMBER (when numeric), RECEIVER type as sensor type (1 HYDROPHONE, 2 VERTICAL_, 3 SV_ (inline), 4 SH_HORIZONTAL_GEOPHONE (crossline), 6 ACCELEROMETER) |
+## | THE#1 | LINE_ID and RECEIVER_STATION_NUMBER (when numeric), RECEIVER type as sensor type (1 HYDROPHONE, 2 `VERTICAL_`, 3 `SV_` (inline), 4 SH_HORIZONTAL_GEOPHONE (crossline), 6 ACCELEROMETER) |
 ## | Position (trace extension) | RECEIVER_LOCATION (z plus DATUM) |
 ## | external header | every file string, as `KEYWORD value` lines |
 ##

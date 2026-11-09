@@ -6,14 +6,31 @@
 ## format layers meet Arraymancer. SEG-Y, SEG-D and SEG-2 formats are separate enums,
 ## so `decodeTrace` overloads on the format type.
 
-import arraymancer/tensor
+# Arraymancer's CPU tensor modules, one by one: `arraymancer/tensor` also
+# imports its CUDA and OpenCL backends under `nimdoc`, which `nim doc` cannot
+# build without those toolkits. The list is that module's CPU list, so
+# `import parseSEG` gives the same tensor API.
+import nimblas
+import arraymancer/[laser/dynamic_stack_arrays, tensor/data_structure, tensor/init_cpu,
+  tensor/init_copy_cpu, tensor/accessors, tensor/accessors_macros_syntax, tensor/accessors_macros_read,
+  tensor/accessors_macros_write, tensor/operators_comparison, tensor/higher_order_applymap,
+  tensor/higher_order_foldreduce, tensor/shapeshifting, tensor/selectors, tensor/display,
+  tensor/ufunc, tensor/operators_blas_l1, tensor/operators_blas_l2l3,
+  tensor/operators_broadcasted, tensor/operators_logical, tensor/complex,
+  tensor/math_functions, tensor/aggregate, tensor/algorithms, tensor/bitops_functions,
+  tensor/lapack, tensor/optim_ops_fusion, tensor/syntactic_sugar, tensor/exporting]
 import ../segy/samples
 import ../segd/samples as segdsamples
 import ../seg2/samples as seg2samples
-import ../common/endians
+import ./endians
 import ../private/tensorrows
 
-export tensor
+export OrderType, dynamic_stack_arrays, data_structure, init_cpu, init_copy_cpu, accessors,
+  accessors_macros_syntax, accessors_macros_read, accessors_macros_write,
+  operators_comparison, higher_order_applymap, higher_order_foldreduce, shapeshifting,
+  selectors, display, ufunc, operators_blas_l1, operators_blas_l2l3, operators_broadcasted,
+  operators_logical, complex, math_functions, aggregate, algorithms, bitops_functions, lapack,
+  optim_ops_fusion, syntactic_sugar, exporting
 
 proc newTraceTensor*[T: SampleType](traces, samples: Natural): Tensor[T] =
   ## A zero-filled `[traces, samples]` tensor. Traces shorter than `samples`

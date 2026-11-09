@@ -39,7 +39,8 @@ import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader, mux, demux]
 import ../seg2/[reader as seg2reader]
-import ./[tensors, keys, indextypes]
+import ./[keys, indextypes]
+import ../common/tensors
 import ../segy/samples as segysamples, ../segd/samples as segdsamples, ../seg2/samples as seg2samples
 import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, segywalk, segyfixed]
 

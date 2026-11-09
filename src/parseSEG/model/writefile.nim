@@ -52,7 +52,8 @@ import ../segy/[reader as segyreader, writer as segywriter, binheader, tracehead
 import ../segd/[reader as segdreader, writer as segdwriter, revconvert]
 import ../seg2/[reader as seg2reader, writer as seg2writer]
 import ../[convert, seg2convert]
-import ./[traceindex, tensors]
+import ./traceindex
+import ../common/tensors
 import ../private/tensorrows
 
 type

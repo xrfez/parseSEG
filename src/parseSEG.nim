@@ -41,8 +41,8 @@ export convert.SegyTargetFormat, convert.ConvertOptions, convert.targetFormat,
 export seg2convert
 
 import parseSEG/model/[keys, keytypes, indextypes, traceindex, gathers, prefetch, fieldvalues,
-  headerfields, edit, headernif, summary, headerlist, sorting, tensors, writefile]
-import parseSEG/common/[seismickind, progress]
+  headerfields, edit, headernif, summary, headerlist, sorting, writefile]
+import parseSEG/common/[seismickind, progress, tensors]
 export seismickind, progress, keys, keytypes, indextypes, tensors, fieldvalues
 # Allowlists: traceindex, edit and convert also export helpers that need
 # their private fields (for the library's own modules), so their public
