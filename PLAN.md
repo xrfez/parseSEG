@@ -966,7 +966,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
       - [x] 14.2a prefetcher lifetime (items 1, 2)
       - [x] 14.2b boundary-only procs (items 3, 8, 9, 10)
       - [x] 14.2c handles to seqs (items 4, 5)
-      - [ ] 14.2d encapsulation and hidden parameters (items 11, 12, 13, 14, 16)
+      - [x] 14.2d encapsulation and hidden parameters (items 11, 12, 13, 14, 16)
       - [ ] 14.2e comments, umbrella, `chunks` (items 19, 21, 22) Known
       candidates:
       - **Handles:** handle-style types (`HeaderListing`, `HeaderPatch` and others), where a
@@ -1571,3 +1571,9 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 - 2026-11-09: 14.2b done. Deleted `readTracesRaw`, `seg2StringCount`/`seg2Keyword`/`seg2Value` (use `seg2Strings`), `previewGeometry`, and `writeGeometry(ed, f: SeismicFile)` (pass `f.index`). `GeometryChanges` gains `$`, the former private `describe`. Tests, the bench, `api.md` and `guide/conversion.md` are updated.
 - 2026-11-09: 14.2c done (3ba46f0). `traceHeaders`/`recordHeaders`/`fileHeaders` return `seq[HeaderRow]`, and `HeaderListing` is gone. `HeaderPatch` gives way to `initHeaderChange(scope, index, name, value)`, which checks the name, plus `writeHeaderPatch(changes, path)`. The guides, `api.md` and theaderlist are updated.
 - 2026-11-09: fix of a 14.2a regression. The map accessors (`unsafeMemory`, `mappedSize`, `isOpen`, `copyBytes`) copied the `MemFileSource` ref into a local. ORC counts are not atomic, so threads sharing a file in `readTracesInto` crashed intermittently (tdocs processing example). They now read through `f.map.src` in place. New `tests/tsharedreads.nim` (8 threads, 20 k reads each) crashed 4 of 5 runs before the fix and 0 after. Rule: never copy `f.map` or `f.map.src` into a local on a path threads share.
+- 2026-11-09: 14.2d done.
+  - `SeismicFile.path`/`demuxPath`, `HeaderEditor.file`/`log`/`journalPath` and `SurveyGeometry.log` are private behind `lent` accessors. `writeGeometry` reports through the internal `logVar`.
+  - `convertFile(src, dst, opts)` and `convertSegdToSegy(src, sink, opts, recordFormats)` lose `join`; the internal `convertJoined`/`convertSegdToSegyJoined`/`GeometryJoin` are out of the umbrella.
+  - `openSeismic` loses `writable`; `openEditor` uses the internal `openSeismicRw`.
+  - `addP1(g, path, opts = P1Options(), elevation)`.
+  - `copyWithGeometry` is one proc returning `GeometryCopy` (`changes`, `log`).

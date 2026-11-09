@@ -728,7 +728,7 @@ block geometry_write_back_is_refused:
   var f = openSeismic(path, keys = true)
   doAssertRaises ValueError: discard f.geometryChanges()
   f.close()
-  let log = copyWithGeometry(path, tmp / "geo2.sg2", initSurveyGeometry())
+  let log = copyWithGeometry(path, tmp / "geo2.sg2", initSurveyGeometry()).log
   doAssert log.isFatal and "SEG-2" in log.messages
   doAssert not fileExists(tmp / "geo2.sg2")
   doAssert convertWithGeometry(path, tmp / "geo.sgy", initSurveyGeometry()).isFatal

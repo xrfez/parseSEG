@@ -62,6 +62,13 @@ type
       ## Values (one per kind and trace) the file has no slot for, or that
       ## do not fit theirs; the log says which.
 
+  GeometryCopy* = object
+    ## The outcome of `copyWithGeometry`.
+    changes*: GeometryChanges ## What was written into the copy.
+    log*: DiagLog
+      ## Problems, with an info summary; fatal when nothing usable was
+      ## written (`dstPath` is then untouched).
+
   Value = enum
     vSrcXY = "source X/Y", vRcvXY = "receiver X/Y", vSrcZ = "source elevation",
     vRcvZ = "receiver elevation", vCmp = "midpoint", vOffset = "offset",
@@ -731,7 +738,7 @@ proc writeGeometry*(ed: var HeaderEditor, ix: TraceIndex,
         record: if ix.kind == skSegd: int(e.record) else: -1)
       if not ed.writeBytes(e.offset, buf, "trace " & $i & " geometry", loc):
         inc refused # logged by the editor
-    ed.log.add p.log
+    ed.logVar.add p.log
     result = p.changes
   finally:
     # Synced here also inside the caller's batch, so the counts below are
@@ -753,7 +760,7 @@ proc writeGeometry*(ed: var HeaderEditor, ix: TraceIndex,
       receiverStations: result.receiverStations - left.receiverStations,
       unwritable: result.unwritable)
     if dropped > 0:
-      ed.log.report(sevFatal, dcIo, $dropped & " traces' geometry was not written: the " &
+      ed.logVar.report(sevFatal, dcIo, $dropped & " traces' geometry was not written: the " &
         "journal could not be synced", loc = Location(file: ed.file.path))
 
 # ------------------------------------------------------------------ files --
@@ -776,49 +783,40 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
   finally:
     j.close()
 
-proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry,
-    changes: var GeometryChanges, fields = GeometryFields(), overwrite = false): DiagLog =
+proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = GeometryFields(),
+    overwrite = false): GeometryCopy =
   ## Writes a copy of `srcPath` to `dstPath`, in the same standard and
   ## layout, with the survey geometry `g` joined (`applySurvey`, `overwrite`
-  ## as there) and written (`writeGeometry`; `changes` says what changed).
+  ## as there) and written (`writeGeometry`; `result.changes` says what changed).
   ## Multiplexed SEG-D is written demultiplexed. `srcPath` is never changed.
   ## SEG-2 is not supported yet (a fatal diagnostic). Never raises: problems
-  ## are in the result, with an info summary. The output goes through
+  ## are in `result.log`, with an info summary. The output goes through
   ## a new temporary file next to `dstPath` and is renamed when complete.
-  if sameAsInput(srcPath, dstPath, result): return
-  let tmp = createTempFor(dstPath, result)
+  if sameAsInput(srcPath, dstPath, result.log): return
+  let tmp = createTempFor(dstPath, result.log)
   if tmp.len == 0: return
   try:
     var f = openSeismic(srcPath)
     try:
       case f.kind
       of skUnknown:
-        result.report(sevFatal, dcUnsupportedFormat, "neither a SEG-Y nor a SEG-D file",
+        result.log.report(sevFatal, dcUnsupportedFormat, "neither a SEG-Y nor a SEG-D file",
           loc = Location(file: srcPath))
       of skSeg2:
-        result.report(sevFatal, dcUnsupportedFormat, "geometry cannot be written to SEG-2 " &
+        result.log.report(sevFatal, dcUnsupportedFormat, "geometry cannot be written to SEG-2 " &
           "files yet", loc = Location(file: srcPath))
       of skSegy, skSegd:
         # A multiplexed file: its demultiplexed copy.
         copyFile(if f.demuxPath.len > 0: f.demuxPath else: srcPath, tmp)
     finally:
       f.close()
-    if not result.isFatal:
-      changes = writeInPlace(tmp, g, fields, overwrite, result)
-      result.report(sevInfo, dcValidation, "geometry written: " & $changes,
+    if not result.log.isFatal:
+      result.changes = writeInPlace(tmp, g, fields, overwrite, result.log)
+      result.log.report(sevInfo, dcValidation, "geometry written: " & $result.changes,
         loc = Location(file: dstPath))
   except CatchableError as e:
-    result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
-  finishOutput(tmp, dstPath, keep = not result.isFatal, result)
-
-proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = GeometryFields(),
-    overwrite = false): DiagLog =
-  ## Writes a copy of `srcPath` to `dstPath` (same standard and layout;
-  ## multiplexed SEG-D demultiplexed) with the survey geometry `g` joined and
-  ## written (see `writeGeometry`). Never raises: problems are in the result,
-  ## with an info summary of what changed.
-  var c: GeometryChanges
-  copyWithGeometry(srcPath, dstPath, g, c, fields, overwrite)
+    result.log.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
+  finishOutput(tmp, dstPath, keep = not result.log.isFatal, result.log)
 
 proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = ConvertOptions(),
     fields = GeometryFields(), overwrite = false): DiagLog =
@@ -843,7 +841,7 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
     return
   case kind
   of skSegd:
-    result.add convertFile(srcPath, dstPath, opts,
+    result.add convertJoined(srcPath, dstPath, opts,
       GeometryJoin(survey: addr g, fields: fields, overwrite: overwrite))
   of skSegy:
     if sameAsInput(srcPath, dstPath, result): return

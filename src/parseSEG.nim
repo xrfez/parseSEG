@@ -29,16 +29,17 @@ import parseSEG/vendor/[maps, apply, scaffold]
 export maps, apply, scaffold
 
 import parseSEG/[convert, seg2convert]
-export convert, seg2convert
+export convert except convertJoined, convertSegdToSegyJoined, GeometryJoin
+export seg2convert
 
 import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif, summary, headerlist]
 export traceindex except unsafeMemory, decodeEntry, mappedSize, flush,
-  requireKeys, checkSpan, spanLen, MapPin, pinMap
+  requireKeys, checkSpan, spanLen, MapPin, pinMap, openSeismicRw
 export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
   isLayoutField, isNamedField, fieldValueOf
 export keys, gathers, prefetch, headernif, summary, headerlist
-export edit except writeBytes, flushPending, batching
+export edit except writeBytes, flushPending, batching, logVar
 
 import parseSEG/survey/[textrec, sps, p1, join, writeback]
 export textrec, sps, p1, join, writeback

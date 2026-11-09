@@ -77,6 +77,6 @@ block survey_setup:
     g.addSps(getTempDir() / "parseseg_no_such.sps")
     doAssert false
   except IOError: discard
-  raisesValue(proc () = g.addP1(getTempDir() / "x.p1", gridDecimals = 9))
+  raisesValue(proc () = g.addP1(getTempDir() / "x.p1", P1Options(gridDecimals: 9)))
 
 echo "tcoreapi: ok"

@@ -416,12 +416,9 @@ type
   SeismicFile* = object
     ## A memory-mapped disk file with its trace index.
     index*: TraceIndex
-    path*: string ## The file's path, as opened.
-    demuxPath*: string
-      ## The temporary demultiplexed copy that is mapped and indexed instead
-      ## of a multiplexed SEG-D file ("" for any other file); deleted on
-      ## `close`. Index offsets and `copyBytes` refer to it.
-    map: MapRef ## nil once closed.
+    path: string      ## See `path`.
+    demuxPath: string ## See `demuxPath`.
+    map: MapRef       ## nil once closed.
 
 proc `=destroy`(f: SeismicFile) =
   # `f` is passed by reference and this is its last use, so its fields may
@@ -488,21 +485,9 @@ proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: 
   log.add f.index.log
   f.index.log = log
 
-proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
-    writable = false, demuxDir = ""): SeismicFile =
-  ## Maps the disk file `path`, detects SEG-Y, SEG-D or SEG-2, and builds the trace
-  ## index (with per-trace geometry when `keys`; `twosComplement8015` also
-  ## reads SEG-2 format-3 mantissas as two's complement). Format problems are in
-  ## `index.log`; an undetectable file gives a fatal diagnostic and an empty
-  ## index. Raises `IOError`/`OSError` if the file cannot be opened or
-  ## mapped. `writable` maps it read-write, for in-place header edits
-  ## (`model/edit`).
-  ##
-  ## A SEG-D file with multiplexed records is demultiplexed once into a
-  ## temporary copy in `demuxDir` (default: the OS temp directory), which is
-  ## mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
-  ## on `close`; the file itself is never changed. With `writable`, such a
-  ## file raises `ValueError`: edits would change only the copy.
+proc openMapped(path: string, twosComplement8015, keys, writable: bool,
+    demuxDir: string): SeismicFile =
+  # `openSeismic` / `openSeismicRw`.
   result = SeismicFile(path: path, map: MapRef(src: openMemFileSource(path, writable)))
   let n = int(min(result.map.src.size, 8192))
   let kind = if n > 0: detectKind(result.map.src.memory.toOpenArray(0, n - 1)) else: skUnknown
@@ -519,11 +504,43 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
     result.index.log.report(sevFatal, dcUnsupportedFormat,
       "not a SEG-Y, SEG-D or SEG-2 file", 0, Location(file: path))
 
+proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
+    demuxDir = ""): SeismicFile =
+  ## Maps the disk file `path` read-only, detects SEG-Y, SEG-D or SEG-2, and
+  ## builds the trace index (with per-trace geometry when `keys`;
+  ## `twosComplement8015` also reads SEG-2 format-3 mantissas as two's
+  ## complement). Format problems are in `index.log`; an undetectable file
+  ## gives a fatal diagnostic and an empty index. Raises `IOError`/`OSError`
+  ## if the file cannot be opened or mapped. To change headers in place, use
+  ## `openEditor` (`model/edit`).
+  ##
+  ## A SEG-D file with multiplexed records is demultiplexed once into a
+  ## temporary copy in `demuxDir` (default: the OS temp directory), which is
+  ## mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
+  ## on `close`; the file itself is never changed.
+  openMapped(path, twosComplement8015, keys, false, demuxDir)
+
+proc openSeismicRw*(path: string): SeismicFile =
+  ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`
+  ## mapped read-write. Raises `ValueError` for multiplexed SEG-D: edits
+  ## would change only the demultiplexed copy.
+  openMapped(path, false, false, true, "")
+
 proc close*(f: var SeismicFile) =
   ## Unmaps the file and deletes a demultiplexed copy (`demuxPath`). The
   ## index stays usable; range reads do not. A prefetcher still running on
   ## the file keeps the map until its own `close`. Idempotent.
   f.map = nil
+
+func path*(f: SeismicFile): lent string {.inline.} =
+  ## The file's path, as opened.
+  f.path
+
+func demuxPath*(f: SeismicFile): lent string {.inline.} =
+  ## The temporary demultiplexed copy that is mapped and indexed instead of a
+  ## multiplexed SEG-D file ("" for any other file); deleted on `close`.
+  ## Index offsets and `copyBytes` refer to it.
+  f.demuxPath
 
 func len*(f: SeismicFile): int {.inline.} =
   ## The number of traces.

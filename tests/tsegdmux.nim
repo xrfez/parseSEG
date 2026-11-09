@@ -457,12 +457,12 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   m.close()
   doAssert ix.len == 12 and not ix.contiguous and ix.segdRecords[0].multiplexed
   # In-place edits refuse a multiplexed file.
-  doAssertRaises ValueError: discard openSeismic(tmp / "m15.sgd", writable = true)
+  doAssertRaises ValueError: discard openEditor(tmp / "m15.sgd")
   doAssertRaises ValueError: discard openEditor(tmp / "m15.sgd", tmp / "j.nif")
   doAssert not fileExists(tmp / "j.nif")
   # Survey geometry: in place is refused like any edit; a copy is written
   # demultiplexed (10.5).
-  let geo = copyWithGeometry(tmp / "m15.sgd", tmp / "m15geo.sgd", initSurveyGeometry())
+  let geo = copyWithGeometry(tmp / "m15.sgd", tmp / "m15geo.sgd", initSurveyGeometry()).log
   doAssert not geo.isFatal and geo.has("geometry written: 0 traces")
   var gf = openSeismic(tmp / "m15geo.sgd")
   doAssert gf.demuxPath.len == 0 and gf.len == 12 and not gf.index.segdRecords[0].multiplexed

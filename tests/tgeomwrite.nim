@@ -156,10 +156,9 @@ block segy_rev2_station_header_via_layout:
   var f = openSeismic(segy, keys = true)
   doAssert f.applySurvey(g, overwrite = true) == 1
   let dst = tmp / "63geo.sgy"
-  var c: GeometryChanges
-  let log = copyWithGeometry(segy, dst, g, c, overwrite = true)
-  doAssert not log.hasErrors, $log.len
-  doAssert c.receiverStations == 1, $c
+  let r = copyWithGeometry(segy, dst, g, overwrite = true)
+  doAssert not r.log.hasErrors, $r.log.len
+  doAssert r.changes.receiverStations == 1, $r.changes
   let d = readSegy(dst)
   doAssert d.file.fieldValue(d.traces[0], "rec_line") == some(14.0)
   doAssert d.file.fieldValue(d.traces[0], "rec_point") == some(105.0)
@@ -252,8 +251,8 @@ block refusals:
   doAssertRaises ValueError: discard ed.writeGeometry(f.index) # no keys
   ed.close()
   f.close()
-  doAssert copyWithGeometry(path, path, initSurveyGeometry()).isFatal
-  doAssert copyWithGeometry(tmp / "missing.sgy", tmp / "x.sgy", initSurveyGeometry()).isFatal
+  doAssert copyWithGeometry(path, path, initSurveyGeometry()).log.isFatal
+  doAssert copyWithGeometry(tmp / "missing.sgy", tmp / "x.sgy", initSurveyGeometry()).log.isFatal
 
 when defined(linux):
   import std/posix

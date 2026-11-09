@@ -716,17 +716,10 @@ proc toSegyTrace(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, inRecord: int
       "and point; they are not carried", c.loc)
   c.toSegySamples(rec, t, twosComplement8015, result.samples)
 
-proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
-    recordFormats: set[SegdSampleFormat] = {}, join = GeometryJoin()): DiagLog =
-  ## Converts the SEG-D stream at `src` to one SEG-Y file (see the module
-  ## doc for the mapping). `recordFormats`, the formats of all records (from
-  ## a header scan; `convertFile` does one), lets the default format choice
-  ## hold every record exactly; without it the first record decides. Either
-  ## way every trace is checked after encoding, and traces not written
-  ## exactly are counted in a warning. The reader's, the writer's and the
-  ## conversion's diagnostics are all in the result; a fatal one means the
-  ## output is incomplete. `join` (internal) joins survey geometry to the
-  ## keys first.
+proc convertSegdToSegyJoined*(src: RecordSource, sink: RecordSink, opts: ConvertOptions,
+    recordFormats: set[SegdSampleFormat], join: GeometryJoin): DiagLog =
+  ## **Internal** (`convertWithGeometry`; not exported by `parseSEG`).
+  ## `convertSegdToSegy` with survey geometry joined to the keys first.
   var c = SegdToSegy(opts: opts, loc: Location(file: sink.name), join: join)
   var err: string
   if not checkTarget(opts, err):
@@ -821,6 +814,19 @@ func seg2TraceId(t: Seg2Trace, k: TraceKeys): int16 =
   elif tt == some(ttTestData): -1
   elif k.component in 12'u8..14'u8: int16(k.component)
   else: 1
+
+
+proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
+    recordFormats: set[SegdSampleFormat] = {}): DiagLog =
+  ## Converts the SEG-D stream at `src` to one SEG-Y file (see the module
+  ## doc for the mapping). `recordFormats`, the formats of all records (from
+  ## a header scan; `convertFile` does one), lets the default format choice
+  ## hold every record exactly; without it the first record decides. Either
+  ## way every trace is checked after encoding, and traces not written
+  ## exactly are counted in a warning. The reader's, the writer's and the
+  ## conversion's diagnostics are all in the result; a fatal one means the
+  ## output is incomplete.
+  convertSegdToSegyJoined(src, sink, opts, recordFormats, GeometryJoin())
 
 proc msRounded(c: var SegdToSegy, seconds: float64): int16 =
   # Seconds as whole ms, noting the rounding.
@@ -1070,20 +1076,10 @@ proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
   except CatchableError:
     result = {}
 
-proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
-    join = GeometryJoin()): DiagLog {.raises: [].} =
-  ## Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
-  ## `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
-  ## `convertSegdToSegy`, `convertSeg2ToSegy`), SEG-D (`convertSegdRevision`
-  ## with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
-  ## input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
-  ## raises: problems, including I/O failures, are in the result. The output
-  ## is written to a new temporary file next to `dstPath` (`<dstPath>.<random>.tmp`,
-  ## created exclusively) and renamed when complete, so a failed conversion
-  ## leaves an existing `dstPath` untouched and no partial file.
-  ## `join` (internal) joins survey geometry to SEG-D keys (SEG-Y target
-  ## only); for survey
-  ## geometry in the output use `convertWithGeometry`.
+proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
+    join: GeometryJoin): DiagLog {.raises: [].} =
+  ## **Internal** (`convertWithGeometry`; not exported by `parseSEG`).
+  ## `convertFile` with survey geometry joined to SEG-D keys (SEG-Y target).
   var head = newSeq[byte](8192)
   try:
     let f = open(srcPath, fmRead)
@@ -1137,7 +1133,7 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
         result = convertSegy(src, sink, opts)
       else:
         src = openDiskSource(srcPath)
-        result = convertSegdToSegy(src, sink, opts, formats, join)
+        result = convertSegdToSegyJoined(src, sink, opts, formats, join)
     finally:
       if src != nil: src.close()
       if sink != nil: sink.close()
@@ -1145,3 +1141,16 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)
+
+proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.raises: [].} =
+  ## Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
+  ## `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
+  ## `convertSegdToSegy`, `convertSeg2ToSegy`), SEG-D (`convertSegdRevision`
+  ## with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
+  ## input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
+  ## raises: problems, including I/O failures, are in the result. The output
+  ## is written to a new temporary file next to `dstPath` (`<dstPath>.<random>.tmp`,
+  ## created exclusively) and renamed when complete, so a failed conversion
+  ## leaves an existing `dstPath` untouched and no partial file. For survey
+  ## geometry in the output use `convertWithGeometry`.
+  convertJoined(srcPath, dstPath, opts, GeometryJoin())

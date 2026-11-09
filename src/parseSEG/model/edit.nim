@@ -71,9 +71,9 @@ type
 
   HeaderEditor* = object
     ## An open file with its journal. Call `close` to flush both.
-    file*: SeismicFile   ## The mapped file and its index (headers as opened).
-    log*: DiagLog ## Refused edits and journal problems.
-    journalPath*: string ## Where the edits are journaled.
+    file: SeismicFile    ## See `file`.
+    log: DiagLog         ## See `log`.
+    journalPath: string  ## See `journalPath`.
     journal: JournalFile ## Unbuffered: entries wait in `unsynced` (see `syncJournal`).
     unsynced: string     ## Journal lines not yet written and synced.
     journalDead: bool    ## The journal could not be cut back after a failed write.
@@ -460,7 +460,7 @@ proc openEditor*(path: string, journalPath = ""): HeaderEditor =
   let jp = if journalPath.len > 0: journalPath else: path & ".edits.nif"
   if jp == path or (fileExists(jp) and fileExists(path) and sameFile(jp, path)):
     raise newException(ValueError, "the journal " & jp & " is the file being edited")
-  result = HeaderEditor(file: openSeismic(path, writable = true), journalPath: jp)
+  result = HeaderEditor(file: openSeismicRw(path), journalPath: jp)
   result.openJournal()
 
 proc close*(ed: var HeaderEditor) =
@@ -480,6 +480,24 @@ proc close*(ed: var HeaderEditor) =
   if not synced:
     raise newException(IOError, "the journal " & ed.journalPath &
       " cannot be synced; the batch's pending edits were not written")
+
+func file*(ed: HeaderEditor): lent SeismicFile {.inline.} =
+  ## The mapped file and its index (cached headers refreshed by the edits).
+  ## Read-only: change the file through the editor's setters.
+  ed.file
+
+func log*(ed: HeaderEditor): lent DiagLog {.inline.} =
+  ## Refused edits and journal problems.
+  ed.log
+
+proc logVar*(ed: var HeaderEditor): var DiagLog {.inline.} =
+  ## **Internal** (`writeGeometry`). The editor's log, to report into. Not
+  ## exported by `parseSEG`.
+  ed.log
+
+func journalPath*(ed: HeaderEditor): lent string {.inline.} =
+  ## Where the edits are journaled.
+  ed.journalPath
 
 func edits*(ed: HeaderEditor): int {.inline.} =
   ## Edits written in this session (no-op edits excluded).

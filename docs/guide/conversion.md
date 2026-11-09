@@ -163,9 +163,9 @@ doAssert check.traceKeys(0).rcvPoint == 101
 doAssert rollbackJournal("shot.sgd", "shot.sgd.edits.nif").len == 0   # undo, if wanted
 
 # 2. Into a copy in the same standard.
-let copyLog = copyWithGeometry("SEG Spec/exampleFiles/63.sgd", "shot_geo.sgd", g,
+let copied = copyWithGeometry("SEG Spec/exampleFiles/63.sgd", "shot_geo.sgd", g,
   overwrite = true)
-doAssert not copyLog.hasErrors
+doAssert not copied.log.hasErrors and copied.changes.receiverStations == 1
 
 # 3. Converted to SEG-Y, which has coordinate fields for everything.
 let convLog = convertWithGeometry("SEG Spec/exampleFiles/63.sgd", "shot_geo.sgy", g,

@@ -46,7 +46,7 @@ type
     tape*: string ## Only X records of this field tape ("" = all).
     lineNames*: Table[string, float64] ## Text line name → line number (see `mapLine`).
     trailingDigits*: bool ## Unmapped line names use their trailing digits.
-    log*: DiagLog ## Problems met while adding survey files.
+    log: DiagLog ## See `log`.
 
   GeometryFields* = object
     ## Which joined values are written to a file (`writeGeometry`,
@@ -62,6 +62,10 @@ type
     ## The stations one channel of a field record was recorded from.
     source*, receiver*: StationKey
     component*: int ## 1-based within the station (multi-component), else 0.
+
+func log*(g: SurveyGeometry): lent DiagLog {.inline.} =
+  ## Problems met while adding survey files.
+  g.log
 
 func relationCount*(g: SurveyGeometry): int =
   ## The number of X runs loaded.
@@ -209,15 +213,15 @@ proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions()) =
   g.addLog(f.log)
   g.addSps(f)
 
-proc addP1*(g: var SurveyGeometry, path: string, gridDecimals = 0, depthDecimals = 0,
-    elevation = false) =
-  ## Reads the SEG P1 file at `path` and adds its shotpoints. The decimals are
-  ## the implicit decimals of the grid and depth/elevation fields (the file's
-  ## header says); with `elevation`, columns 62-66 are z. Raises `IOError` if
-  ## the file cannot be read, `ValueError` for decimals outside 0..8.
-  if gridDecimals notin 0..8 or depthDecimals notin 0..8:
+proc addP1*(g: var SurveyGeometry, path: string, opts = P1Options(), elevation = false) =
+  ## Reads the SEG P1 file at `path` (`readP1` with `opts`: the implicit
+  ## decimals of the grid and depth/elevation fields, which the file's header
+  ## gives, and the angle unit) and adds its shotpoints; with `elevation`,
+  ## columns 62-66 are z. Raises `IOError` if the file cannot be read,
+  ## `ValueError` for decimals outside 0..8.
+  if opts.gridDecimals notin 0..8 or opts.depthDecimals notin 0..8:
     raise newException(ValueError, "decimals must be 0..8")
-  let f = readP1(path, P1Options(gridDecimals: gridDecimals, depthDecimals: depthDecimals))
+  let f = readP1(path, opts)
   g.addLog(f.log)
   g.addP1(f, elevation)
 

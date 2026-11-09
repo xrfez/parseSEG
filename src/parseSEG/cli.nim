@@ -929,7 +929,9 @@ proc surveyApply(a: Args): int =
   var c: GeometryChanges
   if output.len > 0:
     f.close()
-    log.add copyWithGeometry(path, output, g, c, fields, overwrite)
+    let r = copyWithGeometry(path, output, g, fields, overwrite)
+    c = r.changes
+    log.add r.log
     printChanges(c, "changed in " & output)
   elif inPlace:
     var ed = openEditor(path, a.get("journal"))

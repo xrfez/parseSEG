@@ -131,7 +131,7 @@ policy:
 | Streaming readers (`openSegy`, `openSegd`) and writers | `r.log`, `w.log` | The stream ended early |
 | `HeaderEditor` | `ed.log` | Refused edits (`error`) and journal problems |
 | `importHeaders` | `result.log` | The document was refused or unreadable |
-| `convertFile`, `convertSegdRevision`, `copyWithGeometry`, `convertWithGeometry`, `rollbackJournal`, `applyJournal` | the returned `DiagLog` | Nothing usable was written (`dst` is untouched) |
+| `convertFile`, `convertSegdRevision`, `copyWithGeometry` (its `log`), `convertWithGeometry`, `rollbackJournal`, `applyJournal` | the returned `DiagLog` | Nothing usable was written (`dst` is untouched) |
 | `SurveyGeometry.addSps` / `addP1`, `readSps`, `readP1` | `g.log`, the file's `log` | |
 
 ## Logs as files
