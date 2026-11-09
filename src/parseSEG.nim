@@ -40,10 +40,10 @@ export convert.SegyTargetFormat, convert.ConvertOptions, convert.targetFormat,
   convert.convertSegy, convert.convertSegdToSegy, convert.convertSeg2ToSegy, convert.convertFile
 export seg2convert
 
-import parseSEG/model/[keys, keytypes, indextypes, traceindex, gathers, prefetch, fieldvalues,
-  headerfields, edit, headernif, summary, headerlist, sorting, writefile]
+import parseSEG/model/[keys, keytypes, indextypes, indexwalk, traceindex, gathers, prefetch,
+  fieldvalues, headerfields, edit, headernif, summary, headerlist, sorting, writefile]
 import parseSEG/common/[seismickind, progress, tensors]
-export seismickind, progress, keys, keytypes, indextypes, tensors, fieldvalues
+export seismickind, progress, keys, keytypes, indextypes, indexwalk, tensors, fieldvalues
 # Allowlists: traceindex, edit and convert also export helpers that need
 # their private fields (for the library's own modules), so their public
 # names are listed one by one, as are headerfields'. A new public name goes
@@ -54,8 +54,7 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.traceEntry, traceindex.hasKeys, traceindex.traceKeys, traceindex.traceKeysInto,
   traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,
   traceindex.copyBytes, traceindex.readTracesInto, traceindex.readTraces,
-  traceindex.detectKind, traceindex.buildIndex, traceindex.applyGeometry,
-  traceindex.saveIndex
+  traceindex.applyGeometry, traceindex.saveIndex
 export headerfields.fieldNames, headerfields.fieldByName, headerfields.traceField,
   headerfields.recordField, headerfields.fileField, headerfields.findTraceField,
   headerfields.findRecordField, headerfields.findFileField, headerfields.blockKind,

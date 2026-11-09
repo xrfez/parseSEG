@@ -260,7 +260,7 @@ fields and results above, or building blocks for code that works on raw headers.
 
 | Area | Names |
 |---|---|
-| Index (`model/traceindex`, `model/keys` with `model/keytypes`, `model/summary`) | `TraceCodec` (how one file, record or SEG-2 format encodes samples), `NoChannelSet`; per entry `channelSetIndex`, `sampleOffset`, `dataBytes`, `known` (decodable), `prefersFloat64`; `StationKey` / `stationKey` (a station's table key, rounded to 1/100), `Coordinates`, `initTraceKeys`, `deriveGeometry` (offset and midpoint from the coordinates), `hasSourceXY`, `hasReceiverXY`, `hash`; `StandardRevision` |
+| Index (`model/traceindex`, `model/indexwalk`, `model/keys` with `model/keytypes`, `model/summary`) | `TraceCodec` (how one file, record or SEG-2 format encodes samples), `NoChannelSet`; per entry `channelSetIndex`, `sampleOffset`, `dataBytes`, `known` (decodable), `prefersFloat64`; `StationKey` / `stationKey` (a station's table key, rounded to 1/100), `Coordinates`, `initTraceKeys`, `deriveGeometry` (offset and midpoint from the coordinates), `hasSourceXY`, `hasReceiverXY`, `hash`; `StandardRevision` |
 | Header fields (`model/headerfields`) | `FieldValueKind`, `HeaderScope`, `BlockRef` (where a header block lies), `toFieldValue`, `toFloat` |
 | Byte order (`common/endians`) | `ByteOrder`, `hostOrder`, `ByteBuf` / `byteBuf`, `swapBytes`; big-endian readers `beU8` .. `beU64`, `beI8` .. `beI64`, `beU24`, `beI24`, `beF32`, `beF64` and writers `putBeU8` .. `putBeF64`; either order: `getNum`, `putNum`, `loadNum`, `loadU24` (unchecked) |
 | Field layouts (`common/fieldlayout`) | `FieldSpec`, `FieldKind`, `fieldTable(T)` (a header type's layout), `BcdInvalid`, `BcdAllF` |

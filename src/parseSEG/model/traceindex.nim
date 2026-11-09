@@ -9,12 +9,11 @@
 ## f.close()
 ## ```
 ##
-## `buildIndex` walks any `RecordSource` (disk, tape image, tape device) with
-## the readers' `headersOnly` mode: sample bytes are skipped, by seeking where
-## the source can. Each trace costs one 24-byte `TraceEntry`, so 10 million
-## traces take 240 MB (room for the entries is reserved from the file size
-## after the first trace), and 144 bytes of `TraceKeys` with `keys`. Header objects are kept per file (SEG-Y, SEG-2) or per
-## record (SEG-D), never per trace.
+## `buildIndex` (`indexwalk`, re-exported here) walks any `RecordSource`
+## (disk, tape image, tape device) with the readers' `headersOnly` mode. Each
+## trace costs one 24-byte `TraceEntry`, so 10 million traces take 240 MB, and
+## 144 bytes of `TraceKeys` with `keys`. The index cache format (`saveIndex`)
+## is in `private/indexcache`.
 ##
 ## SEG-2 is a random-access disk format (a pointer per trace), so it is
 ## indexed from a memory-mapped file only (`openSeismic`, or `buildIndex` on
@@ -31,241 +30,18 @@
 ## a temporary demultiplexed copy (`segd/demux`) and maps and indexes that
 ## instead (`demuxPath`); the copy is deleted on `close`.
 
-import std/[os, times, strutils]
-import ../common/[errors, diagnostics, bcd, seismickind, progress, binstore, niftext,
-  outputfile]
-import ../version
+import std/[os, times]
+import ../common/[errors, diagnostics, seismickind, progress, tensors]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
-import ../segd/[reader as segdreader, mux, demux]
+import ../segd/[reader as segdreader, demux]
 import ../seg2/[reader as seg2reader]
-import ./[keys, indextypes]
-import ../common/tensors
-import ../segy/samples as segysamples, ../segd/samples as segdsamples, ../seg2/samples as seg2samples
-import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, segywalk, segyfixed]
+import ./[keys, indextypes, indexwalk]
+import ../segy/samples as segysamples, ../segd/samples as segdsamples,
+  ../seg2/samples as seg2samples
+import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, indexcache]
 
-export memsource, diagnostics, keys, seismickind, progress, tensors, indextypes
-
-# ------------------------------------------------------------- detection --
-
-func looksLikeSegdGh1(b: openArray[byte]): bool =
-  # General Header #1: BCD file number (or FFFF) in bytes 1-2, a BCD format
-  # code 0xxx/8xxx/9xxx in bytes 3-4.
-  if b.len < 32: return false
-  let fileOk = isAllF(b, 0, 4) or (block:
-    var ok = true
-    for n in 0..3:
-      if nibble(b, n) > 9: ok = false
-    ok)
-  var code = 0
-  for n in 4..7:
-    let d = int(nibble(b, n))
-    if d > 9: return false
-    code = code * 10 + d
-  fileOk and (toSegdFormat(code).isSome or code.isMultiplexedCode or code in [1015, 1022])
-
-func printable(b: byte, ebcdic: bool): bool {.inline.} =
-  if ebcdic:
-    b == 0x40 or b in 0x4A'u8..0x50'u8 or b in 0x5A'u8..0x61'u8 or b in 0x6A'u8..0x6F'u8 or
-      b in 0x79'u8..0x7F'u8 or b in 0x81'u8..0x89'u8 or b in 0x91'u8..0x99'u8 or
-      b in 0xA1'u8..0xA9'u8 or b in 0xC0'u8..0xC9'u8 or b in 0xD0'u8..0xD9'u8 or
-      b in 0xE0'u8..0xE9'u8 or b in 0xF0'u8..0xF9'u8
-  else:
-    b in 0x20'u8..0x7E'u8
-
-func looksLikeSegy(head: openArray[byte], at: int): bool =
-  # A 3200-byte textual header at `at` that starts with `C` and is mostly
-  # printable text in its character set (EBCDIC for 0xC3, ASCII for 0x43).
-  # The binary header is left to the reader, so a file with an undefined
-  # format code is still read as SEG-Y and gets the reader's diagnostics.
-  if head.len < at + 3600 or head[at] notin {0xC3'u8, 0x43'u8}: return false
-  let ebcdic = head[at] == 0xC3
-  var n = 0
-  for i in at ..< at + 3200:
-    if printable(head[i], ebcdic): inc n
-  n >= 3200 * 6 div 10
-
-func detectKind*(head: openArray[byte]): SeismicKind =
-  ## Guesses the standard from the first bytes of a stream (pass at least
-  ## 3728). SEG-2: the File Descriptor Block ID (`55 3A` or `3A 55`) and the
-  ## first trace's block ID or a plausible fixed part (`isSeg2`); neither
-  ## SEG-Y text nor a SEG-D BCD file number can start that way. SEG-D: a
-  ## storage unit label or a Table of Contents file. SEG-Y: a
-  ## textual header starting with `C` that is mostly printable EBCDIC or
-  ## ASCII, possibly after a 128-byte tape label. Otherwise SEG-D if the bytes
-  ## are a plausible General Header #1 (a SEG-D file number 43xx starts with
-  ## ASCII `C`, but its next 3200 bytes are not text). `skUnknown` if nothing
-  ## fits.
-  if isSeg2(head): skSeg2
-  elif isStorageUnitLabel(head) or isTocFile(head): skSegd
-  elif looksLikeSegy(head, 0) or (head.len >= 6 and head[4] == 0x53 and head[5] == 0x59 and
-      looksLikeSegy(head, 128)):
-    skSegy
-  elif looksLikeSegdGh1(head): skSegd
-  else: skUnknown
-
-# ------------------------------------------------------------------ walk --
-
-proc reserveFor(ix: var TraceIndex, src: RecordSource, first: TraceEntry, dataBytes: int,
-    keys: bool) =
-  # After the first trace: room for as many entries (and keys) as the rest of
-  # a memory-mapped file holds at this trace's size, so 10 M traces take
-  # 24 B each and not the up to 1.5x of a growing seq. Capped at one entry per
-  # 64 bytes of file, in case the first trace is unusually short.
-  if src of MemFileSource:
-    let size = MemFileSource(src).size
-    let stride = max(int64(first.headerBytes) + int64(dataBytes), 64)
-    let n = int(min((size - first.offset) div stride + 1, size div 64))
-    if n > ix.entries.len + 1:
-      var e = newSeqOfCap[TraceEntry](n)
-      for x in ix.entries: e.add x
-      ix.entries = move e
-      if keys:
-        var k = newSeqOfCap[TraceKeys](n)
-        for x in ix.keys: k.add x
-        ix.keys = move k
-
-proc indexFixed(ix: var TraceIndex, r: var SegyReader, src: RecordSource): bool =
-  # `vfSampled`: the index of a fixed-length file from its size
-  # (`private/segyfixed`), with an info diagnostic; false to walk instead.
-  let checked = if src of MemFileSource: fixedEntries(r, MemFileSource(src), ix.entries)
-                else: 0
-  if checked > 0:
-    template b: untyped = r.file.binary
-    ix.maxSamples = int(b.effectiveSamplesPerTrace)
-    ix.segyIntervalUs = b.effectiveSampleInterval
-    ix.segy = r.file
-    ix.log = r.takeLog()
-    ix.log.report(sevInfo, dcIndexSampled, "fixed-length traces: the " & $ix.entries.len &
-      " traces were indexed from the file size, and " & $checked & " of their headers " &
-      "checked against the binary header's sample count and interval (verify = vfFull " &
-      "reads every header)", ix.segy.firstTraceOffset, Location(file: src.name))
-  checked > 0
-
-proc indexSegy(src: RecordSource, keys: bool, verify: VerifyMode,
-    tk: var ProgressTicker): TraceIndex =
-  var r = openSegyWalk(src)
-  result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
-  result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
-    order: r.file.byteOrder)
-  if verify == vfSampled and not keys and result.indexFixed(r, src): return
-  let gr = if keys: initGeometryReader(r.file) else: GeometryReader()
-  result.segyIntervalUs = NaN
-  var t: SegyTrace
-  while r.readTrace(t):
-    if not tk.tick(t.offset): raiseCancelled()
-    if result.entries.len == 0: result.segyIntervalUs = t.sampleInterval
-    elif t.sampleInterval != result.segyIntervalUs: result.segyIntervalUs = NaN
-    let hb = TraceHeaderSize + (if t.hasExt1: TraceHeaderSize + t.proprietary.len else: 0)
-    result.entries.add TraceEntry(offset: t.offset, headerBytes: uint32(hb),
-      numSamples: uint32(t.numSamples), channelSet: NoChannelSet, scanType: -1)
-    result.maxSamples = max(result.maxSamples, t.numSamples)
-    if keys: result.keys.add segyKeys(gr, r.walkHeaders(t))
-    if result.entries.len == 1:
-      result.reserveFor(src, result.entries[0], result.codecs[0].dataBytes(t.numSamples), keys)
-  result.segy = r.file
-  result.log = r.takeLog()
-
-proc indexSegd(src: RecordSource, twosComplement8015, keys: bool,
-    tk: var ProgressTicker): TraceIndex =
-  var r = openSegd(src, twosComplement8015, headersOnly = true)
-  result = TraceIndex(kind: skSegd, contiguous: not src.hasRecordBoundaries)
-  while r.nextRecord():
-    let ri = uint32(result.segdRecords.len)
-    var t: SegdTrace
-    while r.readTrace(t):
-      if not tk.tick(t.offset): raiseCancelled()
-      let the = int(t.header.traceHeaderExtensions)
-      result.entries.add TraceEntry(offset: t.offset,
-        headerBytes: uint32(SegdTraceHeaderSize + SegdBlockSize * the),
-        numSamples: uint32(t.numSamples), record: ri,
-        channelSet: if t.channelSet < 0: NoChannelSet else: uint16(t.channelSet),
-        scanType: int8(t.scanType), channelType: uint8(r.record.channelType(t)))
-      result.maxSamples = max(result.maxSamples, t.numSamples)
-      if keys: result.keys.add traceKeys(r.record, t)
-      if result.entries.len == 1:
-        let fmt = r.record.format
-        result.reserveFor(src, result.entries[0],
-          if fmt.isSome: dataBytes(fmt.get, t.numSamples) else: 0, keys)
-    result.codecs.add TraceCodec(kind: skSegd, segdFormat: r.record.format,
-      twosComplement8015: twosComplement8015)
-    # A multiplexed record's traces have no bytes of their own to read.
-    if r.record.multiplexed: result.contiguous = false
-    result.segdRecords.add r.record
-  result.segdLabel = r.label
-  result.segdToc = r.toc
-  result.log = r.log
-
-func traceTypeCode(t: Seg2Trace): uint8 =
-  # `TraceEntry.channelType` of a SEG-2 trace.
-  let tt = t.traceType
-  if tt.isSome: uint8(ord(tt.get) + 1) else: 0
-
-proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool,
-    tk: var ProgressTicker): TraceIndex =
-  # The whole file, from the map: pointers may come in any order.
-  result = TraceIndex(kind: skSeg2, contiguous: true)
-  let size = src.size
-  let empty: seq[byte] = @[]
-  template data: untyped =
-    (if size > 0: src.memory.toOpenArray(0, int(size) - 1) else: empty.toOpenArray(0, -1))
-  var log: DiagLog
-  result.seg2 = readSeg2(data, log, src.name)
-  template f: untyped = result.seg2
-  let count = max(int64(f.traceCount), 1)
-  for t in traces(data, f, log, src.name):
-    # Pointers come in any order: the share of traces done, in bytes.
-    if not tk.tick(min(int64(result.entries.len) * size div count, size)): raiseCancelled()
-    let fmt = if t.valid: t.format else: none(Seg2Format)
-    var c = 0
-    while c < result.codecs.len and result.codecs[c].seg2Format != fmt: inc c
-    if c == result.codecs.len:
-      result.codecs.add TraceCodec(kind: skSeg2, seg2Format: fmt, order: f.order,
-        twosComplement8015: twosComplement8015)
-    let n = t.sampleCount(size) # bounded by the file (13.3 R4-1)
-    result.entries.add TraceEntry(offset: t.offset,
-      headerBytes: if t.valid: uint32(t.blockSize) else: 0, numSamples: uint32(n),
-      record: uint32(c), channelSet: NoChannelSet, scanType: -1,
-      channelType: traceTypeCode(t))
-    result.maxSamples = max(result.maxSamples, n)
-    if keys: result.keys.add traceKeys(f, t)
-  result.log = log
-
-proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = false,
-    keys = false, progress: Progress = nil, verify = vfFull): TraceIndex =
-  ## Walks the stream at the current position of `src` with headers only and
-  ## indexes every trace; with `keys`, also collects each trace's geometry
-  ## (for `gathers` and `componentGroups`). Problems go to `log`, as with the
-  ## readers. SEG-2 is read from the start of a `MemFileSource` (its
-  ## pointers are file offsets); `twosComplement8015` then applies to its
-  ## format 3. Raises `ValueError` for `skUnknown` and for SEG-2 on another
-  ## source.
-  ##
-  ## The entries of a multiplexed SEG-D record point at its scans (its
-  ## traces have no bytes of their own), so such an index is not
-  ## `contiguous` and refuses range reads; `openSeismic` indexes a
-  ## demultiplexed copy instead.
-  ##
-  ## `progress` is called about every MiB of the walk with the medium
-  ## offset reached and the source's size (-1 unless it is a
-  ## `MemFileSource`), and once at the end; when it returns false the walk
-  ## stops with `SegCancelledError`.
-  ##
-  ## `verify = vfSampled` indexes a fixed-length SEG-Y file on a
-  ## `MemFileSource` from its size, as `openSeismic` does by default (see
-  ## there); the default walks every trace.
-  var tk = initProgressTicker(progress, if src of MemFileSource: MemFileSource(src).size else: -1)
-  result = case kind
-    of skSegy: indexSegy(src, keys, verify, tk)
-    of skSegd: indexSegd(src, twosComplement8015, keys, tk)
-    of skSeg2:
-      if not (src of MemFileSource):
-        raise newException(ValueError, "SEG-2 is indexed from a memory-mapped file " &
-          "(openSeismic or a MemFileSource), not from a stream")
-      indexSeg2(MemFileSource(src), twosComplement8015, keys, tk)
-    of skUnknown: raise newException(ValueError, "buildIndex needs SEG-Y, SEG-D or SEG-2")
-  result.detected = true
-  if not tk.finish(): raiseCancelled()
+export memsource, diagnostics, keys, seismickind, progress, tensors, indextypes, indexwalk
 
 # ---------------------------------------------------------- seismic file --
 
@@ -315,11 +91,6 @@ proc `=copy`(dst: var MapPin, src: MapPin) {.error.}
 proc `=dup`(src: MapPin): MapPin {.error.}
 
 type
-  FileStamp = object
-    # A file's size and modification time, taken when it is opened.
-    size, mtime: int64 # mtime: Unix seconds
-    mtimeNs: int
-
   SeismicFile* = object
     ## A memory-mapped disk file with its trace index.
     index*: TraceIndex
@@ -402,11 +173,6 @@ proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: 
   f.index = buildIndex(f.map.src, skSegd, twosComplement8015, keys, progress)
   log.add f.index.log
   f.index.log = log
-
-proc stampOf(path: string): FileStamp =
-  let info = getFileInfo(path)
-  FileStamp(size: info.size, mtime: info.lastWriteTime.toUnix,
-    mtimeNs: info.lastWriteTime.nanosecond)
 
 proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode): string
   {.raises: [].}
@@ -1050,122 +816,17 @@ proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): in
     if k.applyGeometry(g, overwrite): inc result
 
 # ------------------------------------------------------------ index cache --
-# A file holding a `TraceIndex` exactly as the walk made it:
-#
-#   (.nif27)
-#   (.vendor "parseSEG")
-#   (indexcache
-#    (version 1) (library "0.5.0") (schema "<hex>") (endian littleEndian)
-#    (path "<absolute path>") (size <bytes>) (mtime <s> <ns>)
-#    (head "<hex>") (tail "<hex>") (twosComplement8015 0) (keys 1))
-#   NUL, zero bytes to an 8-byte boundary,
-#   the index as a `binstore` snapshot (entries and keys as single blocks),
-#   the snapshot's length and checksum (2 x uint64, native order).
-#
-# One field per header line; a cache is valid when its header is the one
-# the file would get now. `schema` changes with any stored type, `library`
-# with every release, `version` with this layout.
+# The file format is `private/indexcache`.
 
-const
-  IndexCacheVersion = 1
-  StampSpan = 64 shl 10 ## Bytes hashed at each end of the file.
-  HeaderLimit = 64 shl 10 ## Longest cache header read.
-
-proc spanSums(f: SeismicFile): (uint64, uint64) =
-  # Checksums of the first and the last `StampSpan` bytes of the map.
-  let size = f.mappedSize
-  let mem = f.unsafeMemory
-  let n = int(min(size, StampSpan))
-  if n == 0: return (checksum(nil, 0), checksum(nil, 0))
-  (checksum(mem, n), checksum(cast[ptr UncheckedArray[byte]](addr mem[size - n]), n))
-
-proc cacheHeader(f: SeismicFile, keys: bool): string =
-  const schema = schemaOf(TraceIndex)
-  let (head, tail) = f.spanSums
-  "(.nif27)\n(.vendor \"parseSEG\")\n(indexcache\n" &
-    " (version " & $IndexCacheVersion & ")\n" &
-    " (library " & nifString(PackageVersion) & ")\n" &
-    " (schema \"" & toHex(checksum(cast[ptr UncheckedArray[byte]](schema.cstring),
-      schema.len)) & "\")\n" &
-    " (endian " & $cpuEndian & ")\n" &
-    " (path " & nifString(absolutePath(f.path)) & ")\n" &
-    " (size " & $f.stamp.size & ")\n" &
-    " (mtime " & $f.stamp.mtime & " " & $f.stamp.mtimeNs & ")\n" &
-    " (head \"" & toHex(head) & "\")\n" &
-    " (tail \"" & toHex(tail) & "\")\n" &
-    " (twosComplement8015 " & $ord(f.twos) & ")\n" &
-    " (keys " & $ord(keys) & "))\n"
-
-proc headerMismatch(stored: string, f: SeismicFile, keys: bool): string =
-  # "" when `stored` fits the file as opened; else why not.
-  let want = f.cacheHeader(keys)
-  if stored == want or (not keys and stored == f.cacheHeader(true)): return ""
-  let a = stored.splitLines
-  let b = want.splitLines
-  var tag = ""
-  for i in 0 ..< max(a.len, b.len):
-    if tag.len == 0 and (i >= a.len or i >= b.len or a[i] != b[i]):
-      let line = if i < b.len: b[i] else: a[i]
-      tag = line.strip.strip(chars = {'('}).split(' ')[0]
-  case tag
-  of "version", "library", "schema", "endian": "it was saved by another version of parseSEG"
-  of "path": "it was saved for another file"
-  of "size", "mtime", "head", "tail": "the file changed since it was saved"
-  of "twosComplement8015": "it was saved with another twosComplement8015"
-  of "keys": "it was saved without trace keys"
-  else: "its header is not an index cache header"
-
-func sampled(ix: TraceIndex): bool =
-  # The index was computed from the file size (`vfSampled`).
-  for d in ix.log:
-    if d.code == dcIndexSampled: return true
+proc cacheKey(f: SeismicFile): CacheKey =
+  CacheKey(path: f.path, stamp: f.stamp, mem: f.unsafeMemory, size: f.mappedSize,
+    twos: f.twos)
 
 proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode): string
     {.raises: [].} =
   # Reads `f.index` from the cache `cache`: "" when done, else why not
   # (then `f.index` is unchanged).
-  if not fileExists(cache): return "there is no such file"
-  var m: MemFileSource
-  try:
-    m = openMemFileSource(cache)
-    let size = m.size
-    let mem = m.memory
-    var nul = -1
-    for i in 0 ..< int(min(size, HeaderLimit)):
-      if nul < 0 and mem[i] == 0: nul = i
-    if nul < 0: return "it has no header"
-    var stored = newString(nul)
-    copyMem(addr stored[0], mem, nul)
-    result = headerMismatch(stored, f, keys)
-    if result.len == 0:
-      let start = (nul + 8) and not 7
-      var trailer: array[2, uint64]
-      if size < start + 16: return "it is truncated"
-      copyMem(addr trailer, addr mem[size - 16], 16)
-      # Compared as uint64 first: a damaged trailer may not fit an int64.
-      if trailer[0] > uint64(size): return "it is truncated"
-      let n = int64(trailer[0])
-      if start + n + 16 != size: return "it is truncated"
-      let payload = cast[ptr UncheckedArray[byte]](addr mem[start])
-      if checksum(payload, int(n)) != trailer[1]: return "it is corrupt (checksum)"
-      var r = initBinReader(payload, int(n))
-      var ix: TraceIndex
-      for name, v in fieldPairs(ix):
-        when name == "keys":
-          if keys: r.get v
-          else: r.skipSeq(TraceKeys)
-        else:
-          r.get v
-      if not r.atEnd: return "its contents do not fit its layout"
-      if verify == vfFull and ix.sampled:
-        return "it was saved from a sampled open, and verify = vfFull reads every header"
-      f.index = move ix
-  except CatchableError as e:
-    result = "it cannot be read: " & e.msg
-  finally:
-    if m != nil:
-      try: m.close()
-      except CatchableError: discard
+  readIndexCache(cache, f.cacheKey, keys, verify, f.index)
 
 proc saveIndex*(f: SeismicFile, path: string) =
   ## Writes `f`'s index to the index cache `path`, for `openSeismic(...,
@@ -1195,41 +856,4 @@ proc saveIndex*(f: SeismicFile, path: string) =
     raise newException(ValueError, "the index cache " & path & " is the seismic file itself")
   if stampOf(f.path) != f.stamp:
     raise newException(ValueError, f.path & " changed since it was opened; open it again")
-  var log: DiagLog # the walk's diagnostics, not later ones (a cache miss)
-  for i in 0 ..< min(f.walkLog, f.index.log.len): log.add f.index.log[i]
-  let head = f.cacheHeader(f.hasKeys)
-  let tmp = createTempFor(path)
-  try:
-    var o: File
-    if not open(o, tmp, fmWrite): raise newException(IOError, "cannot write " & tmp)
-    var n: int64
-    try:
-      o.write head
-      var pad = newString(((head.len + 8) and not 7) - head.len) # NUL, then zeros
-      o.write pad
-      var w = initBinWriter(o)
-      for name, v in fieldPairs(f.index):
-        when name == "log": w.put log
-        else: w.put v
-      w.flush()
-      n = w.written
-    finally:
-      o.close()
-    let m = openMemFileSource(tmp)
-    var trailer = [uint64(n), 0'u64]
-    try:
-      let start = int64((head.len + 8) and not 7)
-      if m.size != start + n: raise newException(IOError, "cannot write " & tmp)
-      if n > 0: trailer[1] = checksum(cast[ptr UncheckedArray[byte]](addr m.memory[start]), int(n))
-      else: trailer[1] = checksum(nil, 0)
-    finally:
-      m.close()
-    if not open(o, tmp, fmAppend): raise newException(IOError, "cannot write " & tmp)
-    try:
-      if o.writeBuffer(addr trailer, 16) != 16: raise newException(IOError, "cannot write " & tmp)
-    finally:
-      o.close()
-    moveFile(tmp, path)
-  except CatchableError:
-    discard tryRemoveFile(tmp)
-    raise
+  writeIndexCache(path, f.cacheKey, f.index, f.walkLog, f.hasKeys)
