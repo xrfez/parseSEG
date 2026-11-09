@@ -1,6 +1,8 @@
 # parseSEG public API (task 8.2)
 
-`import parseSEG` gives the stable surface listed here. Everything else is internal or
+`import parseSEG` gives the stable surface listed here. This page is the reference; for
+task-oriented guides with tested examples (viewers, processing, editing, conversion, C,
+Python, diagnostics) see [`docs/guide/`](guide/README.md). Everything else is internal or
 low-level:
 - `parseSEG/codecs` holds the byte codecs and the field-layout pragmas;
 - the `parseSEG/<area>/<module>` paths can still be imported one by one.
