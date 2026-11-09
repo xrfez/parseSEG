@@ -53,7 +53,10 @@ doAssert f.kind == skSegd and f.len == 5 and samples.shape == [2, 4001]
 
 `openSeismic` memory-maps the file, detects the standard (SEG-Y, SEG-D or SEG-2) and walks
 the headers once to build the **trace index**. Nothing else is read until you ask for it, so
-opening a 40 GB file costs one header walk and about 24 bytes of memory per trace.
+opening a 40 GB file costs one header walk and about 24 bytes of memory per trace. A
+fixed-length SEG-Y file (Rev 1 or later, binary header bytes 3503-3504 = 1) is not walked:
+its index is computed from the file size and checked against 64 sampled trace headers, so it
+opens in milliseconds whatever its size ([viewer.md](viewer.md#open-a-file-progress-cancel-and-an-index-cache)).
 
 ## The model in ten concepts
 

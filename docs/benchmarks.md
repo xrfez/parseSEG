@@ -8,9 +8,10 @@ edits and geometry write-back. The fixes this task made are measured before and 
 both the `-d:danger -march=native` build (`nim nimRelease`) and the `-d:release` build
 (`nim cli`).
 
-> The full-scale tables were measured on 2026-11-08, before the C ABI and Python module were
-> removed. Phase 14 (the Nim-only library) was re-measured at small scale on 2026-11-09; see
-> "Phase 14 re-run".
+> **Current numbers: [Phase 15](#phase-15-full-scale-re-run-2026-11-09)** (full scale,
+> 2026-11-09, after the Phase 15 performance review). The sections after it are history:
+> the 2026-11-08 full-scale tables (before the C ABI and Python module were removed) and the
+> Phase 14 small-scale re-run.
 
 ## Machine
 
@@ -19,45 +20,400 @@ both the `-d:danger -march=native` build (`nim nimRelease`) and the `-d:release`
   reads therefore pass through decryption and decompression: sequential `read()` reached
   0.5 to 0.8 GB/s, and writes were throttled to 0.1 to 0.4 GB/s. Cold numbers measure this
   storage stack more than the library.
-- Shared: other agents ran test suites at the same time (load average 4 to 20 on 32
-  threads), so multi-thread numbers above 8 threads and all tail latencies are noisy. The
-  before/after tables were run back to back with the same load pattern.
+- Shared: on 2026-11-08 other agents ran test suites at the same time (load average 4 to
+  20 on 32 threads), so multi-thread numbers above 8 threads and all tail latencies are
+  noisy. The before/after tables were run back to back with the same load pattern. The
+  Phase 15 re-run ran alone (load average below 1 at the start).
 - Nim 2.4.0, gcc 12, default ORC memory management.
 
 ## Method
 
 - `bench/gen.nim` writes the data set (`bench/specs.nim`): SEG-Y formats 1, 2, 3 and 5
   (big- and little-endian), SEG-D Rev 2.1 8058/8015/8024 and Rev 3.0 8058 (1000 traces per
-  record), SEG-2 format 4, each 250 k traces of 1000 samples (0.5 to 1.1 GB); SEG-Y and
+  record), SEG-2 format 4 (16 k traces of 4000 samples), each 250 k traces of 1000 samples
+  (0.26 to 1.1 GB); since 15.3-14 also 8015 and 8024 files of random values of random
+  sign, which give a decoder's branches nothing to learn; SEG-Y and
   SEG-D files of 1 M and 10 M traces (250 / 100 samples; 12.4 GB and 4.5 GB at 10 M); and
   a 24.5 GB SEG-Y file (2 M traces of 3000 samples) larger than the free page cache. SEG-D
   and SEG-2 go through the library's writers; headers carry a shot geometry so keys,
-  gathers and write-back see real values. Full scale is 50 GB.
+  gathers and write-back see real values. Full scale is 53 GB.
 - `bench/suite.nim` runs the sections and prints Markdown (also saved as
-  `results-<scale>.md` in the data directory). Times are wall clock, `std/monotimes`.
+  `results-<scale>-<build>.md` in the data directory). Times are wall clock, `std/monotimes`.
   Throughput tables count file bytes. Warm: the file is read once first; best of 3.
   Cold: the file's pages are unmapped from the process (`madvise(MADV_DONTNEED)`) and
   dropped from the page cache (`posix_fadvise(POSIX_FADV_DONTNEED)`); `drop_caches` is
   not writable in the container. Memory: growth of the Nim heap (`getOccupiedMem`).
+- Buffer sizes (since 15.3-14, perf audit items 9 and 10): decode chunks hold 4 MB of
+  float32 samples (1000 traces of 1000 samples, 250 of the SEG-2 file's 4000; it used 1000
+  traces whatever their length, so SEG-2 wrote a 16 MB tensor and looked half as fast); in
+  the thread table each thread's tensor is 1 MB up to 8 threads and 256 KB from 16 threads.
 - Profiles: `perf record` (installed in the container) on the hot loops; the fixes below
   came from those profiles and from the R2 performance review.
 
 ## How to rerun
 
 ```sh
-nim bench                                   # small scale (about 2.5 GB), a few minutes
-PARSESEG_BENCH_SCALE=full PARSESEG_BENCH_DIR=/big/disk nim bench   # 50 GB, about an hour
+nim bench                                   # small scale (about 2.6 GB), a few minutes
+PARSESEG_BENCH_SCALE=full PARSESEG_BENCH_DIR=/big/disk nim bench   # 53 GB, about an hour
 PARSESEG_BENCH_SECTIONS="decode latency" nim bench                 # some sections only
-PARSESEG_BENCH_BUILD=release nim bench      # the suite in the shipped -d:release build
+PARSESEG_BENCH_BUILD=release nim bench      # the shipped build: -d:release, x86-64-v3
+PARSESEG_BENCH_BUILD=portable nim bench     # -d:release, baseline x86-64 (SSE2)
 PARSESEG_BENCH_WARM_ONLY=1 nim bench        # skip the disk-bound cold runs
 ```
 
-`nim bench` builds `bench/gen` and `bench/suite` (nimRelease flags by default), writes
-the files that are missing, and runs the suite. The data directory defaults to
-`bench/data` (gitignored). Sections: `baseline index decode latency threads prefetch
-write`.
+`nim bench` builds `bench/gen` and `bench/suite` (nimRelease flags by default:
+`-d:danger -march=native`), writes the files that are missing (existing files of the
+expected size are kept, so a data directory can be reused), and runs the suite. The data
+directory defaults to `bench/data` (gitignored). Sections: `baseline index decode latency
+threads prefetch write`.
 
-## Fixes made, before and after
+## Phase 15: full-scale re-run (2026-11-09)
+
+After the Phase 15 performance review (`docs/design/phase15_perf_audit.md`, steps 15.3-2 to
+15.3-14 in `PLAN.md`), the whole suite at full scale (53 GB), once in each build:
+
+- **danger:** `nim bench` (`-d:danger -d:release --opt:speed -march=native`), all sections,
+  cold runs included;
+- **release v3:** `PARSESEG_BENCH_BUILD=release PARSESEG_BENCH_WARM_ONLY=1 nim bench`
+  (`-d:release -march=x86-64-v3`, the shipped `nim cli` build), sections `decode index latency
+  prefetch write` (the cold runs measure the disk, not the build).
+
+Machine as above (Ryzen 9 3950X, Zen 2, 32 threads, 31 GB, dual-channel DDR4-3200; btrfs on
+dm-crypt), alone on it this time; Nim 2.4.0, gcc 12, ORC. Data in `/tmp/pl/benchdata`, made
+by `bench/gen` (existing files reused). Method as above, with the 15.3-14 suite: 4 MB decode
+chunks, L2-sized thread tensors, a full-walk column next to the default (sampled) open, a
+real header column row, prefetch rows with `workers` and `quickFirst`, and random-sample
+8015/8024 files. The tables were taken before the last 15.3-14 change (one residency probe
+instead of two for a range: about 1 µs less per warm range read, measured separately).
+
+### Headline: 2026-11-08 → Phase 15
+
+2026-11-08 is the danger full-scale run below ("Full results after the fixes").
+
+| measure | 2026-11-08 danger | Phase 15 danger | Phase 15 release v3 |
+|---|---:|---:|---:|
+| decode GB/s, 1 thread: SEG-Y IBM float | 6.53 | 6.55 | 6.40 |
+| SEG-Y IEEE, big-endian | 22.47 | 21.57 | 25.17 |
+| SEG-Y IEEE, little-endian | 17.27 | 22.29 | 22.41 |
+| SEG-Y int32 / int16 | 21.85 / 15.49 | 21.34 / 15.20 | 23.91 / 15.13 |
+| SEG-D 2.1 8058 / 3.0 8058 | 22.40 / 23.30 | 21.80 / 21.78 | 22.47 / 22.32 |
+| SEG-D 8015 (smooth / random samples) | 2.55 / - | 4.71 / 4.71 | 4.64 / 4.67 |
+| SEG-D 8024 (smooth / random samples) | 1.98 / - | 6.98 / 7.01 | 6.91 / 6.90 |
+| SEG-2 float32 (4 MB chunks since 15.3-14) | 11.48 | 26.93 | 27.04 |
+| open y-ieee-10m (10 M traces, 12.4 GB), warm | 2437 ms | 20.5 ms | 21.9 ms |
+| open y-ieee-10m, cold / cold to first trace | 19.9 s / 23.0 s | 49 ms / 27 ms | - |
+| open y-ieee-big (24.5 GB), cold | 37.4 s | 54 ms | - |
+| index walk (`vfFull`), SEG-Y 10 M, ns/trace | 244 | 169 | 191 |
+| index walk with keys, SEG-Y 10 M, ns/trace | 682 | 387 | 480 |
+| index walk, SEG-D 2.1 10 M, ns/trace (keys) | 197 (229) | 188 (245) | 252 (299) |
+| cold receiver gather p50, y-ieee-10m / d21-8058-10m | 222 / 55 ms | 72 / 21 ms | - |
+| cold shot gather p50, y-ieee-10m / d21-8058-10m | 15.0 / 1.2 ms | 3.0 / 1.25 ms | - |
+| header column, 1000 traces (`traceFieldColumnInto`) | - | 22.5 µs (SEG-Y), 18.0 µs (SEG-D) | 29.3 / 23.4 µs |
+| 32 threads, y-ieee / y-ibm, GB/s | 30.4 / 28.9 | 46.8 / 44.6 | - |
+| prefetch, 4 workers (256 x 4): y-ibm / d21-8015, GB/s | 6.44 / 2.52 (1 worker) | 22.86 / 16.23 | 22.71 / 16.78 |
+| prefetch seek → first chunk, y-ieee 1024 traces, p50 | 559 µs | 242 µs (`quickFirst`) | 285 µs |
+| conversion CPU, GB/s of input: y-ibm → IEEE / d21-8058 → SEG-Y / s2 → SEG-Y | 1.5 / 1.3 / 1.5 | 2.1 / 1.8 / 2.3 | 1.8 / 1.8 / 1.7 |
+
+Reading them:
+- **Decode:** the big-endian formats are at memory speed in both builds (the v3 release
+  build is now as fast as danger; before 15.3-5 it was half). 8015/8024 are 2-3.5x faster
+  and no longer depend on the data (random signs and exponents decode as fast as a smooth
+  sine). SEG-2 was never slow: the old suite gave it a 16 MB tensor (audit item 9).
+- **Open:** fixed-length SEG-Y is O(1) by default. The walk, still used for SEG-D, SEG-2,
+  variable-length SEG-Y, keys and `vfFull`, is 30 % faster; keys cost about 220 ns per
+  trace on top of it (was 440).
+- **First touch after a sampled open:** a sampled open does not read every header page, so
+  the first read of each page in this process takes a minor page fault even when the file
+  is cached: random single traces on y-ieee-10m take 3.6 µs p50 instead of 0.3 µs (the walk
+  used to take those faults at open, 1.7 s for this file). They are paid once per page;
+  the walked SEG-D file still shows 0.3 µs.
+- **Cold reads:** read-ahead advice (15.3-4, 15.3-14) makes cold gathers 3x faster here;
+  cold sequential reads stay at the disk's 0.7-0.8 GB/s.
+- **Threads:** with 256 KB per-thread tensors, 32 threads hold 45-47 GB/s (audit item 10);
+  8015 now saturates memory bandwidth from 16 threads.
+- **Conversions** are bound by this machine's write speed (0.1-0.4 GB/s); the CPU column is
+  what a faster disk would see. 15.3-8 measured the conversion code alone with a null sink:
+  1.4 to 5.2 GB/s.
+- **Release vs danger:** within 10 % everywhere except the index walk with keys (480 vs 387
+  ns/trace) and SEG-D walks (252 vs 188), where danger also drops overflow checks.
+
+#### Warm gathers and the read-ahead probes (15.3-14)
+
+15.3-4 noted the warm 1000-trace gathers' medians rose by about 6 µs. Measured again with
+the same binary built with and without the advice (danger, 2000 gathers per run, medians):
+
+| | no advice | 15.3-4 (two probes) | 15.3-14 |
+|---|---:|---:|---:|
+| d21-8058-10m shot gather (1000 traces, 452 KB), warm | 28.7-28.9 µs | 30.1-31.0 µs | 29.3-30.0 µs (one probe) |
+| d21-8058-10m receiver gather (1000 traces), warm | 140.7-141.7 µs | 143.6-144.6 µs | 141.7-143.6 µs |
+| y-ieee-1m receiver gather, warm | 253.6-254.9 µs | 253.5-254.2 µs | 251.3-255.0 µs |
+| y-ieee-1m receiver gather, cold | 1261 ms | 105-140 ms | 105 ms |
+| y-ieee-1m shot gather, cold | 6.37 ms | 1.85-2.80 ms | 1.83 ms |
+| prefetch 64 x 4, warm, y-ieee | 22.3-22.5 GB/s | 18.7-19.6 GB/s | 21.8-22.3 GB/s |
+| prefetch, 100 k trace range, cold, y-ieee-1m | 101-110 ms | 134-136 ms | 100 ms |
+| prefetch, 4000 scattered traces, cold, y-ieee-1m | 1174-1178 ms | 382-386 ms | 384-385 ms |
+| `readTracesInto` sequential, cold, 64 / 1000-trace chunks, y-ieee | 0.76 / 0.76 GB/s | 0.35 / 0.65 GB/s | 0.76 / 0.73-0.76 GB/s |
+
+One `mincore` call costs 0.66-0.76 µs here (`madvise` of one page 0.44 µs, of 4 MB of
+resident pages 40.7 µs). So the probes cost about a syscall each, a little more in cache
+effects, not 6 µs;
+the rest of 15.3-4's rise was run-to-run noise (one binary's y-ieee-1m shot gather median
+moves between 62 and 77 µs between runs). Skipping the probe and always advising is far
+worse warm (40 µs for 4 MB of resident pages). The real costs were elsewhere and are fixed:
+- the prefetcher probed every chunk: 16 % of a warm 64-trace-chunk run. It now advises
+  about 4 MB at a time, and a range only once after a start or `seek`;
+- advice per chunk stalled the kernel's sequential read-ahead: cold sequential reads in
+  64-trace chunks ran at half the disk's speed. A range that continues a sequential read
+  (the byte before it is in memory) is no longer advised;
+- a range is probed at its last trace only; a selection at both ends.
+
+#### Per step, before → after
+
+From the `PLAN.md` Log lines of each step (danger = `-d:danger -march=native`, release =
+`-d:release -march=x86-64-v3` from 15.3-5 on; full-scale files unless noted).
+
+| Step | What changed | Measure | Before → after |
+|---|---|---|---|
+| 15.3-2 (P7) | Branchless SEG-D 8015/8022/8024/8042/8044 and SEG-2 format 3 decoders | `readTracesInto`, GB/s, danger / release | 8015: 2.57 → 4.75 / 2.27 → 3.47; 8024: 1.94 → 7.16 / 2.14 → 4.82 (random words: 8015 0.68 → 4.82, 8024 0.50 → 6.99) |
+| 15.3-3 (P3) | `decodeFields`: one length check, unchecked loads, byte order picked once | SEG-Y index walk, ns/trace, release / danger | 429 → 242 / 244 → 224 (keys 1172 → 928 / 661 → 612) |
+| 15.3-4 (P12) | `madvise(WILLNEED)` before large scattered reads and in the prefetcher | cold reads, y-ieee-1m, danger | receiver gather 1261 → 106 ms; shot gather 5.97 → 1.64 ms; prefetch of 4000 scattered traces 1462 → 418 ms |
+| 15.3-5 (P1, P2) | x86-64-v3 build default; plain copy loop for host-order samples | 1 thread GB/s, release v1 → v3 | y-ieee BE 10.8 → 22.5; y-ieee LE 17.1 → 22.4-23.6; d21-8058 10.6 → 23.2; d31-9058 16.5 → 23.4; s2-ieee 12.5 → 13.4 |
+| 15.3-8 (P4.1, P5.1, P13) | Civil-date arithmetic, `findChannelSet` by index, conversion fast paths | conversion CPU, GB/s of input, danger; index walk ns/trace | d21-8058 → SEG-Y 1.76 → 4.20; y-ieee → 6: 1.74 → 5.23; y-ibm → 5: 1.85 → 3.26; SEG-Y keys walk 607 → 530 (release 932 → 828) |
+| 15.3-9 (P4.2-4.3, P5.2) | SEG-Y keys from raw header bytes; header-only walk | y-ieee-1m walk ns/trace, danger / release | 226 → 198 / 244 → 200; keys 537 → 397 / 824 → 440 |
+| 15.3-10 (P6) | O(1) sampled open for fixed-length SEG-Y | y-ieee-10m open, warm / cold | 1824 → 20 ms / 21.3 s → 39 ms |
+| 15.3-11 (P11) | Prefetcher `workers`, 4 MB ring cap, `quickFirst` | GB/s, 1 → 2/4 workers (256 x 4) | y-ibm 6.2 → 10.8/20.0; d21-8015 4.6 → 8.9/16.2; y-ieee 256 x 16: 12.4 → 20.9 (cap); seek → first chunk 1024 x 4: 554 → 319 µs |
+| 15.3-14 | Read-ahead advice: none for a range continuing a sequential read, one probe for a range; the prefetcher advises 4 MB at a time, a range once per start or `seek` | danger, y-ieee / y-ieee-1m / d21-8058-10m | cold sequential `readTracesInto`, 64-trace chunks 0.35 → 0.76 GB/s, 1000-trace chunks 0.65 → 0.76; cold prefetch of a 100 k trace range 135 → 100 ms; warm prefetch 64 x 4 19.4 → 21.8-22.3 GB/s; warm shot gather (452 KB) 30.1-31.0 → 29.3-30.0 µs (28.8 without advice); cold gathers unchanged (105 ms, 1.8 ms) |
+
+### Full tables, danger build
+
+#### Baselines: memory and disk on this machine
+
+| what | GB/s |
+| --- | ---: |
+| memcpy 1 GiB, 1 thread (bytes copied) | 23.20 |
+| sum of uint64 over 1 GiB, 1 thread (bytes read) | 40.11 |
+| memcpy 1 GiB, 4 threads | 23.28 |
+| memcpy 1 GiB, 16 threads | 22.28 |
+| memcpy 1 GiB, 32 threads | 21.56 |
+| y-ieee, warm: mmap + sum (fresh map each run) | 17.88 |
+| y-ieee, warm: read() 8 MiB blocks | 18.42 |
+| y-ieee, cold: mmap + sum | 0.76 |
+| y-ieee, cold: read() 8 MiB blocks | 0.76 |
+
+#### Index build and keys (openSeismic)
+
+Cold: the file's pages dropped first. Warm: best of 3 with the file cached. Open: the default `openSeismic` (fixed-length SEG-Y: sampled, O(1)); walk: `verify = vfFull` (every header). Memory: managed heap growth (`getOccupiedMem`) of the open file, per trace.
+
+| file | traces | GB | cold open ms | cold first trace ms | cold walk ms | warm open ms | walk ms | ns/trace walk | keys ms | ns/trace keys | heap B/trace | keys heap B/trace | gathers ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| y-ieee | 250000 | 1.06 | 22.65 | 22.33 | 1448.26 | 0.85 | 59.36 | 237. | 108.40 | 434. | 24.2 | 146.8 | 14.20 (250) |
+| d21-8058 | 250000 | 1.01 | 1856.60 | 1651.63 | 1651.74 | 105.46 | 105.10 | 420. | 111.58 | 446. | 24.9 | 146.8 | 13.30 (250) |
+| y-ieee-1m | 1000000 | 1.24 | 13.83 | 13.86 | 960.17 | 2.45 | 170.02 | 170. | 372.36 | 372. | 24.1 | 146.8 | 54.53 (1000) |
+| d21-8058-1m | 1000000 | 0.45 | 780.24 | 780.09 | 778.78 | 177.94 | 179.10 | 179. | 199.85 | 200. | 24.9 | 146.8 | 51.87 (1000) |
+| y-ieee-10m | 10000000 | 12.40 | 48.65 | 26.74 | 21629.73 | 20.54 | 1694.71 | 169. | 3869.95 | 387. | 24.3 | 144.0 | 555.33 (10000) |
+| d21-8058-10m | 10000000 | 4.52 | 8215.48 | 8083.42 | 8454.36 | 1886.63 | 1879.27 | 188. | 2448.39 | 245. | 25.4 | 144.0 | 534.34 (10000) |
+| y-ieee-big | 2000000 | 24.48 | 53.69 | 23.16 | 42506.95 | - | - | - | - | - | - | - | - |
+
+#### Sequential decode throughput (readTracesInto, 4 MB chunks, 1 thread)
+
+GB/s of file bytes. Chunks of 4 MB of float32 samples (1000 traces of 1000 samples, 250 of the SEG-2 file's 4000). First pass: right after `openSeismic` (pages not touched yet fault in); mapped: best of 3 later passes. memcpy baseline: 23.2 GB/s, read baseline 40.1 GB/s.
+
+| file | format | GB | cold GB/s | first pass GB/s | mapped GB/s | Msamples/s | % of memcpy | float64 GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| y-ibm | SEG-Y 1 (IBM float) | 1.06 | 0.72 | 5.77 | 6.55 | 1544. | 28. | 6.70 |
+| y-ieee | SEG-Y 5 (IEEE float) | 1.06 | 0.75 | 15.08 | 21.57 | 5087. | 93. | 17.53 |
+| y-ieee-le | SEG-Y 5 (IEEE float, LE) | 1.06 | 0.66 | 11.65 | 22.29 | 5258. | 96. | 18.41 |
+| y-int32 | SEG-Y 2 (int32) | 1.06 | 0.55 | 16.14 | 21.34 | 5033. | 92. | 17.58 |
+| y-int16 | SEG-Y 3 (int16) | 0.56 | 0.56 | 12.47 | 15.20 | 6786. | 66. | 8.37 |
+| d21-8058 | SEG-D 2.1 8058 | 1.01 | 0.62 | 21.72 | 21.80 | 5379. | 94. | 17.88 |
+| d21-8015 | SEG-D 2.1 8015 | 0.64 | 0.55 | 4.70 | 4.71 | 1845. | 20. | 3.89 |
+| d21-8024 | SEG-D 2.1 8024 | 0.51 | 0.55 | 6.95 | 6.98 | 3399. | 30. | 3.65 |
+| d21-8015-noise | SEG-D 2.1 8015 (random samples) | 0.64 | 0.56 | 4.70 | 4.71 | 1844. | 20. | 3.90 |
+| d21-8024-noise | SEG-D 2.1 8024 (random samples) | 0.51 | 0.55 | 7.02 | 7.01 | 3416. | 30. | 3.67 |
+| d30-8058 | SEG-D 3.0 8058 | 1.01 | 0.55 | 21.10 | 21.78 | 5374. | 94. | 17.92 |
+| s2-ieee | SEG-2 4 (float32, LE) | 0.26 | 0.56 | 26.15 | 26.93 | 6677. | 116. | 19.31 |
+
+y-ieee-big (24.48 GB, larger than the free page cache), cold, 1 thread: 0.72 GB/s.
+
+#### Viewer latency on y-ieee-10m (10000000 traces of 250 samples)
+
+Warm: file cached (first touch of a page in this map still faults it in). Cold: the file's pages dropped from the cache before the run (`dropCache`).
+
+| operation | runs | p50 µs | p90 µs | p99 µs | max µs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| random single trace, warm (readTracesInto) | 20000 | 3.6 | 5.8 | 6.7 | 152.5 |
+| random single trace, warm (readTraces, new tensor) | 5000 | 3.4 | 4.1 | 6.4 | 41.2 |
+| shot gather (1000 consecutive traces), warm | 500 | 80.6 | 111.5 | 127.2 | 135.0 |
+| receiver gather (1000 traces 1000 apart), warm | 200 | 264.7 | 973.9 | 2509.2 | 2773.9 |
+| window: samples 0..199 of 10000 traces, warm | 100 | 1027.4 | 1081.2 | 1393.1 | 1456.5 |
+| 10000 whole traces, warm | 100 | 961.9 | 1088.8 | 1393.5 | 1400.3 |
+| trace header listing (traceHeaders), warm | 5000 | 3.8 | 7.3 | 9.7 | 57.3 |
+| header field loop: traceField(i, trace.sourceX) for 1000 traces, warm | 100 | 259.2 | 271.5 | 301.3 | 301.6 |
+| header column: traceFieldColumnInto(trace.sourceX) of 1000 traces, warm | 1000 | 22.5 | 32.9 | 65.6 | 78.7 |
+| random single trace, cold | 300 | 256.3 | 8494.9 | 11267.4 | 17412.4 |
+| shot gather (1000 traces), cold | 50 | 2972.8 | 3118.3 | 3189.4 | 3189.4 |
+| receiver gather (1000 traces), cold | 20 | 71924.5 | 80563.8 | 645207.3 | 645207.3 |
+| trace header listing, cold | 300 | 148.2 | 7703.9 | 9147.0 | 10871.8 |
+
+#### Viewer latency on d21-8058-10m (10000000 traces of 100 samples)
+
+Warm: file cached (first touch of a page in this map still faults it in). Cold: the file's pages dropped from the cache before the run (`dropCache`).
+
+| operation | runs | p50 µs | p90 µs | p99 µs | max µs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| random single trace, warm (readTracesInto) | 20000 | 0.3 | 0.4 | 0.7 | 7.9 |
+| random single trace, warm (readTraces, new tensor) | 5000 | 0.3 | 0.4 | 0.7 | 6.5 |
+| shot gather (1000 consecutive traces), warm | 500 | 33.9 | 41.0 | 46.1 | 60.4 |
+| receiver gather (1000 traces 1000 apart), warm | 200 | 145.4 | 176.0 | 201.8 | 210.5 |
+| window: samples 0..199 of 10000 traces, warm | 100 | 308.8 | 320.1 | 369.1 | 396.1 |
+| 10000 whole traces, warm | 100 | 312.9 | 319.7 | 330.8 | 333.2 |
+| trace header listing (traceHeaders), warm | 5000 | 1.1 | 1.4 | 1.5 | 8.8 |
+| header field loop: traceField(i, ext1.receiverPointNumber) for 1000 traces, warm | 100 | 174.1 | 178.7 | 182.8 | 183.9 |
+| header column: traceFieldColumnInto(ext1.receiverPointNumber) of 1000 traces, warm | 1000 | 18.0 | 18.6 | 24.5 | 49.6 |
+| random single trace, cold | 300 | 140.2 | 8678.7 | 10290.4 | 10685.1 |
+| shot gather (1000 traces), cold | 50 | 1254.8 | 1325.8 | 1447.1 | 1447.1 |
+| receiver gather (1000 traces), cold | 20 | 21025.0 | 31909.9 | 32251.5 | 32251.5 |
+| trace header listing, cold | 300 | 140.5 | 8692.1 | 10400.4 | 10549.8 |
+
+#### Multi-thread scaling: N threads, disjoint trace ranges, one SeismicFile
+
+Aggregate GB/s of file bytes; each thread decodes into its own tensor: 1 MB (256 traces of 1000 samples) up to 8 threads, 256 KB (64 traces) from 16, so two SMT siblings' outputs fit their shared L2. Warm: mapped, best of 3. Cold: pages dropped before each run.
+
+| file | state | 1 | 2 | 4 | 8 | 16 | 32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| y-ieee | warm | 21.59 | 37.35 | 43.14 | 50.87 | 49.74 | 46.83 |
+| y-ieee | cold | 0.73 | 0.78 | 0.78 | 0.78 | 0.78 | 0.76 |
+| y-ibm | warm | 6.50 | 12.76 | 24.78 | 45.50 | 48.05 | 44.64 |
+| y-int16 | warm | 14.03 | 27.10 | 45.29 | 48.60 | 48.83 | 44.53 |
+| d21-8015 | warm | 4.62 | 9.07 | 17.62 | 34.24 | 48.30 | 42.19 |
+| d21-8015 | cold | 0.56 | 0.56 | 0.56 | 0.55 | 0.57 | 0.56 |
+| d21-8058 | warm | 21.38 | 38.43 | 47.23 | 51.00 | 50.08 | 45.68 |
+
+#### Prefetcher vs readTracesInto on the caller's thread
+
+The consumer only takes chunks (`nextInto`, recycling its buffer). Depth: the ring depth used (capped at 4 MB of chunks). Seek: `seek` to a random trace, then wait for the first chunk; `quickFirst` makes that chunk a quarter of `chunkTraces`.
+
+| file | mode | chunk x depth | workers | GB/s | seek -> first chunk p50 µs | p99 µs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| y-ieee | readTracesInto, caller thread | 1000 | - | 22.23 | - | - |
+| y-ieee | prefetcher | 64 x 4 | 1 | 20.95 | 27.9 | 42.0 |
+| y-ieee | prefetcher | 256 x 4 | 1 | 21.58 | 107.7 | 145.1 |
+| y-ieee | prefetcher | 1024 x 2 | 1 | 13.13 | 573.8 | 645.5 |
+| y-ieee | prefetcher | 256 x 4 | 1 | 21.65 | 98.8 | 129.1 |
+| y-ieee | prefetcher | 256 x 4 | 2 | 35.85 | 130.4 | 201.4 |
+| y-ieee | prefetcher | 256 x 4 | 4 | 42.55 | 135.4 | 220.6 |
+| y-ieee | prefetcher, quickFirst | 256 x 4 | 1 | 21.61 | 65.4 | 90.8 |
+| y-ieee | prefetcher, quickFirst | 1024 x 2 | 1 | 13.07 | 242.1 | 272.5 |
+| y-ibm | readTracesInto, caller thread | 1000 | - | 6.50 | - | - |
+| y-ibm | prefetcher | 64 x 4 | 1 | 6.31 | 87.6 | 99.7 |
+| y-ibm | prefetcher | 256 x 4 | 1 | 6.44 | 335.1 | 389.5 |
+| y-ibm | prefetcher | 1024 x 2 | 1 | 6.40 | 1360.4 | 1733.2 |
+| y-ibm | prefetcher | 256 x 4 | 1 | 6.51 | 331.4 | 351.9 |
+| y-ibm | prefetcher | 256 x 4 | 2 | 12.50 | 256.8 | 346.6 |
+| y-ibm | prefetcher | 256 x 4 | 4 | 22.86 | 184.9 | 366.2 |
+| y-ibm | prefetcher, quickFirst | 256 x 4 | 1 | 6.47 | 214.4 | 312.1 |
+| y-ibm | prefetcher, quickFirst | 1024 x 2 | 1 | 6.39 | 831.8 | 870.0 |
+| d21-8015 | readTracesInto, caller thread | 1000 | - | 4.65 | - | - |
+| d21-8015 | prefetcher | 64 x 4 | 1 | 4.56 | 74.4 | 96.1 |
+| d21-8015 | prefetcher | 256 x 4 | 1 | 4.62 | 284.0 | 331.3 |
+| d21-8015 | prefetcher | 1024 x 2 | 1 | 4.58 | 1133.3 | 1169.1 |
+| d21-8015 | prefetcher | 256 x 4 | 1 | 4.64 | 280.7 | 299.6 |
+| d21-8015 | prefetcher | 256 x 4 | 2 | 9.08 | 234.2 | 295.5 |
+| d21-8015 | prefetcher | 256 x 4 | 4 | 16.23 | 154.6 | 319.6 |
+| d21-8015 | prefetcher, quickFirst | 256 x 4 | 1 | 4.61 | 176.8 | 201.0 |
+| d21-8015 | prefetcher, quickFirst | 1024 x 2 | 1 | 4.54 | 700.5 | 741.7 |
+
+#### Conversion, in-place header edits and geometry write-back
+
+| operation | input | GB in | s | GB/s in | rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SEG-Y IBM -> SEG-Y IEEE | y-ibm | 1.06 | 5.31 | 0.20 | 0.20 GB/s out; CPU 0.49 s (2.1 GB/s of CPU) |
+| SEG-Y -> SEG-Y (copy, same format) | y-ieee | 1.06 | 7.79 | 0.14 | 0.14 GB/s out; CPU 0.32 s (3.4 GB/s of CPU) |
+| SEG-D 2.1 8058 -> SEG-Y | d21-8058 | 1.01 | 8.27 | 0.12 | 0.14 GB/s out; CPU 0.57 s (1.8 GB/s of CPU) |
+| SEG-D 3.0 8058 -> SEG-Y | d30-8058 | 1.01 | 4.53 | 0.22 | 0.26 GB/s out; CPU 0.51 s (2.0 GB/s of CPU) |
+| SEG-D 2.1 8015 -> SEG-Y | d21-8015 | 0.64 | 7.11 | 0.09 | 0.17 GB/s out; CPU 0.69 s (0.9 GB/s of CPU) |
+| SEG-D 2.1 -> SEG-D 3.0 | d21-8058 | 1.01 | 6.92 | 0.15 | 0.15 GB/s out; CPU 1.06 s (1.0 GB/s of CPU) |
+| SEG-2 -> SEG-Y | s2-ieee | 0.26 | 0.45 | 0.57 | 0.59 GB/s out; CPU 0.11 s (2.3 GB/s of CPU) |
+| setTraceField trace.sourceX, one synced journal entry per edit | y-ieee-1m | 1.24 | 0.98 | - | 203. edits/s |
+| setTraceField trace.sourceX, every trace in one batch | y-ieee-1m | - | 14.34 | - | 69711. edits/s |
+| writeGeometry (journaled, batched) | y-ieee-1m | - | 18.92 | - | 52850. traces/s (1000000 changed) |
+| setTraceField ext1.receiverPointNumber, one synced journal entry per edit | d21-8058-1m | 0.45 | 1.03 | - | 195. edits/s |
+| setTraceField ext1.receiverPointNumber, every trace in one batch | d21-8058-1m | - | 6.99 | - | 143136. edits/s |
+| writeGeometry (journaled, batched) | d21-8058-1m | - | 6.23 | - | 160479. traces/s (1000000 changed) |
+
+### Release v3 build (warm)
+
+Sections that depend on the build; the latency tables match the danger ones within noise
+(SEG-Y 10 M: single trace 3.5 µs, shot gather 90 µs, receiver gather 261 µs p50; SEG-D 10 M:
+0.3, 31.4 and 132 µs), as do the conversion and edit rates.
+
+#### Sequential decode throughput (readTracesInto, 4 MB chunks, 1 thread)
+
+GB/s of file bytes. Chunks of 4 MB of float32 samples (1000 traces of 1000 samples, 250 of the SEG-2 file's 4000). First pass: right after `openSeismic` (pages not touched yet fault in); mapped: best of 3 later passes. memcpy baseline: 22.5 GB/s, read baseline 39.4 GB/s.
+
+| file | format | GB | cold GB/s | first pass GB/s | mapped GB/s | Msamples/s | % of memcpy | float64 GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| y-ibm | SEG-Y 1 (IBM float) | 1.06 | - | 5.60 | 6.40 | 1510. | 28. | 6.61 |
+| y-ieee | SEG-Y 5 (IEEE float) | 1.06 | - | 17.63 | 25.17 | 5935. | 112. | 19.23 |
+| y-ieee-le | SEG-Y 5 (IEEE float, LE) | 1.06 | - | 11.94 | 22.41 | 5285. | 99. | 18.60 |
+| y-int32 | SEG-Y 2 (int32) | 1.06 | - | 16.12 | 23.91 | 5639. | 106. | 19.14 |
+| y-int16 | SEG-Y 3 (int16) | 0.56 | - | 11.95 | 15.13 | 6757. | 67. | 8.07 |
+| d21-8058 | SEG-D 2.1 8058 | 1.01 | - | 22.48 | 22.47 | 5544. | 100. | 17.97 |
+| d21-8015 | SEG-D 2.1 8015 | 0.64 | - | 4.65 | 4.64 | 1817. | 21. | 3.88 |
+| d21-8024 | SEG-D 2.1 8024 | 0.51 | - | 6.82 | 6.91 | 3367. | 31. | 3.65 |
+| d21-8015-noise | SEG-D 2.1 8015 (random samples) | 0.64 | - | 4.67 | 4.67 | 1829. | 21. | 3.92 |
+| d21-8024-noise | SEG-D 2.1 8024 (random samples) | 0.51 | - | 6.85 | 6.90 | 3364. | 31. | 3.67 |
+| d30-8058 | SEG-D 3.0 8058 | 1.01 | - | 22.09 | 22.32 | 5509. | 99. | 18.05 |
+| s2-ieee | SEG-2 4 (float32, LE) | 0.26 | - | 26.38 | 27.04 | 6704. | 120. | 19.87 |
+
+#### Index build and keys (openSeismic)
+
+Cold: the file's pages dropped first. Warm: best of 3 with the file cached. Open: the default `openSeismic` (fixed-length SEG-Y: sampled, O(1)); walk: `verify = vfFull` (every header). Memory: managed heap growth (`getOccupiedMem`) of the open file, per trace.
+
+| file | traces | GB | cold open ms | cold first trace ms | cold walk ms | warm open ms | walk ms | ns/trace walk | keys ms | ns/trace keys | heap B/trace | keys heap B/trace | gathers ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| y-ieee | 250000 | 1.06 | - | - | - | 0.87 | 59.05 | 236. | 120.72 | 483. | 24.2 | 146.8 | 15.81 (250) |
+| d21-8058 | 250000 | 1.01 | - | - | - | 125.85 | 125.86 | 503. | 132.40 | 530. | 24.9 | 146.8 | 15.13 (250) |
+| y-ieee-1m | 1000000 | 1.24 | - | - | - | 2.50 | 173.36 | 173. | 424.49 | 424. | 24.1 | 146.8 | 62.55 (1000) |
+| d21-8058-1m | 1000000 | 0.45 | - | - | - | 254.55 | 255.59 | 256. | 282.64 | 283. | 24.9 | 146.8 | 60.86 (1000) |
+| y-ieee-10m | 10000000 | 12.40 | - | - | - | 21.90 | 1912.55 | 191. | 4802.40 | 480. | 24.3 | 144.0 | 653.70 (10000) |
+| d21-8058-10m | 10000000 | 4.52 | - | - | - | 2522.67 | 2516.09 | 252. | 2986.93 | 299. | 25.4 | 144.0 | 616.43 (10000) |
+
+#### Prefetcher vs readTracesInto on the caller's thread
+
+The consumer only takes chunks (`nextInto`, recycling its buffer). Depth: the ring depth used (capped at 4 MB of chunks). Seek: `seek` to a random trace, then wait for the first chunk; `quickFirst` makes that chunk a quarter of `chunkTraces`.
+
+| file | mode | chunk x depth | workers | GB/s | seek -> first chunk p50 µs | p99 µs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| y-ieee | readTracesInto, caller thread | 1000 | - | 25.15 | - | - |
+| y-ieee | prefetcher | 64 x 4 | 1 | 23.37 | 24.1 | 39.1 |
+| y-ieee | prefetcher | 256 x 4 | 1 | 24.68 | 87.3 | 129.3 |
+| y-ieee | prefetcher | 1024 x 2 | 1 | 14.31 | 514.9 | 610.7 |
+| y-ieee | prefetcher | 256 x 4 | 1 | 24.06 | 91.0 | 120.2 |
+| y-ieee | prefetcher | 256 x 4 | 2 | 36.77 | 100.1 | 180.9 |
+| y-ieee | prefetcher | 256 x 4 | 4 | 44.43 | 123.3 | 221.2 |
+| y-ieee | prefetcher, quickFirst | 256 x 4 | 1 | 22.54 | 75.5 | 110.2 |
+| y-ieee | prefetcher, quickFirst | 1024 x 2 | 1 | 14.31 | 285.0 | 355.2 |
+| y-ibm | readTracesInto, caller thread | 1000 | - | 6.51 | - | - |
+| y-ibm | prefetcher | 64 x 4 | 1 | 6.10 | 85.9 | 107.3 |
+| y-ibm | prefetcher | 256 x 4 | 1 | 6.39 | 341.8 | 412.2 |
+| y-ibm | prefetcher | 1024 x 2 | 1 | 6.38 | 1369.7 | 1513.5 |
+| y-ibm | prefetcher | 256 x 4 | 1 | 6.47 | 333.9 | 359.7 |
+| y-ibm | prefetcher | 256 x 4 | 2 | 12.53 | 271.7 | 354.9 |
+| y-ibm | prefetcher | 256 x 4 | 4 | 22.71 | 183.9 | 379.9 |
+| y-ibm | prefetcher, quickFirst | 256 x 4 | 1 | 6.43 | 212.9 | 243.0 |
+| y-ibm | prefetcher, quickFirst | 1024 x 2 | 1 | 6.32 | 842.1 | 1155.6 |
+| d21-8015 | readTracesInto, caller thread | 1000 | - | 4.64 | - | - |
+| d21-8015 | prefetcher | 64 x 4 | 1 | 4.50 | 73.0 | 93.0 |
+| d21-8015 | prefetcher | 256 x 4 | 1 | 4.61 | 283.8 | 324.8 |
+| d21-8015 | prefetcher | 1024 x 2 | 1 | 4.63 | 1138.6 | 1272.7 |
+| d21-8015 | prefetcher | 256 x 4 | 1 | 4.61 | 285.6 | 319.5 |
+| d21-8015 | prefetcher | 256 x 4 | 2 | 9.10 | 225.9 | 301.8 |
+| d21-8015 | prefetcher | 256 x 4 | 4 | 16.78 | 156.0 | 310.9 |
+| d21-8015 | prefetcher, quickFirst | 256 x 4 | 1 | 4.58 | 178.0 | 199.2 |
+| d21-8015 | prefetcher, quickFirst | 1024 x 2 | 1 | 4.53 | 713.0 | 794.8 |
+
+## Phase 13 fixes, before and after (2026-11-08)
 
 | Fix | Commit | What changed |
 |---|---|---|
@@ -116,7 +472,7 @@ written).
 Wall time stays at the output disk's speed here (0.2 to 0.4 GB/s written, see below); on a
 faster disk the conversion would now run at 1.3 to 5 GB/s of CPU.
 
-## Full results after the fixes (danger build, full scale)
+## Full results after the Phase 13 fixes (danger build, full scale, 2026-11-08)
 
 `PARSESEG_BENCH_SCALE=full nim bench`, 2026-11-08. Notes on reading them:
 - warm decode of big-endian IEEE (22 GB/s) beats `memcpy` (18 to 22 GB/s): the decoder
@@ -285,8 +641,10 @@ New rows from 14.3:
 - **Sample window:** samples 0..199 of 10 000 traces of 250 samples take 722 µs, against
   825 µs for the whole traces. On the 100-sample SEG-D file the window covers whole traces
   and costs the same.
-- **Header column:** `traceFieldColumn` over 1000 traces takes 263 µs on SEG-Y and 151 µs
-  on SEG-D, about 0.15 to 0.26 µs per trace with the per-call checks included.
+- **Header field loop:** `traceField(i, name)` for 1000 traces takes 263 µs on SEG-Y and
+  151 µs on SEG-D (the suite's row was labelled "header column", but it timed this loop).
+  `traceFieldColumnInto`, the column read, takes 5.6 to 8.9 ns per trace (Phase 15 audit
+  item 14; the suite has a row for it since 15.3-14).
 
 The 14.3 agents also measured, in their own scratch benchmarks:
 - **Index cache:** opening 10 M SEG-Y traces from the cache takes 43 ms against 2.48 s
@@ -430,7 +788,11 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
 | setTraceField ext1.receiverPointNumber, every trace in one batch | d21-8058-1m | - | 0.16 | - | 322261. edits/s |
 | writeGeometry (journaled, batched) | d21-8058-1m | - | 0.13 | - | 399243. traces/s (50000 changed) |
 
-## Remaining bottlenecks, ranked, with proposed fixes
+## Remaining bottlenecks, ranked, with proposed fixes (2026-11-08)
+
+The list as it stood after Phase 13; each item says what Phase 15 did about it (numbers in
+the [Phase 15](#phase-15-full-scale-re-run-2026-11-09) section).
+
 
 1. **The `-d:release` build targets baseline x86-64 (SSE2).** The release build decodes
    big-endian IEEE at 11 GB/s; the same code with `-march=native` (AVX2 byte shuffles)
@@ -438,6 +800,8 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
    policy): build the x86-64 library for `x86-64-v2` (SSSE3, every x86-64 CPU since about
    2009) or `-v3` (AVX2, since 2013/2015), or add a `target_clones("avx2","default")`
    variant of the decode loops (Linux/glibc only).
+   *Phase 15 (15.3-5):* x86-64-v3 is the default for `nim cli` and the release bench;
+   `nimPortable`/`zigPortable` build baseline x86-64.
 2. **`openSeismic` walks every header before returning.** Time to first trace is the whole
    index: 2.4 s warm and 23 s cold for 10 M SEG-Y traces (the walk reads every page of a
    file with 1 KB traces), 35 s cold for the 24 GB file. Proposals: (a) SEG-Y with fixed-length traces (binary header
@@ -445,14 +809,16 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
    sample of headers, so opening is O(1) and keys are computed on demand; (b) an
    incremental index (open returns after the first N traces, a worker extends it; `len`
    grows), which is an API change.
-   *14.3e:* an index cache: `saveIndex(f, path)` once, then `openSeismic(path, cache =
-   cachePath)` reads the index instead of walking (validated by size, mtime, the first and
+   *14.3e:* an index cache: `saveIndex(f, path)` once, then `openSeismic(path, opts =
+   OpenOptions(cache: cachePath))` reads the index instead of walking (validated by size, mtime, the first and
    last 64 KiB, options and version; any mismatch walks the file). Danger build, warm,
    10 M SEG-Y traces (12.4 GB): open 2.48 s, from the cache 43 ms (a 240 MB cache, saved in
    95 ms); with `keys = true` 7.0 s, from the cache 0.47 s (1.68 GB). 1 M SEG-D 2.1 traces:
    0.21 s, cached 5 ms. A `progress` hook costs nothing measurable (2.48 s with and without
    one, 11 822 calls), and the walk without one is unchanged (2.58 s before, 2.48 s after;
    noise).
+   *Phase 15:* (a) is in (15.3-10): fixed-length SEG-Y opens in 21 ms warm and 49 ms cold
+   at 10 M traces; the walk itself is 30 % faster (15.3-3, 15.3-9). SEG-D still walks.
 3. **Cold reads through the map are latency-bound.** Each page fault reads ahead 128 KB
    synchronously: a cold random trace costs one disk round trip (p50 0.3 ms, p99 12 ms on
    this storage), a cold receiver gather (1000 traces 1000 apart) 1000 sequential round
@@ -461,12 +827,17 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
    (only for spans above about 1 MB, or for selections, so warm single-trace reads keep
    their 0.3 µs), and in the prefetcher for the chunk after the one being decoded. The
    kernel then issues the reads in parallel.
+   *Phase 15:* in (15.3-4, refined in 15.3-14): cold receiver gather p50 222 → 72 ms on
+   y-ieee-10m. Cold sequential reads stay at the disk's speed: a range that continues a
+   sequential read is left to the kernel's read-ahead.
 4. **SEG-Y keys cost 450 ns per trace and 144 B per trace.** 10 M traces: 6.8 s and
    1.44 GB with `keys = true` (the plain index: 2.4 s, 243 MB). Proposals: compute keys
    lazily per gather or column (the R2-4 bulk `traceKeysInto` / `traceFieldColumn`); store
    them as float32 or as a columnar table of the fields a viewer sorts on.
    *14.3a:* `traceKeys(f, traces)` / `traceKeysInto` (on demand, without `keys = true`) and
    `traceFieldColumn` / `traceFieldColumnInto` are in; see the 14.3a Log line in `PLAN.md`.
+   *Phase 15 (15.3-8, 15.3-9):* keys from the raw header bytes: about 220 ns per trace on
+   top of the walk (10 M traces with keys: 6.8 → 3.9 s). Float32 keys were not adopted.
 5. **No sample window.** A viewer showing samples 1000..1500 of 10 000 traces decodes the
    traces from sample 0 (the tensor width can only truncate the end). Proposal:
    `readTracesInto(f, traces, samples: Slice[int], dst)` decoding only the window (new API).
@@ -477,10 +848,13 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
    (fine for every format now except 8015/8024 at about 2 GB/s); after a `seek` the first
    chunk arrives after a whole chunk's decode (chunk 1024: about 1 ms at 4 MB). Proposals:
    N workers over the ring; a smaller first chunk after a seek.
+   *Phase 15 (15.3-11):* `workers` (4 workers: IBM 6.4 → 22.9 GB/s, 8015 4.6 → 16.2),
+   `quickFirst` (seek → first chunk 574 → 242 µs at 1024 traces), a 4 MB ring cap.
 7. **Release builds keep checks in the header and index code.** The index walk is about
    1.7 times slower in `-d:release` (450 ns per trace) than in danger (245 ns). Proposal:
    the same pattern as the decoders in `fieldlayout.decodeFields` (check the block
    length once, then unchecked loads).
+   *Phase 15 (15.3-3):* done; the release v3 and danger walks now cost the same.
 8. **Batched edits are bound by the journal.** 70 k to 130 k edits/s (one fsync per 4096
    edits plus a NIF line per edit, about 10 µs each); CPU is a small part. A binary or
    coalesced journal would be faster; fine for header patches as they are.
@@ -489,3 +863,6 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
     other load on this machine); 8015 scales to 37 GB/s at 16 threads. No lock is taken
     on the read path (R2 confirmed no refcount contention), so nothing in the library
     limits it.
+    *Phase 15 (audit item 10):* the drop at 32 threads was each SMT pair writing two 1 MB
+    tensors through one 512 KB L2; with 256 KB per thread 32 threads hold 47 GB/s
+    (`processing.md` says so).

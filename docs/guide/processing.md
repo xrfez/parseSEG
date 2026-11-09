@@ -137,6 +137,14 @@ doAssert abs(total - serial) <= 1e-9 * serial
 Splitting by trace ranges keeps each thread's reads sequential on disk, which is what the OS
 read-ahead likes. Splitting by gather (`f.gathers`, with `keys = true`) works the same way.
 
+Size each thread's buffer for the CPU cache. From about 4 threads, decoding IEEE, int16 or
+SEG-D 8058 runs at memory bandwidth (about 49 GB/s on a dual-channel DDR4-3200 machine), so
+more threads add nothing for those formats; IBM float and SEG-D 8015/8024 keep scaling to
+16 threads and more. When you run one thread per SMT thread, two threads share each core's
+L2 cache (512 KB on AMD Zen 2), so keep each thread's tensor at about 256 KB (64 traces of
+1000 float32 samples). With 1 MB tensors, 32 threads fell to 32 GB/s; with 256 KB tensors
+they held 47 GB/s.
+
 ## Write results
 
 ### Write like the input

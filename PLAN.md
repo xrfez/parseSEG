@@ -2,18 +2,46 @@
 
 > **Resuming in a new session? Read this file first, then follow "Resume protocol".**
 
-## Handoff (2026-11-09, end of Phase 14) — start here
-- **Branch state:** Phase 14 is complete, and `main` was fast-forwarded to `seg-library` (13.5).
-  Both point at the same commit. Nothing is pushed: push only if the owner asks.
+## Handoff (2026-11-09, end of Phase 15) — start here
+- **Branch state:** Phase 15 is complete on `seg-library`; `main` is still at e09e332 (end of
+  Phase 14). Nothing is pushed or merged: push or merge only if the owner asks.
 - **What parseSEG is now:** a Nim-only library (0.5.0), plus the `parseSEG` CLI.
-  - 14.1 removed the C ABI and Python module.
-  - 14.2 removed the API shapes the FFI forced (see `docs/design/phase14_audit.md`).
-  - 14.3 added bulk header columns and keys on demand, sample windows, `textHeader`,
-    `sortTraces`, `openEditor(f)`/`release`, `SeismicWriter`, a progress/cancel hook, the
-    index cache (`saveIndex`, `openSeismic(cache = ...)`) and prefetch recycling.
-  - `docs/benchmarks.md` has a Phase 14 re-run section.
-- **Suite:** `TMPDIR=/tmp/pl nim test` (47 test files). Check both the exit code and the
-  line "All test files completed".
+  - 15.1 fixed the ORC per-thread leak (decode failures are statuses on worker threads).
+  - 15.2 brought the usage guides up to date (`docs/guide/`, every example runs in `tdocs`).
+  - 15.3 was the idiom and performance review (`docs/design/phase15_idiom_audit.md`,
+    `docs/design/phase15_perf_audit.md`). Before and after numbers per step are in
+    `docs/benchmarks.md` "Phase 15", which also has the full-scale re-run (15.3-14).
+- **Breaking changes since `main` (e09e332):**
+  - `openSeismic(path, keys = false, progress = nil, opts = OpenOptions())`: `verify`,
+    `cache`, `demuxDir` and `twosComplement8015` moved into `OpenOptions` (15.3-13 D2).
+  - Fixed-length SEG-Y opens are sampled by default (`verify = vfSampled`; 15.3-10): a
+    mismatch in a header that was not sampled is not reported; `OpenOptions(verify: vfFull)`
+    walks every header. New info diagnostic `dcIndexSampled`. `buildIndex` has `verify`
+    (default `vfFull`). `loadIndex` refuses a cache saved from a sampled open for `vfFull`.
+  - Module paths: `model/tensors` -> `common/tensors` (15.3-12); `seg2convert` and
+    `segd/revconvert` -> `convert/toseg2` and `convert/tosegd`, the SEG-Y conversion body in
+    `convert/tosegy`; `model/indexwalk` (detection and walks) split from `model/traceindex`
+    (15.3-13). New public modules `model/indextypes`, `model/fieldvalues`, `model/keytypes`
+    hold types that moved (re-exported where they were before).
+  - Names: `decodeSegdSamples`, `encodeSegdSamples`, `decodeSeg2Samples`,
+    `encodeSeg2Samples` are `decodeSamples`/`encodeSamples` overloads on the format type;
+    `Seg2Format` -> `Seg2SampleFormat`; `MemoryTape.items` is an iterator (15.3-13 D3, D4).
+  - `import parseSEG` no longer exports internals: the `*Raw` decoders (15.2, 15.3-1), the
+    `private/` layer (15.3-7: `checkSpan`, `tryDecodeEntry`, `adviseTraces`, ...) and the
+    `require*` helpers; the umbrella re-exports `traceindex`, `headerfields`, `edit`,
+    `convert` by allowlist.
+  - Not copyable (`=dup`/`=copy` are errors): `SeismicFile`, `Prefetcher`, `SeismicWriter`,
+    `JournalFile`, `MapOwner` (15.3-12). Private with accessors: `SegyReader.file`/`log`,
+    `SegyWriter.log` (15.3-13 D1).
+  - `ImportOptions.onChange` is `{.raises: [CatchableError]}` (15.3-6b).
+  - Build: `nim cli` and `PARSESEG_BENCH_BUILD=release` target x86-64-v3 (AVX2);
+    `nimPortable`/`zigPortable` are the baseline x86-64 builds (15.3-5).
+- **Suite:** `TMPDIR=/tmp/pl nim test` (47 test files), `nim testRelease` (release and
+  danger), `nim asan` (threaded tests under ASan/LSan), `nim docs` (fails on broken links
+  and RST warnings). Check both the exit code and the line "All test files completed".
+- **Bench:** `PARSESEG_BENCH_SCALE=full PARSESEG_BENCH_DIR=/tmp/pl/benchdata nim bench`
+  (53 GB of data, regenerated only when missing; reports in
+  `<dir>/results-<scale>-<build>.md`).
 - **Gotchas:**
   - **Short TMPDIR:** `theadernif` `failed_journal_syncs` fails under a long TMPDIR.
   - **Map refs on shared read paths:** never copy `f.map`/`f.map.src` into a local. ORC
@@ -22,15 +50,22 @@
     line after a heredoc runs even when the check before it failed.
   - **Worker-thread exceptions:** decode paths that run on worker or caller threads must not
     raise. Use `tryDecodeEntry` (it returns a status, `{.raises: [].}`); `nim asan` checks
-    for leaks (15.1).
+    for leaks.
+  - **Read-ahead advice** (`private/decodeentry.adviseTraces`): `madvise(WILLNEED)` helps
+    scattered cold reads 4-12x but stalls the kernel's sequential read-ahead when issued per
+    chunk; measure cold sequential reads too when touching it (15.3-14).
   - **Parallel agents:** they need their own worktree, `XDG_CACHE_HOME` and a short
-    `TMPDIR`. Phase 14.3 ran one agent at a time on the main checkout instead.
-- **Open (from the 14.3 logs):**
-  - the SEG-D writer cannot change sample counts and refuses multiplexed input;
-  - the full-scale bench (`PARSESEG_BENCH_SCALE=full`) was not re-run;
+    `TMPDIR`.
+- **Open:**
+  - Future (below): a bounds-checked `mapped(f)` view for internal map reads (14.2 audit
+    item 20); `Option` fields instead of -1/NaN sentinels in `FileSummary` (item 23); sorting
+    follow-ups.
+  - The SEG-D writer cannot change sample counts and refuses multiplexed input.
+  - `convertWithGeometry` stays in writeback (15.3-13 note); the three `*Raw` decoders are
+    still hidden by `except` lists rather than a private module.
   - "Open questions for the owner" below still stand.
-- **Next:** Phase 15 (owner, 2026-11-09): 15.1 leak (done), 15.2 docs pass, 15.3
-  idiomatic Nim and performance review.
+- **Next:** owner review of Phase 15; then merge `seg-library` into `main` (fast-forward) if
+  approved, and push only when asked.
 
 ## Goal
 An idiomatic, high-performance Nim library to **read and write** SEG seismic data on **disk and
@@ -1018,7 +1053,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
       - **Prefetch (R3-9):** chunk recycling, `recycle` / `nextInto`.
 - [x] 14.4 Re-run `nim bench` (Nim only) and update `docs/benchmarks.md`, then do 13.5.
 
-### Phase 15: Leak, usage docs, idiomatic Nim and performance review (owner, 2026-11-09)
+### Phase 15: Leak, usage docs, idiomatic Nim and performance review (owner, 2026-11-09) — complete
 - [x] 15.1 **The 32 KB leak.** It was found under ASan in `tests/tprefetch.nim`.
       - **Cause** (2026-11-09, ASan with `fast_unwind_on_malloc=0`):
         - When a trace cannot be decoded, the prefetcher worker raises and catches a `SegError`
@@ -1058,7 +1093,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
       - check that `docs/api.md` covers every exported symbol (a script over `nim jsondoc`
         output), and retitle it (it still says "task 8.2");
       - the README feature summary.
-- [ ] 15.3 **Idiomatic Nim and performance review** of the whole codebase. Process as in 14.2:
+- [x] 15.3 **Idiomatic Nim and performance review** of the whole codebase. Process as in 14.2:
       audit agents report to files, the owner approves, then commit-sized fixes.
       - **Idiom:** check against the `nim-*` skills (api-design, style-guide, error-handling,
         ownership-hooks, code-organization, doc-comments). Look at naming, `func`/`raises`,
@@ -1109,7 +1144,7 @@ threaded paths):
 - [x] 15.3-12 I 15.3h-i: hooks (C1-C3); the docs build (narrow Arraymancer imports,
       `tensors` to `common/`), `nim docs` in CI
 - [x] 15.3-13 I optionals: D1, D4, G2, A3 splits, D2 `OpenOptions`, D3 codec overloads, F4
-- [ ] 15.3-14 P9/P10/P14 bench and docs fixes; a full-scale `nim bench` re-run;
+- [x] 15.3-14 P9/P10/P14 bench and docs fixes; a full-scale `nim bench` re-run;
       `docs/benchmarks.md` updated;
       also revisit the 15.3-4 cost on warm gathers (median +6 µs on 1000-trace gathers from the
       two `mincore` probes): one probe, or skip the probe for contiguous spans
@@ -1747,3 +1782,4 @@ threaded paths):
 - 2026-11-09: 15.3-11 done. P11: `newPrefetcher(..., workers = 1, quickFirst = false, maxRingBytes = DefaultRingBytes)` (range and list forms; additive). `workers` threads claim chunks under the lock and decode unlocked as before (`tryDecodeEntry` only, no raises, no `f.map` copies, the `MapPin` held until `close`); the consumer still takes in order. `work`/`quit` are broadcast, and a worker that finishes a chunk dropped by a seek frees the slot and wakes the others; `shutdown` joins every thread. Ring cap: the depth is `min(depth, max(workers + 1, maxRingBytes div chunkBytes))` (`DefaultRingBytes` = 4 MiB; no cap for 0 columns); `p.depth` gives the depth used. `quickFirst`: chunk 0 of the start range and of every `seek` has `max(1, chunkTraces div 4)` traces and the rest follow from it (`chunkCount`/`chunkFirst` from a per-range `head`). `tprefetch`: workers 2/3/8 give chunks identical to 1 worker (first, count, samples, failed, log) on the sample files, ranges and lists, with undecodable rows; 3000 random seeks/polls with 4 workers, with and without `quickFirst`; the ring cap (cap, floor of workers + 1, a larger `maxRingBytes`, an explicit depth below the cap, 0 columns); `quickFirst` boundaries at the start, after seeks (to the end, a span shorter than the head, an empty span), for lists and 1-3 trace chunks, and off by default. Full-scale files, the consumer only takes (`nextInto`), GB/s, danger native / release v3, before -> after: y-ieee 256x16 12.4 -> 20.9 / 12.5 -> 20.8 (the cap; 1024x4 stays 12.8-13.3: one 4 MB chunk), 256x4 21.3 -> 21.3 / 21.2 -> 21.2; with workers 2/4 (256x4): y-ieee 34.9/37.7 / 35.2/38.0, y-ibm 6.2 -> 10.8/20.0 / 6.4 -> 12.4/22.5, d21-8015 4.6 -> 8.9/16.2 / 4.5 -> 9.0/16.0. Seek -> first chunk p50 with `quickFirst` (1 worker), before -> after: y-ieee 1024x4 554 -> 319 / 548 -> 254 us, 256x4 100 -> 86 / 102 -> 70 us; y-ibm 1024x4 1386 -> 966 / 1373 -> 839 us; d21-8015 1024x4 1128 -> 712 / 1138 -> 702 us. The danger IBM single-worker figure moved 6.2 -> 5.5 between builds with identical decoder code placed 16 bytes off its 32-byte loop alignment (perf annotate; release unchanged): code placement, not the prefetcher. Suite, testRelease and asan green.
 - 2026-11-09: 15.3-12 done. Hooks (C1-C3): `=dup {.error.}` on `JournalFile`, `Prefetcher[T]`, `SeismicWriter`, `MapOwner`, `SeismicFile`; the `*` dropped from `Prefetcher`'s `=destroy`/`=copy` and `SeismicFile`'s `=copy` (MapPin's `=destroy` stays exported: `Prefetcher`'s destructor in another module destroys its pin by an explicit call, which a hidden hook does not bind, it falls to the generic `=destroy(var T)`). `SeismicWriter`: `closed` -> `open` (set by `openSeismicWriter`; a zeroed or moved-from writer releases nothing), `releaseOutput(WriterState)` (no mutation) for `=destroy`, `discardOutput(var)` for `close`; a dropped SEG-2 output's file is closed, not finished. The one `addr` left in that destructor is for `=destroy` of the plain-object field: on 2.4 a non-`var` destructor cannot destroy such a field otherwise, and a custom destructor does not destroy fields itself (checked under ASan). `twritefile` moved_writer; `tphase6review` checks `g = f`. Docs build (E1): `model/tensors` moved to `common/tensors` (module path change; the umbrella re-exports it as before); it imports and re-exports Arraymancer's CPU tensor modules one by one (`arraymancer/tensor`'s list, plus nimblas `OrderType`) instead of `arraymancer/tensor`, whose `when defined(nimdoc)` CUDA/OpenCL imports broke `nim doc`, so `import parseSEG` gives the same tensor API; `private/tensorrows` imports only `tensor/data_structure`. RST fixed: `NAME_` keyword stems (read as link references) in backticks (`seg2convert`, `keys`, `convert`), two continuation lines starting "(2)"/"(X)" (enumerated lists; `keys`, `sps`). `nim docs` exits 0 with no warning (`XCannotRaiseY` hints only) and fails on `BrokenLink`/`warnRstStyle` (`--warningAsError`); `nim doc` of every module alone passes (bar `tape_windows`, Windows only). CI linux job runs `nim docs`. Decode bench (small, mapped GB/s, back-to-back runs, 15.3-11 -> 15.3-12): y-ibm 6.58 -> 6.63, y-ieee 23.1 -> 23.5, d21-8058 19.3 -> 23.6 (noise), d21-8015 4.68 -> 4.70, d21-8024 7.05 -> 7.07, s2-ieee 13.6 -> 13.7. Suite, testRelease and asan green.
 - 2026-11-09: 15.3-13 done (commits 15.3-13a-f). D1: `SegyReader.file`/`log` and `SegyWriter.log` private with `lent` accessors (as SEG-D/SEG-2); the index walk moves the log out through `private/segywalk.takeLog`. D4: `MemoryTape` is a collection: `len`, `[]` (`lent TapeItem`) and an `items` iterator (the stdlib iterator name; chosen over renaming the accessor, so `for`, `toSeq` and indexing behave as for a collection). G2: `ensureMove` at the 11 last-use `move`s of locals (convert, headerlist, segy/reader, edit); each compiles (checked by instantiating every proc), `move` stays on fields of `var` parameters. F4: the 42 blocks of `tphase6review`, `tphase8review`, `tsegyreview2`, `treview13` moved into their subject files (ttraceindex, tgathers, tedit, tprefetch, tconvert, tsegdrev3, tsurvey, tsegyreader, tsegylayout, tsegyuserdata, tseg2, tsegdrevconvert), named `p6_`/`p8_`/`segyreview2_`/`r13_<finding>`; the four files are gone. A3: `model/traceindex` (1235 -> 860 lines) split into `model/indexwalk` (public: `detectKind`, `buildIndex`, the walks; re-exported by traceindex, exported whole by the umbrella) and `private/indexcache` (the cache format: `FileStamp`, `CacheKey` with the mapped bytes as a raw pointer, `readIndexCache`, `writeIndexCache`; `saveIndex` and its checks stay); conversion by target: `convert/tosegy` (the old convert.nim body, `ConvertOptions`), `convert/tosegd` (was `segd/revconvert` + `convertSeg2ToSegd`), `convert/toseg2` (`convertToSeg2`), `private/seg2conv` (the SEG-2 converters' shared state; its `decodeTrace` renamed `decodeFloat64`, the name clashed with the public tensors overloads); `convert.nim` keeps `convertFile`/`convertJoined` and re-exports the three; umbrella: `tosegd`/`toseg2` whole, `tosegy` by allowlist (tdocs). Not done: moving `convertWithGeometry` into convert (it needs writeback's private `writeInPlace`, shared with `copyWithGeometry`: one exported internal for another). D2: `openSeismic(path, keys = false, progress = nil, opts = OpenOptions())`, `OpenOptions` (in `model/indextypes`: `verify = vfSampled`, `cache`, `demuxDir`, `twosComplement8015`); keys and progress stay parameters as the audit proposed (common setting, callback), options last as in the skill's `scan(ws, opts)`; ~30 named call sites (cli, tests, guides, README, api.md) pass `opts = OpenOptions(...)`, path/keys/progress-only calls unchanged. No deprecated overload: one with defaulted legacy keywords makes `openSeismic(path)` ambiguous. D3: `decodeSamples`/`encodeSamples`/`decodeSamplesRaw` overloaded on `SampleFormat`, `SegdSampleFormat`, `Seg2SampleFormat` (renamed from `Seg2Format`); `toSegdFormat`/`toSeg2Format` (int input) keep their names; no aliases. Breaking (module paths and names; `import parseSEG` users only see the renames and `OpenOptions`): `parseSEG/seg2convert` and `parseSEG/segd/revconvert` -> `parseSEG/convert/toseg2`, `convert/tosegd` (also re-exported by `parseSEG/convert`); `decodeSegdSamples`, `encodeSegdSamples`, `decodeSeg2Samples`, `encodeSeg2Samples`, `Seg2Format`; `MemoryTape.items` (now an iterator); the openSeismic keywords above; direct field writes to `SegyReader.file`/`log`, `SegyWriter.log`. Benches, danger native, back-to-back with 15.3-12 (2 rounds each, 15.3-12 -> now): decode mapped GB/s y-ibm 6.56/6.56 -> 6.54/6.63, y-ieee 23.2/23.8 -> 23.5/23.5, d21-8058 23.8/23.1 -> 23.4/23.2, d21-8015 4.67/4.71 -> 4.69/4.63, d21-8024 7.09/7.11 -> 7.15/7.10, s2-ieee 13.8/13.8 -> 13.3/13.7; index walk ns/trace d21-8058-10m 169/169 -> 163/163 (keys 194/193 -> 185/186), y-ieee keys 618/668 -> 633/658, y-ieee-10m sampled open 1.45/1.41 -> 1.41/1.42 ms; conversion CPU (null sink, GB/s) d21-8058->Y 4.02/4.03 -> 3.85/4.02, d21-8015->Y 1.52/1.53 -> 1.51/1.52, y-ibm->5 2.95/2.95 -> 2.93/2.97, d21-8058->3.0 1.14/1.15 -> 1.14/1.14 (noise). Suite, testRelease, asan and docs green.
+- 2026-11-09: 15.3-14 done; **Phase 15 complete.** Warm gathers: the two `mincore` probes cost a syscall each (0.66-0.76 µs here; `madvise` of 4 MB of resident pages 40.7 µs, so probing stays); A/B with advice compiled out, danger: d21-8058-10m warm shot gather (452 KB) 28.7-28.9 µs none / 30.1-31.0 two probes, receiver 140.7-141.7 / 143.6-144.6 µs; y-ieee-1m gathers within noise (shot median 62-77 µs run to run: the 15.3-4 "+6 µs" was mostly noise). Real costs found and fixed (`private/decodeentry.adviseTraces`, `model/prefetch`): (1) a range is probed at its last trace only, a selection at both ends (shot gather 30.1-31.0 -> 29.3-30.0 µs); (2) a range whose preceding byte (before trace `lo`'s header) is resident continues a sequential read and is not advised: per-chunk WILLNEED stalled the kernel read-ahead, cold sequential `readTracesInto` y-ieee 64-trace chunks 0.35 -> 0.76 GB/s, 1000-trace 0.65 -> 0.73-0.76 (no advice: 0.76); (3) the prefetcher advises about 4 MB (`AdviseAheadBytes`) at a time, a range only once per start/`seek`: warm 64 x 4 y-ieee 18.7-19.6 -> 21.8-22.3 GB/s (none 22.3-22.5), cold 100 k trace range 135 -> 100 ms; kept: cold scattered prefetch 382-386 -> 384-385 ms (none 1174), cold receiver gather y-ieee-1m 105 ms (none 1261), shot 1.83 ms (none 6.37). Bench (P9/P10/P14): decode chunks of 4 MB of float32 (`ChunkBytes`; SEG-2 250 traces), thread tensors 1 MB up to 8 threads and 256 KB from 16, the `traceField` loop row relabelled and a `traceFieldColumnInto` row added, index table with a cold/warm `vfFull` walk next to the default open, prefetch rows with workers 2/4 and `quickFirst` (depth shown as used), random-sample `d21-8015-noise`/`d21-8024-noise` files (`Spec.noise`), report `results-<scale>-<build>.md` naming the build. Full scale (53 GB, /tmp/pl/benchdata reused, 7 files generated), danger all sections and release v3 warm decode/index/latency/prefetch/write: decode GB/s danger/release y-ibm 6.55/6.40, y-ieee 21.6/25.2, LE 22.3/22.4, d21-8058 21.8/22.5, 8015 4.71/4.64 (random 4.71/4.67), 8024 6.98/6.91 (7.01/6.90), s2-ieee 26.9/27.0; y-ieee-10m open 20.5/21.9 ms warm, 49 ms cold (2026-11-08: 2.4 s / 19.9 s), walk 169/191 ns/trace, keys 387/480; cold receiver gather y-ieee-10m p50 222 -> 72 ms; 32 threads y-ieee 30.4 -> 46.8 GB/s; prefetch 4 workers y-ibm 22.9, 8015 16.2 GB/s; header column 22.5 µs per 1000 traces (loop 259 µs). New observation: after a sampled open the first read of each page takes a minor fault (y-ieee-10m random single trace warm p50 3.6 µs vs 0.3 walked). Docs: `docs/benchmarks.md` Phase 15 section (headline, warm-gather table, per-step table, full tables), bottleneck list annotated, method/rerun updated, stale `openSeismic(cache =)` and "header column" claims fixed; viewer.md cold-read paragraph and current numbers (keys 220 ns, walk 1.7 s), processing.md per-thread buffer guidance, getting-started.md and README sampled open, README layout (`convert`, `private`), api.md read-ahead note, viewer table `opts = OpenOptions(cache: ...)`. Suite, testRelease, asan and docs green.

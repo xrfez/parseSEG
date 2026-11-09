@@ -9,7 +9,7 @@ records, channel sets, keys, gathers).
 
 | Section | Main names |
 |---|---|
-| [Open a file](#open-a-file-progress-cancel-and-an-index-cache) | `openSeismic(progress, cache)`, `saveIndex`, `SegCancelledError` |
+| [Open a file](#open-a-file-progress-cancel-and-an-index-cache) | `openSeismic(progress, opts = OpenOptions(cache: ...))`, `saveIndex`, `SegCancelledError` |
 | [The navigation tree](#the-navigation-tree) | `summary`, `gathers`, `channelSets`, `componentGroupIds` |
 | [Read what is on screen](#read-what-is-on-screen) | `readTraces`, `readTracesInto`, sample windows |
 | [Sorted views](#sorted-views) | `sortTraces`, `sortOrder` |
@@ -27,13 +27,14 @@ The open walks every trace header once, which takes seconds on a 40 GB file. A
 fixed-length SEG-Y file (Rev 1 or later, binary header bytes 3503-3504 = 1) is the exception:
 by default (`verify = vfSampled`) its index is computed from the file size and 64 of its trace
 headers (the first, the last and 62 between) are checked against the binary header, so 10 M
-traces open in about 20 ms warm and 40 ms cold, against 1.8 s and 21 s for the walk. The log
-then has an `indexSampled` info. A sampled header that disagrees, keys, Rev 2 extension
+traces open in about 20 ms warm and 50 ms cold, against 1.7 s and 22 s for the walk. The log
+then has an `indexSampled` info. The first read of each page then maps it (a few µs, once
+per page), which the walk used to do at open. A sampled header that disagrees, keys, Rev 2 extension
 headers or trailers, and a size that is not a whole number of traces all fall back to the
 walk; `OpenOptions(verify: vfFull)` always walks, and also reports a mismatch in a header that was not
 sampled (`parseSEG diag` opens that way). Pass a
 `progress` hook to show how far it got and to let the user cancel, and an index cache so the
-next open of the same file is near-instant (10 M SEG-Y traces: 2.5 s to walk, 43 ms from the
+next open of the same file is near-instant (10 M SEG-Y traces: 1.7 s to walk, 43 ms from the
 cache). The hook runs on the opening thread about every MiB and once at the end; returning
 false stops the walk with `SegCancelledError`. Files change only on an explicit write, so
 `openSeismic` only reads the cache: `saveIndex` writes it.
@@ -199,6 +200,17 @@ doAssert view == zoom
 f.close()
 ```
 
+**Cold files.** When a file is not in the page cache, each page fault waits for the disk,
+one at a time, so a scattered read pays one disk round trip per trace. Before a large read
+(32 traces or more, or 1 MB), `readTraces` and `readTracesInto` check whether it is in memory
+(one `mincore` call, about 0.7 µs, at the last trace of a range; two, at both ends, for a
+selection). If it is not, the read asks the OS for all of its traces' pages at once
+(`madvise(MADV_WILLNEED)`): a cold receiver gather of 1000 traces spread over 1.2 GB takes about 0.1 s instead of 1.3 s,
+and a cold shot gather 2 ms instead of 6 ms. A range that continues the previous read (the
+bytes just before it are in memory) is left to the kernel's sequential read-ahead, which
+streams faster than advice per chunk. The prefetcher advises the first 4 MB after a start or
+`seek`, and a selection 4 MB at a time. POSIX only; elsewhere reads fault in as before.
+
 ## Sorted views
 
 A sort is a selection: `sortTraces(by)` sorts by header fields and returns trace indices,
@@ -223,7 +235,8 @@ f.close()
 
 ## Header columns and keys on demand
 
-Stored keys (`keys = true`) cost about 144 bytes and 450 ns per trace at open. A viewer that
+Stored keys (`keys = true`) cost about 144 bytes and 220 ns per trace at open (SEG-Y; 290 ns
+in the release build). A viewer that
 shows geometry only for the traces on screen can open without them and ask for what it
 shows: `traceKeys(traces)` (or `traceKeysInto`, into a reused buffer) makes the keys on
 demand, exactly as `keys = true` would, and `traceFieldColumn(name, traces)` reads one

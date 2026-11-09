@@ -6,7 +6,8 @@ SEG-Y (Rev 0, 1, 2.0, 2.1) and SEG-D (Rev 0 and 1 multiplexed or demultiplexed, 
 traces their geometry. It is built for seismic viewers and for HPC processing.
 
 - **Any file size.** Files are memory-mapped and indexed in one header walk (about 24 bytes
-  per trace), never loaded whole. A `progress` hook shows the walk and can cancel it, and an
+  per trace), never loaded whole; fixed-length SEG-Y opens in milliseconds from a sample of
+  its headers. A `progress` hook shows the walk and can cancel it, and an
   index cache (`saveIndex`, `openSeismic(opts = OpenOptions(cache: ...))`) makes the next open
   near-instant.
 - **Samples into tensors.** Any range, list (a gather, a sort order) or sample window
@@ -65,7 +66,8 @@ Exit status: 0 success, 1 the command reported errors, 2 a usage error.
 ## Directory Layout
 
 - `src/parseSEG.nim`: the public API (umbrella module); `src/parseSEG/`: the library, by
-  area (`common`, `io`, `segy`, `segd`, `seg2`, `model`, `vendor`, `survey`), plus `cli.nim`.
+  area (`common`, `io`, `segy`, `segd`, `seg2`, `model`, `convert`, `vendor`, `survey`;
+  `private` holds internals no public module re-exports), plus `cli.nim`.
 - `tests/`: `nim test` runs every `tests/t*.nim` (the CLI and the guides' examples included).
 - `bench/`: the `nim bench` suite (`docs/benchmarks.md`).
 - `docs/`: usage guides (`guide/`), `api.md`, design notes (`design/`), distilled spec notes
@@ -101,7 +103,7 @@ Nim 2.4's experimental incremental compilation for `nim test`, `nimDebug` and `z
 
 - Run test suite: `nim test` (`nim testRelease`: again in `-d:release` and `-d:danger` builds;
   `nim asan`: the threaded tests under ASan/LSan)
-- Run the benchmarks: `nim bench`
+- Run the benchmarks: `nim bench` (`docs/benchmarks.md`: options, method and results)
 - Format codebase: `nim fmt`
 - Generate documentation: `nim docs`
 
