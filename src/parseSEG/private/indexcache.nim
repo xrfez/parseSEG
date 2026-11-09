@@ -5,7 +5,7 @@
 ##   (.nif27)
 ##   (.vendor "parseSEG")
 ##   (indexcache
-##    (version 1) (library "0.6.0") (schema "<hex>") (endian littleEndian)
+##    (version 1) (library "0.6.1") (schema "<hex>") (endian littleEndian)
 ##    (path "<absolute path>") (size <bytes>) (mtime <s> <ns>)
 ##    (head "<hex>") (tail "<hex>") (twosComplement8015 0) (keys 1))
 ##   NUL, zero bytes to an 8-byte boundary,
