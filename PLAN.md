@@ -1071,6 +1071,38 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
         `deps/` too. The HTML for our modules is still written. Options: import narrower
         Arraymancer modules in `model/tensors.nim`, or doc our modules without `--project`.
 
+#### 15.3 decisions and steps (owner, 2026-11-09)
+Audits: `docs/design/phase15_idiom_audit.md` (I-items) and `docs/design/phase15_perf_audit.md`
+(P-items). Owner decisions:
+- **Build target:** x86-64-v3 by default for `nim cli` and the release tasks; the docs say v3 is
+  the baseline (perf item 1, with item 2's plain loop for host-order copies).
+- **Fixed-length SEG-Y:** opens are sampled by default (perf item 6). `verify = vfFull` gives
+  the strict walk, and an info diagnostic says how many headers were checked.
+- **Prefetch:** a smaller first chunk after `seek`, opt-in (`quickFirst`).
+- **Scope:** every [do] item plus the optional ones.
+
+Steps, in order. Each is one commit or a few, with `nim test` green (and `nim asan` for the
+threaded paths):
+- [ ] 15.3-1 I 15.3a: the umbrella leak quick fix (exclude the `*Raw` decoders in the
+      re-exports) and a `tumbrella` test of every name in the `except` lists
+- [ ] 15.3-2 P7: branchless 8015/8024 (and 8022/8042/8044, SEG-2 format 3) decoders, with a
+      randomized equivalence test
+- [ ] 15.3-3 P3: unchecked `decodeFields`, with the byte order picked once
+- [ ] 15.3-4 P12: `madvise(WILLNEED)` for scattered/large reads and the prefetcher's next chunk
+- [ ] 15.3-5 P1+P2: the x86-64-v3 build default, the host-order copy loop, and the docs
+- [ ] 15.3-6 I 15.3b-e: `{.raises: [].}` contracts, raise helpers, release/danger test
+      runs and the asan flag, `tests/testutils.nim`
+- [ ] 15.3-7 I 15.3f-g: the `private/` layer and the allowlist umbrella exports
+- [ ] 15.3-8 P4.1+P5.1, P13: civil-date arithmetic, `findChannelSet`, the conversion fast paths
+- [ ] 15.3-9 P4.2-4.3, P5.2: SEG-Y keys from raw header bytes; a header-only walk fast path
+- [ ] 15.3-10 P6: O(1) open for fixed-length SEG-Y (sampled by default, `verify`)
+- [ ] 15.3-11 P11: prefetcher `workers`, the ring cap, `quickFirst`
+- [ ] 15.3-12 I 15.3h-i: hooks (C1-C3); the docs build (narrow Arraymancer imports,
+      `tensors` to `common/`), `nim docs` in CI
+- [ ] 15.3-13 I optionals: D1, D4, G2, A3 splits, D2 `OpenOptions`, D3 codec overloads, F4
+- [ ] 15.3-14 P9/P10/P14 bench and docs fixes; a full-scale `nim bench` re-run;
+      `docs/benchmarks.md` updated
+
 ### Future (noted, not scheduled)
 - From the 14.2 audit, declined for now: a bounds-checked `mapped(f)` view for internal map
   reads (item 20); `Option` fields instead of -1/NaN sentinels in `FileSummary` (item 23).
@@ -1686,3 +1718,4 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
     - `madvise(WILLNEED)` on cold gathers: 1261 → 106 ms;
     - x86-64-v3 release build: big-endian IEEE 8.2 → 25.5 GB/s.
   - Owner decisions needed: the build target, O(1) open for fixed-length SEG-Y, and a smaller first prefetch chunk after a seek.
+- 2026-11-09: owner decisions on the 15.3 audits: v3 build default, sampled fixed-length open by default, opt-in `quickFirst`, all [do] and optional items. Steps 15.3-1..14 recorded.
