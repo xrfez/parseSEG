@@ -98,7 +98,8 @@ Nim 2.4's experimental incremental compilation for `nim test`, `nimDebug` and `z
 
 ## Development Commands
 
-- Run test suite: `nim test`
+- Run test suite: `nim test` (`nim testRelease`: again in `-d:release` and `-d:danger` builds;
+  `nim asan`: the threaded tests under ASan/LSan)
 - Run the benchmarks: `nim bench`
 - Format codebase: `nim fmt`
 - Generate documentation: `nim docs`

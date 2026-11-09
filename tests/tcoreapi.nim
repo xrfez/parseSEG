@@ -46,10 +46,11 @@ block unknown_file:
   let f = openSeismic(path)
   doAssert f.kind == skUnknown and f.len == 0 and f.recordCount == 0 and f.log.isFatal
   doAssert f.log[f.log.len - 1].severity == sevFatal
-  try:
-    discard f.log[f.log.len]
-    doAssert false
-  except IndexDefect: discard
+  when compileOption("boundChecks"): # off under -d:danger
+    try:
+      discard f.log[f.log.len]
+      doAssert false
+    except IndexDefect: discard
 
 block prefetch_ranges:
   var f = openSeismic(exampleDir / "Sweep0.sgy")

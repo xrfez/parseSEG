@@ -81,12 +81,19 @@ task test, "Run test suite":
   ## Executes unittest suite (PARSESEG_IC=1: incremental compilation).
   selfExec "c -r --hints:off" & dev() & "tests/tester.nim"
 
+task testRelease, "Run the test suite in -d:release and -d:danger builds (as shipped)":
+  ## The shipped CLI and the benchmarks are release builds, and the hot
+  ## decoders turn their checks off: run every test in both modes too.
+  selfExec "c -r --hints:off -d:release" & dev() & "tests/tester.nim"
+  selfExec "c -r --hints:off -d:danger" & dev() & "tests/tester.nim"
+
 task asan, "Run the threaded tests under ASan/LSan (any leak or memory error fails)":
   ## The tests whose worker or caller threads decode (15.1: a leak there once
   ## came from exceptions destroyed on worker threads). Needs gcc or clang
   ## with libasan. Each test gets its own nimcache under nimcache/asan.
   for t in ["tprefetch", "tsharedreads", "tcolumns", "tviewerreads", "tdiagnostics"]:
-    selfExec "c -r --hints:off -d:useMalloc --debugger:native --passC:-fsanitize=address " &
+    selfExec "c -r --hints:off -d:useMalloc -d:noSignalHandler --debugger:native " &
+      "--passC:-fsanitize=address " &
       "--passL:-fsanitize=address --nimcache:nimcache/asan/" & t & " -o:bin/asan/" & t &
       " tests/" & t & ".nim"
 

@@ -31,6 +31,9 @@ jobs:
       - name: Run test suite
         run: nim test
 
+      - name: Run test suite in release and danger builds
+        run: nim testRelease
+
       - name: Threaded tests under ASan/LSan (fails on any leak)
         run: nim asan
 
