@@ -98,6 +98,7 @@ proc `=destroy`(j: JournalFile) =
     except CatchableError: discard
 
 proc `=copy`(dst: var JournalFile, src: JournalFile) {.error.}
+proc `=dup`(src: JournalFile): JournalFile {.error.}
 
 const
   MaxJournalLine = 1 shl 16 ## Longer journal lines are malformed.

@@ -296,6 +296,7 @@ proc `=destroy`(m: MapOwner) =
   `=destroy`(m.parkedCodecs)
 
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
+proc `=dup`(src: MapOwner): MapOwner {.error.}
 
 type
   MapPin* = object
@@ -304,6 +305,8 @@ type
     m: MapRef
 
 proc `=destroy`*(p: MapPin) =
+  # Exported: `Prefetcher`'s destructor (another module) destroys its pin
+  # explicitly, and only a visible hook binds to a non-`var` field there.
   if p.m != nil: dec p.m.pins
   `=destroy`(p.m)
 
@@ -342,8 +345,9 @@ proc `=destroy`(f: SeismicFile) =
   `=destroy`(f.demuxPath)
   `=destroy`(f.map)
 
-proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
+proc `=copy`(dst: var SeismicFile, src: SeismicFile) {.error.}
   # A copy would share the map, and outlive `close` with a dangling view.
+proc `=dup`(src: SeismicFile): SeismicFile {.error.}
 
 func mapped(f: SeismicFile): bool {.inline.} =
   # Read the map's fields through `f.map.src` in place, never through a

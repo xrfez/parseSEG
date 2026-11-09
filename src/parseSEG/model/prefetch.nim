@@ -138,7 +138,7 @@ proc shutdown[T](sh: ptr Shared[T]) =
   freeShared(sh.slots)
   freeShared(sh)
 
-proc `=destroy`*[T](p: Prefetcher[T]) =
+proc `=destroy`[T](p: Prefetcher[T]) =
   # A forgotten `close` must not leave a worker writing into freed buffers:
   # join it before the slot tensors go.
   if p.sh != nil: shutdown(p.sh)
@@ -148,7 +148,8 @@ proc `=destroy`*[T](p: Prefetcher[T]) =
   `=destroy`(p.selection) # after the shutdown: the workers read it
   `=destroy`(p.path)
 
-proc `=copy`*[T](dst: var Prefetcher[T], src: Prefetcher[T]) {.error.}
+proc `=copy`[T](dst: var Prefetcher[T], src: Prefetcher[T]) {.error.}
+proc `=dup`[T](src: Prefetcher[T]): Prefetcher[T] {.error.}
 
 func chunkCount[T](sh: ptr Shared[T]): int {.inline.} =
   # Chunk 0 holds `head` rows, the others `chunkTraces`.

@@ -302,4 +302,21 @@ block dropped_writer_leaves_no_file:
   doAssert readFile(dst) == "old"
   noTempFiles()
 
+block moved_writer:
+  # The moved-from writer is zeroed: closed, with nothing to release; the
+  # writer moved into finishes the output (or drops it).
+  for drop in [false, true]:
+    let dst = tmp / "moved.sgy"
+    block:
+      var f = openSeismic(bo)
+      var w = openSeismicWriter(dst, f)
+      w.writeTrace(f, 0, f.readTraces(0..0), 0)
+      var w2 = move w
+      doAssertRaises(ValueError): discard w.close()
+      doAssert w2.len == 1
+      if not drop: discard w2.close()
+    doAssert fileExists(dst) == not drop
+    removeFile(dst)
+  noTempFiles()
+
 removeDir(tmp)

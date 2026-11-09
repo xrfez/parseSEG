@@ -44,7 +44,7 @@
 ## trace out of range, another standard, a closed file, a broken SEG-D
 ## record rule) raise `ValueError`.
 
-import std/[options, os]
+import std/[importutils, options, os]
 import ../common/[diagnostics, endians, outputfile, seismickind]
 import ../io/[records, diskio]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
@@ -63,7 +63,7 @@ type
   WriterState = object
     kind: SeismicKind
     path, tmp: string     ## The output, and its temporary file ("" once gone).
-    closed: bool
+    open: bool            ## Set by `openSeismicWriter`; false once closed (and when zeroed).
     written: int
     sink: RecordSink      ## SEG-Y and SEG-D output (nil once closed).
     # SEG-Y
@@ -95,26 +95,34 @@ method writeRecordImpl(s: NullSink; data: openArray[byte]) {.raises: [].} =
 
 method writeTapeMarkImpl(s: NullSink) {.raises: [].} = discard
 
-proc discardOutput(s: var WriterState) {.raises: [].} =
-  # Closes what is open and removes the temporary file. Idempotent.
-  s.closed = true
+proc releaseOutput(s: WriterState) {.raises: [].} =
+  # Closes what is still open and removes the temporary file, mutating
+  # nothing: `=destroy` calls it, `discardOutput` adds the bookkeeping.
   if s.sink != nil:
     try: s.sink.close()
     except CatchableError: discard
-    s.sink = nil
-  try: s.seg2.close() # a no-op unless open; closes its file even when it raises
-  except CatchableError: discard
-  if s.tmp.len > 0:
-    discard tryRemoveFile(s.tmp)
-    s.tmp = ""
+  privateAccess(Seg2Writer)
+  if s.seg2.open: s.seg2.file.close() # the output is dropped: no pointers to write
+  if s.tmp.len > 0: discard tryRemoveFile(s.tmp)
+
+proc discardOutput(s: var WriterState) {.raises: [].} =
+  # `releaseOutput`, then marks it all gone so that it runs once.
+  s.releaseOutput()
+  s.open = false
+  s.sink = nil
+  privateAccess(Seg2Writer)
+  s.seg2.open = false
+  s.tmp = ""
 
 proc `=destroy`(w: SeismicWriter) =
-  let p = addr w
-  if not p[].s.closed: p[].s.discardOutput()
-  `=destroy`(p[].s)
+  if w.s.open: w.s.releaseOutput()
+  # A plain object field has only the generic `=destroy(var T)`; the
+  # address is taken for that call alone, nothing is mutated before it.
+  `=destroy`((addr w.s)[])
 
 proc `=copy`(dst: var SeismicWriter, src: SeismicWriter) {.error.}
   # A copy would share the temporary file and finish it twice.
+proc `=dup`(src: SeismicWriter): SeismicWriter {.error.}
 
 func len*(w: SeismicWriter): int {.inline.} =
   ## Traces written so far.
@@ -196,7 +204,8 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   try: same = fileExists(path) and sameFile(like.path, path)
   except OSError: discard
   if same: refuse("the output " & path & " is the input file")
-  result = SeismicWriter(s: WriterState(kind: kind, path: path, tmp: createTempFor(path)))
+  result = SeismicWriter(s: WriterState(kind: kind, path: path, tmp: createTempFor(path),
+    open: true))
   try:
     case kind
     of skSegy: result.s.openSegy(like, segyFormat)
@@ -421,7 +430,7 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   ## output cannot take or a broken SEG-D rule (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold or output the
   ## writer refuses; `IOError` on a write failure.
-  if w.s.closed: refuse("the writer is closed")
+  if not w.s.open: refuse("the writer is closed")
   if src.kind != w.s.kind:
     refuse("the output is " & $w.s.kind & ", " & src.path & " is " & $src.kind)
   if not src.isOpen: refuse("the file " & src.path & " is closed")
@@ -456,7 +465,7 @@ proc close*(w: var SeismicWriter): DiagLog =
   ## (`ValueError` for an incomplete SEG-D record, `SegFormatError` for
   ## output the writer refuses, e.g. a SEG-2 file without traces, `IOError`)
   ## the output is discarded. Raises `ValueError` when already closed.
-  if w.s.closed: refuse("the writer is closed")
+  if not w.s.open: refuse("the writer is closed")
   try:
     case w.s.kind
     of skSegy: w.s.closeSegy(result)
@@ -468,6 +477,6 @@ proc close*(w: var SeismicWriter): DiagLog =
   except CatchableError:
     w.s.discardOutput()
     raise
-  w.s.closed = true
+  w.s.open = false
   finishOutput(w.s.tmp, w.s.path, keep = true, result)
   w.s.tmp = ""

@@ -86,7 +86,7 @@ block a6_closed_maps_fail_cleanly:
   doAssert s.readRecord(buf) == rkEndOfData and s.memory == nil and s.size == 0
   var f = openSeismic(exampleDir / "63.sgd")
   var g: SeismicFile
-  doAssert not compiles(`=copy`(g, f)) # a copy could outlive `close`
+  doAssert not compiles(g = f) # a copy could outlive `close`
   f.close()
   var t = newTraceTensor[float32](1, 10)
   doAssert f.readTracesInto(0 .. -1, t) == 0 and not f.isOpen
