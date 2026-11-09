@@ -80,7 +80,7 @@ import ./survey/join
 import ./seg2convert
 export seg2convert.Seg2ConvertOptions, seg2convert.Seg2TargetFormat
 import ./version
-import ./private/[decodeentry, progressticker]
+import ./private/[decodeentry, progressticker, sampleconv]
 
 const
   ConverterName = "parseSEG " & PackageVersion
@@ -198,20 +198,6 @@ func checkTarget(opts: ConvertOptions, err: var string): bool =
   if opts.byteOrder != boBig and r.major < 2:
     err = "little-endian and pair-swapped SEG-Y need Rev 2"
     return false
-  true
-
-proc encodeExact(fmt: SampleFormat, vals: openArray[float64], dst: var seq[byte],
-    order: ByteOrder, scratch: var seq[float64]): bool =
-  # Encodes, then decodes back: false if any value changed (rounding, float32
-  # narrowing, overflow to infinity). Raises like `encodeSamples`.
-  # Both buffers are overwritten whole: no zero-fill (it was half of a
-  # SEG-D -> SEG-Y conversion's CPU time).
-  dst.setLenUninit vals.len * sampleSize(fmt)
-  encodeSamples(fmt, vals, dst, order)
-  scratch.setLenUninit vals.len
-  decodeSamples(fmt, dst, scratch, order)
-  for i in 0..<vals.len:
-    if scratch[i] != vals[i] and not (scratch[i].isNaN and vals[i].isNaN): return false
   true
 
 proc add(l: var Losses, trace: int) =
@@ -384,7 +370,7 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
       try:
         vals.setLen t.numSamples
         decodeSamples(inFmt, t.samples, vals, f.byteOrder)
-        if not encodeExact(outFmt, vals, buf, f.byteOrder, scratch): losses.add(t.index)
+        if not encodeChecked(outFmt, vals, buf, f.byteOrder, scratch): losses.add(t.index)
         swap(t.samples, buf)
       except SegFormatError as e:
         result.report(sevError, dcValidation, "samples do not fit format " & $ord(outFmt) &
@@ -700,13 +686,22 @@ proc toSegySamples(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, twosComplem
       dst.setLenUninit 4 * t.numSamples # every word is written below
       for i in 0..<t.numSamples:
         putNum(dst, 4 * i, getNum[uint32](t.samples, 4 * i, boBig), c.opts.byteOrder)
+    elif not c.opts.applyDescale and t.samples.len >= dataBytes(f, t.numSamples) and
+        (bigEndianOf(f) == sd8058 and c.outFmt == sfFloat32 or
+         bigEndianOf(f) == sd8080 and c.outFmt == sfFloat64):
+      # IEEE floats into the same IEEE format: the bytes, reordered (exact).
+      let order = if f.isLittleEndian: boLittle else: boBig
+      if c.outFmt == sfFloat32:
+        copyFloatWords(float32, t.samples, order, t.numSamples, dst, c.opts.byteOrder)
+      else:
+        copyFloatWords(float64, t.samples, order, t.numSamples, dst, c.opts.byteOrder)
     else:
       c.vals.setLen t.numSamples
       decodeSegdSamples(f, t.samples, c.vals, twosComplement8015)
       if c.opts.applyDescale:
         let m = rec.descaleFactor(t)
         for v in c.vals.mitems: v *= m
-      if not encodeExact(c.outFmt, c.vals, dst, c.opts.byteOrder, c.scratch):
+      if not encodeChecked(c.outFmt, c.vals, dst, c.opts.byteOrder, c.scratch):
         c.losses.add(c.nOut)
   except SegFormatError as e:
     c.log.report(sevError, dcValidation, "samples do not fit SEG-Y format " & $ord(c.outFmt) &
@@ -1065,7 +1060,7 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
         if ns > 0:
           decodeEntry(f.unsafeMemory, f.mappedSize, e, codec,
             cast[ptr UncheckedArray[float64]](addr c.vals[0]), ns)
-        if not encodeExact(c.outFmt, c.vals, ot.samples, opts.byteOrder, c.scratch):
+        if not encodeChecked(c.outFmt, c.vals, ot.samples, opts.byteOrder, c.scratch):
           c.losses.add(c.nOut)
       except SegFormatError as x:
         c.log.report(sevError, dcValidation, "samples do not fit SEG-Y format " &

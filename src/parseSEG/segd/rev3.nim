@@ -11,7 +11,7 @@
 ## changed fields.
 
 import std/[strutils, math]
-import ../common/[endians, fieldlayout]
+import ../common/[endians, fieldlayout, years]
 import ./headers
 
 type
@@ -444,16 +444,6 @@ const
     (2015, 6, 30), (2016, 12, 31)]
     ## The spec's table (to 2014) plus 2015-06-30 and 2016-12-31 (IERS);
     ## append future leap seconds here.
-
-func daysFromCivil(y, m, d: int): int64 =
-  # Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's algorithm).
-  let yy = if m <= 2: y - 1 else: y
-  let era = (if yy >= 0: yy else: yy - 399) div 400
-  let yoe = yy - era * 400
-  let mp = (m + 9) mod 12
-  let doy = (153 * mp + 2) div 5 + d - 1
-  let doe = yoe * 365 + yoe div 4 - yoe div 100 + doy
-  int64(era) * 146097 + int64(doe) - 719468
 
 func computeLeapUnix(): array[leapSecondDays.len, int64] =
   for i, (y, m, d) in leapSecondDays:

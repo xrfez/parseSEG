@@ -32,7 +32,7 @@
 ##   the GH#3 time zero (both GPS µs), else GH#1 as for Rev 1/2.
 ## - SEG-2: ACQUISITION_DATE/TIME (`Seg2File.acquisitionTime`).
 
-import std/[math, tables, hashes, strutils, times]
+import std/[math, tables, hashes, strutils]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
 import ../seg2/headers as seg2headers
@@ -101,13 +101,13 @@ func unset(x: float64): bool {.inline.} = x == 0 or x.isNaN
 
 func isSourceBlock(t: uint8): bool {.inline.} = t in {0x15'u8..0x19'u8, 0x1F'u8}
 
-proc civilSeconds(year, day, hour, minute, second: int): float64 =
+func civilSeconds(year, day, hour, minute, second: int): float64 =
   # POSIX seconds of a date given as year and day of year, as if it were UTC;
   # NaN when a field is out of range.
   if year notin 1..9999 or day notin 1..366 or hour notin 0..23 or minute notin 0..59 or
       second notin 0..60:
     return NaN
-  let jan1 = dateTime(year, mJan, 1, zone = utc()).toTime.toUnix
+  let jan1 = daysFromCivil(year, 1, 1) * 86400
   float64(jan1 + int64(day - 1) * 86400 + int64(hour) * 3600 + int64(minute) * 60 + second)
 
 proc segyTime(gr: GeometryReader, t: SegyTrace): float64 =

@@ -475,3 +475,21 @@ block review_12_4:
       var tr: SegdTrace
       doAssert r.readTrace(tr)
     finally: src.close()
+
+block channel_set_hint_matches_the_search:
+  # The reader tries the previous trace's channel set first (15.3-8); every
+  # trace must still get the descriptor the plain search finds.
+  for name in ["63.sgd", "00000151_12900_11300.sgd", "inova_rev30_5traces.sgd"]:
+    var src: RecordSource = openDiskSource(exampleDir / name)
+    try:
+      var r = openSegd(src, headersOnly = true)
+      var traces = 0
+      while r.nextRecord():
+        var t: SegdTrace
+        while r.readTrace(t):
+          let want = r.record.findChannelSet(t.header)
+          doAssert t.channelSet == (if want.isSome: want.get.channelSet else: -1), name
+          if want.isSome: doAssert t.scanType == want.get.scanType, name
+          inc traces
+      doAssert traces > 0, name
+    finally: src.close()

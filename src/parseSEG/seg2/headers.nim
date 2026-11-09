@@ -347,5 +347,4 @@ proc acquisitionTime*(f: Seg2File): Option[float64] =
   let t = f.value("ACQUISITION_TIME")
   if t.isSome and not parseClock(t.get, secs): return none(float64)
   if day > getDaysInMonth(Month(month), year): return none(float64) # e.g. 31/02
-  let dt = dateTime(year, Month(month), MonthdayRange(day), zone = utc())
-  some(float64(dt.toTime.toUnix) + secs)
+  some(float64(daysFromCivil(year, month, day) * 86400) + secs)

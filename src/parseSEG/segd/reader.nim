@@ -165,6 +165,7 @@ type
     inRecord: bool
     done: bool
     csdWarned: bool
+    lastChannelSet: SegdChannelSetRef ## The previous trace's, for `findChannelSet` (-1s: none).
     noted: Table[(Severity, string), int] ## Diagnostics per (severity, field), for `note`.
     headersOnly: bool          ## Skip sample bytes (`SegdTrace.samples` stays empty).
     mux: MuxBody               ## The current record's scans, when it is multiplexed.
@@ -289,23 +290,35 @@ func scanTypeIndex(rec: SegdRecord, h: SegdTraceHeader): int =
   let st = h.scanTypeNumber - 1
   if st >= 0 and st < rec.scanTypes.len: st else: -1
 
-func findChannelSet*(rec: SegdRecord, h: SegdTraceHeader): Option[SegdChannelSetRef] =
-  ## The channel set descriptor that trace header `h` names (its scan type
-  ## and channel set number); none when the record has no such descriptor.
+func findChannelSet(rec: SegdRecord, h: SegdTraceHeader,
+    last: SegdChannelSetRef): Option[SegdChannelSetRef] =
+  # `findChannelSet`, trying `last` (this record's previous answer, or -1s)
+  # first: consecutive traces mostly share a channel set. A hit is the
+  # first descriptor with its number, as the search below would find, since
+  # `last` came from that search in the same record. Descriptors are read in
+  # place by index (`for i, c in` copied each one).
   let st = scanTypeIndex(rec, h)
   if st >= 0:
     let want = channelSetNumber(h) # BCD byte 4, or bytes 16-17 when it is FF
     template s: untyped = rec.scanTypes[st]
+    template search(descs: untyped, number: untyped) =
+      let n = descs.len
+      if last.scanType == st and last.channelSet in 0..<n and
+          number(descs[last.channelSet]) == want:
+        return some(last)
+      for i in 0..<n:
+        if number(descs[i]) == want:
+          return some(SegdChannelSetRef(scanType: st, channelSet: i))
+    template rev3Number(c: SegdChannelSetDescriptorRev3): int = int(c.channelSetNumber)
     case s.layout
-    of slRev2:
-      for i, c in s.descriptors:
-        if channelSetNumber(c) == want:
-          return some(SegdChannelSetRef(scanType: st, channelSet: i))
-    of slRev3:
-      for i, c in s.descriptorsRev3:
-        if int(c.channelSetNumber) == want:
-          return some(SegdChannelSetRef(scanType: st, channelSet: i))
+    of slRev2: search(s.descriptors, channelSetNumber)
+    of slRev3: search(s.descriptorsRev3, rev3Number)
   none(SegdChannelSetRef)
+
+func findChannelSet*(rec: SegdRecord, h: SegdTraceHeader): Option[SegdChannelSetRef] =
+  ## The channel set descriptor that trace header `h` names (its scan type
+  ## and channel set number); none when the record has no such descriptor.
+  findChannelSet(rec, h, SegdChannelSetRef(scanType: -1, channelSet: -1))
 
 # Channel set values of a trace, the same for every revision; the Rev 1/2 or
 # Rev 3 descriptor is chosen here. A channel set that is unknown
@@ -923,8 +936,9 @@ proc readTraceBody(r: var SegdReader, t: var SegdTrace) =
   t.extensions.setLen 0
   t.header = r.readBlock[:SegdTraceHeader]()
   r.reportBcd(t.header, "trace", t.offset)
-  let found = rec.findChannelSet(t.header)
+  let found = rec.findChannelSet(t.header, r.lastChannelSet)
   if found.isSome:
+    r.lastChannelSet = found.get
     t.scanType = found.get.scanType
     t.channelSet = found.get.channelSet
   else:
@@ -1065,6 +1079,7 @@ proc nextRecord*(r: var SegdReader): bool =
   inc r.records
   r.tracesRead = 0
   r.csdWarned = false
+  r.lastChannelSet = SegdChannelSetRef(scanType: -1, channelSet: -1)
   r.mux = MuxBody()
   r.record = SegdRecord(index: index) # not the previous record if GH#1 cannot be read
   if r.log.tryRecord(r.loc(), r.readRecordHeaders(index)):

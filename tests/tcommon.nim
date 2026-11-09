@@ -1,7 +1,8 @@
-## Tests for the common primitives: endians, bcd, ibmfloat, ebcdic, output files.
+## Tests for the common primitives: endians, bcd, ibmfloat, ebcdic, output files,
+## civil dates.
 
-import std/[assertions, os, strutils]
-import parseSEG/common/[endians, bcd, ibmfloat, ebcdic, errors, diagnostics, outputfile]
+import std/[assertions, os, strutils, times]
+import parseSEG/common/[endians, bcd, ibmfloat, ebcdic, errors, diagnostics, outputfile, years]
 
 block endian_roundtrip:
   var b = newSeq[byte](16)
@@ -96,3 +97,12 @@ block output_files_through_tmp:
   finishOutput(tmp, dir / "missing" / "out.bin", keep = true, log2)
   doAssert log2.isFatal and "cannot move the output into place" in log2[0].msg
   removeFile(tmp)
+
+block civil_days_match_std_times:
+  # `daysFromCivil` (the keys' per-trace date) against `std/times` for the
+  # first and last day of every month of years 1-9999.
+  for y in 1..9999:
+    for m in 1..12:
+      for d in [1, getDaysInMonth(Month(m), y)]:
+        let want = dateTime(y, Month(m), MonthdayRange(d), zone = utc()).toTime.toUnix
+        doAssert daysFromCivil(y, m, d) * 86400 == want, $y & "-" & $m & "-" & $d
