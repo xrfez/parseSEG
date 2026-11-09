@@ -6,7 +6,11 @@
 ## truncation checks that guard the unchecked loops.
 
 import std/[assertions, math, random]
-import parseSEG/common/[endians, ibmfloat, errors]
+import std/macros
+import parseSEG/common/[endians, ibmfloat, errors, fieldlayout]
+import parseSEG/segy/[traceheader, binheader]
+import parseSEG/segd/headers as segdheaders
+import parseSEG/seg2/headers as seg2headers
 import parseSEG/segy/samples
 import parseSEG/segd/samples as segdsamples
 import parseSEG/seg2/samples as seg2samples
@@ -201,3 +205,27 @@ block seg2_formats_orders_and_types:
     decodeSeg2Samples(s2Float64, newSeq[byte](31), dst, boLittle)
 
 echo "tfastcodecs: ok"
+
+block decode_fields_unchecked_loads_match_get_num:
+  # 15.3-3: `decodeFields` loads `at` fields unchecked, with the byte order
+  # picked once; compare each field with the checked `getNum`, in every order.
+  doAssert layoutBytes(SegyTraceHeader, 1) == TraceHeaderSize
+  doAssert layoutBytes(SegyBinaryHeader, 3201) <= BinaryHeaderSize
+  doAssert layoutBytes(Seg2TraceFixed, 0) == 13 # 0-based: bytes 0..12
+  doAssert layoutBytes(SegdGeneralHeader1, 1) == 32
+  proc check[T](firstByte: static int, size: int) =
+    for o in ByteOrder:
+      for _ in 0..<200:
+        let b = randomBytes(size)
+        var h: T
+        decodeFields(h, b, firstByte, o)
+        for _, v in fieldPairs(h):
+          when v.hasCustomPragma(at) and v isnot array:
+            const pos = v.getCustomPragmaVal(at) - firstByte
+            doAssert v == getNum[typeof(v)](b, pos, o) or (v != v) # NaN floats
+  check[SegyTraceHeader](1, TraceHeaderSize)
+  check[SegyTraceHeaderExt1](1, TraceHeaderSize)
+  check[SegyBinaryHeader](3201, BinaryHeaderSize)
+  check[Seg2TraceFixed](0, Seg2FixedSize)
+  var h: SegyTraceHeader
+  doAssertRaises(SegTruncatedError): decodeFields(h, newSeq[byte](239), 1, boBig)

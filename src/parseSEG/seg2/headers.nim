@@ -106,6 +106,10 @@ type
 
 # --------------------------------------------------------- fixed parts --
 
+# `decodeFields` loads unchecked within `layoutBytes`: every layout must fit its block.
+static: doAssert layoutBytes(Seg2FileFixed, 0) <= Seg2FixedSize and
+  layoutBytes(Seg2TraceFixed, 0) <= Seg2FixedSize
+
 func initSeg2File*(order = boLittle): Seg2File =
   ## An empty File Descriptor Block for writing: revision 1, `order` (PC
   ## files are little-endian), NUL as String Terminator and CR LF as Line

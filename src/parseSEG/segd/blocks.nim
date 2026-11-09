@@ -15,6 +15,8 @@ type
 
 func decodeBlock*[T: SegdBlock](b: openArray[byte]): T =
   ## Decodes a block of type `T` from the start of `b` and keeps its bytes.
+  static: doAssert layoutBytes(T, 1) <= sizeof(default(T).raw),
+    "the layout of " & $T & " overruns its block" # `decodeFields` loads unchecked
   doAssert b.len >= result.raw.len, "SEG-D header block too short"
   for i in 0..<result.raw.len: result.raw[i] = b[i]
   decodeFields(result, b, 1, boBig)

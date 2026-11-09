@@ -114,6 +114,9 @@ type
 const traceHeaderFields* = fieldTable(SegyTraceHeader)
   ## Layout of the standard trace header.
 
+# `decodeFields` loads unchecked within `layoutBytes`: every layout must fit its block.
+static: doAssert layoutBytes(SegyTraceHeader, 1) <= TraceHeaderSize
+
 func decodeTraceHeader*(b: openArray[byte], order: ByteOrder): SegyTraceHeader =
   ## Decodes a trace header from the first 240 bytes of `b`, with numbers in
   ## `order`.
@@ -190,6 +193,9 @@ const
   LastInLine* = 2'u16 ## `lastTraceFlag` bit: last trace of its line.
   LastInFile* = 4'u16 ## `lastTraceFlag` bit: last trace of the file (readers stop here).
   LastInSurvey* = 8'u16 ## `lastTraceFlag` bit: last trace of the survey.
+
+# `decodeFields` loads unchecked within `layoutBytes`: every layout must fit its block.
+static: doAssert layoutBytes(SegyTraceHeaderExt1, 1) <= TraceHeaderSize
 
 func decodeTraceHeaderExt1*(b: openArray[byte], order: ByteOrder): SegyTraceHeaderExt1 =
   ## Decodes Extension 1 from the first 240 bytes of `b`.

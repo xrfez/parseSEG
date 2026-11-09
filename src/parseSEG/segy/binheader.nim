@@ -140,6 +140,9 @@ func rulesRevision*(h: SegyBinaryHeader): SegyRevision =
 func isRev20(h: SegyBinaryHeader): bool {.inline.} =
   h.rulesRevision == SegyRevision(major: 2, minor: 0)
 
+# `decodeFields` loads unchecked within `layoutBytes`: every layout must fit its block.
+static: doAssert layoutBytes(SegyBinaryHeader, BinaryHeaderFirstByte) <= BinaryHeaderSize
+
 func decodeBinaryHeader*(b: openArray[byte], order: ByteOrder): SegyBinaryHeader =
   ## Decodes a binary header from the first 400 bytes of `b` (file offset
   ## 3200), with numbers in `order`.

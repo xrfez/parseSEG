@@ -232,12 +232,46 @@ template encodeOne(v: untyped, name: string, b: var openArray[byte], firstByte: 
     const pos = v.getCustomPragmaVal(fix24) - firstByte
     putBeU24(b, pos, uint32(fixedToInt(v, 256.0, 0, 0xFF_FFFF, name)))
 
+func layoutBytes*(T: typedesc, firstByte: static int): int =
+  ## The bytes a layout of `T` spans from spec byte `firstByte`: the end of
+  ## its last field. Use it in a `const` or `static` check that a layout fits
+  ## its block (`decodeFields` loads unchecked within this span).
+  for s in fieldTable(T):
+    result = max(result, (s.firstNibble + s.nibbles + 1) div 2 - (firstByte - 1))
+
+template decodeOneFast(v: untyped, b: openArray[byte], p: ByteBuf, firstByte: static int,
+    order: static ByteOrder) =
+  # `decodeOne` with unchecked loads for the `at` fields, in a fixed order.
+  when v.hasCustomPragma(at):
+    const pos = v.getCustomPragmaVal(at) - firstByte
+    when v is array:
+      for i in 0..<v.len: v[i] = typeof(v[0])(p[pos + i])
+    else:
+      v = loadNum[typeof(v)](p, pos, order)
+  else:
+    decodeOne(v, b, firstByte, order)
+
+{.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+
 proc decodeFields*[T: object](h: var T, b: openArray[byte], firstByte: static int,
     order: ByteOrder) =
   ## Fills every layout field of `h` from `b`, where `b[0]` holds spec byte
-  ## `firstByte`.
-  for _, v in fieldPairs(h):
-    decodeOne(v, b, firstByte, order)
+  ## `firstByte`. Raises `SegTruncatedError` if `b` is shorter than the
+  ## layout (`layoutBytes`); that one check guards every load, which are
+  ## then unchecked in every build.
+  const need = layoutBytes(T, firstByte)
+  if b.len < need:
+    raiseTruncated($T & " needs " & $need & " bytes, got " & $b.len)
+  let p = byteBuf(b)
+  case order # picked once, not per field
+  of boBig:
+    for _, v in fieldPairs(h): decodeOneFast(v, b, p, firstByte, boBig)
+  of boLittle:
+    for _, v in fieldPairs(h): decodeOneFast(v, b, p, firstByte, boLittle)
+  of boPairSwapped:
+    for _, v in fieldPairs(h): decodeOneFast(v, b, p, firstByte, boPairSwapped)
+
+{.pop.}
 
 proc encodeFields*[T: object](h: T, b: var openArray[byte], firstByte: static int,
     order: ByteOrder) =
