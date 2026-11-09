@@ -54,7 +54,7 @@
 ##   extended or external blocks.
 
 import std/[math, os, strutils]
-import ../common/[errors, diagnostics, endians, outputfile, years]
+import ../common/[errors, diagnostics, endians, outputfile, years, progress]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer]
 
@@ -129,6 +129,7 @@ type
     adjusted: int
     srcSize: int64 # bytes of the input file; -1 unknown (a stream)
     records, written: int # records read; records whose headers were written
+    tk: ProgressTicker
 
 const
   WrapDescription = "SEG-D REV2 TRLR " ## Trailer group holding a Rev 2 trailer.
@@ -646,13 +647,19 @@ proc withinRev2(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecor
 
 # ------------------------------------------------------------ the stream --
 
-proc scanSegdRecords*(src: RecordSource, twosComplement8015 = false): seq[SegdRecordScan] =
+func inputSize(src: RecordSource): int64 =
+  if src of DiskSource: DiskSource(src).size else: -1
+
+proc scanSegdRecords*(src: RecordSource, twosComplement8015 = false,
+    progress: Progress = nil): seq[SegdRecordScan] =
   ## A headers-only pass over every record. A record's headers are written
   ## before its traces and trailer are read, but some header values depend on
   ## them: Rev 2 descriptors do not hold sample counts exactly (real data
   ## counts both end points), and a wrapped Rev 2 trailer sets the Rev 2
-  ## trailer block count.
+  ## trailer block count. Raises `SegCancelledError` when `progress`
+  ## (called about every MiB, see `Progress`) returns false.
   var r = openSegd(src, twosComplement8015, headersOnly = true)
+  var tk = initProgressTicker(progress, inputSize(src))
   while r.nextRecord():
     var rs = SegdRecordScan(rev2Trailer: -1)
     for st in r.record.scanTypes:
@@ -660,6 +667,7 @@ proc scanSegdRecords*(src: RecordSource, twosComplement8015 = false): seq[SegdRe
       for x in rs.setSamples[^1].mitems: x = -1
     var t: SegdTrace
     while r.readTrace(t):
+      if not tk.tick(t.offset): raiseCancelled()
       if t.scanType >= 0 and t.channelSet >= 0:
         rs.setSamples[t.scanType][t.channelSet] =
           max(rs.setSamples[t.scanType][t.channelSet], t.numSamples)
@@ -669,6 +677,7 @@ proc scanSegdRecords*(src: RecordSource, twosComplement8015 = false): seq[SegdRe
       let blocks = unwrapTrailer(r.record.trailerRev3)
       if blocks.isSome: rs.rev2Trailer = blocks.get.len
     result.add rs
+  if not tk.finish(): raiseCancelled()
 
 proc convertHeaders(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
     scan: SegdRecordScan): SegdRecord =
@@ -707,6 +716,7 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
   inc c.written
   var t: SegdTrace
   while r.readTrace(t):
+    if not c.tk.tick(t.offset): raiseCancelled()
     if t.scanType < 0 or t.channelSet < 0:
       raiseFormat("trace " & $t.index & " names a channel set no descriptor has " &
         "(convert the file by path: its header scan skips such records)")
@@ -741,10 +751,11 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
         w.endRecord(blocks.get(@[]))
 
 proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions,
-    scan: seq[SegdRecordScan], srcSize: int64): DiagLog
+    scan: seq[SegdRecordScan], srcSize: int64, progress: Progress): DiagLog
 
 proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
-    opts = SegdConvertOptions(), scan: seq[SegdRecordScan] = @[]): DiagLog =
+    opts = SegdConvertOptions(), scan: seq[SegdRecordScan] = @[],
+    progress: Progress = nil): DiagLog =
   ## Converts the SEG-D stream at `src` to revision `opts.revision` on
   ## `sink` (see the module doc). `scan`, from `scanSegdRecords` over the
   ## same data (`convertSegdRevision(path, ...)` makes one), gives Rev 1/2 to
@@ -753,13 +764,17 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
   ## that differ are adjusted (with a warning), and Rev 3 trailers are
   ## dropped. The reader's, the writer's and the conversion's diagnostics are
   ## all in the result; a fatal one means the output is incomplete.
-  convertStream(src, sink, opts, scan, -1)
+  ## `progress` is called about every MiB of input (see `Progress`); when it
+  ## returns false the conversion stops with a fatal `dcCancelled`
+  ## diagnostic.
+  convertStream(src, sink, opts, scan, -1, progress)
 
 proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions,
-    scan: seq[SegdRecordScan], srcSize: int64): DiagLog =
+    scan: seq[SegdRecordScan], srcSize: int64, progress: Progress): DiagLog =
   # `convertSegdRevision`; `srcSize` (-1: unknown) bounds what damaged
   # headers may make it allocate.
-  var c = Conv(opts: opts, loc: Location(file: sink.name), srcSize: srcSize)
+  var c = Conv(opts: opts, loc: Location(file: sink.name), srcSize: srcSize,
+    tk: initProgressTicker(progress, inputSize(src)))
   let target = opts.revision
   if not validTarget(target):
     c.log.report(sevFatal, dcValidation, "target SEG-D revision " & $target &
@@ -779,7 +794,10 @@ proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions
       let rs = if r.record.index < scan.len: scan[r.record.index]
                else: SegdRecordScan(rev2Trailer: -1)
       c.convertRecord(r, w, rs)
+    if not c.tk.finish(): raiseCancelled()
     w.close()
+  except SegCancelledError:
+    c.log.reportCancelled(sink.name)
   except CatchableError as e:
     c.log.report(sevFatal, dcValidation, "conversion stopped: " & e.msg, loc = c.loc)
   if c.records > 0 and c.written == 0 and not c.log.isFatal:
@@ -799,11 +817,14 @@ proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions
   for d in c.log: result.add d
   for d in w.log: result.add d
 
-proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions()): DiagLog =
+proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions(),
+    progress: Progress = nil): DiagLog =
   ## Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
   ## version). Never raises: problems, including I/O failures, are in the
   ## result. The output is written to a new temporary file next to
-  ## `dstPath` and renamed when complete.
+  ## `dstPath` and renamed when complete. `progress` spans the header scan
+  ## and the conversion (see `convertFile`); when it cancels, the result
+  ## holds a fatal `dcCancelled` diagnostic and nothing is written.
   if sameAsInput(srcPath, dstPath, result):
     return
   let tmp = createTempFor(dstPath, result)
@@ -812,12 +833,15 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
   var sink: RecordSink
   try:
     src = openDiskSource(srcPath)
-    let scan = scanSegdRecords(src, opts.twosComplement8015)
+    let scan = scanSegdRecords(src, opts.twosComplement8015, progressPhase(progress, 0, 2))
     src.close()
     src = nil
     src = openDiskSource(srcPath)
     sink = openDiskSink(tmp)
-    result = convertStream(src, sink, opts, scan, getFileSize(srcPath))
+    result = convertStream(src, sink, opts, scan, getFileSize(srcPath),
+      progressPhase(progress, 1, 2))
+  except SegCancelledError:
+    result.reportCancelled(dstPath)
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finally:

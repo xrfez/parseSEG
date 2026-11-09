@@ -58,7 +58,7 @@
 ## before Rev 3).
 
 import std/[math, os, strutils, times, tables]
-import ./common/[endians, errors, diagnostics, outputfile, fieldlayout]
+import ./common/[endians, errors, diagnostics, outputfile, fieldlayout, progress]
 import ./io/[records, diskio]
 import ./segy/[reader as segyreader, samples as segysamples]
 import ./segd/[reader as segdreader, writer as segdwriter, revconvert, rev3, headers as segdheaders,
@@ -91,6 +91,7 @@ type
     loc: Location
     inexact, firstInexact: int
     unmapped: seq[string] ## Keywords without a slot, in order of first sight.
+    tk: ProgressTicker ## The writing pass's progress.
 
 const
   ConverterName = "parseSEG " & PackageVersion
@@ -120,6 +121,10 @@ proc reportUnmapped(c: var Conv, target: string) =
       "are not carried: " & c.unmapped.join(", "), loc = c.loc)
 
 func finite(x: float64): bool {.inline.} = not (x.isNaN or x == Inf or x == -Inf)
+
+proc tickTrace(c: var Conv, f: SeismicFile, k: int) =
+  # Progress after `k` of the file's traces; raises when cancelled.
+  if not c.tk.tick(int64(k) * f.mappedSize div max(f.len, 1)): raiseCancelled()
 
 proc closeQuietly(f: var SeismicFile) {.raises: [].} =
   # Unmaps a read-only input; a failure there loses nothing.
@@ -378,6 +383,7 @@ proc writeSeg2From(c: var Conv, f: SeismicFile, path: string, opts: Seg2ConvertO
     var vals, back: seq[float64]
     var data: seq[byte]
     for i in 0..<f.len:
+      c.tickTrace(f, i)
       let e = f.index.entries[i]
       let codec = f.index.codecs[e.record]
       let tl = Location(file: c.loc.file, trace: i)
@@ -413,22 +419,32 @@ proc writeSeg2From(c: var Conv, f: SeismicFile, path: string, opts: Seg2ConvertO
             for b in data.mitems: b = 0
           w.writeTrace(t, data)
     c.reportInexact("the SEG-2 target format")
+    if not c.tk.finish(): raiseCancelled()
   finally:
     w.close()
     c.log.add w.log
 
-proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions()): DiagLog {.
-    raises: [].} =
+proc reportFailure(c: var Conv, e: ref CatchableError) =
+  if e of SegCancelledError: c.log.reportCancelled(c.loc.file)
+  else: c.log.report(sevFatal, (if e of IOError: dcIo else: dcValidation), e.msg, loc = c.loc)
+
+proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions(),
+    progress: Progress = nil): DiagLog {.raises: [].} =
   ## Converts the SEG-Y, SEG-D or SEG-2 file `srcPath` to the SEG-2 file
   ## `dstPath` (see the module doc). Never raises: problems, including I/O
   ## failures, are in the result (the input's own diagnostics first). The
   ## output is written to a new temporary file next to `dstPath` and renamed
-  ## when complete.
+  ## when complete. `progress` spans the index walk and the writing pass
+  ## (see `convertFile`); when it cancels, the result holds a fatal
+  ## `dcCancelled` diagnostic and nothing is written.
   var c = Conv(loc: Location(file: dstPath))
   if sameAsInput(srcPath, dstPath, result): return
   var f: SeismicFile
   try:
-    f = openSeismic(srcPath, keys = true)
+    f = openSeismic(srcPath, keys = true, progress = progressPhase(progress, 0, 2))
+  except SegCancelledError:
+    result.reportCancelled(dstPath)
+    return
   except CatchableError as e:
     result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
     return
@@ -445,10 +461,11 @@ proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions()): Diag
   if tmp.len == 0:
     f.closeQuietly()
     return
+  c.tk = initProgressTicker(progressPhase(progress, 1, 2), f.mappedSize)
   try:
     c.writeSeg2From(f, tmp, opts)
   except CatchableError as e:
-    c.log.report(sevFatal, (if e of IOError: dcIo else: dcValidation), e.msg, loc = c.loc)
+    c.reportFailure(e)
   f.closeQuietly()
   result.add c.log
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)
@@ -687,6 +704,7 @@ proc writeSeg2AsSegd(c: var Conv, f: SeismicFile, sink: RecordSink, opts: SegdCo
   w.writeRecordHeaders(rec)
   var vals, back: seq[float64]
   for k, o in order:
+    c.tickTrace(f, k)
     let kk = keysOf[k]
     let s = sets[o.set]
     let ch = o.t.channelNumber
@@ -729,33 +747,41 @@ proc writeSeg2AsSegd(c: var Conv, f: SeismicFile, sink: RecordSink, opts: SegdCo
         trace: o.index))
       t.samples = newSeq[byte](dataBytes(fmt, s.ns))
     w.writeTrace(t)
+  if not c.tk.finish(): raiseCancelled()
   w.endRecord()
   w.close()
   c.log.add w.log
   c.reportInexact("SEG-D format " & $ord(fmt))
   c.reportUnmapped("SEG-D")
 
-proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions()): DiagLog {.
-    raises: [].} =
+proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions(),
+    progress: Progress = nil): DiagLog {.raises: [].} =
   ## Converts the SEG-2 file `srcPath` to the SEG-D file `dstPath`, Rev 2.0,
   ## 2.1, 3.0 or 3.1 (`opts.revision`; see the module doc). Never raises:
   ## problems, including I/O failures, are in the result. The output is
   ## written to a new temporary file next to `dstPath` and renamed when
-  ## complete.
+  ## complete. `progress` spans every pass (see `convertFile`); when it
+  ## cancels, the result holds a fatal `dcCancelled` diagnostic and nothing
+  ## is written.
   var c = Conv(loc: Location(file: dstPath))
   if sameAsInput(srcPath, dstPath, result): return
   let r = opts.revision
+  let passes = if r.major == 3: 2 else: 3 # Rev 2: through a Rev 3.0 file
   if not (r.major == 2 and r.minor in {0'u8, 1} or r.major == 3 and r.minor in {0'u8, 1}):
     result.report(sevFatal, dcValidation, "target revision " & $r & " is not 2.0, 2.1, 3.0 " &
       "or 3.1", loc = c.loc)
     return
   var f: SeismicFile
   try:
-    f = openSeismic(srcPath, keys = true)
+    f = openSeismic(srcPath, keys = true, progress = progressPhase(progress, 0, passes))
+  except SegCancelledError:
+    result.reportCancelled(dstPath)
+    return
   except CatchableError as e:
     result.report(sevFatal, dcIo, "cannot read: " & e.msg, loc = Location(file: srcPath))
     return
   result.add f.index.log
+  let inSize = f.mappedSize
   if f.index.log.isFatal or f.kind != skSeg2:
     if f.kind != skSeg2 and not f.index.log.isFatal:
       result.report(sevFatal, dcUnsupportedFormat, srcPath & " is not SEG-2", loc = c.loc)
@@ -773,11 +799,12 @@ proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions()): 
       sink = openDiskSink(rev3Path)
       var o3 = opts
       if not direct: o3.revision = SegdRevision(major: 3, minor: 0)
+      c.tk = initProgressTicker(progressPhase(progress, 1, passes), f.mappedSize)
       c.writeSeg2AsSegd(f, sink, o3)
     finally:
       if sink != nil: sink.close()
   except CatchableError as e:
-    c.log.report(sevFatal, (if e of IOError: dcIo else: dcValidation), e.msg, loc = c.loc)
+    c.reportFailure(e)
   f.closeQuietly()
   result.add c.log
   if direct:
@@ -787,7 +814,8 @@ proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions()): 
       var o2 = opts
       o2.format = tfKeep # chosen by the first pass
       try:
-        result.add convertSegdRevision(rev3Path, dstPath, o2)
+        result.add convertSegdRevision(rev3Path, dstPath, o2,
+          progressPhase(progress, 2, 3, inSize))
       except CatchableError as e: # it logs its own failures; this is a safety net
         result.report(sevFatal, dcIo, e.msg, loc = c.loc)
     try: removeFile(rev3Path)

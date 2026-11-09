@@ -36,6 +36,10 @@ proc openDiskSource*(path: string): DiskSource =
     discard
   DiskSource(f: f, name: path, size: size)
 
+func size*(s: DiskSource): int64 {.inline.} =
+  ## The file's size when opened; -1 for a pipe or device.
+  s.size
+
 proc refreshSize(s: DiskSource) =
   # The size is cached at open; a file still being written may have grown.
   try:

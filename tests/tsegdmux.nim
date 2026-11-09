@@ -475,6 +475,15 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   doAssert gf.demuxPath.len == 0 and gf.len == 12 and not gf.index.segdRecords[0].multiplexed
   gf.close()
 
+block demultiplexed_copies_are_not_cached:
+  # 14.3e: the index belongs to a temporary copy, so there is no cache.
+  let cache = tmp / "m15.pidx"
+  var f = openSeismic(tmp / "m15.sgd", cache = cache)
+  doAssert not f.fromCache and f.log.has("was not used", sevInfo), $f.log
+  doAssertRaises(ValueError): f.saveIndex(cache)
+  doAssert not fileExists(cache)
+  f.close()
+
 block conversions_read_demultiplexed_traces:
   # Revision conversion and SEG-Y conversion go through the reader.
   let log = convertSegdRevision(tmp / "m15.sgd", tmp / "m15_21.sgd",

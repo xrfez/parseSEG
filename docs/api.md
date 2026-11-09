@@ -32,9 +32,11 @@ Conventions that hold throughout:
 ## Opening and indexing (any size, disk)
 | Proc | What |
 |---|---|
-| `openSeismic(path, twosComplement8015 = false, keys = false, demuxDir = ""): SeismicFile` | Memory-maps the file, detects SEG-Y, SEG-D or SEG-2, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (`TraceKeys`, 144 B per trace). Multiplexed SEG-D (formats 0015 ... 0058) is demultiplexed once into a temporary copy in `demuxDir` (default: the OS temp dir; `f.demuxPath`, a warning in `f.log`), which is indexed instead and deleted on `close`; `openEditor` refuses such a file (`ValueError`). |
+| `openSeismic(path, twosComplement8015 = false, keys = false, demuxDir = "", progress: Progress = nil, cache = ""): SeismicFile` | Memory-maps the file, detects SEG-Y, SEG-D or SEG-2, and builds the trace index (`index`, 24 B per trace). With `keys`, also collects per-trace geometry (`TraceKeys`, 144 B per trace). Multiplexed SEG-D (formats 0015 ... 0058) is demultiplexed once into a temporary copy in `demuxDir` (default: the OS temp dir; `f.demuxPath`, a warning in `f.log`), which is indexed instead and deleted on `close`; `openEditor` refuses such a file (`ValueError`). `progress` reports the walk (below); `cache` names an index cache (below). |
+| `Progress = proc (done, total: int64): bool {.closure, gcsafe, raises: [].}` | A progress and cancel hook: input bytes done and the input's size (-1 if unknown), about every MiB (`ProgressStep`) and once at the end (`done == total`); return false to cancel. Never per trace: a nil hook (the default) costs one comparison per trace. `openSeismic`, `buildIndex` and `exportHeaders` raise `SegCancelledError` when cancelled (the file is unmapped, no output is left); `convertFile`, `convertSegy`, `convertSegdToSegy`, `convertSeg2ToSegy`, `convertToSeg2`, `convertSeg2ToSegd`, `convertSegdRevision`, `copyWithGeometry` and `convertWithGeometry` take it as their last parameter and return a fatal `dcCancelled` with nothing written. Operations that read the input more than once (a header scan first, SEG-2 input, a copy then an index) spread their passes over one `0 .. total` run. The hook must be gcsafe: capture a parameter or a local `ref`, not a global. |
+| `saveIndex(f, path)`, `f.fromCache` | Write `f`'s index as an index cache: entries, codecs, file and record headers, the walk's diagnostics and keys (if opened with them), about 24 B per trace (+ 144 with keys), a NIF header with the file's stamps and a checksum. `openSeismic(path, cache = cachePath)` reads it instead of walking the file when it was saved for the same path, size, modification time and first/last 64 KiB, with the same `twosComplement8015` (and keys, when asked for), by the same parseSEG version, and is intact; otherwise it walks the file and logs why (`dcIndexCache`, info). `fromCache` says which. `saveIndex` raises `ValueError` for a closed or unrecognized file, a demultiplexed copy, keys changed by `applyGeometry`/`applySurvey`, a file changed since it was opened, or the file itself as `path`. |
 | `detectKind(bytes): SeismicKind` | Detection only (`skUnknown` when nothing fits). |
-| `buildIndex(src: RecordSource, kind, keys = false): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). SEG-2 needs a `MemFileSource` (`ValueError` otherwise). |
+| `buildIndex(src: RecordSource, kind, keys = false, progress = nil): TraceIndex` | The same index from any source: disk, tape image or tape device (`contiguous` is false for tape). SEG-2 needs a `MemFileSource` (`ValueError` otherwise). |
 | `f.len`, `f.kind` (`skSegy`, `skSegd`, `skSeg2`, `skUnknown`), `f.log`, `f.recordCount`, `f.maxSamples`, `f.hasKeys`, `f.isOpen`, `f.path`, `f.demuxPath` | File facts. |
 | `f.traceEntry(i)` (`TraceEntry`), `f.traceKeys(i)` (`TraceKeys`), `f.copyBytes(offset, n)`, `f.sampleIntervalUs(i)` | One trace's location, geometry, raw bytes and sample interval (`ValueError` for a trace out of range; `sampleIntervalUs` and `copyBytes` also for a closed file). |
 | `f.summary` (`FileSummary`), `f.channelSets` (`seq[ChannelSetSummary]`), `f.crsText` | Common metadata with no branch on the standard (task 6.8): standard and revision, byte order, format code, trace/record counts, first/last field record, sample interval, samples per trace and record length (NaN / -1 when not uniform), coordinate units (`CoordinateUnits`) and the CRS text's format (`CrsTextFormat`). `channelSets` gives each SEG-D channel set's interval, timing and trace count; `crsText` the CRS text (P1/11 or Location Data). |
@@ -129,7 +131,7 @@ was opened. `release(ed): SeismicFile` ends the session (as `close`) and returns
 still mapped and as edited.
 `rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them.
 
-Header documents (`model/headernif`): `exportHeaders(f, path, raw = true)` streams every named
+Header documents (`model/headernif`): `exportHeaders(f, path, raw = true, progress = nil)` streams every named
 field (and raw bytes) as NIF; `importHeaders(path, nifPath, ImportOptions(outPath, journal,
 dryRun, force, onChange))` applies an edited document as a patch through the editor, in
 place or into a copy (`dryRun` only lists the changes). A viewer saves its pending edits with
@@ -200,7 +202,7 @@ fatal diagnostic.
   through the read-only `recordIndex` and `fileIndex`.
 
 ## Conversion
-- `convertFile(src, dst, ConvertOptions(...))` detects the input (SEG-Y, SEG-D or SEG-2)
+- `convertFile(src, dst, ConvertOptions(...), progress = nil)` detects the input (SEG-Y, SEG-D or SEG-2)
   and writes the standard `target` names (`skSegy`, the default; `skSegd` with the
   `segd: SegdConvertOptions` for SEG-D or SEG-2 input; `skSeg2` with `seg2:
   Seg2ConvertOptions(byteOrder = boLittle, format = s2tKeep)` for any input). SEG-2 → SEG-Y

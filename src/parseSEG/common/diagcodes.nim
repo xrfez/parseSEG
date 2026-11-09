@@ -29,3 +29,5 @@ type
     dcTapeLayout = "tapeLayout"     ## Tape marks, labels or block sizes deviate from the spec.
     dcValidation = "validation"     ## A writer found spec-invalid content.
     dcMultiplexed = "multiplexed"   ## Multiplexed SEG-D data, demultiplexed as it was read.
+    dcCancelled = "cancelled"       ## A progress callback cancelled the operation; no output.
+    dcIndexCache = "indexCache"     ## An index cache was missing, stale or unreadable; rebuilt.

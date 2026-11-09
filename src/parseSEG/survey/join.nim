@@ -267,6 +267,7 @@ proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, overwrite = false): int
   ## `applySurvey` on every trace; returns the traces changed. Raises
   ## `ValueError` for an index built without `keys = true`.
   ix.requireKeys()
+  ix.joined = true
   for k in ix.keys.mitems:
     if k.applySurvey(g, overwrite): inc result
 

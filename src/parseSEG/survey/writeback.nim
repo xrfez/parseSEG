@@ -39,7 +39,7 @@
 ## the general header blocks. SEG-2 files are refused for now.
 
 import std/[math, options, os, strutils]
-import ../common/[endians, errors, diagnostics, ibmfloat, outputfile]
+import ../common/[endians, errors, diagnostics, ibmfloat, outputfile, progress]
 import ../segy/[layout, traceheader, reader as segyreader, fields]
 import ../segd/[reader as segdreader]
 import ../model/[traceindex, keys, edit]
@@ -775,10 +775,10 @@ proc writeGeometry*(ed: var HeaderEditor, fields = GeometryFields()): GeometryCh
 # ------------------------------------------------------------------ files --
 
 proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overwrite: bool,
-    log: var DiagLog): GeometryChanges =
+    log: var DiagLog, progress: Progress = nil): GeometryChanges =
   # Joins `g` to the file at `path` and writes it in place, journaled into a
   # temporary journal that is removed afterwards (the file is new output).
-  var j = openSeismic(path, keys = true)
+  var j = openSeismic(path, keys = true, progress = progress)
   discard j.applySurvey(g, overwrite)
   let journal = path & ".geometry.nif"
   var ed = openEditor(j, journal)
@@ -789,8 +789,35 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
     log.add ed.log
     discard tryRemoveFile(journal)
 
+proc copyReporting(src, dst: string, progress: Progress) =
+  # `copyFile`, in chunks through `progress` when there is one; raises
+  # `SegCancelledError` when it cancels.
+  if progress == nil:
+    copyFile(src, dst)
+    return
+  const chunk = 8 shl 20
+  var i, o: File
+  if not open(i, src, fmRead): raise newException(IOError, "cannot open for reading: " & src)
+  try:
+    if not open(o, dst, fmWrite): raise newException(IOError, "cannot write " & dst)
+    try:
+      var tk = initProgressTicker(progress, getFileSize(i))
+      var buf = newSeq[byte](chunk)
+      var done = 0'i64
+      while true:
+        if not tk.tick(done): raiseCancelled()
+        let n = i.readBuffer(addr buf[0], chunk)
+        if n <= 0: break
+        if o.writeBuffer(addr buf[0], n) != n: raise newException(IOError, "cannot write " & dst)
+        done += n
+      if not tk.finish(): raiseCancelled()
+    finally:
+      o.close()
+  finally:
+    i.close()
+
 proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = GeometryFields(),
-    overwrite = false): GeometryCopy =
+    overwrite = false, progress: Progress = nil): GeometryCopy =
   ## Writes a copy of `srcPath` to `dstPath`, in the same standard and
   ## layout, with the survey geometry `g` joined (`applySurvey`, `overwrite`
   ## as there) and written (`writeGeometry`; `result.changes` says what changed).
@@ -798,11 +825,14 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = Geo
   ## SEG-2 is not supported yet (a fatal diagnostic). Never raises: problems
   ## are in `result.log`, with an info summary. The output goes through
   ## a new temporary file next to `dstPath` and is renamed when complete.
+  ## `progress` spans the passes over the input (index, copy, index of the
+  ## copy; see `convertFile`); when it cancels, `result.log` holds a fatal
+  ## `dcCancelled` diagnostic and nothing is written.
   if sameAsInput(srcPath, dstPath, result.log): return
   let tmp = createTempFor(dstPath, result.log)
   if tmp.len == 0: return
   try:
-    var f = openSeismic(srcPath)
+    var f = openSeismic(srcPath, progress = progressPhase(progress, 0, 3))
     try:
       case f.kind
       of skUnknown:
@@ -813,24 +843,29 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = Geo
           "files yet", loc = Location(file: srcPath))
       of skSegy, skSegd:
         # A multiplexed file: its demultiplexed copy.
-        copyFile(if f.demuxPath.len > 0: f.demuxPath else: srcPath, tmp)
+        copyReporting(if f.demuxPath.len > 0: f.demuxPath else: srcPath, tmp,
+          progressPhase(progress, 1, 3, f.mappedSize))
     finally:
       f.close()
     if not result.log.isFatal:
-      result.changes = writeInPlace(tmp, g, fields, overwrite, result.log)
+      result.changes = writeInPlace(tmp, g, fields, overwrite, result.log,
+        progressPhase(progress, 2, 3))
       result.log.report(sevInfo, dcValidation, "geometry written: " & $result.changes,
         loc = Location(file: dstPath))
+  except SegCancelledError:
+    result.log.reportCancelled(dstPath)
   except CatchableError as e:
     result.log.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finishOutput(tmp, dstPath, keep = not result.log.isFatal, result.log)
 
 proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = ConvertOptions(),
-    fields = GeometryFields(), overwrite = false): DiagLog =
+    fields = GeometryFields(), overwrite = false, progress: Progress = nil): DiagLog =
   ## `convertFile` with the survey geometry `g` joined (`applySurvey`,
   ## `overwrite` as there) and written into the SEG-Y output: SEG-D keys are
   ## joined before they become SEG-Y headers; SEG-Y output is written with
   ## `writeGeometry` before it is moved into place. Never raises: problems
-  ## are in the result.
+  ## are in the result. `progress` as for `convertFile` (SEG-Y input: the
+  ## conversion, then the index of the output).
   var kind = skUnknown
   try:
     var head = newSeq[byte](8192)
@@ -848,17 +883,20 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
   case kind
   of skSegd:
     result.add convertJoined(srcPath, dstPath, opts,
-      GeometryJoin(survey: addr g, fields: fields, overwrite: overwrite))
+      GeometryJoin(survey: addr g, fields: fields, overwrite: overwrite), progress)
   of skSegy:
     if sameAsInput(srcPath, dstPath, result): return
     let tmp = createTempFor(dstPath, result)
     if tmp.len == 0: return
-    result.add convertFile(srcPath, tmp, opts)
+    result.add convertFile(srcPath, tmp, opts, progressPhase(progress, 0, 2))
     if not result.isFatal:
       try:
-        let c = writeInPlace(tmp, g, fields, overwrite, result)
+        let c = writeInPlace(tmp, g, fields, overwrite, result, progressPhase(progress, 1, 2,
+          getFileSize(srcPath)))
         result.report(sevInfo, dcValidation, "geometry written: " & $c,
           loc = Location(file: dstPath))
+      except SegCancelledError:
+        result.reportCancelled(dstPath)
       except CatchableError as e:
         result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
     finishOutput(tmp, dstPath, keep = not result.isFatal, result)
@@ -866,4 +904,4 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
     result.report(sevFatal, dcUnsupportedFormat, "geometry cannot be written to SEG-2 " &
       "files or their conversions yet", loc = Location(file: srcPath))
   of skUnknown:
-    result.add convertFile(srcPath, dstPath, opts) # reports why it cannot
+    result.add convertFile(srcPath, dstPath, opts, progress) # reports why it cannot

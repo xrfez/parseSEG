@@ -69,7 +69,7 @@
 ## float32. Trace strings with no slot are listed in one info note.
 
 import std/[math, os, strutils, times]
-import ./common/[endians, errors, diagnostics, outputfile, years]
+import ./common/[endians, errors, diagnostics, outputfile, years, progress]
 import ./io/[records, diskio, memsource]
 import ./segy/[reader as segyreader, writer as segywriter, textheader, binheader, traceheader,
   samples as segysamples, exttext, layout]
@@ -254,11 +254,20 @@ proc reorderProprietary(lay: TraceLayout, blocks: var seq[byte], src, dst: ByteO
 
 # ------------------------------------------------------------- SEG-Y → SEG-Y --
 
-proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()): DiagLog =
+func inputSize(src: RecordSource): int64 =
+  # The size `Progress` reports for `src`: -1 unless it is a file.
+  if src of MemFileSource: MemFileSource(src).size
+  elif src of DiskSource: DiskSource(src).size
+  else: -1
+
+proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
+    progress: Progress = nil): DiagLog =
   ## Rewrites the SEG-Y file at `src` with the target revision, byte order and
   ## format of `opts` (`stKeep` keeps the input format). The reader's,
   ## the writer's and the conversion's diagnostics are all in the result; a
-  ## fatal one means the output is incomplete.
+  ## fatal one means the output is incomplete. `progress` is called about
+  ## every MiB of input (see `Progress`); when it returns false the
+  ## conversion stops with a fatal `dcCancelled` diagnostic.
   var err: string
   if not checkTarget(opts, err):
     result.report(sevFatal, dcValidation, err, loc = Location(file: sink.name))
@@ -344,7 +353,12 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
   var vals, scratch: seq[float64]
   var losses: Losses
   var layoutReordered: seq[int] # traces whose proprietary headers the Layout fully described
+  var tk = initProgressTicker(progress, inputSize(src))
   while r.readTrace(t):
+    if not tk.tick(t.offset):
+      result.add r.log
+      result.reportCancelled(sink.name)
+      return
     let tl = Location(file: sink.name, trace: t.index)
     var ok = true
     if rev.major < 2:
@@ -383,6 +397,9 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions()):
         return
   result.add r.log
   result.report(losses, outFmt, loc)
+  if not tk.finish():
+    result.reportCancelled(sink.name)
+    return
   try:
     w.close()
   except CatchableError as e:
@@ -717,7 +734,7 @@ proc toSegyTrace(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, inRecord: int
   c.toSegySamples(rec, t, twosComplement8015, result.samples)
 
 proc convertSegdToSegyJoined*(src: RecordSource, sink: RecordSink, opts: ConvertOptions,
-    recordFormats: set[SegdSampleFormat], join: GeometryJoin): DiagLog =
+    recordFormats: set[SegdSampleFormat], join: GeometryJoin, progress: Progress = nil): DiagLog =
   ## **Internal** (`convertWithGeometry`; not exported by `parseSEG`).
   ## `convertSegdToSegy` with survey geometry joined to the keys first.
   var c = SegdToSegy(opts: opts, loc: Location(file: sink.name), join: join)
@@ -732,11 +749,15 @@ proc convertSegdToSegyJoined*(src: RecordSource, sink: RecordSink, opts: Convert
     result = move c.log
     result.add r.log
     return
+  var tk = initProgressTicker(progress, inputSize(src))
   while r.nextRecord():
     c.noteRecord(r.record)
     var t: SegdTrace
     var inRecord = 0
     while r.readTrace(t):
+      if not tk.tick(t.offset):
+        c.log.reportCancelled(sink.name)
+        stop()
       inc inRecord
       if not opened:
         # The file headers come from the first trace.
@@ -769,6 +790,9 @@ proc convertSegdToSegyJoined*(src: RecordSource, sink: RecordSink, opts: Convert
   if not opened:
     result.report(sevFatal, dcValidation, "the SEG-D stream has no traces; nothing written",
       loc = c.loc)
+    return
+  if not tk.finish():
+    result.reportCancelled(sink.name)
     return
   try:
     w.close()
@@ -817,7 +841,7 @@ func seg2TraceId(t: Seg2Trace, k: TraceKeys): int16 =
 
 
 proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
-    recordFormats: set[SegdSampleFormat] = {}): DiagLog =
+    recordFormats: set[SegdSampleFormat] = {}, progress: Progress = nil): DiagLog =
   ## Converts the SEG-D stream at `src` to one SEG-Y file (see the module
   ## doc for the mapping). `recordFormats`, the formats of all records (from
   ## a header scan; `convertFile` does one), lets the default format choice
@@ -825,8 +849,8 @@ proc convertSegdToSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptio
   ## way every trace is checked after encoding, and traces not written
   ## exactly are counted in a warning. The reader's, the writer's and the
   ## conversion's diagnostics are all in the result; a fatal one means the
-  ## output is incomplete.
-  convertSegdToSegyJoined(src, sink, opts, recordFormats, GeometryJoin())
+  ## output is incomplete. `progress` as for `convertSegy`.
+  convertSegdToSegyJoined(src, sink, opts, recordFormats, GeometryJoin(), progress)
 
 proc msRounded(c: var SegdToSegy, seconds: float64): int16 =
   # Seconds as whole ms, noting the rounding.
@@ -966,12 +990,15 @@ proc initSegyFileForSeg2(c: var SegdToSegy, f: SeismicFile, t0: Seg2Trace, dt: f
     result.extended.addEndText()
     result.binary.numExtTextHeaders = int16(result.extended.recordCount)
 
-proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions()): DiagLog =
+proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(),
+    progress: Progress = nil): DiagLog =
   ## Converts the SEG-2 file `f` (opened with `keys = true`) to one SEG-Y
   ## file (see the module doc for the mapping). Undecodable traces are
   ## skipped with an error. The index's, the writer's and the conversion's
   ## diagnostics are all in the result; a fatal one means the output is
   ## incomplete. Raises `ValueError` when `f` is not SEG-2 or has no keys.
+  ## `progress` as for `convertSegy` (done: the share of traces written, in
+  ## bytes of the file).
   if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
   if not f.hasKeys: raise newException(ValueError, "open the file with keys = true")
   var c = SegdToSegy(opts: opts, loc: Location(file: sink.name))
@@ -988,7 +1015,12 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
     result = move c.log
     result.add f.index.log
     return
+  let size = f.mappedSize
+  var tk = initProgressTicker(progress, size)
   for i in 0..<f.len:
+    if not tk.tick(int64(i) * size div f.len):
+      c.log.reportCancelled(sink.name)
+      stop()
     let e = f.index.entries[i]
     let codec = f.index.codecs[e.record]
     let tl = Location(file: sink.name, trace: c.nOut)
@@ -1054,6 +1086,9 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
     result.report(sevFatal, dcValidation, "the SEG-2 file has no decodable traces; nothing " &
       "written", loc = c.loc)
     return
+  if not tk.finish():
+    result.reportCancelled(sink.name)
+    return
   try:
     w.close()
   except CatchableError as x:
@@ -1062,22 +1097,25 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
 
 # ------------------------------------------------------------------- files --
 
-proc recordFormats(srcPath: string): set[SegdSampleFormat] {.raises: [].} =
+proc recordFormats(srcPath: string, progress: Progress,
+    cancelled: var bool): set[SegdSampleFormat] {.raises: [].} =
   # The formats of all records of a SEG-D file, from a header-only scan;
   # empty when the scan fails (the conversion reports what is wrong).
   try:
     let m = openMemFileSource(srcPath)
     try:
-      let ix = buildIndex(m, skSegd)
+      let ix = buildIndex(m, skSegd, progress = progress)
       for c in ix.codecs:
         if c.segdFormat.isSome: result.incl c.segdFormat.get
     finally:
       m.close()
+  except SegCancelledError:
+    cancelled = true
   except CatchableError:
     result = {}
 
 proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
-    join: GeometryJoin): DiagLog {.raises: [].} =
+    join: GeometryJoin, progress: Progress = nil): DiagLog {.raises: [].} =
   ## **Internal** (`convertWithGeometry`; not exported by `parseSEG`).
   ## `convertFile` with survey geometry joined to SEG-D keys (SEG-Y target).
   var head = newSeq[byte](8192)
@@ -1094,15 +1132,15 @@ proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
       loc = Location(file: srcPath))
     return
   case opts.target
-  of skSeg2: return convertToSeg2(srcPath, dstPath, opts.seg2)
+  of skSeg2: return convertToSeg2(srcPath, dstPath, opts.seg2, progress)
   of skSegd:
     case kind
     of skSegd:
-      try: return convertSegdRevision(srcPath, dstPath, opts.segd)
+      try: return convertSegdRevision(srcPath, dstPath, opts.segd, progress)
       except CatchableError as e:
         result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
         return
-    of skSeg2: return convertSeg2ToSegd(srcPath, dstPath, opts.segd)
+    of skSeg2: return convertSeg2ToSegd(srcPath, dstPath, opts.segd, progress)
     else:
       result.report(sevFatal, dcUnsupportedFormat, "SEG-Y to SEG-D conversion is not " &
         "supported (only SEG-D and SEG-2 input)", loc = Location(file: srcPath))
@@ -1114,8 +1152,16 @@ proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
   of skSegy: discard
   if sameAsInput(srcPath, dstPath, result):
     return
-  # SEG-D: one target format must hold every record.
-  let formats = if kind == skSegd and opts.format == stKeep: recordFormats(srcPath) else: {}
+  # SEG-D: one target format must hold every record, so the headers are
+  # scanned first (a second pass over the input, for `progress`).
+  let scan = kind == skSegd and opts.format == stKeep
+  var cancelled = false
+  let formats = if scan: recordFormats(srcPath, progressPhase(progress, 0, 2), cancelled)
+                else: {}
+  if cancelled:
+    result.reportCancelled(dstPath)
+    return
+  let pass = if scan or kind == skSeg2: progressPhase(progress, 1, 2) else: progress
   let tmp = createTempFor(dstPath, result)
   if tmp.len == 0: return
   var src: RecordSource
@@ -1126,23 +1172,26 @@ proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
       sink = openDiskSink(tmp)
       case kind
       of skSeg2:
-        seg2 = openSeismic(srcPath, keys = true)
-        result = convertSeg2ToSegy(seg2, sink, opts)
+        seg2 = openSeismic(srcPath, keys = true, progress = progressPhase(progress, 0, 2))
+        result = convertSeg2ToSegy(seg2, sink, opts, pass)
       of skSegy:
         src = openDiskSource(srcPath)
-        result = convertSegy(src, sink, opts)
+        result = convertSegy(src, sink, opts, pass)
       else:
         src = openDiskSource(srcPath)
-        result = convertSegdToSegyJoined(src, sink, opts, formats, join)
+        result = convertSegdToSegyJoined(src, sink, opts, formats, join, pass)
     finally:
       if src != nil: src.close()
       if sink != nil: sink.close()
       seg2.close()
+  except SegCancelledError:
+    result.reportCancelled(dstPath)
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)
 
-proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.raises: [].} =
+proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
+    progress: Progress = nil): DiagLog {.raises: [].} =
   ## Detects whether `srcPath` is SEG-Y, SEG-D or SEG-2 and converts it to
   ## `dstPath` in the standard `opts.target` names: SEG-Y (`convertSegy`,
   ## `convertSegdToSegy`, `convertSeg2ToSegy`), SEG-D (`convertSegdRevision`
@@ -1153,4 +1202,11 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions()): DiagLog {.
   ## created exclusively) and renamed when complete, so a failed conversion
   ## leaves an existing `dstPath` untouched and no partial file. For survey
   ## geometry in the output use `convertWithGeometry`.
-  convertJoined(srcPath, dstPath, opts, GeometryJoin())
+  ##
+  ## `progress` is called about every MiB of input with the bytes read and
+  ## the input's size, and once at the end. Conversions that read the input
+  ## twice (SEG-D with a format chosen from every record, SEG-2 input,
+  ## SEG-D output) spread both passes over one `0 .. total` run. When it
+  ## returns false the conversion stops: the result holds a fatal
+  ## `dcCancelled` diagnostic and nothing is written.
+  convertJoined(srcPath, dstPath, opts, GeometryJoin(), progress)

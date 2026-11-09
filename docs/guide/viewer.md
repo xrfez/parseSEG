@@ -47,6 +47,62 @@ Things worth knowing for the overview:
 - Gather kinds are derived from the keys. A post-stack SEG-Y volume such as the Inglewood
   sample is a single gather of kind `gkUnknown`: there is no source or receiver to group by.
 
+### A progress bar, a cancel button and an index cache
+
+Opening a 40 GB file walks every trace header first. Pass a `progress` hook to show how
+far it got and to let the user cancel, and an index cache so the next open of the same
+file is near-instant (10 M SEG-Y traces: 2.5 s to walk, 43 ms from the cache). The hook
+runs on the opening thread about every MiB and once at the end; returning false stops
+the walk with `SegCancelledError`. Files change only on an explicit write, so
+`openSeismic` only reads the cache: `saveIndex` writes it.
+
+```nim
+import std/os
+import parseSEG
+
+type Bar = ref object
+  percent: int
+  cancelled: bool             # set by the cancel button
+
+proc progressOf(bar: Bar): Progress =
+  # The hook must be gcsafe: it captures `bar`, not a global.
+  proc (done, total: int64): bool =
+    if total > 0: bar.percent = int(done * 100 div total)
+    not bar.cancelled
+
+let path = "SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy"
+let cache = getTempDir() / "inglewood.pidx" # anywhere writable; one cache per file
+removeFile(cache)
+let bar = Bar()
+var f = openSeismic(path, keys = true, progress = progressOf(bar), cache = cache)
+doAssert bar.percent == 100 and not f.fromCache  # no cache yet: indexed, with an info note
+f.saveIndex(cache)
+f.close()
+
+var g = openSeismic(path, keys = true, cache = cache)   # the second open
+doAssert g.fromCache and g.len == 200
+g.close()
+
+bar.cancelled = true
+try:
+  discard openSeismic(path, progress = progressOf(bar))
+  doAssert false
+except SegCancelledError:
+  discard                     # nothing stays mapped
+```
+
+- A cache is used only when it was saved for this path, size, modification time and
+  first and last 64 KiB of the file, with the same `twosComplement8015` (and keys when
+  you ask for them), by the same parseSEG version, and is intact. Anything else walks
+  the file and says why in `f.log` (`indexCache`, info), so a stale cache never gives a
+  wrong index. Save again after such an open.
+- Save right after opening: `saveIndex` refuses an index whose keys `applySurvey` or
+  `applyGeometry` changed, a file changed since it was opened, and the temporary
+  demultiplexed copy of multiplexed SEG-D (those files are never cached).
+- The same hook drives conversions and exports: `convertFile(src, dst, opts, progress)`
+  returns a fatal `cancelled` diagnostic and writes nothing; `exportHeaders(f, path,
+  progress = hook)` raises `SegCancelledError`.
+
 ## Read what is on screen
 
 `readTraces` returns a new tensor; `readTracesInto` decodes into one you already have, so a

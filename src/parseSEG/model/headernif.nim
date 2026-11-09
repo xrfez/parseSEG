@@ -40,7 +40,7 @@
 ## Memory does not grow with the file or the document.
 
 import std/[os, strutils, math, options]
-import ../common/[errors, diagnostics, niftext, outputfile]
+import ../common/[errors, diagnostics, niftext, outputfile, progress]
 import ../segd/reader as segdreader
 from ../seg2/reader import Seg2String, fileBlockSize
 import ./[traceindex, headerfields, edit]
@@ -151,7 +151,7 @@ proc recordBlocks(f: SeismicFile, record: int): seq[BlockRef] =
     inc n
     b = f.index.locateBlock(hsRecord, record, "gh" & $n)
 
-proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
+proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress = nil) =
   ## Writes every named header field of `f` to the NIF file `path`, streamed
   ## through a buffer (memory does not grow with the file). `raw` adds each
   ## block's bytes, and each trace's whole header, as hex. The document is
@@ -159,6 +159,11 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
   ## complete. Raises `IOError` if it cannot be written, and `ValueError` if
   ## `f` is closed or `path` is the seismic file itself. SEG-2 blocks also
   ## list their keyword strings (see the module doc).
+  ##
+  ## `progress` is called about every MiB of the file (the share of traces
+  ## written, in bytes) and once at the end; when it returns false the
+  ## export stops with `SegCancelledError` and nothing is written (like a
+  ## failed write, a cancel raises: this call reports by exceptions).
   if not f.isOpen and f.len > 0: raise newException(ValueError, "the file is closed")
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
@@ -190,7 +195,10 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
         o.put "\n"
         o.putBlock(f, blk, raw, "  ")
       o.put ")"
+    let size = f.mappedSize
+    var tk = initProgressTicker(progress, size)
     for t in 0..<f.len:
+      if not tk.tick(int64(t) * size div f.len): raiseCancelled()
       o.put "\n (trace " & $t
       for name in ["trace", "ext1"]:
         let b = f.index.locateBlock(hsTrace, t, name)
@@ -204,6 +212,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true) =
           int(e.offset) + int(e.headerBytes) - 1)) & "\")"
       o.put ")"
     o.put ")\n"
+    if not tk.finish(): raiseCancelled()
     o.f.write o.buf
     o.f.close()
   except CatchableError:

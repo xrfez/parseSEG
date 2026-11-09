@@ -279,6 +279,14 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
    sample of headers, so opening is O(1) and keys are computed on demand; (b) an
    incremental index (open returns after the first N traces, a worker extends it; `len`
    grows), which is an API change.
+   *14.3e:* an index cache: `saveIndex(f, path)` once, then `openSeismic(path, cache =
+   cachePath)` reads the index instead of walking (validated by size, mtime, the first and
+   last 64 KiB, options and version; any mismatch walks the file). Danger build, warm,
+   10 M SEG-Y traces (12.4 GB): open 2.48 s, from the cache 43 ms (a 240 MB cache, saved in
+   95 ms); with `keys = true` 7.0 s, from the cache 0.47 s (1.68 GB). 1 M SEG-D 2.1 traces:
+   0.21 s, cached 5 ms. A `progress` hook costs nothing measurable (2.48 s with and without
+   one, 11 822 calls), and the walk without one is unchanged (2.58 s before, 2.48 s after;
+   noise).
 3. **Cold reads through the map are latency-bound.** Each page fault reads ahead 128 KB
    synchronously: a cold random trace costs one disk round trip (p50 0.3 ms, p99 12 ms on
    this storage), a cold receiver gather (1000 traces 1000 apart) 1000 sequential round

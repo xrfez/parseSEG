@@ -20,6 +20,10 @@ type
     ## leaves trace lengths unknown): readers stop. Raise it with
     ## `diagnostics.raiseUnlocatable`, which records the diagnostic code.
     diagCode*: DiagCode ## The code to report.
+  SegCancelledError* = object of CatchableError
+    ## A `Progress` callback returned false: the caller cancelled the
+    ## operation (`openSeismic`, `exportHeaders`). Not a `SegError`, so the
+    ## readers' format-error boundaries never swallow it.
 
 proc raiseFormat*(msg: string; offset: int64 = -1) {.noinline, noreturn.} =
   ## Raises `SegFormatError` with `msg` and the byte `offset` (-1 if unknown).
@@ -28,3 +32,7 @@ proc raiseFormat*(msg: string; offset: int64 = -1) {.noinline, noreturn.} =
 proc raiseTruncated*(msg: string; offset: int64 = -1) {.noinline, noreturn.} =
   ## Raises `SegTruncatedError` with `msg` and the byte `offset` where data ran out.
   raise (ref SegTruncatedError)(msg: msg, offset: offset)
+
+proc raiseCancelled*(msg = "cancelled by the progress callback") {.noinline, noreturn.} =
+  ## Raises `SegCancelledError`.
+  raise newException(SegCancelledError, msg)

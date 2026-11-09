@@ -119,6 +119,8 @@ policy:
 | `tapeLayout` | Tape marks, labels or block sizes off the spec | Usually harmless on disk copies of tapes |
 | `validation` | A writer or converter found something the target cannot hold or forbids; also conversion loss notes (`info`) | `error`: nothing was written unless `lenient`. `info`: read the note, it says what was dropped |
 | `multiplexed` | The file holds multiplexed SEG-D, demultiplexed into a temporary copy | `warning`: reads and keys use the copy (`f.demuxPath`); edits need a demultiplexed file |
+| `cancelled` | A `Progress` hook returned false during a conversion | `fatal`: nothing was written; run it again to finish |
+| `indexCache` | `openSeismic(cache = ...)` did not use the index cache (none, stale, damaged; the message says which) | `info`: the file was indexed; `saveIndex` writes a fresh cache |
 | `internal` | A library bug | Please report it with the message |
 
 ## Where logs come from
