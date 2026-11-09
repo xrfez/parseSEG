@@ -11,11 +11,9 @@
 import std/[assertions, os, strutils, times]
 import parseSEG
 import parseSEG/common/binstore
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tindexcache"
-removeDir(tmp)
-createDir(tmp)
+let tmp = scratchDir("parseseg_tindexcache")
 
 let
   d63 = exampleDir / "63.sgd"

@@ -5,17 +5,10 @@ import std/[assertions, os, strutils]
 import parseSEG/common/[errors, diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader, writer, fields]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const ingle = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
-let tmp = getTempDir() / "parseseg_tsegyreview2"
-createDir(tmp)
-
-proc toBytes(s: string): seq[byte] =
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
-
-proc readBytes(path: string): seq[byte] = toBytes(readFile(path))
+let tmp = scratchDir("parseseg_tsegyreview2")
 
 proc write(d: SegyData, path: string, opts: SegyWriteOptions): DiagLog =
   let sink = openDiskSink(path)

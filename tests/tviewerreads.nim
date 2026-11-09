@@ -6,14 +6,12 @@
 
 import std/[algorithm, assertions, math, os, sequtils, strutils]
 import parseSEG
+import ./utils/testutils
 from parseSEG/model/traceindex import unsafeMemory, mappedSize
 from parseSEG/io/memsource import adviseWillNeed, isResident
 when defined(posix): import std/posix
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tviewerreads"
-removeDir(tmp)
-createDir(tmp)
+let tmp = scratchDir("parseseg_tviewerreads")
 
 let
   d63 = exampleDir / "63.sgd"

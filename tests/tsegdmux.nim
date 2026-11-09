@@ -4,29 +4,19 @@
 ## multiplexed sample file, so every record here is built by `muxRecord`,
 ## which writes the bytes the spec describes (`segd_rev0.md` §2.3, §3.6, §5).
 
-import std/[assertions, os, strutils, math, options]
+import std/[assertions, os, math, options]
 import parseSEG/common/[diagnostics, endians, errors]
 import parseSEG/io/[records, tapeimage]
 import parseSEG/segd/[reader, writer, headers, samples, mux, demux, revconvert]
 import parseSEG/model/[traceindex, edit]
 import parseSEG/survey/writeback
+import ./utils/testutils
 
 
-let tmp = getTempDir() / "parseseg_tsegdmux"
-removeDir(tmp)
-createDir(tmp)
-
-proc has(log: DiagLog, text: string, sev = sevInfo): bool =
-  for d in log:
-    if d.severity == sev and text in d.msg: return true
+let tmp = scratchDir("parseseg_tsegdmux")
 
 proc problems(log: DiagLog): int =
   log.count(sevWarning) + log.count(sevError) + log.count(sevFatal)
-
-proc writeBytes(path: string, b: openArray[byte]) =
-  var s = newString(b.len)
-  for i, x in b: s[i] = char(x)
-  writeFile(path, s)
 
 # ------------------------------------------------------------- fixtures --
 
@@ -266,7 +256,7 @@ block demux_0015_two_channel_sets_and_subscans:
   writeBytes(tmp / "m15.sgd", s.muxRecord)
   let d = readSegd(tmp / "m15.sgd")
   doAssert d.log.problems == 0, $d.log
-  doAssert d.log.has("multiplexed (format 0015)")
+  doAssert d.log.has("multiplexed (format 0015)", sevInfo)
   let r = d.records[0].record
   doAssert r.multiplexed and r.format == some(sd8015) and r.gh1.formatCode == 15
   doAssert r.gh1.bytesPerScan == 8 + 10 + 2 * 20
@@ -322,11 +312,11 @@ block window_disagrees_and_the_copy_carries_the_length:
   s.window = @[7] # the window ends one scan early (the +1 question)
   writeBytes(tmp / "w.sgd", s.muxRecord)
   let d = readSegd(tmp / "w.sgd")
-  doAssert d.log.has("has 8 scans, its channel set window gives 7"), $d.log
+  doAssert d.log.has("has 8 scans, its channel set window gives 7", sevInfo), $d.log
   doAssert d.log.problems == 0
   s.checkTraces(d.records[0])
   let log = demultiplexSegd(tmp / "w.sgd", tmp / "w_demux.sgd")
-  doAssert log.problems == 0 and log.has("Trace Header Extension #1"), $log
+  doAssert log.problems == 0 and log.has("Trace Header Extension #1", sevInfo), $log
   let c = readSegd(tmp / "w_demux.sgd")
   doAssert c.log.problems == 0, $c.log
   let r = c.records[0].record
@@ -470,7 +460,7 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   # Survey geometry: in place is refused like any edit; a copy is written
   # demultiplexed (10.5).
   let geo = copyWithGeometry(tmp / "m15.sgd", tmp / "m15geo.sgd", initSurveyGeometry()).log
-  doAssert not geo.isFatal and geo.has("geometry written: 0 traces")
+  doAssert not geo.isFatal and geo.has("geometry written: 0 traces", sevInfo)
   var gf = openSeismic(tmp / "m15geo.sgd")
   doAssert gf.demuxPath.len == 0 and gf.len == 12 and not gf.index.segdRecords[0].multiplexed
   gf.close()

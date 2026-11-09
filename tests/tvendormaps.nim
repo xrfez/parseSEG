@@ -5,9 +5,9 @@ import parseSEG/common/[ibmfloat, ebcdic]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/segy/[reader as segyreader]
 import parseSEG/vendor/apply
+import ./utils/testutils
 
 const here = currentSourcePath().parentDir
-const exampleDir = here / ".." / "SEG Spec" / "exampleFiles"
 
 proc ctxAcme(): VendorContext =
   VendorContext(format: skSegd, revision: VendorRevision(major: 2, minor: 1), manufacturer: 13,

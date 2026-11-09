@@ -5,18 +5,9 @@ import parseSEG/common/[errors, diagnostics, endians]
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/model/tensors
 import parseSEG/segy/[reader, writer]
+import ./utils/testutils
 
-let tmp = getTempDir() / "parseseg_tsegyuserdata"
-createDir(tmp)
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
-
-proc toBytes(s: string): seq[byte] =
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
+let tmp = scratchDir("parseseg_tsegyuserdata")
 
 proc nastyBlob(n: int): seq[byte] =
   ## Binary data full of things a careless walker would trip on.

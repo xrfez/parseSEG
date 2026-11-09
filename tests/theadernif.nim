@@ -5,10 +5,10 @@
 
 import std/[assertions, os, strutils]
 import parseSEG
+import ./utils/testutils
 
 const ex = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_theadernif"
-createDir(tmp)
+let tmp = scratchDir("parseseg_theadernif")
 
 proc fresh(name: string): string =
   result = tmp / name
@@ -20,10 +20,6 @@ proc exportOf(path, to: string, raw = true) =
   var f = openSeismic(path)
   exportHeaders(f, to, raw)
   f.close()
-
-proc has(log: DiagLog, text: string, sev: Severity): bool =
-  for d in log:
-    if d.severity == sev and text in d.msg: return true
 
 block round_trips_change_nothing:
   for n in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy", "63.sgd", "inova_rev30_5traces.sgd"]:

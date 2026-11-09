@@ -4,10 +4,9 @@ import std/[assertions, os, math, sequtils]
 import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader, writer, fields]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tsegylayout"
-createDir(tmp)
+let tmp = scratchDir("parseseg_tsegylayout")
 
 proc write(d: SegyData, path: string) =
   let sink = openDiskSink(path)

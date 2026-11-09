@@ -4,16 +4,10 @@ import std/[assertions, os, strutils, math]
 import parseSEG/common/errors
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const bigFile = exampleDir / "00000151_12900_11300.sgd" # local only, not in git
-let tmp = getTempDir() / "parseseg_tsegdrev3io"
-createDir(tmp)
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
+let tmp = scratchDir("parseseg_tsegdrev3io")
 
 proc toDisk(d: SegdData, path: string, opts = SegdWriteOptions()): DiagLog =
   let sink = openDiskSink(path)

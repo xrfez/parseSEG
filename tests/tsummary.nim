@@ -3,10 +3,9 @@
 
 import std/[assertions, math, os, strutils]
 import parseSEG
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tsummary"
-createDir(tmp)
+let tmp = scratchDir("parseseg_tsummary")
 
 const
   s63 = exampleDir / "63.sgd"

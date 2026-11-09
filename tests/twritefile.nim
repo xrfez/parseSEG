@@ -5,11 +5,9 @@
 
 import std/[assertions, math, os, strutils]
 import parseSEG
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_twritefile"
-removeDir(tmp)
-createDir(tmp)
+let tmp = scratchDir("parseseg_twritefile")
 
 proc convert(src, name: string, o: ConvertOptions): string =
   result = tmp / name

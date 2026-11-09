@@ -8,20 +8,9 @@ import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/model/tensors
 import parseSEG/segy/[reader, writer]
 import parseSEG/convert
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tsegyreader"
-createDir(tmp)
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
-
-proc writeBytes(path: string, b: openArray[byte]) =
-  var s = newString(b.len)
-  for i, c in b: s[i] = char(c)
-  writeFile(path, s)
+let tmp = scratchDir("parseseg_tsegyreader")
 
 proc rewrite(d: SegyData, sink: RecordSink, opts: SegyWriteOptions) =
   var w = openSegyWriter(sink, d.file, opts)

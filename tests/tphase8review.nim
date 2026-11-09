@@ -8,10 +8,9 @@ import parseSEG/segy/[reader as segyreader, fields]
 import parseSEG/segd/[reader as segdreader, writer as segdwriter]
 import parseSEG/model/[traceindex, keys, prefetch]
 import parseSEG/convert
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tphase8review"
-createDir(tmp)
+let tmp = scratchDir("parseseg_tphase8review")
 
 proc errorsAndWorse(log: DiagLog): int = log.count(sevError) + log.count(sevFatal)
 

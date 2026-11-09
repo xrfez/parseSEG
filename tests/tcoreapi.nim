@@ -3,8 +3,8 @@
 
 import std/[os, math, tables]
 import parseSEG
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir.parentDir / "SEG Spec" / "exampleFiles"
 
 proc raisesValue(body: proc ()) =
   try:

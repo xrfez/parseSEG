@@ -6,15 +6,9 @@ import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, writer as segywriter]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, headerfields, edit, prefetch]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tedit"
-createDir(tmp)
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
+let tmp = scratchDir("parseseg_tedit")
 
 proc fresh(name: string): (string, string) =
   ## A copy of a sample file and a path for its journal (removed first).

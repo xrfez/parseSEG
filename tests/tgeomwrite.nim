@@ -7,9 +7,9 @@
 import std/[assertions, options, os, strutils, math]
 import parseSEG
 import parseSEG/survey/cards # column helpers (internal)
+import ./utils/testutils
 from parseSEG/survey/writeback import chooseScalar # internal
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 let tmp = getEnv("XDG_CACHE_HOME", getTempDir()) / "parseseg_tgeomwrite"
 removeDir(tmp)
 createDir(tmp)
@@ -41,10 +41,6 @@ proc sps(name: string, lines: varargs[string]): SurveyGeometry =
   doAssert not result.log.hasErrors, $result.log.len
 
 proc bytesOf(path: string): string = readFile(path)
-
-proc has(log: DiagLog, text: string, sev = sevWarning): bool =
-  for d in log:
-    if d.severity == sev and text in d.msg: return true
 
 proc copySample(name: string): string =
   result = tmp / name
@@ -90,8 +86,8 @@ block segy_in_place_scalar_journal_and_rollback:
   doAssert c.sourceZ == 4 and c.receiverZ == 4 and c.midpoints == 4 and c.offsets == 4
   doAssert c.sourceStations == 4, "the source point goes to espnum and sp"
   doAssert c.receiverStations == 0 and c.unwritable == 8, $c # lines/points: no slot
-  doAssert log.has("source station: the file's layout has no field")
-  doAssert log.has("receiver station: the file's layout has no field")
+  doAssert log.has("source station: the file's layout has no field", sevWarning)
+  doAssert log.has("receiver station: the file's layout has no field", sevWarning)
   doAssert ($c).startsWith("4 traces"), $c
   doAssert bytesOf(path) == original
   # In place, journaled.
@@ -142,7 +138,7 @@ block segy_scalar_choice_overflow_and_precision:
   f.close()
   doAssert w.receiverXy == 1 and w.unwritable == 2, $w # x and y of trace 1
   doAssert ed.log.has("too large for a 4-byte SEG-Y field", sevError)
-  doAssert ed.log.has("receiver X/Y: rounded")
+  doAssert ed.log.has("receiver X/Y: rounded", sevWarning)
   let d = readSegy(path)
   doAssert d.traces[0].header.coordinateScalar == -10000
   doAssert d.traces[1].header.groupX == 0, "refused: left alone"
@@ -177,7 +173,8 @@ block segd_rev2_the1_in_place:
   ed.close()
   f.close()
   doAssert w.receiverStations == 1 and w.receiverXy == 0, $w
-  doAssert ed.log.has("receiver X/Y: SEG-D Rev 1/2 trace headers have no coordinate fields")
+  doAssert ed.log.has("receiver X/Y: SEG-D Rev 1/2 trace headers have no coordinate fields",
+    sevWarning)
   var k = openSeismic(path, keys = true)
   doAssert k.traceKeys(0).rcvLine == 14 and k.traceKeys(0).rcvPoint == 105.5
   doAssert k.traceField(0, "ext1.receiverPointNumber").intVal == -1, "the extended field"
@@ -203,7 +200,7 @@ block segd_rev3_position_blocks:
   doAssert ed.writeGeometry(f.index) == c
   ed.close()
   f.close()
-  doAssert ed.log.has("source X/Y: the trace has no source Position block")
+  doAssert ed.log.has("source X/Y: the trace has no source Position block", sevWarning)
   var k = openSeismic(path, keys = true)
   let k3 = k.traceKeys(3)
   doAssert k3.rcvX == 1826000.5 and k3.rcvY == 446000.25 and k3.rcvZ == 1000

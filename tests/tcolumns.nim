@@ -6,11 +6,9 @@
 
 import std/[assertions, os, math, options, strutils, sequtils, typedthreads]
 import parseSEG
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tcolumns"
-removeDir(tmp)
-createDir(tmp)
+let tmp = scratchDir("parseseg_tcolumns")
 
 proc sameFloat(a, b: float64): bool = a == b or (a.isNaN and b.isNaN)
 

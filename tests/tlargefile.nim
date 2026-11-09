@@ -10,14 +10,13 @@ import parseSEG/common/[diagnostics, endians]
 import parseSEG/segy/[reader as segyreader]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, prefetch, edit]
+import ./utils/testutils
 
 const
   FourGiB = 4_294_967_296'i64
   MaxAllocated = 256'i64 shl 20 # more than this means the holes were filled
-  exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 
-let tmp = getTempDir() / "parseseg_tlargefile"
-createDir(tmp)
+let tmp = scratchDir("parseseg_tlargefile")
 
 when defined(posix):
   import std/posix
@@ -43,10 +42,6 @@ proc writeSparse(path: string, size: int64, pieces: openArray[(int64, seq[byte])
   else:
     result = false
   if not result: removeFile(path)
-
-proc toBytes(s: string): seq[byte] =
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
 
 proc ramp(n: int, scale: float32): seq[float32] =
   result = newSeq[float32](n)

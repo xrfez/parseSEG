@@ -2,32 +2,17 @@
 ## and on synthetic records (every Rev 2 format, trailers, labels, tape),
 ## the logged losses, and records that cannot be represented.
 
-import std/[assertions, os, strutils, math]
+import std/[assertions, os, math]
 import parseSEG/common/diagnostics
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer, headers, samples, rev3, revconvert]
 import parseSEG/model/traceindex
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tsegdrevconvert"
-createDir(tmp)
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
-
-proc writeBytes(path: string, b: openArray[byte]) =
-  var s = newString(b.len)
-  for i, x in b: s[i] = char(x)
-  writeFile(path, s)
+let tmp = scratchDir("parseseg_tsegdrevconvert")
 
 proc rev(major, minor: int): SegdConvertOptions =
   SegdConvertOptions(revision: SegdRevision(major: uint8(major), minor: uint8(minor)))
-
-proc has(log: DiagLog, text: string, sev = sevInfo): bool =
-  for d in log:
-    if d.severity == sev and text in d.msg: return true
 
 proc clean(log: DiagLog): bool =
   ## No warning, error or fatal.
@@ -50,8 +35,8 @@ block rev20_sample_to_rev3_and_back:
   let o = orig.records[0]
   let log = convertSegdRevision(src, tmp / "63_r3.sgd", rev(3, 0))
   doAssert log.clean, $log
-  doAssert log.has("time zero comes from General Header #1")
-  doAssert log.has("trace header extensions after #1 are dropped")
+  doAssert log.has("time zero comes from General Header #1", sevInfo)
+  doAssert log.has("trace header extensions after #1 are dropped", sevInfo)
   let d = readSegd(tmp / "63_r3.sgd")
   doAssert d.log.clean, $d.log
   let r = d.records[0].record
@@ -126,7 +111,7 @@ block rev30_sample_to_rev21_and_back:
   doAssert log.clean, $log
   for text in ["type 0x55 (crs)", "type 0x50 (position)", "General Header #3",
       "kept as raw Rev 2 extensions", "descale multipliers are approximated"]:
-    doAssert log.has(text), text
+    doAssert log.has(text, sevInfo), text
   let d = readSegd(tmp / "inova_r2.sgd")
   doAssert d.log.count(sevWarning) + d.log.count(sevError) == 0, $d.log
   let r = d.records[0].record
@@ -173,7 +158,7 @@ block rev30_sample_to_rev21_and_back:
   # Rev 2.0 has no record set number.
   let to20 = convertSegdRevision(src, tmp / "inova_r20.sgd", rev(2, 0))
   if o.record.gh2Rev3.recordSetNumber != 0:
-    doAssert to20.has("Rev 2.0 has no record set")
+    doAssert to20.has("Rev 2.0 has no record set", sevInfo)
 
 # ------------------------------------------------- synthetic Rev 2 records --
 
@@ -237,7 +222,7 @@ block synthetic_rev2_every_format_to_rev3_and_back:
   toDisk(d, tmp / "multi_r2.sgd")
   let log = convertSegdRevision(tmp / "multi_r2.sgd", tmp / "multi_r3.sgd", rev(3, 0))
   doAssert log.clean, $log
-  doAssert log.has("user trailer group")
+  doAssert log.has("user trailer group", sevInfo)
   let r3 = readSegd(tmp / "multi_r3.sgd")
   doAssert r3.log.clean, $r3.log
   doAssert r3.records.len == d.records.len
@@ -301,7 +286,7 @@ block rev2_on_tape_without_a_header_scan:
               src.close()
               sink.close()
   doAssert log.clean, $log
-  doAssert log.has("sample counts come from the descriptors")
+  doAssert log.has("sample counts come from the descriptors", sevInfo)
   var back: RecordSource = openTapeImageSource(tmp / "r3.tap")
   let r3 = try: readSegd(back) finally: back.close()
   doAssert r3.log.clean and r3.label.isSome and r3.label.get.revision == "SD3.0"
@@ -345,7 +330,7 @@ block rev3_8080_to_rev2_and_format_changes:
   toDisk(makeRev3(sd8080, [0.25, -1.5, 3.0, 0.0]), tmp / "f64.sgd")
   var log = convertSegdRevision(tmp / "f64.sgd", tmp / "f64_r2.sgd", rev(2, 1))
   doAssert log.clean, $log
-  doAssert log.has("Trace Header Extension #1 fields Rev 2 lacks") # groupIndex
+  doAssert log.has("Trace Header Extension #1 fields Rev 2 lacks", sevInfo) # groupIndex
   let d = readSegd(tmp / "f64_r2.sgd")
   doAssert d.log.clean and d.records[0].record.format == some(sd8058)
   doAssert d.records[0].record.gh1.formatCode == 8058
@@ -545,7 +530,8 @@ block review_value_edges:
             finally:
               src.close()
               sink.close()
-  doAssert log.has("over 4294 s") and log.has("undefined Rev 2 channel types"), $log
+  doAssert log.has("over 4294 s", sevInfo) and
+    log.has("undefined Rev 2 channel types", sevInfo), $log
   let x = decodeAll(tmp / "edge_r3.sgd")
   doAssert x.records[0].record.gh2Rev3.extRecordLength == high(uint32)
   let v = decodeF64(sd8015, x.records[0].traces[4].samples, 52)
@@ -562,7 +548,7 @@ block review_nan_filters_and_zeroed_traces:
   r3.records[0].record.scanTypes[0].descriptorsRev3[0].aliasFilterFreq = NaN
   toDisk(r3, tmp / "nanf.sgd")
   var log = convertSegdRevision(tmp / "nanf.sgd", tmp / "nanf_r2.sgd", rev(2, 1))
-  doAssert not log.isFatal and log.has("filter frequencies"), $log
+  doAssert not log.isFatal and log.has("filter frequencies", sevInfo), $log
   toDisk(makeRev3(sd8058, [1.0, 1e12, 3.0]), tmp / "big.sgd")
   var o = rev(3, 0)
   o.format = tf8036
@@ -606,7 +592,7 @@ block rev0_demux_task_4_6:
   doAssert b.record.gh1.scansPerBlock == 6
   # To Rev 2.1: vertical stack and array forming 0 would mean something else.
   var log = convertSegdRevision(tmp / "rev0.sgd", tmp / "rev0_21.sgd", rev(2, 1))
-  doAssert not log.isFatal and log.has("no vertical stack or array forming"), $log
+  doAssert not log.isFatal and log.has("no vertical stack or array forming", sevInfo), $log
   let r21 = readSegd(tmp / "rev0_21.sgd")
   let c21 = r21.records[0].record.scanTypes[0].descriptors[0]
   doAssert c21.verticalStack == 1 and c21.arrayForming == 1

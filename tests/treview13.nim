@@ -5,15 +5,9 @@ import std/[assertions, os, strutils, options, times]
 import parseSEG
 import parseSEG/common/[outputfile, years]
 import parseSEG/seg2/writer as seg2writer
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_treview13"
-removeDir(tmp)
-createDir(tmp)
-
-proc has(log: DiagLog, text: string, sev: Severity): bool =
-  for d in log:
-    if d.severity == sev and text in d.msg: return true
+let tmp = scratchDir("parseseg_treview13")
 
 proc put32(s: var string, at: int, v: uint32, order: ByteOrder) =
   for k in 0..3:

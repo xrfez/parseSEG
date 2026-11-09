@@ -3,13 +3,8 @@
 import std/[assertions, os, strutils]
 import parseSEG/common/[endians, fieldlayout, diagnostics]
 import parseSEG/segy/[textheader, binheader, traceheader]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-
-proc readBytes(name: string): seq[byte] =
-  let s = readFile(exampleDir / name)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
 
 proc checkTiling(fields: openArray[FieldSpec], first, last: int) =
   ## Every byte in first..last belongs to exactly one field.
@@ -73,7 +68,7 @@ block text_header_basics:
   doAssert detectTextEncoding(encodeText("  some text here", teAscii)) == teAscii
 
 block sweep0_rev0_little_endian:
-  let f = readBytes("Sweep0.sgy")
+  let f = readBytes(exampleDir / "Sweep0.sgy")
   let t = decodeTextHeader(f)
   doAssert t.encoding == teAscii
   doAssert t.card(1).startsWith("C 1 INSTRUMENT:")
@@ -103,7 +98,7 @@ block sweep0_rev0_little_endian:
   doAssert hb == f[3600..<3840]
 
 block inglewood_rev21_big_endian:
-  let f = readBytes("BO_3D-Inglewood_rev21_v7.sgy")
+  let f = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let t = decodeTextHeader(f)
   doAssert t.encoding == teEbcdic
   doAssert t.card(1).startsWith("C01 AREA    : Taranaki_Basin")

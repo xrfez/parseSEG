@@ -5,10 +5,9 @@ import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, writer as segywriter, fields]
 import parseSEG/segd/[reader as segdreader, writer as segdwriter]
 import parseSEG/model/[traceindex, gathers]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tgathers"
-createDir(tmp)
+let tmp = scratchDir("parseseg_tgathers")
 
 proc key(record = NaN, ensemble = NaN, offset = NaN, sx = NaN, rx = NaN,
     comp = 0'u8): TraceKeys =

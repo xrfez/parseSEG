@@ -5,10 +5,9 @@ import std/[assertions, os, macros, options, strutils, math]
 import parseSEG/segy/[reader as segyreader]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, headerfields, edit]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_theaderfields"
-createDir(tmp)
+let tmp = scratchDir("parseseg_theaderfields")
 
 proc same[T](f: SeismicFile, get: proc (name: string): Option[FieldValue], h: T,
     blockName: string): int =

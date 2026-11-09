@@ -9,20 +9,9 @@ import parseSEG/io/[records, memsource]
 import parseSEG/segy/[reader as segyreader]
 import parseSEG/segd/[reader as segdreader]
 import parseSEG/model/[traceindex, gathers, prefetch, edit]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tphase6review"
-createDir(tmp)
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
-
-proc writeBytes(path: string, b: openArray[byte]) =
-  var s = newString(b.len)
-  for i, c in b: s[i] = char(c)
-  writeFile(path, s)
+let tmp = scratchDir("parseseg_tphase6review")
 
 proc copySample(name: string): (string, string) =
   let path = tmp / name

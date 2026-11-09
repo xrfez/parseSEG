@@ -7,24 +7,13 @@ import parseSEG/io/[records, diskio, tapeimage, tapedevice, memsource, pushback]
 import parseSEG/segy/[reader as segyreader, writer as segywriter]
 import parseSEG/segd/[reader as segdreader, writer as segdwriter]
 import parseSEG/model/traceindex
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_ttraceindex"
-createDir(tmp)
+let tmp = scratchDir("parseseg_ttraceindex")
 
 const
   segdFiles = ["63.sgd", "inova_rev30_5traces.sgd"]
   segyFiles = ["Sweep0.sgy", "BO_3D-Inglewood_rev21_v7.sgy"]
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
-
-proc writeBytes(path: string, b: openArray[byte]) =
-  var s = newString(b.len)
-  for i, c in b: s[i] = char(c)
-  writeFile(path, s)
 
 proc segdToTape(d: SegdData, path: string) =
   let sink = openTapeImageSink(path)

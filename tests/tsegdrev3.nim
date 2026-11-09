@@ -3,8 +3,8 @@
 import std/[assertions, os, times, math, strutils]
 import parseSEG/segd/[headers, rev3, reader]
 import parseSEG/io/[records, diskio]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const bigFile = exampleDir / "00000151_12900_11300.sgd" # local only, not in git
 
 proc checkNibbleTiling(fields: openArray[FieldSpec], blockBytes: int) =

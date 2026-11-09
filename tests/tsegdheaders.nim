@@ -3,13 +3,8 @@
 import std/[assertions, os, strutils]
 import parseSEG/common/errors
 import parseSEG/segd/blocks
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-
-proc readBytes(name: string): seq[byte] =
-  let s = readFile(exampleDir / name)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
 
 proc checkNibbleTiling(fields: openArray[FieldSpec], blockBytes: int) =
   ## Every nibble of the block belongs to exactly one field.
@@ -30,7 +25,7 @@ block layouts_tile_their_blocks:
   checkNibbleTiling(segdTraceHeaderFields, 20)
   checkNibbleTiling(segdTraceHeaderExt1Fields, 32)
 
-let f = readBytes("63.sgd")
+let f = readBytes(exampleDir / "63.sgd")
 
 block sample_63_headers:
   # Values from the verified walk (docs/spec/segd_rev2_0_delta.md §4).

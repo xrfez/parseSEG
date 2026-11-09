@@ -5,13 +5,8 @@ import std/[assertions, os, math, strutils]
 import parseSEG/common/[endians, errors]
 import parseSEG/segy/[textheader, binheader, traceheader, samples, exttext]
 import parseSEG/model/tensors
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-
-proc readBytes(name: string): seq[byte] =
-  let s = readFile(exampleDir / name)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
 
 proc sumAbs(t: Tensor[float32], row: int): float64 =
   for j in 0..<t.shape[1]: result += abs(float64(t[row, j]))
@@ -76,10 +71,10 @@ block encode_refuses_bad_values:
   doAssert beI64(b, 0) == high(int64)
 
 block detect_byte_order:
-  let sweep = readBytes("Sweep0.sgy")
+  let sweep = readBytes(exampleDir / "Sweep0.sgy")
   let d = detectByteOrder(sweep.toOpenArray(3200, 3599))
   doAssert d.order == boLittle and not d.fromMarker and d.plausible
-  let ingle = readBytes("BO_3D-Inglewood_rev21_v7.sgy")
+  let ingle = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let e = detectByteOrder(ingle.toOpenArray(3200, 3599))
   doAssert e.order == boBig and e.fromMarker and e.plausible
   # Re-encode Inglewood's header in each order; detection follows the marker
@@ -96,7 +91,7 @@ block detect_byte_order:
   doAssert not detectByteOrder(junk).plausible
 
 block sweep0_samples_into_tensor:
-  let f = readBytes("Sweep0.sgy")
+  let f = readBytes(exampleDir / "Sweep0.sgy")
   let order = detectByteOrder(f.toOpenArray(3200, 3599)).order
   let th = decodeTraceHeader(f.toOpenArray(3600, 3839), order)
   let ns = int(th.numSamples)
@@ -110,7 +105,7 @@ block sweep0_samples_into_tensor:
   doAssert back == f[3840..^1]
 
 block inglewood_ibm_samples:
-  let f = readBytes("BO_3D-Inglewood_rev21_v7.sgy")
+  let f = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   const first = 333200
   const recLen = 240 + 2001 * 4
   var t = newTraceTensor[float32](200, 2001)
@@ -131,7 +126,7 @@ block inglewood_ibm_samples:
   doAssert back == f[p..<p + 2001 * 4]
 
 block inglewood_extended_header:
-  let f = readBytes("BO_3D-Inglewood_rev21_v7.sgy")
+  let f = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let bh = decodeBinaryHeader(f.toOpenArray(3200, 3599), boBig)
   var h = initExtendedTextHeader()
   var pos = 3600

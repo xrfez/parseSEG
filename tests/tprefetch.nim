@@ -2,8 +2,8 @@
 
 import std/[assertions, os, random, strutils]
 import parseSEG/model/[traceindex, prefetch]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 const files = ["BO_3D-Inglewood_rev21_v7.sgy", "inova_rev30_5traces.sgd", "63.sgd",
   "00000151_12900_11300.sgd"] # the last is local only
 

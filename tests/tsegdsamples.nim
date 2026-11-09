@@ -4,8 +4,8 @@ import std/[assertions, os, math, random]
 import parseSEG/common/errors
 import parseSEG/segd/samples
 import parseSEG/model/tensors
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
 
 proc decode1(f: SegdSampleFormat, b: openArray[byte], n: int): seq[float64] =
   result = newSeq[float64](n)

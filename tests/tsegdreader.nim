@@ -6,20 +6,9 @@ import std/[assertions, os, strutils]
 import parseSEG/common/errors
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer]
+import ./utils/testutils
 
-const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
-let tmp = getTempDir() / "parseseg_tsegdreader"
-createDir(tmp)
-
-proc readBytes(path: string): seq[byte] =
-  let s = readFile(path)
-  result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
-
-proc writeBytes(path: string, b: openArray[byte]) =
-  var s = newString(b.len)
-  for i, c in b: s[i] = char(c)
-  writeFile(path, s)
+let tmp = scratchDir("parseseg_tsegdreader")
 
 proc toDisk(d: SegdData, path: string, opts = SegdWriteOptions()): DiagLog =
   let sink = openDiskSink(path)

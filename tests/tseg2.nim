@@ -12,9 +12,9 @@ import parseSEG/model/[traceindex, gathers, headerfields, headernif, prefetch, s
   headerlist, edit]
 import parseSEG/[convert, seg2convert]
 import parseSEG/survey/writeback
+import ./utils/testutils
 
-let tmp = getTempDir() / "parseseg_tseg2"
-createDir(tmp)
+let tmp = scratchDir("parseseg_tseg2")
 
 # ------------------------------------------------------------ builder --
 
