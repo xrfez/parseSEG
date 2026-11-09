@@ -439,6 +439,10 @@ block open_seismic_demultiplexes_into_a_temp_copy:
   doAssert sel[1, 8] == 0 # trace 1 has 8 samples, padded
   let k = f.traceKeys(6)
   doAssert k.record == 12 and k.channel == 3
+  # Keys on demand (14.3a) come from the demultiplexed copy's headers too.
+  var plain = openSeismic(tmp / "m15.sgd", demuxDir = dir)
+  doAssert not plain.hasKeys and $plain.traceKeys(0..11) == $f.traceKeys(0..11)
+  plain.close()
   let copy = f.demuxPath
   f.close()
   doAssert not fileExists(copy)

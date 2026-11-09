@@ -988,7 +988,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 - [ ] 14.3 Nim-only API additions from the 13.3 review (Group II, now without the C/Python
       forms). The owner picks which; the rest go to "Future". In order of need.
       **Owner decision (2026-11-09): all of them.** Steps, each committed with `nim test` green:
-      - [ ] 14.3a bulk keys and header columns
+      - [x] 14.3a bulk keys and header columns
       - [ ] 14.3b viewer reads: sample windows, SEG-Y text header as text, `sortTraces`
       - [ ] 14.3c `openEditor(f: SeismicFile)` reusing the index
       - [ ] 14.3d write path: `openSeismicWriter(path, like = f)`, `writeTrace`
@@ -1590,3 +1590,8 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
   - `readFields` and `chooseScalar` are out of the umbrella.
   - `iterator chunks` added to `Prefetcher`; the processing guide and `api.md` use it.
   - Next: 14.3, where the owner picks the API additions.
+- 2026-11-09: 14.3a done.
+  - `traceFieldColumn(f, name, traces): seq[float64]` and `traceFieldColumnInto(f, name, traces, dst)` (openArray and Slice forms; `model/headerfields`). The field is resolved once per block kind (a compile-time `fieldTable` plus the new internal `NumberReader`/`readNumber` in `fieldlayout`), and only its bytes are read per trace. NaN when a trace lacks the block. `ValueError` for an unknown, text or raw field, a closed file or a trace out of range. SEG-2 keyword strings take the slow path (parsed as float, NaN otherwise).
+  - `traceKeys(f, traces): seq[TraceKeys]` and `traceKeysInto(f, traces, dst)` (openArray and Slice; `model/traceindex`). Without `keys = true` they rebuild the reader's `SegyTrace`/`SegdTrace`/`Seg2Trace` from the mapped headers and call the same `traceKeys` the walk uses; with keys they copy the stored ones (so `applySurvey` changes show only there).
+  - Tests: new `tests/tcolumns.nim`, run on the 5 samples and 8 converted fixtures (SEG-Y 2.1 with Ext1+PSEGD001, little-endian, Rev 1; SEG-D 2.1/3.0; 3 SEG-2). It checks keys equal to a keys=true open for every trace, every numeric trace/ext1 field equal to `findTraceField`, NaN, errors and 6 threads. tsegdmux checks on-demand keys of a demultiplexed copy. Docs: `api.md` rows, a `viewer.md` example, a note in benchmarks item 4.
+  - Measured (`-d:danger`, warm). BO_3D-Inglewood (200 tr): column 6.5 ns/trace vs `traceField` loop 205 ns; `traceKeysInto` on demand 629 ns/trace vs keys=true open +567 ns/trace. 63.sgd (1 tr, per-call overhead): column 253 ns vs 143; keys 234 ns. 00000151 SEG-D (3957 tr): column 14 ns vs 159; keys 259 ns vs open +195 ns.

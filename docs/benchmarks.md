@@ -291,6 +291,8 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
    1.44 GB with `keys = true` (the plain index: 2.4 s, 243 MB). Proposals: compute keys
    lazily per gather or column (the R2-4 bulk `traceKeysInto` / `traceFieldColumn`); store
    them as float32 or as a columnar table of the fields a viewer sorts on.
+   *14.3a:* `traceKeys(f, traces)` / `traceKeysInto` (on demand, without `keys = true`) and
+   `traceFieldColumn` / `traceFieldColumnInto` are in; see the 14.3a Log line in `PLAN.md`.
 5. **No sample window.** A viewer showing samples 1000..1500 of 10 000 traces decodes the
    traces from sample 0 (the tensor width can only truncate the end). Proposal:
    `readTracesInto(f, traces, samples: Slice[int], dst)` decoding only the window (new API).

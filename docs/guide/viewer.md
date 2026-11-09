@@ -232,6 +232,29 @@ doAssert inlines.len == 200 and inlines[0] == 1001 and crosslines[^1] == 200
 `traceField(f, i, "trace.inlineNumber")` reads the standard bytes 189-192 only, which this
 file leaves at 0.
 
+### Keys and header columns without `keys = true`
+
+Stored keys cost about 144 bytes and 450 ns per trace at open. A viewer that shows geometry
+only for the traces on screen can open without them and ask for what it shows:
+`traceKeys(traces)` (or `traceKeysInto`, into a reused buffer) makes the keys on demand,
+exactly as `keys = true` would, and `traceFieldColumn(name, traces)` reads one numeric
+header field for many traces (a plot axis, a colour bar), resolving the field once.
+
+```nim
+import std/math
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy") # no stored keys
+let ks = f.traceKeys(0 ..< 10)                 # the keys of what is on screen
+let sx = f.traceFieldColumn("trace.sourceX", 0 ..< 10)
+var buf = newSeq[float64](3)                   # reused across redraws
+f.traceFieldColumnInto("trace.cdpX", [9, 0, 5], buf)
+echo "trace 0: ensemble ", ks[0].ensemble, ", source x (raw) ", sx[0]
+doAssert not f.hasKeys and ks.len == 10 and sx.len == 10
+doAssert f.traceFieldColumn("ext1.extFieldRecord", [0])[0].isNaN # this file has no Ext1
+f.close()
+```
+
 ## Keep the user's header edits as a patch
 
 A viewer should not write to the file while the user experiments. Collect the changes in a

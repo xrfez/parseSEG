@@ -261,3 +261,48 @@ proc encodeChanged*[T: object](h: T, b: var openArray[byte], firstByte: static i
         changed = v != o
     if changed:
       encodeOne(v, name, b, firstByte, order)
+
+type
+  NumberReader* = object
+    ## **Internal.** How to read one numeric field of a layout from its
+    ## block's bytes (`numberReader`): the field resolved once, for reading
+    ## it from many blocks (`readNumber`).
+    pos: int     ## Byte of the field, from the block's first byte.
+    nibble: int  ## First nibble, from the block's first nibble (BCD, nibbles).
+    size: int    ## Bytes (`at`, `at24`, `fix40`, `fix24`); digits for BCD.
+    kind: FieldKind
+
+func numberReader*(s: FieldSpec, firstByte: int): NumberReader =
+  ## **Internal.** The reader of field `s` of a block whose first byte is
+  ## spec byte `firstByte`. `s.kind` must not be `fkBytes` or `fkText`.
+  let low = s.firstNibble - 2 * (s.specByte - 1) # 1 for the low nibble
+  NumberReader(pos: s.specByte - firstByte, nibble: 2 * (s.specByte - firstByte) + low,
+    size: if s.kind == fkBcd: s.nibbles else: s.size, kind: s.kind)
+
+func readNumber*(r: NumberReader, b: openArray[byte], order: ByteOrder): float64 =
+  ## **Internal.** The field's value in the block `b`, as `decodeFields`
+  ## decodes it, converted to float64. `b` must hold the field's bytes.
+  case r.kind
+  of fkInt:
+    case r.size
+    of 1: float64(getNum[int8](b, r.pos, order))
+    of 2: float64(getNum[int16](b, r.pos, order))
+    of 3: float64(beI24(b, r.pos))
+    of 4: float64(getNum[int32](b, r.pos, order))
+    else: float64(getNum[int64](b, r.pos, order))
+  of fkUInt:
+    case r.size
+    of 1: float64(getNum[uint8](b, r.pos, order))
+    of 2: float64(getNum[uint16](b, r.pos, order))
+    of 3: float64(beU24(b, r.pos))
+    of 4: float64(getNum[uint32](b, r.pos, order))
+    else: float64(getNum[uint64](b, r.pos, order))
+  of fkFloat:
+    if r.size == 4: float64(getNum[float32](b, r.pos, order))
+    else: getNum[float64](b, r.pos, order)
+  of fkBcd: float64(decodeBcdField(b, r.nibble, r.size))
+  of fkNibble: float64(nibble(b, r.nibble))
+  of fkFixed:
+    if r.size == 5: float64(get40(b, r.pos)) / 65536.0
+    else: float64(beU24(b, r.pos)) / 256.0
+  of fkBytes, fkText: NaN

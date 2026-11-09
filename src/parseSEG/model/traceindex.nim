@@ -651,6 +651,120 @@ func spanLen*(span: Slice[int]): int {.inline.} =
   ## **Internal.** The number of elements of `span`; 0 when empty.
   if span.b < span.a: 0 else: span.len
 
+# ------------------------------------------------------- keys on demand --
+
+type
+  KeyReader = object
+    # Per-call state of `traceKeysInto`: buffers reused across traces.
+    gr: GeometryReader
+    segy: SegyTrace
+    segd: array[SegdLayout, SegdTrace]
+
+proc initKeyReader(f: SeismicFile): KeyReader =
+  if f.index.kind == skSegy: result.gr = initGeometryReader(f.index.segy)
+  result.segd = [SegdTrace(layout: slRev2), SegdTrace(layout: slRev3)]
+
+proc raiseOutside(trace: int) {.noinline, noreturn.} =
+  raise newException(ValueError, "the headers of trace " & $trace & " lie outside the file")
+
+proc keysOf(f: SeismicFile, r: var KeyReader, mem: ptr UncheckedArray[byte], size: int64,
+    trace: int): TraceKeys =
+  # The keys of `trace` from its mapped headers, as the index walk makes them.
+  template ix: untyped = f.index
+  let e = ix.entries[trace]
+  let a = int(e.offset)
+  let hb = int(e.headerBytes)
+  case ix.kind
+  of skSegy:
+    let order = ix.segy.byteOrder
+    if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > size: raiseOutside(trace)
+    template t: untyped = r.segy
+    t.header = decodeTraceHeader(mem.toOpenArray(a, a + TraceHeaderSize - 1), order)
+    t.hasExt1 = hb >= 2 * TraceHeaderSize
+    let extra = hb - 2 * TraceHeaderSize
+    if t.hasExt1:
+      t.ext1 = decodeTraceHeaderExt1(
+        mem.toOpenArray(a + TraceHeaderSize, a + 2 * TraceHeaderSize - 1), order)
+    t.proprietary.setLen max(extra, 0)
+    if extra > 0: copyMem(addr t.proprietary[0], addr mem[a + 2 * TraceHeaderSize], extra)
+    t.index = trace
+    t.offset = e.offset
+    r.gr.traceKeys(t)
+  of skSegd:
+    if e.offset < 0 or e.offset + hb > size or hb < SegdTraceHeaderSize: raiseOutside(trace)
+    template rec: untyped = ix.segdRecords[e.record]
+    template t: untyped = r.segd[rec.layout]
+    t.header = decodeBlock[SegdTraceHeader](mem.toOpenArray(a, a + SegdTraceHeaderSize - 1))
+    let b1 = a + SegdTraceHeaderSize
+    let extra = hb - SegdTraceHeaderSize - SegdBlockSize
+    case t.layout
+    of slRev2:
+      t.ext1 = if extra >= 0:
+          some(decodeBlock[SegdTraceHeaderExt1](mem.toOpenArray(b1, b1 + SegdBlockSize - 1)))
+        else: none(SegdTraceHeaderExt1)
+    of slRev3:
+      t.ext1Rev3 = if extra >= 0:
+          some(decodeBlock[SegdTraceHeaderExt1Rev3](mem.toOpenArray(b1, b1 + SegdBlockSize - 1)))
+        else: none(SegdTraceHeaderExt1Rev3)
+    t.extensions.setLen max(extra, 0)
+    if extra > 0: copyMem(addr t.extensions[0], addr mem[b1 + SegdBlockSize], extra)
+    t.offset = e.offset
+    t.scanType = int(e.scanType)
+    t.channelSet = e.channelSetIndex
+    t.numSamples = int(e.numSamples)
+    traceKeys(rec, t)
+  of skSeg2:
+    var log: DiagLog # already reported by the index walk
+    let t = readSeg2Trace(mem.toOpenArray(0, int(size) - 1), ix.seg2, trace, log, f.path)
+    traceKeys(ix.seg2, t)
+  of skUnknown: initTraceKeys() # no traces
+
+template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
+    traceAt: untyped) =
+  if dst.len != count:
+    raise newException(ValueError, "need " & $count & " keys, got " & $dst.len)
+  if f.hasKeys:
+    for k in 0 ..< count: dst[k] = f.index.keys[traceAt(k)]
+  elif count > 0:
+    if not f.isOpen: raise newException(ValueError, "the file is closed")
+    let mem = f.unsafeMemory
+    let size = f.mappedSize
+    var r = initKeyReader(f)
+    for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k))
+
+proc traceKeysInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[TraceKeys]) =
+  ## The keys of each trace of `traces` into `dst` (`dst.len == traces.len`).
+  ## A file opened with `keys = true` copies its stored keys (with any
+  ## `applyGeometry` or `applySurvey` changes); otherwise the keys are made
+  ## on demand from the mapped headers, exactly as `openSeismic(keys = true)`
+  ## makes them (the file's own geometry: survey changes are not applied).
+  ## On demand costs about what the index walk spends per trace, but only for
+  ## the traces asked for. Raises `ValueError` for a trace out of range, a
+  ## closed file or a `dst` of the wrong length.
+  for i in traces:
+    if i notin 0 ..< f.len: f.raiseNoTrace(i)
+  template at(k: int): int = traces[k]
+  keysLoop(f, dst, traces.len, at)
+
+proc traceKeysInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[TraceKeys]) =
+  ## `traceKeysInto` for a range of traces (an empty range must start in
+  ## `0 .. f.len`).
+  checkSpan(traces, f.len)
+  template at(k: int): int = traces.a + k
+  keysLoop(f, dst, spanLen(traces), at)
+
+proc traceKeys*(f: SeismicFile, traces: openArray[int]): seq[TraceKeys] =
+  ## The keys of each trace of `traces` (see `traceKeysInto`); works on a file
+  ## opened without `keys = true`.
+  result = newSeq[TraceKeys](traces.len)
+  f.traceKeysInto(traces, result)
+
+proc traceKeys*(f: SeismicFile, traces: Slice[int]): seq[TraceKeys] =
+  ## The keys of a range of traces (see `traceKeysInto`).
+  checkSpan(traces, f.len)
+  result = newSeq[TraceKeys](spanLen(traces))
+  f.traceKeysInto(traces, result)
+
 # ---------------------------------------------------------------- reading --
 
 template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: int,
