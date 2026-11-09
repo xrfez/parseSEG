@@ -23,7 +23,15 @@ records, channel sets, keys, gathers).
 
 Open with `keys = true` when the viewer shows geometry or gathers for the whole file (or
 make keys on demand for what is on screen: [below](#header-columns-and-keys-on-demand)).
-The open walks every trace header once, which takes seconds on a 40 GB file. Pass a
+The open walks every trace header once, which takes seconds on a 40 GB file. A
+fixed-length SEG-Y file (Rev 1 or later, binary header bytes 3503-3504 = 1) is the exception:
+by default (`verify = vfSampled`) its index is computed from the file size and 64 of its trace
+headers (the first, the last and 62 between) are checked against the binary header, so 10 M
+traces open in about 20 ms warm and 40 ms cold, against 1.8 s and 21 s for the walk. The log
+then has an `indexSampled` info. A sampled header that disagrees, keys, Rev 2 extension
+headers or trailers, and a size that is not a whole number of traces all fall back to the
+walk; `verify = vfFull` always walks, and also reports a mismatch in a header that was not
+sampled (`parseSEG diag` opens that way). Pass a
 `progress` hook to show how far it got and to let the user cancel, and an index cache so the
 next open of the same file is near-instant (10 M SEG-Y traces: 2.5 s to walk, 43 ms from the
 cache). The hook runs on the opening thread about every MiB and once at the end; returning
@@ -69,7 +77,8 @@ except SegCancelledError:
   first and last 64 KiB of the file, with the same `twosComplement8015` (and keys when
   you ask for them), by the same parseSEG version, and is intact. Anything else walks
   the file and says why in `f.log` (`indexCache`, info), so a stale cache never gives a
-  wrong index. Save again after such an open.
+  wrong index. Save again after such an open. A cache saved from a sampled open does not
+  serve `verify = vfFull`.
 - Save right after opening: `saveIndex` refuses an index whose keys `applySurvey` or
   `applyGeometry` changed, a file changed since it was opened, and the temporary
   demultiplexed copy of multiplexed SEG-D (those files are never cached).

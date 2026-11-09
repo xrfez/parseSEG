@@ -104,13 +104,18 @@ proc mapped(path: string): bool =
       if line.endsWith(full): return true
 
 block open_cancels_and_unmaps:
+  # vfFull: a sampled open of fixed-length SEG-Y makes only the final call.
   for p in inputs:
     for at in [1, 2]:
       let c = Calls(cancelAt: at)
       doAssertRaises(SegCancelledError):
-        discard openSeismic(p, progress = c.hook)
+        discard openSeismic(p, progress = c.hook, verify = vfFull)
       doAssert c.done.len == at, p
       doAssert not mapped(p), p & " is still mapped"
+  let c = Calls(cancelAt: 1)
+  doAssertRaises(SegCancelledError):
+    discard openSeismic(big, progress = c.hook)
+  doAssert c.done == @[getFileSize(big)] and not mapped(big), $c.done
 
 block open_without_hook_is_unchanged:
   var f = openSeismic(big, progress = nil)

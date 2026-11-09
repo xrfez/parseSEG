@@ -31,3 +31,6 @@ type
     dcMultiplexed = "multiplexed"   ## Multiplexed SEG-D data, demultiplexed as it was read.
     dcCancelled = "cancelled"       ## A progress callback cancelled the operation; no output.
     dcIndexCache = "indexCache"     ## An index cache was missing, stale or unreadable; rebuilt.
+    dcIndexSampled = "indexSampled"
+      ## A fixed-length SEG-Y index was computed from the file size and a
+      ## sample of its trace headers checked (`verify = vfSampled`).

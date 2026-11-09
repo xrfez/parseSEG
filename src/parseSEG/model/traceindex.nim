@@ -41,7 +41,7 @@ import ../segd/[reader as segdreader, mux, demux]
 import ../seg2/[reader as seg2reader]
 import ./[tensors, keys, indextypes]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples, ../seg2/samples as seg2samples
-import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, segywalk]
+import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, segywalk, segyfixed]
 
 export memsource, diagnostics, keys, seismickind, progress, tensors, indextypes
 
@@ -124,11 +124,30 @@ proc reserveFor(ix: var TraceIndex, src: RecordSource, first: TraceEntry, dataBy
         for x in ix.keys: k.add x
         ix.keys = move k
 
-proc indexSegy(src: RecordSource, keys: bool, tk: var ProgressTicker): TraceIndex =
+proc indexFixed(ix: var TraceIndex, r: var SegyReader, src: RecordSource): bool =
+  # `vfSampled`: the index of a fixed-length file from its size
+  # (`private/segyfixed`), with an info diagnostic; false to walk instead.
+  let checked = if src of MemFileSource: fixedEntries(r, MemFileSource(src), ix.entries)
+                else: 0
+  if checked > 0:
+    template b: untyped = r.file.binary
+    ix.maxSamples = int(b.effectiveSamplesPerTrace)
+    ix.segyIntervalUs = b.effectiveSampleInterval
+    ix.segy = r.file
+    ix.log = move r.log
+    ix.log.report(sevInfo, dcIndexSampled, "fixed-length traces: the " & $ix.entries.len &
+      " traces were indexed from the file size, and " & $checked & " of their headers " &
+      "checked against the binary header's sample count and interval (verify = vfFull " &
+      "reads every header)", ix.segy.firstTraceOffset, Location(file: src.name))
+  checked > 0
+
+proc indexSegy(src: RecordSource, keys: bool, verify: VerifyMode,
+    tk: var ProgressTicker): TraceIndex =
   var r = openSegyWalk(src)
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
   result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
     order: r.file.byteOrder)
+  if verify == vfSampled and not keys and result.indexFixed(r, src): return
   let gr = if keys: initGeometryReader(r.file) else: GeometryReader()
   result.segyIntervalUs = NaN
   var t: SegyTrace
@@ -212,7 +231,7 @@ proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool,
   result.log = log
 
 proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = false,
-    keys = false, progress: Progress = nil): TraceIndex =
+    keys = false, progress: Progress = nil, verify = vfFull): TraceIndex =
   ## Walks the stream at the current position of `src` with headers only and
   ## indexes every trace; with `keys`, also collects each trace's geometry
   ## (for `gathers` and `componentGroups`). Problems go to `log`, as with the
@@ -230,9 +249,13 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
   ## offset reached and the source's size (-1 unless it is a
   ## `MemFileSource`), and once at the end; when it returns false the walk
   ## stops with `SegCancelledError`.
+  ##
+  ## `verify = vfSampled` indexes a fixed-length SEG-Y file on a
+  ## `MemFileSource` from its size, as `openSeismic` does by default (see
+  ## there); the default walks every trace.
   var tk = initProgressTicker(progress, if src of MemFileSource: MemFileSource(src).size else: -1)
   result = case kind
-    of skSegy: indexSegy(src, keys, tk)
+    of skSegy: indexSegy(src, keys, verify, tk)
     of skSegd: indexSegd(src, twosComplement8015, keys, tk)
     of skSeg2:
       if not (src of MemFileSource):
@@ -380,10 +403,11 @@ proc stampOf(path: string): FileStamp =
   FileStamp(size: info.size, mtime: info.lastWriteTime.toUnix,
     mtimeNs: info.lastWriteTime.nanosecond)
 
-proc loadIndex(f: var SeismicFile, cache: string, keys: bool): string {.raises: [].}
+proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode): string
+  {.raises: [].}
 
 proc openMapped(path: string, twosComplement8015, keys, writable: bool,
-    demuxDir: string, progress: Progress = nil, cache = ""): SeismicFile =
+    demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled): SeismicFile =
   # `openSeismic` / `openSeismicRw`. Built in a local, so a raise (a
   # cancelled walk) unmaps the file.
   var f = SeismicFile(path: path, map: MapRef(src: openMemFileSource(path, writable)),
@@ -391,7 +415,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
   f.stamp = stampOf(path)
   var why = ""
   if cache.len > 0:
-    why = f.loadIndex(cache, keys)
+    why = f.loadIndex(cache, keys, verify)
     if why.len == 0:
       f.cached = true
       f.walkLog = f.index.log.len
@@ -401,7 +425,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
   let n = int(min(f.map.src.size, 8192))
   let kind = if n > 0: detectKind(f.map.src.memory.toOpenArray(0, n - 1)) else: skUnknown
   if kind != skUnknown:
-    f.index = buildIndex(f.map.src, kind, twosComplement8015, keys, progress)
+    f.index = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify)
     if kind == skSegd and f.index.multiplexed:
       if writable:
         raise newException(ValueError, path & " holds multiplexed SEG-D, which cannot be " &
@@ -419,7 +443,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
   f
 
 proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
-    demuxDir = "", progress: Progress = nil, cache = ""): SeismicFile =
+    demuxDir = "", progress: Progress = nil, cache = "", verify = vfSampled): SeismicFile =
   ## Maps the disk file `path` read-only, detects SEG-Y, SEG-D or SEG-2, and
   ## builds the trace index (with per-trace geometry when `keys`;
   ## `twosComplement8015` also reads SEG-2 format-3 mantissas as two's
@@ -444,8 +468,22 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
   ## by this version of parseSEG, and is intact, the index is read from it
   ## instead of walking the file (`fromCache`). Otherwise the file is
   ## indexed as without `cache`, with an info diagnostic (`dcIndexCache`)
-  ## saying why; the cache is never written here.
-  openMapped(path, twosComplement8015, keys, false, demuxDir, progress, cache)
+  ## saying why; the cache is never written here. A cache saved from a
+  ## sampled open (below) is not used with `verify = vfFull`.
+  ##
+  ## `verify` (`vfSampled` by default): a fixed-length SEG-Y file (Rev 1 or
+  ## later, binary bytes 3503-3504 = 1) is indexed from its size, without
+  ## walking the trace headers: 10 M traces in milliseconds, and only the
+  ## pages of the sampled headers are read. Up to 64 headers, the first, the
+  ## last and the rest spread between, must have the binary header's sample
+  ## count and interval; the log then has an info
+  ## diagnostic (`dcIndexSampled`) with the number checked. The entries are
+  ## the walk's, but the per-trace warnings of headers not sampled (a
+  ## fixed-length mismatch) are not made. When any sampled header disagrees,
+  ## and for Rev 2 additional headers or trailer records, a trace count or
+  ## file size that does not fit, `keys`, and every other file, the headers
+  ## are walked. `vfFull` always walks them.
+  openMapped(path, twosComplement8015, keys, false, demuxDir, progress, cache, verify)
 
 proc openSeismicRw*(path: string): SeismicFile =
   ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`
@@ -1072,7 +1110,13 @@ proc headerMismatch(stored: string, f: SeismicFile, keys: bool): string =
   of "keys": "it was saved without trace keys"
   else: "its header is not an index cache header"
 
-proc loadIndex(f: var SeismicFile, cache: string, keys: bool): string {.raises: [].} =
+func sampled(ix: TraceIndex): bool =
+  # The index was computed from the file size (`vfSampled`).
+  for d in ix.log:
+    if d.code == dcIndexSampled: return true
+
+proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode): string
+    {.raises: [].} =
   # Reads `f.index` from the cache `cache`: "" when done, else why not
   # (then `f.index` is unchanged).
   if not fileExists(cache): return "there is no such file"
@@ -1093,8 +1137,10 @@ proc loadIndex(f: var SeismicFile, cache: string, keys: bool): string {.raises: 
       var trailer: array[2, uint64]
       if size < start + 16: return "it is truncated"
       copyMem(addr trailer, addr mem[size - 16], 16)
+      # Compared as uint64 first: a damaged trailer may not fit an int64.
+      if trailer[0] > uint64(size): return "it is truncated"
       let n = int64(trailer[0])
-      if n < 0 or start + n + 16 != size: return "it is truncated"
+      if start + n + 16 != size: return "it is truncated"
       let payload = cast[ptr UncheckedArray[byte]](addr mem[start])
       if checksum(payload, int(n)) != trailer[1]: return "it is corrupt (checksum)"
       var r = initBinReader(payload, int(n))
@@ -1106,6 +1152,8 @@ proc loadIndex(f: var SeismicFile, cache: string, keys: bool): string {.raises: 
         else:
           r.get v
       if not r.atEnd: return "its contents do not fit its layout"
+      if verify == vfFull and ix.sampled:
+        return "it was saved from a sampled open, and verify = vfFull reads every header"
       f.index = move ix
   except CatchableError as e:
     result = "it cannot be read: " & e.msg

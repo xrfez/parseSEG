@@ -10,6 +10,12 @@ import ../seg2/[reader as seg2reader]
 import ./keys
 
 type
+  VerifyMode* = enum
+    ## How `openSeismic` checks the trace headers of a fixed-length SEG-Y
+    ## file (Rev 1 or later, binary header bytes 3503-3504 = 1).
+    vfSampled ## Index computed from the file size; a sample of headers checked.
+    vfFull    ## Every trace header walked, as for any other file.
+
   TraceEntry* = object
     ## Where one trace lives (24 bytes).
     offset*: int64       ## Medium offset of the trace header.

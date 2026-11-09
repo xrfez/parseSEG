@@ -23,7 +23,7 @@ block private_modules_stay_private:
   # modules import them, no module re-exports them, so `import parseSEG`
   # cannot reach them whatever the re-export graph does.
   const privateMods = ["checks", "coordscalar", "decodeentry", "fieldaccess", "pagehints",
-    "progressticker", "sampleconv", "segykeys", "segywalk", "tensorrows"]
+    "progressticker", "sampleconv", "segyfixed", "segykeys", "segywalk", "tensorrows"]
   doAssert sorted(privateModules()) == @privateMods,
     "update privateMods (and the hidden-name check below) for " & $privateModules()
   for path in sourceFiles():

@@ -28,7 +28,8 @@ Inspecting
                                 its byte offset and size; --records and --file
                                 list the SEG-D record and the file headers
   diag <file> [--nif] [--min=info|warning|error|fatal]
-                                the diagnostics of indexing the file
+                                the diagnostics of indexing the file (every
+                                trace header read, as verify = vfFull)
   keys <file> [--traces=SEL] [SURVEY]
                                 per-trace geometry: record, channel, source
                                 and receiver stations and coordinates, offset
@@ -195,9 +196,9 @@ proc checkInput(path: string) =
   except IOError:
     cannot("cannot read " & path & " (" & osErrorMsg(osLastError()) & ")")
 
-proc openFile(path: string, keys = false): SeismicFile =
+proc openFile(path: string, keys = false, verify = vfSampled): SeismicFile =
   checkInput(path)
-  result = openSeismic(path, keys = keys)
+  result = openSeismic(path, keys = keys, verify = verify)
   if not result.index.detected:
     printLog(result.index.log, sevError)
     cannot(path & " is not SEG-Y, SEG-D or SEG-2")
@@ -424,7 +425,7 @@ proc dump(a: Args): int =
 proc diag(a: Args): int =
   a.onlyOptions(["nif", "min"])
   a.needArgs(1, "diag <file>")
-  var f = openFile(a.pos[0])
+  var f = openFile(a.pos[0], verify = vfFull) # every header, not a sample
   defer: f.close()
   let minSev = try: parseEnum[Severity](a.get("min", "info"))
                except ValueError: usage("--min must be info, warning, error or fatal")
