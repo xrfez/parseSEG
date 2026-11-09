@@ -731,16 +731,38 @@ proc writeGeometry*(ed: var HeaderEditor, ix: TraceIndex,
   let batched = ed.batching
   if batched: discard ed.flushPending() # the map holds every edit so far
   else: ed.beginBatch()
+  let before = ed.edits
+  var refused = 0
   try:
     eachChange(ed.file, ix.keys, fields, p, i, e, buf):
       let loc = Location(file: ed.file.path, trace: i,
         record: if ix.kind == skSegd: int(e.record) else: -1)
       if not ed.writeBytes(e.offset, buf, "trace " & $i & " geometry", loc):
-        dec p.changes.traces # refused: logged by the editor
+        inc refused # logged by the editor
     ed.log.add p.log
     result = p.changes
   finally:
-    if not batched: discard ed.endBatch()
+    # Synced here also inside the caller's batch, so the counts below are
+    # what the file holds.
+    if batched: discard ed.flushPending()
+    else: discard ed.endBatch()
+  if ed.edits - before < result.traces:
+    # Refused writes, or batched edits a failed journal sync dropped (each
+    # changed trace is one edit): count what the map holds now.
+    eachChange(ed.file, ix.keys, fields, q, i, e, buf):
+      discard
+    let left = q.changes
+    let dropped = result.traces - refused - (ed.edits - before)
+    result = GeometryChanges(traces: result.traces - left.traces,
+      sourceXy: result.sourceXy - left.sourceXy, receiverXy: result.receiverXy - left.receiverXy,
+      sourceZ: result.sourceZ - left.sourceZ, receiverZ: result.receiverZ - left.receiverZ,
+      midpoints: result.midpoints - left.midpoints, offsets: result.offsets - left.offsets,
+      sourceStations: result.sourceStations - left.sourceStations,
+      receiverStations: result.receiverStations - left.receiverStations,
+      unwritable: result.unwritable)
+    if dropped > 0:
+      ed.log.report(sevFatal, dcIo, $dropped & " traces' geometry was not written: the " &
+        "journal could not be synced", loc = Location(file: ed.file.path))
 
 proc writeGeometry*(ed: var HeaderEditor, f: SeismicFile,
     fields = GeometryFields()): GeometryChanges {.segApi.} =
@@ -776,9 +798,10 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry,
   ## Multiplexed SEG-D is written demultiplexed. `srcPath` is never changed.
   ## SEG-2 is not supported yet (a fatal diagnostic). Never raises: problems
   ## are in the result, with an info summary. The output goes through
-  ## `<dstPath>.tmp` and is renamed when complete.
+  ## a new temporary file next to `dstPath` and is renamed when complete.
   if sameAsInput(srcPath, dstPath, result): return
-  let tmp = tmpPathFor(dstPath)
+  let tmp = createTempFor(dstPath, result)
+  if tmp.len == 0: return
   try:
     var f = openSeismic(srcPath)
     try:
@@ -838,7 +861,8 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
       GeometryJoin(survey: addr g, fields: fields, overwrite: overwrite))
   of skSegy:
     if sameAsInput(srcPath, dstPath, result): return
-    let tmp = tmpPathFor(dstPath)
+    let tmp = createTempFor(dstPath, result)
+    if tmp.len == 0: return
     result.add convertFile(srcPath, tmp, opts)
     if not result.isFatal:
       try:

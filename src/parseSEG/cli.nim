@@ -404,7 +404,9 @@ proc dump(a: Args): int =
   echo header.join("\t")
   for t in sel:
     let e = f.index.entries[t]
-    var row = @[$t, $e.offset, $e.numSamples, $e.record,
+    # SEG-2: `record` indexes the codecs; the file is one record.
+    let record = if f.kind == skSeg2: 0'u32 else: e.record
+    var row = @[$t, $e.offset, $e.numSamples, $record,
       (if e.channelSetIndex < 0: "-" else: $e.channelSetIndex)]
     for name in fields:
       let v = f.findTraceField(t, name)

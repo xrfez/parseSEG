@@ -6,6 +6,8 @@
 ## - compiles `tests/c/abi_test.c` against the header (C99 and as C++) and
 ##   runs it: struct layouts against the library's own, every function,
 ##   errors, edits and journals, 4 host threads;
+## - builds `tests/c/guard_lib.nim` and runs `tests/c/guard_test.c`: a
+##   Defect inside an export is SEG_ERR_INTERNAL and the thread stays usable;
 ## - checks that the exported `seg_*` symbols and the header's declarations
 ##   are the same set.
 ## Each step is skipped (with a message) when its tool (cc, nm) is missing.
@@ -67,6 +69,23 @@ when defined(linux):
       let cxx = findExe("c++")
       if cxx.len > 0:
         mustRun(cxx & " -Wall -Wextra -Werror -fsyntax-only -x c++ " & quoteShell(header))
+
+  block defects_become_internal_errors:
+    # segGuard on a Defect: SEG_ERR_INTERNAL, and the thread stays usable.
+    if cc.len == 0:
+      echo "tcapi: no C compiler; guard test skipped"
+    else:
+      let dir = tmp / "guard"
+      createDir(dir)
+      mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --app:lib --noMain " &
+        "--mm:atomicArc --threads:on -d:useMalloc -d:release --nimcache:" &
+        quoteShell(dir / "cache") & " -o:" & quoteShell(dir / "libguard.so") & " " &
+        quoteShell(root / "tests" / "c" / "guard_lib.nim"))
+      let exe = dir / "guard_test"
+      mustRun(cc & " -std=c99 -Wall -Wextra -Werror -o " & quoteShell(exe) & " " &
+        quoteShell(root / "tests" / "c" / "guard_test.c") & " -L" & quoteShell(dir) &
+        " -lguard -lpthread -Wl,-rpath," & quoteShell(dir))
+      mustRun("timeout 60 " & quoteShell(exe))
 
   block symbols_match_the_header:
     let nm = findExe("nm")

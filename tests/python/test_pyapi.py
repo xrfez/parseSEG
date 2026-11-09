@@ -8,6 +8,7 @@ numpy array) run when numpy is installed, unless `nonumpy` hides it to test
 the module without numpy. Exits non-zero on failure.
 """
 import array
+import ctypes
 import gc
 import math
 import os
@@ -558,5 +559,35 @@ if sys.platform.startswith("linux"):
         del e
     gc.collect()
     assert fds() == before_fds and maps_of(ed_path) == 0
+
+# ------------------------------------------- Phase 13 review (R3-7, R3-10) --
+rf = parseseg.open_seismic(INGLEWOOD)
+big = rf.copy_bytes(0, 5000)                       # more than the first guess
+assert len(big) == 5000 and big[0] == 0xC3 and big[:4] == rf.copy_bytes(0, 4)
+assert rf.copy_bytes(0, 0) == b""
+# Embedded NUL: C would see a shorter text.
+e = raises(parseseg.ArgumentError, parseseg.open_seismic, INGLEWOOD + "\0junk")
+assert "NUL" in str(e)
+raises(parseseg.ArgumentError, rf.trace_field, 0, "trace.sourceX\0")
+# Field text longer than the first 4 KiB buffer: fetched again, whole.
+long_text = "x" * 10000
+
+
+def fake_text(v):
+    v.kind, v.text_len = 3, len(long_text)
+    if v.text_cap > len(long_text):
+        ctypes.memmove(v.text, long_text.encode(), len(long_text))
+
+
+assert parseseg._value_call(fake_text) == long_text
+if np is not None:
+    t = rf.read_traces(range(2))
+    shared = t.__array__()
+    copied = t.__array__(copy=True)
+    assert np.shares_memory(shared, t.numpy()) and not np.shares_memory(copied, shared)
+    assert t.__array__(np.float64).dtype == np.float64
+    raises(ValueError, t.__array__, np.float64, copy=False)
+    raises(BufferError, t.__dlpack__, copy=True)
+rf.close()
 
 print("python module: ok")

@@ -278,7 +278,7 @@ proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool): TraceIndex =
     if c == result.codecs.len:
       result.codecs.add TraceCodec(kind: skSeg2, seg2Format: fmt, order: f.order,
         twosComplement8015: twosComplement8015)
-    let n = t.sampleCount
+    let n = t.sampleCount(size) # bounded by the file (13.3 R4-1)
     result.entries.add TraceEntry(offset: t.offset,
       headerBytes: if t.valid: uint32(t.blockSize) else: 0, numSamples: uint32(n),
       record: uint32(c), channelSet: NoChannelSet, scanType: -1,
@@ -523,12 +523,13 @@ func isOpen*(f: SeismicFile): bool {.inline, segApi.} =
   ## The file is still mapped (range reads work).
   f.map.src != nil
 
-proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] {.segApi.} =
+proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
   ## A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
   ## hex view). Raises `ValueError` if the file is closed or the range lies
   ## outside it. Changing the copy never changes the file.
   if f.map.src == nil: raise newException(ValueError, "the file is closed")
-  if offset < 0 or offset + int64(n) > f.map.src.size:
+  # `n > size - offset`, not `offset + n > size`: the sum can overflow.
+  if offset < 0 or offset > f.map.src.size or int64(n) > f.map.src.size - offset:
     raise newException(ValueError, "bytes " & $offset & "+" & $n & " lie outside the file (" &
       $f.map.src.size & " bytes)")
   result = newSeq[byte](n)

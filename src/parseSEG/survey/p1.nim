@@ -20,7 +20,7 @@
 ## - Two-digit years: < 50 is 20YY, else 19YY.
 
 import std/[options, streams, strutils, math]
-import ../common/[diagnostics, errors, outputfile]
+import ../common/[diagnostics, errors, outputfile, years]
 import ./[textrec, cards]
 
 export textrec, diagnostics
@@ -186,7 +186,7 @@ proc decodeP1(x: Ctx, log: var DiagLog, line: string): P1Record =
   int2(74, 75, "P1.minute", result.minute, 59)
   int2(76, 77, "P1.second", result.second, 59)
   if result.year >= 0:
-    result.year = if result.year < 50: 2000 + result.year else: 1900 + result.year
+    result.year = fullYear(result.year)
 
 proc detect(lines: openArray[string]): PFormat =
   ## The format of a logical file from the first of its data records that
@@ -378,11 +378,14 @@ proc writeP1*(f: P1File, s: Stream, opts = P1WriteOptions()): DiagLog =
       if i < lines.len - 1 or f.finalNewline: s.write nl
 
 proc writeP1*(f: P1File, path: string, opts = P1WriteOptions()): DiagLog =
-  ## Writes `f` to `path` through `<path>.tmp`, renamed on success.
-  let tmp = tmpPathFor(path)
-  let s = newFileStream(tmp, fmWrite)
+  ## Writes `f` to `path` through a new temporary file next to it, renamed on
+  ## success.
+  let tmp = createTempFor(path, result)
+  let s = if tmp.len > 0: newFileStream(tmp, fmWrite) else: nil
   if s == nil:
-    result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
+    if tmp.len > 0:
+      result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
+      finishOutput(tmp, path, keep = false, result)
   else:
     try:
       result = writeP1(f, s, opts)

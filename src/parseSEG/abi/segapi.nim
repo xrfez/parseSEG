@@ -7,7 +7,8 @@
 ## `-d:segCapi`) generates from the recorded signatures:
 ##
 ## - one C export per routine (`exportc, dynlib, cdecl`, `raises: []`). It
-##   converts the arguments, serializes calls on a handle (unless
+##   converts the arguments, serializes calls on a handle, every handle
+##   argument locked in address order (the receiver unless
 ##   `concurrent`), maps every exception to a `SegStatus` and
 ##   `seg_last_error`, and writes the results through trailing out-pointers;
 ## - `include/parseseg.h`, with the core's doc comments;
@@ -93,6 +94,7 @@ type
     lo, hi: string   ## integer bounds (Python checks; for ranges also Nim)
     isRange: bool
     isVar, isLent: bool
+    borrowed: bool   ## `ByteSpan`: bytes lent by the call, copied out (akBytes)
     handle: int      ## index into `Bindings.handles`
     mirror: int      ## index into `Bindings.mirrors`
     elem: seq[AbiType] ## element of a seq
@@ -363,6 +365,9 @@ proc classify(b: var Bindings, t0: NimNode, what: string): AbiType =
   case result.nim
   of "FieldValue":
     result.kind = akValue
+    return
+  of "ByteSpan":
+    (result.kind, result.borrowed) = (akBytes, true)
     return
   of "string":
     result.kind = akString
@@ -716,6 +721,8 @@ type
     seqType, seqConv: string ## `pmSeq`: ctypes element type and per-element conversion
     defaults: seq[NimNode]
     outNil: bool
+    outZero: bool ## a struct result: zeroed on entry, so a failure leaves no stale data
+    pyHeld: bool  ## Python: handle arguments other than self, counted in flight
 
 proc genParam(b: var Bindings, g: var Gen, k: int, p: Param, isSelf: bool) =
   let a = "a" & $k
@@ -766,7 +773,10 @@ proc genParam(b: var Bindings, g: var Gen, k: int, p: Param, isSelf: bool) =
     g.pyArgTypes.add "ctypes.c_void_p"
     g.convs.add "    let " & v & " = handleArg[" & h.refType & "](" & a & ", \"" & hn & "\")\n"
     if h.core and not t.nim.startsWith("Handle["): call = v & ".v"
-    g.pyCall.add(if isSelf: "_h" else: "_handle(" & pyn & ", " & h.name & ", \"" & cn & "\")")
+    if isSelf: g.pyCall.add "_h"
+    else:
+      g.pyCall.add "_arg(" & pyn & ", " & h.name & ", \"" & cn & "\", _held)"
+      g.pyHeld = true
   of akStruct:
     let m = b.mirrors[t.mirror]
     if not m.input: error("segApi: " & m.nim & " cannot be a parameter", t.node)
@@ -854,15 +864,18 @@ proc genResult(b: var Bindings, g: var Gen, t: AbiType, call: string, isProc, ct
     g.hParams.add h.cName & " **out"
     g.pyArgTypes.add "ctypes.POINTER(ctypes.c_void_p)"
     g.outNil = true
-    let wrapped = if h.core and not t.nim.startsWith("Handle["): h.refType & "(v: " & call & ")"
+    # A core value is computed before its holder is allocated: a holder
+    # built around a call that raises would leak (ARC, goto exceptions).
+    let wrapped = if h.core and not t.nim.startsWith("Handle["): h.refType & "(v: move r0)"
                   else: call
+    let pre = if h.core and not t.nim.startsWith("Handle["): "var r0 = " & call & "\n" else: ""
     if h.name == "DiagLog" and isProc and not t.isLent:
       g.write = "let r = " & call & "\nif r.isFatal: raiseFatal(r)\nif o != nil: o[] = keep(" &
         h.refType & "(v: r))"
       g.logOut = "o"
       g.pyMode = pmLog
     else:
-      g.write = "let r = keep(" & wrapped & ")\nif o != nil: o[] = r\nelse: GC_unref(cast[" &
+      g.write = pre & "let r = keep(" & wrapped & ")\nif o != nil: o[] = r\nelse: GC_unref(cast[" &
         h.refType & "](r))"
       g.pyPre = "_o = ctypes.c_void_p()"
       g.pyCall.add "ctypes.byref(_o)"
@@ -876,6 +889,7 @@ proc genResult(b: var Bindings, g: var Gen, t: AbiType, call: string, isProc, ct
     g.hParams.add m.cName & " *out"
     g.pyArgTypes.add "ctypes.POINTER(" & m.cName & ")"
     g.write = "if o != nil: o[] = toC(" & call & ")\nelse: discard " & call
+    g.outZero = true
     g.pyPre = "_o = " & m.cName & "()"
     g.pyCall.add "ctypes.byref(_o)"
     g.pyPost = "return _struct_dict(_o)"
@@ -901,7 +915,8 @@ proc genResult(b: var Bindings, g: var Gen, t: AbiType, call: string, isProc, ct
     g.pyArgTypes.add "ctypes.POINTER(" & pt & ")"
     g.pyArgTypes.add "ctypes.c_int64"
     g.pyArgTypes.add "ctypes.POINTER(ctypes.c_int64)"
-    g.write = "let r = " & call & "\nwriteSeqWith(r, o, ocap, olen, " & conv & ")"
+    g.write = if t.borrowed: "writeSpan(" & call & ", o, ocap, olen)"
+              else: "let r = " & call & "\nwriteSeqWith(r, o, ocap, olen, " & conv & ")"
     if t.kind == akBytes: g.pyMode = pmBytes
     else: (g.pyMode, g.seqType, g.seqConv) = (pmSeq, pt, pconv)
   of akValue:
@@ -929,9 +944,7 @@ proc pyBody(g: Gen, cName: string): seq[string] =
       (if g.pyCall.len > 0: g.pyCall.join(", ") & ", " else: "") & "ctypes.byref(_o))"
     result.add "return _logged(_st, _o)"
   of pmValue:
-    result.add "_o = _value_out()"
-    result.add "_call(" & args & ", ctypes.byref(_o))"
-    result.add "return _value(_o)"
+    result.add "return _value_call(lambda _o: _call(" & args & ", ctypes.byref(_o)))"
   of pmSeq:
     result.add "return _seq(lambda _b, _c, _n: _call(" & args & ", _b, _c, _n), " & g.seqType &
       ", " & g.seqConv & ")"
@@ -953,10 +966,14 @@ proc pyFunction(r: RoutineInfo, g: Gen, defName: string, decorator = ""): string
   result = "\n" & (if decorator.len > 0: base & decorator & "\n" else: "") & base & "def " &
     defName & "(" & sig.join(", ") & "):\n" & pyDoc(r.doc, base & "    ")
   let lines = pyBody(g, r.cName)
-  if r.isMethod:
-    result.add base & "    _h = self._enter()\n" & base & "    try:\n"
+  if r.isMethod or g.pyHeld:
+    if r.isMethod: result.add base & "    _h = self._enter()\n"
+    if g.pyHeld: result.add base & "    _held = []\n"
+    result.add base & "    try:\n"
     for l in lines: result.add base & "        " & l & "\n"
-    result.add base & "    finally:\n" & base & "        self._leave()\n"
+    result.add base & "    finally:\n"
+    if g.pyHeld: result.add base & "        _leave_all(_held)\n"
+    if r.isMethod: result.add base & "        self._leave()\n"
   else:
     for l in lines: result.add base & "    " & l & "\n"
 
@@ -991,10 +1008,16 @@ proc genRoutine(b: var Bindings, r: RoutineInfo): string =
       " & \" is out of range 0 ..< \" & $len(" & recv & "))\n" & g.write
   var body = ""
   if g.outNil: body.add "    if o != nil: o[] = nil\n"
+  if g.outZero: body.add "    if o != nil: zeroMem(o, sizeof(o[]))\n"
   body.add g.convs
-  let lockIt = r.params.len > 0 and r.params[0].t.kind == akHandle and not r.concurrent
-  let ind = if lockIt: "      " else: "    "
-  if lockIt: body.add "    withHandle(v0):\n"
+  # Every handle argument is locked (the receiver too unless `concurrent`),
+  # several in address order (`withHandles`).
+  var locked: seq[string]
+  for k, p in r.params:
+    if p.t.kind == akHandle and not (k == 0 and r.concurrent): locked.add "AbiHandle(v" & $k & ")"
+  let ind = if locked.len > 0: "      " else: "    "
+  if locked.len == 1: body.add "    withHandle(" & locked[0] & "):\n"
+  elif locked.len > 1: body.add "    withHandles([" & locked.join(", ") & "]):\n"
   for l in g.write.splitLines: body.add ind & l & "\n"
   result = wrapper(r.cName, body, g)
   b.emitDecl(r.cName, g, r.doc)

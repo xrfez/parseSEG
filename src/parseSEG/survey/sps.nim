@@ -638,12 +638,15 @@ proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
       if i < lines.len - 1 or f.finalNewline: s.write nl
 
 proc writeSps*(f: SpsFile, path: string, opts = SpsWriteOptions()): DiagLog =
-  ## Writes `f` to `path` through `<path>.tmp`, renamed on success; on
+  ## Writes `f` to `path` through a new temporary file next to it, renamed on
+  ## success; on
   ## validation errors nothing is written.
-  let tmp = tmpPathFor(path)
-  let s = newFileStream(tmp, fmWrite)
+  let tmp = createTempFor(path, result)
+  let s = if tmp.len > 0: newFileStream(tmp, fmWrite) else: nil
   if s == nil:
-    result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
+    if tmp.len > 0:
+      result.report(sevFatal, dcIo, "cannot create " & tmp, loc = Location(file: path))
+      finishOutput(tmp, path, keep = false, result)
   else:
     try:
       result = writeSps(f, s, opts)

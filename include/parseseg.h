@@ -592,8 +592,8 @@ SegStatus seg_diag_log_to_nif(SegDiagLog *diag_log, char *out, int64_t out_cap, 
 /*
  * Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
  * version). Never raises: problems, including I/O failures, are in the
- * result. The output is written to `<dstPath>.tmp` and renamed when
- * complete.
+ * result. The output is written to a new temporary file next to
+ * `dstPath` and renamed when complete.
  */
 SegStatus seg_convert_segd_revision(const char *src_path, const char *dst_path, const SegSegdConvertOptions *opts, SegDiagLog **out);
 
@@ -647,13 +647,6 @@ SegStatus seg_seismic_file_trace_keys(SegSeismicFile *seismic_file, int64_t trac
 
 /* The file is still mapped (range reads work). */
 SegStatus seg_seismic_file_is_open(SegSeismicFile *seismic_file, bool *out);
-
-/*
- * A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
- * hex view). Raises `ValueError` if the file is closed or the range lies
- * outside it. Changing the copy never changes the file.
- */
-SegStatus seg_seismic_file_copy_bytes(SegSeismicFile *seismic_file, int64_t offset, int64_t n, uint8_t *out, int64_t out_cap, int64_t *out_len);
 
 /*
  * The named fields of block kind `kind`, in layout order (raw byte fields
@@ -770,8 +763,9 @@ SegStatus seg_seismic_file_apply_survey(SegSeismicFile *seismic_file, SegSurveyG
  * with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
  * input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
  * raises: problems, including I/O failures, are in the result. The output
- * is written to `<dstPath>.tmp` and renamed when complete, so a failed
- * conversion leaves an existing `dstPath` untouched and no partial file.
+ * is written to a new temporary file next to `dstPath` (`<dstPath>.<random>.tmp`,
+ * created exclusively) and renamed when complete, so a failed conversion
+ * leaves an existing `dstPath` untouched and no partial file.
  * `join` (internal) joins survey geometry to SEG-D keys (SEG-Y target
  * only); for survey
  * geometry in the output use `convertWithGeometry`.
@@ -992,6 +986,13 @@ SegStatus seg_seismic_file_read_traces_into_range(SegSeismicFile *seismic_file, 
 
 /* Decodes the listed traces into rows `row ..` of `dst`, one per trace. */
 SegStatus seg_seismic_file_read_traces_into(SegSeismicFile *seismic_file, const int64_t *traces, int64_t traces_len, const SegTensorView *dst, int64_t row, int64_t *out);
+
+/*
+ * A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
+ * hex view). Raises `ValueError` if the file is closed or the range lies
+ * outside it. Changing the copy never changes the file.
+ */
+SegStatus seg_seismic_file_copy_bytes(SegSeismicFile *seismic_file, int64_t offset, int64_t n, uint8_t *out, int64_t out_cap, int64_t *out_len);
 
 /*
  * The samples' memory: pointer, dtype, rank (2), shape and strides in

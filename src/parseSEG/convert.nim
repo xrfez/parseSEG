@@ -69,7 +69,7 @@
 ## float32. Trace strings with no slot are listed in one info note.
 
 import std/[math, os, strutils, times]
-import ./common/[endians, errors, diagnostics, outputfile]
+import ./common/[endians, errors, diagnostics, outputfile, years]
 import ./io/[records, diskio, memsource]
 import ./segy/[reader as segyreader, writer as segywriter, textheader, binheader, traceheader,
   samples as segysamples, exttext, layout]
@@ -533,7 +533,7 @@ proc fillTime(h: var SegyTraceHeader, rec: SegdRecord): bool =
     h.timeBasisCode = 4 # UTC
   elif rec.gh1.year >= 0 and rec.gh1.julianDay in 0..366 and rec.gh1.hour in 0..24 and
       rec.gh1.minute in 0..60 and rec.gh1.second in 0..60:
-    h.year = int16(if rec.gh1.year < 70: 2000 + rec.gh1.year else: 1900 + rec.gh1.year)
+    h.year = int16(fullYear(rec.gh1.year))
     h.dayOfYear = int16(max(rec.gh1.julianDay, 0))
     h.hour = int16(max(rec.gh1.hour, 0))
     h.minute = int16(max(rec.gh1.minute, 0))
@@ -1077,8 +1077,9 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
   ## with `opts.segd` for SEG-D input, `convertSeg2ToSegd` for SEG-2; SEG-Y
   ## input is refused) or SEG-2 (`convertToSeg2` with `opts.seg2`). Never
   ## raises: problems, including I/O failures, are in the result. The output
-  ## is written to `<dstPath>.tmp` and renamed when complete, so a failed
-  ## conversion leaves an existing `dstPath` untouched and no partial file.
+  ## is written to a new temporary file next to `dstPath` (`<dstPath>.<random>.tmp`,
+  ## created exclusively) and renamed when complete, so a failed conversion
+  ## leaves an existing `dstPath` untouched and no partial file.
   ## `join` (internal) joins survey geometry to SEG-D keys (SEG-Y target
   ## only); for survey
   ## geometry in the output use `convertWithGeometry`.
@@ -1118,7 +1119,8 @@ proc convertFile*(srcPath, dstPath: string, opts = ConvertOptions(),
     return
   # SEG-D: one target format must hold every record.
   let formats = if kind == skSegd and opts.format == stKeep: recordFormats(srcPath) else: {}
-  let tmp = tmpPathFor(dstPath)
+  let tmp = createTempFor(dstPath, result)
+  if tmp.len == 0: return
   var src: RecordSource
   var sink: RecordSink
   var seg2: SeismicFile

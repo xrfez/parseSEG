@@ -137,8 +137,9 @@ non-buffer for `read_traces_into`, a `range` with a step) raise `TypeError`.
 
 - ctypes releases the GIL during every call, so all decoding (and waiting in
   `Prefetcher.next`) runs without it, and Python threads read one file in parallel.
-- The library serializes calls on one handle, except the reads (see `c_abi.md`).
-- Each method counts its call in flight. `close()` from another thread marks the object
+- The library serializes calls on one handle, except the reads, and locks every handle
+  argument of a call; `Prefetcher.next` waits without the lock (see `c_abi.md`).
+- Each method counts its call in flight, and so the handle arguments it was given. `close()` from another thread marks the object
   closed at once (new calls raise `StateError`), and the last call to return releases the
   handle, so nothing is freed under a running call. `close()` (or leaving `with`) releases
   the file's mapping immediately when no call is running and no prefetcher holds it.

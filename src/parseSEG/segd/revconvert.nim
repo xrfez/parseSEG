@@ -53,8 +53,8 @@
 ##   interval / 2^k (k = 0..9), more than 99 skew blocks, more than 65535
 ##   extended or external blocks.
 
-import std/[math, strutils]
-import ../common/[errors, diagnostics, endians, outputfile]
+import std/[math, os, strutils]
+import ../common/[errors, diagnostics, endians, outputfile, years]
 import ../io/[records, diskio]
 import ./[headers, samples, reader, writer]
 import ../abi/pragmas
@@ -128,6 +128,8 @@ type
     inexact: int
     zeroed: int
     adjusted: int
+    srcSize: int64 # bytes of the input file; -1 unknown (a stream)
+    records, written: int # records read; records whose headers were written
 
 const
   WrapDescription = "SEG-D REV2 TRLR " ## Trailer group holding a Rev 2 trailer.
@@ -307,7 +309,7 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
     c.note(rnTrailerWrapped, "the Rev 2 general trailer is carried as one user trailer " &
       "group (0xA0, \"" & WrapDescription.strip & "\")")
   var g3 = SegdGeneralHeader3(blockType: BlockTypeGeneralHeader3)
-  let utc = generalHeaderUtc(g1, if g1.year < 80: 2000 else: 1900)
+  let utc = generalHeaderUtc(g1, fullYear(g1.year) - g1.year)
   if utc.isNaN:
     g3.relativeTimeMode = 1
     c.note(rnNoTimeZero, "General Header #1 has no valid date and time: GH#3 time zero is 0 " &
@@ -588,6 +590,14 @@ proc withinRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecor
   # The trailer comes after the traces; a placeholder of the announced size
   # until then (see setRev3Trailer).
   let gt = rec.gh2Rev3.generalTrailerBlocks
+  if gt != UnknownTrailerBlocks:
+    # Bounded before the placeholder is allocated: a damaged count (up to
+    # 2^32 blocks, 137 GB) must not cost memory (13.3 R4-2).
+    let bytes = SegdBlockSize * int64(gt)
+    let limit = if c.srcSize >= 0: c.srcSize else: DefaultMaxHeaderBytes
+    if bytes > limit:
+      skipRecord("General Header #2 announces " & $gt & " trailer blocks (" & $bytes &
+        " bytes), more than the " & (if c.srcSize >= 0: "file holds" else: "reader holds"))
   result.trailerRev3 = newSeq[byte](if gt == UnknownTrailerBlocks: 0
                                     else: SegdBlockSize * int(gt))
   result.gh1.formatCode = ord(fOut)
@@ -679,6 +689,7 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
   ## skipped with an error.
   let rec = r.record
   c.loc.record = rec.index
+  inc c.records
   if rec.format.isNone:
     c.log.report(sevError, dcUnsupportedFormat, "record " & $rec.index & ": SEG-D " &
       "format " & $rec.gh1.formatCode & " cannot be decoded; the record is skipped",
@@ -694,6 +705,7 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
       "as Rev " & $c.opts.revision & ": " & e.msg & "; it is skipped", rec.offset, c.loc)
     return
   w.writeRecordHeaders(outRec)
+  inc c.written
   var t: SegdTrace
   while r.readTrace(t):
     if t.scanType < 0 or t.channelSet < 0:
@@ -729,6 +741,9 @@ proc convertRecord(c: var Conv, r: var SegdReader, w: var SegdWriter, scan: Segd
       else:
         w.endRecord(blocks.get(@[]))
 
+proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions,
+    scan: seq[SegdRecordScan], srcSize: int64): DiagLog
+
 proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
     opts = SegdConvertOptions(), scan: seq[SegdRecordScan] = @[]): DiagLog =
   ## Converts the SEG-D stream at `src` to revision `opts.revision` on
@@ -739,7 +754,13 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
   ## that differ are adjusted (with a warning), and Rev 3 trailers are
   ## dropped. The reader's, the writer's and the conversion's diagnostics are
   ## all in the result; a fatal one means the output is incomplete.
-  var c = Conv(opts: opts, loc: Location(file: sink.name))
+  convertStream(src, sink, opts, scan, -1)
+
+proc convertStream(src: RecordSource, sink: RecordSink, opts: SegdConvertOptions,
+    scan: seq[SegdRecordScan], srcSize: int64): DiagLog =
+  # `convertSegdRevision`; `srcSize` (-1: unknown) bounds what damaged
+  # headers may make it allocate.
+  var c = Conv(opts: opts, loc: Location(file: sink.name), srcSize: srcSize)
   let target = opts.revision
   if not validTarget(target):
     c.log.report(sevFatal, dcValidation, "target SEG-D revision " & $target &
@@ -762,6 +783,10 @@ proc convertSegdRevision*(src: RecordSource, sink: RecordSink,
     w.close()
   except CatchableError as e:
     c.log.report(sevFatal, dcValidation, "conversion stopped: " & e.msg, loc = c.loc)
+  if c.records > 0 and c.written == 0 and not c.log.isFatal:
+    # Every record was skipped: an empty output is no conversion (13.3 R1-4).
+    c.log.report(sevFatal, dcValidation, "none of the " & $c.records & " records can be " &
+      "written as Rev " & $target & "; nothing was converted", loc = c.loc)
   if c.adjusted > 0:
     c.log.report(sevWarning, dcValidation, $c.adjusted & " traces were cut or zero-padded " &
       "to their channel set's sample count (Rev 3 requires one count per set)", loc = c.loc)
@@ -779,11 +804,12 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
     segApi.} =
   ## Converts the SEG-D disk file `srcPath` to `dstPath` (see the stream
   ## version). Never raises: problems, including I/O failures, are in the
-  ## result. The output is written to `<dstPath>.tmp` and renamed when
-  ## complete.
+  ## result. The output is written to a new temporary file next to
+  ## `dstPath` and renamed when complete.
   if sameAsInput(srcPath, dstPath, result):
     return
-  let tmp = tmpPathFor(dstPath)
+  let tmp = createTempFor(dstPath, result)
+  if tmp.len == 0: return
   var src: RecordSource
   var sink: RecordSink
   try:
@@ -793,7 +819,7 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions())
     src = nil
     src = openDiskSource(srcPath)
     sink = openDiskSink(tmp)
-    result = convertSegdRevision(src, sink, opts, scan)
+    result = convertStream(src, sink, opts, scan, getFileSize(srcPath))
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
   finally:

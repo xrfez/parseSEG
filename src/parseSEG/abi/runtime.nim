@@ -8,7 +8,7 @@
 ## `writeValue` fill the caller's out-buffers; `keep` hands a counted
 ## reference to the host.
 
-import std/[enumutils, locks, typetraits]
+import std/[algorithm, enumutils, locks, typetraits]
 import ../common/[errors, diagnostics]
 import ../model/headerfields
 
@@ -78,6 +78,13 @@ type
     text*: cstring
     textLen*: int64
 
+  ByteSpan* = object
+    ## Bytes a call lends to the boundary (a range of a mapped file), valid
+    ## during the call: copied straight into the caller's buffer, never into
+    ## a Nim `seq` (a C `uint8_t *out, out_cap, *out_len` result).
+    data*: ptr UncheckedArray[byte]
+    len*: int
+
   MSegSlice* {.bycopy.} = object
     ## C mirror of `Slice[int]` (`SegSlice`): `a..b`, both included.
     a*, b*: int64
@@ -128,8 +135,9 @@ proc keep*[T: AbiHandle](h: T): pointer =
   cast[pointer](h)
 
 template segGuard*(logOut: untyped, body: untyped): SegStatus =
-  ## Runs `body` with every exception mapped to a status and `lastError`.
-  ## A `LoggedError` also hands its log out through `logOut` (`nil`: none).
+  ## Runs `body` with every exception mapped to a status and `lastError`,
+  ## Defects included (`SEG_ERR_INTERNAL`). A `LoggedError` also hands its
+  ## log out through `logOut` (`nil`: none).
   var st = SEG_OK
   lastErrorBuf[0] = '\0'
   try:
@@ -147,6 +155,11 @@ template segGuard*(logOut: untyped, body: untyped): SegStatus =
   except ValueError as e: st = fail(SEG_ERR_ARGUMENT, e.msg)
   except AbiMemoryError as e: st = fail(SEG_ERR_MEMORY, e.msg)
   except CatchableError as e: st = fail(SEG_ERR_INTERNAL, $e.name & ": " & e.msg)
+  except Defect as e:
+    # A library bug (an overflow, a bad index): reported, never let through.
+    # An escaped exception would leave the thread's pending-error state set,
+    # and every later call on the thread would return early and do nothing.
+    st = fail(SEG_ERR_INTERNAL, $e.name & ": " & e.msg)
   st
 
 template withHandle*(h: AbiHandle, body: untyped) =
@@ -156,6 +169,31 @@ template withHandle*(h: AbiHandle, body: untyped) =
     body
   finally:
     release(h.lock)
+
+proc lockOrder*(hs: openArray[AbiHandle]): seq[AbiHandle] =
+  ## `hs` by address, each once: the order every call taking several handle
+  ## locks takes them, so two such calls cannot deadlock.
+  result = @hs
+  result.sort(proc (a, b: AbiHandle): int = cmp(cast[uint](a), cast[uint](b)))
+  var k = 0
+  for i in 0 ..< result.len:
+    if k == 0 or result[i] != result[k - 1]:
+      result[k] = result[i]
+      inc k
+  result.setLen k
+
+template withHandles*(hs: openArray[AbiHandle], body: untyped) =
+  ## Runs `body` holding the locks of every handle in `hs` (see `lockOrder`).
+  let held = lockOrder(hs)
+  for h in held: acquire(h.lock)
+  try:
+    body
+  finally:
+    for i in countdown(held.high, 0): release(held[i].lock)
+
+template handleLock*(h: AbiHandle): var Lock =
+  ## The lock `withHandle` takes (for a call that waits without it).
+  h.lock
 
 proc argError*(msg: string) {.noinline, noreturn.} =
   ## Fails with `SEG_ERR_ARGUMENT` (a `ValueError`).
@@ -235,6 +273,14 @@ proc writeText*(s: string, buf: ptr UncheckedArray[char], cap: int64, outLen: pt
   ## and sets `outLen` to its full length.
   if cap < 0: argError("out_cap must be >= 0")
   copyText(s, buf, cap)
+  if outLen != nil: outLen[] = int64(s.len)
+
+proc writeSpan*(s: ByteSpan, buf: ptr UncheckedArray[uint8], cap: int64, outLen: ptr int64) =
+  ## Copies at most `cap` bytes of `s` to `buf` and sets `outLen` to its
+  ## full length.
+  if cap < 0: argError("out_cap must be >= 0")
+  if buf != nil and s.len > 0 and cap > 0:
+    copyMem(addr buf[0], addr s.data[0], min(int64(s.len), cap))
   if outLen != nil: outLen[] = int64(s.len)
 
 template writeSeqWith*(s: untyped, buf: untyped, cap: int64, outLen: ptr int64,

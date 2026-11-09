@@ -47,6 +47,14 @@ func sampleCount*(t: Seg2Trace): int =
   elif t.format.isNone: int(t.numSamples)
   else: min(int(t.numSamples), samplesIn(t.format.get, int(t.dataSize)))
 
+func sampleCount*(t: Seg2Trace, fileSize: int64): int =
+  ## `sampleCount`, at most the bytes from the Data Block to the end of a
+  ## file of `fileSize` bytes (no format stores a sample in less than one):
+  ## what a reader may allocate for the trace, also when `numSamples` and
+  ## `dataSize` are damaged. A trace that is cut short keeps its count (and
+  ## reads as truncated).
+  int(min(int64(t.sampleCount), max(0'i64, fileSize - t.dataOffset)))
+
 proc checkList(s: openArray[Seg2String], st: var WalkState, log: var DiagLog,
     loc: Location, offset: int64) =
   # Spec style rules vendors often break: info only, once per file each.

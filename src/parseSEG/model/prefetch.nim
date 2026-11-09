@@ -59,6 +59,7 @@ type
     nextChunk: int   # next chunk the worker decodes
     takeChunk: int   # next chunk the consumer takes
     quit: bool
+    waiters: int     # threads in `waitReady`; `shutdown` waits for them to leave
     chunkTraces, cols: int
     mem: ptr UncheckedArray[byte]
     size: int64
@@ -93,6 +94,8 @@ proc shutdown[T](sh: ptr Shared[T]) =
   acquire(sh.lock)
   sh.quit = true
   signal(sh.work)
+  broadcast(sh.ready)
+  while sh.waiters > 0: wait(sh.ready, sh.lock)
   release(sh.lock)
   joinThread(sh.thread)
   deinitCond(sh.work)
@@ -108,6 +111,7 @@ proc `=destroy`*[T](p: Prefetcher[T]) =
   if p.sh != nil: shutdown(p.sh)
   `=destroy`(p.tensors)
   `=destroy`(p.selection) # after the shutdown: the worker reads it
+  `=destroy`(p.path)
 
 proc `=copy`*[T](dst: var Prefetcher[T], src: Prefetcher[T]) {.error.}
 
@@ -252,7 +256,9 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T]) =
     let e = sh.entries[trace]
     c.log.report(sevError, fr.code, if fr.code == dcTruncated:
       "trace samples lie past the end of the file" else: "the sample format is not decodable",
-      e.offset, Location(file: p.path, record: int(e.record), trace: trace))
+      e.offset, Location(file: p.path, trace: trace,
+        # SEG-2: `record` indexes the codecs; the file is one record.
+        record: if sh.codecs[e.record].kind == skSeg2: 0 else: int(e.record)))
   if s.count == sh.chunkTraces:
     c.samples = move(p.tensors[i])
     p.tensors[i] = newTensorUninit[T](sh.chunkTraces, sh.cols)
@@ -300,6 +306,24 @@ proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   if more: p.take(c)
   more
 
+proc waitReady*[T](p: var Prefetcher[T], outer: var Lock) =
+  ## **Internal** (the C ABI). For a caller holding `outer`: waits until the
+  ## next chunk is decoded, the range is done or the prefetcher is closed,
+  ## with `outer` released meanwhile, then takes `outer` again. `close`,
+  ## called holding `outer`, waits for the waiter to leave before it frees
+  ## the ring. Then `tryNext` (or `atEnd`) tells what happened.
+  let sh = p.sh
+  if sh == nil: return
+  acquire(sh.lock)
+  inc sh.waiters
+  release(outer)
+  while not (sh.quit or sh.takeChunk >= sh.chunkCount or sh.headReady):
+    wait(sh.ready, sh.lock)
+  dec sh.waiters
+  if sh.quit: broadcast(sh.ready) # `shutdown` waits for the last waiter
+  release(sh.lock)
+  acquire(outer)
+
 proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   ## Restarts read-ahead over the positions `span` (traces in range mode).
   ## Chunks decoded for the old positions are dropped; one being decoded
@@ -321,6 +345,7 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   for i in 0..<sh.depth:
     if sh.slots[i].state == ssReady: sh.slots[i].state = ssFree
   signal(sh.work)
+  broadcast(sh.ready) # a `waitReady` for the old range re-checks
   release(sh.lock)
 
 proc close*[T](p: var Prefetcher[T]) =
