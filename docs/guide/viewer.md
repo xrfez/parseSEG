@@ -78,8 +78,44 @@ let decimated = f.readTraces(picks)
 doAssert decimated.shape == [20, 2001]
 ```
 
-Decoding always starts at the trace's first sample: a buffer narrower than the trace keeps
-the first `width` samples. There is no call that decodes only a deep time window.
+A buffer narrower than the trace keeps the first `width` samples. For a deep time window,
+pass `samples: a..b`: only those samples are decoded (rows are zero past a trace's end), and
+the buffer's width must be the window's length.
+
+```nim
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+# Samples 1000..1499 of traces 90..119: a zoomed-in panel.
+let zoom = f.readTraces(90 ..< 120, 1000 .. 1499)
+doAssert zoom.shape == [30, 500]
+var view = newTraceTensor[float32](30, 500)  # the same window into a reused buffer
+doAssert f.readTracesInto(90 ..< 120, 1000 .. 1499, view) == 0
+doAssert view == zoom
+f.close()
+```
+
+### Sorted views and the textual header
+
+`sortTraces(by)` sorts by header fields and returns trace indices; read the sorted view with
+the list form of `readTraces` (or `newPrefetcher`). The sort is stable, ascending, with NaN
+last. `sortOrder(columns)` does the same over columns of your own, such as `TraceKeys`.
+`textHeader` gives a SEG-Y textual header as 40 lines of text.
+
+```nim
+import std/[sequtils, strutils]
+import parseSEG
+
+var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+let order = f.sortTraces(["trace.crosslineNumber", "trace.inlineNumber"])
+let firstColumn = f.readTraces(order[0 ..< 10], 0 .. 499)   # the sorted view, a window
+doAssert order.len == f.len and firstColumn.shape == [10, 500]
+let byOffset = sortOrder([f.traceKeys(0 ..< f.len).mapIt(it.offset)]) # positions = traces here
+doAssert byOffset.len == f.len
+echo f.textHeader.splitLines[0]          # "C01 AREA    : Taranaki_Basin - ..."
+echo f.extendedTextHeaders.len, " extended textual records"
+f.close()
+```
 
 ### Gathers and multi-component stations
 

@@ -47,8 +47,9 @@ Conventions that hold throughout:
 | `readTraces(f, traces: openArray[int], log, T)` | A **selection** (gather, component group, sort order) in list order. |
 | `readTraces(f, traces, T = float32)` | Without a log: raises `SegFormatError` (`SegTruncatedError`) naming the first trace that cannot be decoded. |
 | `readTracesInto(f, traces, var tensor, row = 0[, log]): int` | Decode a range or a selection into an existing tensor; returns the number of traces left zero (logged in `log`). |
+| `readTraces(f, traces, samples: Slice[int][, log], T)`, `readTracesInto(f, traces, samples, var tensor, row = 0[, log]): int` | A **sample window** (`a..b`, 0-based) of a range or selection: `[traces, samples.len]`, and the tensor's width must be `samples.len`. Only the window's bytes are decoded (SEG-D 8015 and SEG-2 format 3, 4 samples in 10 bytes, also decode the rest of the group the window starts in); zero past a trace's end. `ValueError` for an empty window or one starting below 0. |
 | `maxSamples(f, traces)` | Longest trace of a range or selection. |
-| `newPrefetcher[T](f, traces, chunkTraces, depth, cols)` (a range or a list) | Read-ahead on a worker thread: `tryNext` (never blocks), `next`, `for c in p.chunks`, `seek(span)`, `atEnd`, `traceAt`, `len` (positions), `close`. It keeps the file's map alive until its `close`. A `PrefetchChunk` has `first`, `count`, `samples`, `failed` and `log` (one error per trace left zero, with its trace index). |
+| `newPrefetcher[T](f, traces, chunkTraces, depth, cols, firstSample = 0)` (a range or a list) | Read-ahead on a worker thread (rows hold samples `firstSample ..< firstSample + cols`): `tryNext` (never blocks), `next`, `for c in p.chunks`, `seek(span)`, `atEnd`, `traceAt`, `len` (positions), `close`. It keeps the file's map alive until its `close`. A `PrefetchChunk` has `first`, `count`, `samples`, `failed` and `log` (one error per trace left zero, with its trace index). |
 
 Bad caller input (a trace, range or position out of range, a closed file) raises
 `ValueError` everywhere.
@@ -56,10 +57,16 @@ Bad caller input (a trace, range or position out of range, a closed file) raises
 Sorting is a selection: a sort produces a list of trace indices, and no data is moved
 (PLAN.md, "Future").
 
+| Proc | What |
+|---|---|
+| `f.sortTraces(by: openArray[string][, traces]): seq[int]` (`model/sorting`) | The traces (all, a range or a list) sorted by numeric header fields (`traceFieldColumn` names), first key first: ascending, stable, NaN last, -0 = 0. A permutation of trace indices for the list forms of `readTraces` / `newPrefetcher`. One column read per key, then a radix sort: 10 M traces in about 0.2 s per key plus the column reads. |
+| `sortOrder(columns: openArray[seq[float64]]): seq[int]` | The same order over the caller's own columns (e.g. `TraceKeys` fields): the sorted row positions. |
+
 ## Headers
 | Proc | What |
 |---|---|
 | `traceField(f, trace, "trace.sourceX")`, `recordField(f, record, "gh1.year")`, `fileField(f, "binary.sampleInterval")` | Any named header field, read from the map, as a `FieldValue` (`intVal`, `floatVal` or `text` by `kind`). Raises `ValueError` for an unknown name, trace or record. |
+| `f.textHeader: string`, `f.extendedTextHeaders: seq[string]` | SEG-Y: the textual file header decoded (EBCDIC or ASCII, as detected) to 40 lines of 80 characters joined by `'\n'`; each extended textual header record the same way (Rev 1+; stanzas are parsed in `f.index.segy.extended`). `ValueError` for another standard. |
 | `findTraceField`, `findRecordField`, `findFileField` | The same, as an `Option[FieldValue]` (none when the field cannot be read). |
 | `f.traceFieldColumn(name, traces): seq[float64]`, `f.traceFieldColumnInto(name, traces, dst: var openArray[float64])` | One numeric trace field (`trace.<field>`, `ext1.<field>`; SEG-2 keyword strings parsed as numbers) for a list or range of traces. The field is resolved once and only its bytes are read per trace. NaN where the trace lacks the block (no `ext1`); `ValueError` for an unknown, text or raw field, a trace out of range or a closed file. |
 | `fieldNames(HeaderBlock)`, `f.blockKind(scope, index, "ext1")`, `h.fieldByName("sourceX")` | The fields of a block kind; the kind of a file's block (`hsFile`, `hsRecord`, `hsTrace`); a field of a decoded header object (`Option`). |

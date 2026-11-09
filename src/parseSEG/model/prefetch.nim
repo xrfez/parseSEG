@@ -64,6 +64,7 @@ type
     takeChunk: int   # next chunk the consumer takes
     quit: bool
     chunkTraces, cols: int
+    firstSample: int # samples `firstSample ..< firstSample + cols` of each trace
     mem: ptr UncheckedArray[byte]
     size: int64
     entries: ptr UncheckedArray[TraceEntry]
@@ -133,7 +134,7 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) {.raises: [].} =
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
     let e = sh.entries[sh.traceOf(s.first + k)]
     try:
-      decodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols)
+      decodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols, sh.firstSample)
     except SegError as err:
       for c in 0..<sh.cols: row[c] = T(0)
       s.fails[s.failed] = FailedRow(row: k,
@@ -169,22 +170,26 @@ proc raiseArg(msg: string) {.noinline, noreturn.} =
   raise newException(ValueError, msg)
 
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTraces = 256,
-    depth = 4, cols = -1): Prefetcher[T] =
+    depth = 4, cols = -1, firstSample = 0): Prefetcher[T] =
   ## Starts decoding `traces` on a worker thread, `chunkTraces` at a time, at
-  ## most `depth` chunks ahead. Rows have `cols` samples (-1: the range's
-  ## largest trace). `f` may be closed meanwhile (the prefetcher keeps the
-  ## map until its `close`), but its index must not change.
-  ## Raises `ValueError` for traces outside the file (an empty range must
-  ## still start in `0 .. f.len`), a closed or tape file, or a non-positive
-  ## chunk size or depth.
+  ## most `depth` chunks ahead. Rows hold samples `firstSample ..< firstSample
+  ## + cols` of each trace, zero past its end (`cols` -1: up to the end of
+  ## the range's largest trace), as the windowed `readTracesInto`. `f` may
+  ## be closed meanwhile (the prefetcher keeps the map until its `close`),
+  ## but its index must not change. Raises `ValueError` for traces outside
+  ## the file (an empty range must still start in `0 .. f.len`), a closed or
+  ## tape file, a non-positive chunk size or depth, or a negative
+  ## `firstSample`.
   if not f.isOpen and f.len > 0: raiseArg("the file is closed")
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
-  if chunkTraces <= 0 or depth <= 0 or cols < -1:
-    raiseArg("need chunkTraces > 0, depth > 0 and cols >= -1")
+  if chunkTraces <= 0 or depth <= 0 or cols < -1 or firstSample < 0:
+    raiseArg("need chunkTraces > 0, depth > 0, cols >= -1 and firstSample >= 0")
   checkSpan(traces, f.len)
   let first = traces.a
   let stop = if traces.b >= first: traces.b + 1 else: first
-  let width = if cols >= 0: cols elif first < stop: f.maxSamples(first..<stop) else: 0
+  let width = if cols >= 0: cols
+    elif first < stop: max(f.maxSamples(first..<stop) - firstSample, 0)
+    else: 0
   # No range (even after a seek) holds more traces than the file.
   let rows = max(1, min(chunkTraces, f.len))
   let sh = createShared(Shared[T])
@@ -194,6 +199,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   sh.stop = stop
   sh.chunkTraces = rows
   sh.cols = width
+  sh.firstSample = firstSample
   sh.mem = f.unsafeMemory
   sh.size = f.mappedSize
   if f.len > 0:
@@ -211,17 +217,17 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   createThread(sh.thread, worker[T], sh)
 
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
-    depth = 4, cols = -1): Prefetcher[T] =
+    depth = 4, cols = -1, firstSample = 0): Prefetcher[T] =
   ## Read-ahead over a list of trace indices (a gather, a component group, a
   ## sort order), decoded in list order. Positions (`seek`) index the list;
   ## `traceAt` maps them to traces. The list is fixed for the prefetcher's
   ## life (for another list, make another prefetcher).
   for i in traces:
     if i notin 0 ..< f.len: raiseArg("trace " & $i & " lies outside the file")
-  let width = if cols >= 0: cols else: f.maxSamples(traces)
+  let width = if cols >= 0: cols else: max(f.maxSamples(traces) - firstSample, 0)
   # Build in range mode over positions, then switch the worker to the list
   # before it can run: the lock orders the hand-over.
-  result = newPrefetcher[T](f, 0 .. -1, chunkTraces, depth, width)
+  result = newPrefetcher[T](f, 0 .. -1, chunkTraces, depth, width, firstSample)
   result.selection = traces
   result.last = result.selection.len
   let sh = result.sh

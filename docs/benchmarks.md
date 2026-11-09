@@ -296,6 +296,9 @@ Aggregate GB/s of file bytes; each thread decodes 256-trace chunks into its own 
 5. **No sample window.** A viewer showing samples 1000..1500 of 10 000 traces decodes the
    traces from sample 0 (the tensor width can only truncate the end). Proposal:
    `readTracesInto(f, traces, samples: Slice[int], dst)` decoding only the window (new API).
+   *14.3b:* in, as proposed (`readTraces`/`readTracesInto` with `samples`, `newPrefetcher(firstSample)`);
+   only the window's bytes are decoded, and the full-trace path is unchanged (7.7/9.4/5.2/15 GB/s
+   for 8058/IEEE/IBM/int16, before and after).
 6. **The prefetcher has one worker and delivers whole chunks.** Throughput is one core's
    (fine for every format now except 8015/8024 at about 2 GB/s); after a `seek` the first
    chunk arrives after a whole chunk's decode (chunk 1024: about 1 ms at 4 MB). Proposals:

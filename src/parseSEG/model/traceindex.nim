@@ -339,14 +339,31 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
 
 # ---------------------------------------------------------- range decode --
 
+proc decodeRun[T: SampleType](c: TraceCodec, src: openArray[byte], dst: var openArray[T]) =
+  # `dst.len` samples of codec `c` from the start of `src` (a known format).
+  case c.kind
+  of skSegy: decodeSamples(c.segyFormat.get, src, dst, c.order)
+  of skSegd: decodeSegdSamples(c.segdFormat.get, src, dst, c.twosComplement8015)
+  of skSeg2: decodeSeg2Samples(c.seg2Format.get, src, dst, c.order, c.twosComplement8015)
+  of skUnknown: discard
+
+func packedInFours(c: TraceCodec): bool {.inline.} =
+  # 4 samples in 10 bytes (SEG-D 8015, SEG-2 format 3): a window must start
+  # on a group.
+  (c.kind == skSegd and c.segdFormat.get == sd8015) or
+    (c.kind == skSeg2 and c.seg2Format.get == s2Float20)
+
 proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
-    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int) =
-  ## Decodes trace `e` from the mapped bytes `mem[0 ..< size]` into
-  ## `dst[0 ..< cols]`: the first `min(numSamples, cols)` samples, then zeros.
-  ## Touches no managed memory, so a worker thread may call it. Raises
-  ## `SegFormatError` for an undecodable format and `SegTruncatedError` when
-  ## the trace lies past `size`.
-  let n = min(int(e.numSamples), cols)
+    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0) =
+  ## Decodes samples `first ..< first + cols` of trace `e` from the mapped
+  ## bytes `mem[0 ..< size]` into `dst[0 ..< cols]`, zero past the trace's
+  ## end. Only the window's bytes are read; a window of SEG-D 8015 or SEG-2
+  ## format 3 (4 samples in 10 bytes) that starts inside a group decodes that
+  ## whole group first. Touches no managed memory, so a worker thread may
+  ## call it. Raises `SegFormatError` for an undecodable format and
+  ## `SegTruncatedError` when the trace lies past `size` (the whole trace is
+  ## checked, whatever the window).
+  let n = clamp(int(e.numSamples) - first, 0, cols)
   if not c.known:
     raiseFormat("the sample format is not decodable", e.offset)
   let nbytes = c.dataBytes(int(e.numSamples))
@@ -355,17 +372,25 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: 
     raiseTruncated("trace samples lie past the end of the file", start)
   if n > 0:
     let a = int(start)
-    case c.kind
-    of skSegy:
-      decodeSamples(c.segyFormat.get, mem.toOpenArray(a, a + nbytes - 1), dst.toOpenArray(0, n - 1),
-        c.order)
-    of skSegd:
-      decodeSegdSamples(c.segdFormat.get, mem.toOpenArray(a, a + nbytes - 1),
-        dst.toOpenArray(0, n - 1), c.twosComplement8015)
-    of skSeg2:
-      decodeSeg2Samples(c.seg2Format.get, mem.toOpenArray(a, a + nbytes - 1),
-        dst.toOpenArray(0, n - 1), c.order, c.twosComplement8015)
-    of skUnknown: discard # not known: raised above
+    let last = a + nbytes - 1
+    if first == 0:
+      c.decodeRun(mem.toOpenArray(a, last), dst.toOpenArray(0, n - 1))
+    elif not c.packedInFours:
+      let skip = c.dataBytes(first)
+      c.decodeRun(mem.toOpenArray(a + skip, last), dst.toOpenArray(0, n - 1))
+    else:
+      # The group holding `first`, then whole groups straight into `dst`.
+      let g = a + first div 4 * 10
+      let lead = first mod 4
+      var head = 0
+      if lead > 0:
+        var grp: array[4, T]
+        head = min(4 - lead, n)
+        c.decodeRun(mem.toOpenArray(g, last), grp.toOpenArray(0, lead + head - 1))
+        for k in 0..<head: dst[k] = grp[lead + k]
+      if head < n:
+        let b = if lead > 0: g + 10 else: g
+        c.decodeRun(mem.toOpenArray(b, last), dst.toOpenArray(head, n - 1))
   for k in n..<cols: dst[k] = T(0)
 
 # ---------------------------------------------------------- seismic file --
@@ -596,6 +621,50 @@ proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.index.seg2, trace,
     log, f.path)
 
+func cardLines(text: string): string =
+  # A text block as lines of `CardWidth` characters joined by '\n'.
+  result = newStringOfCap(text.len + text.len div CardWidth)
+  for i, c in text:
+    if i > 0 and i mod CardWidth == 0: result.add '\n'
+    result.add c
+
+proc requireSegy(f: SeismicFile) =
+  if f.kind != skSegy: raise newException(ValueError, "not a SEG-Y file")
+
+func textHeader*(f: SeismicFile): string =
+  ## SEG-Y: the 3200-byte textual file header decoded (EBCDIC or ASCII, as
+  ## detected) to 40 lines of 80 Latin-1 characters joined by '\n', with no
+  ## trailing newline. Works on a closed file. Raises `ValueError` for a file
+  ## that is not SEG-Y.
+  f.requireSegy()
+  cardLines(f.index.segy.text.text)
+
+proc extendedTextHeaders*(f: SeismicFile): seq[string] =
+  ## SEG-Y Rev 1+: each extended textual header record after the binary
+  ## header, decoded in its own detected character set, as 40 lines of 80
+  ## characters joined by '\n' (the stanzas parsed from them are in
+  ## `f.index.segy.extended`). Empty when there are none. Records of binary
+  ## stanzas come out as their bytes in Latin-1. Raises `ValueError` for a
+  ## file that is not SEG-Y, or a closed one when the records were too large
+  ## to keep in memory.
+  f.requireSegy()
+  template ext: untyped = f.index.segy.extended
+  let n = ext.recordCount
+  let start = int64(f.index.segy.tapeLabel.len + TextHeaderSize + BinaryHeaderSize)
+  if not ext.isComplete and n > 0:
+    if not f.mapped: raise newException(ValueError, "the file is closed")
+    if start + int64(n * TextHeaderSize) > f.map.src.size:
+      raise newException(ValueError, "the extended textual header lies past the end of the file")
+  template record(rec: openArray[byte]): string =
+    cardLines(decodeText(rec, detectTextEncoding(rec)))
+  for r in 0..<n:
+    let a = r * TextHeaderSize
+    if ext.isComplete:
+      result.add record(ext.data.toOpenArray(a, a + TextHeaderSize - 1))
+    else:
+      let b = int(start) + a
+      result.add record(f.map.src.memory.toOpenArray(b, b + TextHeaderSize - 1))
+
 proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
   ## **Internal.** The mapped bytes (nil after `close`), for the library's own
   ## zero-copy decoders and the journaled `HeaderEditor`. Not part of the
@@ -767,9 +836,10 @@ proc traceKeys*(f: SeismicFile, traces: Slice[int]): seq[TraceKeys] =
 
 # ---------------------------------------------------------------- reading --
 
-template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: int,
+template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, first: int,
     log: var DiagLog, T: typedesc): int =
-  # Decodes `count` traces: trace `traceAt(k)` into row pointer `rowAt(k)`.
+  # Decodes `count` traces: samples `first ..< first + cols` of trace
+  # `traceAt(k)` into row pointer `rowAt(k)`.
   var failed = 0
   let mem = f.unsafeMemory
   let size = f.mappedSize
@@ -778,7 +848,7 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols: i
     let e = f.index.entries[i]
     let p = rowAt(k)
     try:
-      decodeEntry(mem, size, e, f.index.codecs[e.record], p, cols)
+      decodeEntry(mem, size, e, f.index.codecs[e.record], p, cols, first)
     except SegError as err:
       for c in 0..<cols: p[c] = T(0)
       log.report(sevError, if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat,
@@ -818,7 +888,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   dst.checkRows(row, count)
   template trace(k: int): int = traces.a + k
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, count, trace, rowOf, dst.shape[1], log, T)
+  decodeLoop(f, count, trace, rowOf, dst.shape[1], 0, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     dst: var Tensor[T], row = 0, log: var DiagLog): int =
@@ -831,7 +901,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   dst.checkRows(row, traces.len)
   template trace(k: int): int = traces[k]
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], log, T)
+  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], 0, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
     row = 0): int =
@@ -846,6 +916,61 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   ## decoded (left zero).
   var log: DiagLog
   f.readTracesInto(traces, dst, row, log)
+
+proc checkWindow[T](dst: Tensor[T], samples: Slice[int]) =
+  if samples.a < 0 or samples.b < samples.a:
+    raise newException(ValueError, "the sample window " & $samples &
+      " must be a..b with 0 <= a <= b")
+  if dst.rank == 2 and dst.shape[1] != samples.len:
+    raise newException(ValueError, "the sample window " & $samples & " needs " &
+      $samples.len & " columns, the tensor has " & $dst.shape[1])
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples: Slice[int],
+    dst: var Tensor[T], row = 0, log: var DiagLog): int =
+  ## Decodes samples `samples` (0-based, `a..b`) of each trace of `traces`
+  ## into rows `row ..< row + traces.len` of `dst`, whose `shape[1]` must be
+  ## `samples.len`: a viewer's visible time window. Only the window's bytes
+  ## are read (SEG-D 8015 and SEG-2 format 3 pack 4 samples in 10 bytes: a
+  ## window starting inside a group also decodes the rest of that group).
+  ## Past a trace's end the row is zero, so a window starting past it gives a
+  ## zero row. A trace that cannot be decoded (the whole trace is checked)
+  ## is left zero, logged in `log`, and counted in the result. Raises
+  ## `ValueError` for a window that is empty or starts below 0, a tensor of
+  ## another width or without room, traces outside the file or a closed file.
+  let count = traces.spanLen
+  dst.checkWindow(samples)
+  f.checkReadable(count)
+  f.checkSelection(traces)
+  dst.checkRows(row, count)
+  template trace(k: int): int = traces.a + k
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, count, trace, rowOf, dst.shape[1], samples.a, log, T)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
+    samples: Slice[int], dst: var Tensor[T], row = 0, log: var DiagLog): int =
+  ## The sample window of the selected traces, in list order (a gather, a
+  ## sort order); otherwise as the `Slice` form.
+  dst.checkWindow(samples)
+  f.checkReadable(traces.len)
+  f.checkSelection(traces)
+  dst.checkRows(row, traces.len)
+  template trace(k: int): int = traces[k]
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], samples.a, log, T)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples: Slice[int],
+    dst: var Tensor[T], row = 0): int =
+  ## As above, without a log: returns the number of traces that could not be
+  ## decoded (left zero).
+  var log: DiagLog
+  f.readTracesInto(traces, samples, dst, row, log)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
+    samples: Slice[int], dst: var Tensor[T], row = 0): int =
+  ## As above, without a log: returns the number of traces that could not be
+  ## decoded (left zero).
+  var log: DiagLog
+  f.readTracesInto(traces, samples, dst, row, log)
 
 func maxSamples*(f: SeismicFile, traces: Slice[int]): int =
   ## Largest sample count in the trace range (0 when empty). Raises
@@ -878,6 +1003,21 @@ proc readTraces*(f: SeismicFile, traces: openArray[int], log: var DiagLog,
   result = newTensorUninit[T](traces.len, f.maxSamples(traces)) # every element is written
   discard f.readTracesInto(traces, result, 0, log)
 
+proc readTraces*(f: SeismicFile, traces: Slice[int], samples: Slice[int], log: var DiagLog,
+    T: typedesc[SampleType] = float32): Tensor[T] =
+  ## Samples `samples` of `traces` as a new `[traces.len, samples.len]`
+  ## tensor (zero past a trace's end); see the windowed `readTracesInto`. A
+  ## trace that cannot be decoded stays zero and is logged in `log`.
+  result = newTensorUninit[T](traces.spanLen, max(samples.len, 0)) # every element is written
+  discard f.readTracesInto(traces, samples, result, 0, log)
+
+proc readTraces*(f: SeismicFile, traces: openArray[int], samples: Slice[int],
+    log: var DiagLog, T: typedesc[SampleType] = float32): Tensor[T] =
+  ## The sample window of the selected traces, in list order; otherwise as
+  ## the `Slice` form.
+  result = newTensorUninit[T](traces.len, max(samples.len, 0)) # every element is written
+  discard f.readTracesInto(traces, samples, result, 0, log)
+
 proc raiseUndecodable(log: DiagLog) {.noinline, noreturn.} =
   # The first decode error of `log`, with the count, as the exception.
   let first = log[0]
@@ -903,6 +1043,23 @@ proc readTraces*(f: SeismicFile, traces: openArray[int],
   ## tensor; otherwise as the `Slice` form.
   var log: DiagLog
   result = f.readTraces(traces, log, T)
+  if log.len > 0: raiseUndecodable(log)
+
+proc readTraces*(f: SeismicFile, traces: Slice[int], samples: Slice[int],
+    T: typedesc[SampleType] = float32): Tensor[T] =
+  ## Samples `samples` of `traces` as a new `[traces.len, samples.len]`
+  ## tensor. Raises like the full `readTraces` when a trace cannot be
+  ## decoded, and `ValueError` for an empty window or one starting below 0.
+  var log: DiagLog
+  result = f.readTraces(traces, samples, log, T)
+  if log.len > 0: raiseUndecodable(log)
+
+proc readTraces*(f: SeismicFile, traces: openArray[int], samples: Slice[int],
+    T: typedesc[SampleType] = float32): Tensor[T] =
+  ## The sample window of the selected traces, in list order; otherwise as
+  ## the `Slice` form.
+  var log: DiagLog
+  result = f.readTraces(traces, samples, log, T)
   if log.len > 0: raiseUndecodable(log)
 
 proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): int =
