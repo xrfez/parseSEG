@@ -1,6 +1,6 @@
 ## Read-ahead on a worker thread (task 6.3).
 
-import std/[assertions, os, random]
+import std/[assertions, os, random, strutils]
 import parseSEG/model/[traceindex, prefetch]
 
 const exampleDir = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles"
@@ -170,3 +170,63 @@ block failed_rows_are_logged:
   doAssertRaises(ValueError): discard p.traceAt(3)
   p.close()
   f.close()
+
+proc mapped(path: string): bool =
+  ## The file is mapped into this process (Linux; true elsewhere).
+  when defined(linux): expandFilename(path) in readFile("/proc/self/maps")
+  else: true
+
+block close_while_prefetching:
+  # R2-5: the prefetcher pins the map; the unmap waits for its close.
+  let path = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  var f = openSeismic(path)
+  let all = f.readTraces(0..<f.len)
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 7, depth = 2)
+  f.close()
+  doAssert not f.isOpen
+  doAssertRaises(ValueError): discard f.readTraces(0..0)
+  var c: PrefetchChunk[float32]
+  var n = 0
+  while p.next(c):
+    doAssert c.failed == 0 and c.samples == all.rows(c.first, c.count)
+    n += c.count
+  doAssert n == all.shape[0]
+  p.seek(10 ..< 20) # still reads after a seek
+  doAssert p.next(c) and c.samples == all.rows(10, c.count)
+  doAssert mapped(path)
+  p.close()
+  doAssert not mapped(path)
+  f.close() # idempotent
+
+block file_destroyed_before_its_prefetcher:
+  # The file's entries and codecs are parked with the map, not freed.
+  let path = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  var p: Prefetcher[float32]
+  var all: Tensor[float32]
+  block:
+    var f = openSeismic(path)
+    all = f.readTraces(0..<f.len)
+    p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 5, depth = 3)
+  var c: PrefetchChunk[float32]
+  var n = 0
+  while p.next(c):
+    doAssert c.failed == 0 and c.samples == all.rows(c.first, c.count)
+    n += c.count
+  doAssert n == all.shape[0]
+  p.seek(0 ..< p.len)
+  doAssert p.next(c) and c.samples == all.rows(0, c.count)
+  p.close()
+  doAssert not mapped(path)
+
+block two_prefetchers_one_map:
+  let path = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  var f = openSeismic(path)
+  var a = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 50)
+  var b = newPrefetcher[float32](f, @[3, 1, 4, 1, 5])
+  f.close()
+  a.close()
+  doAssert mapped(path) # `b` still holds it
+  var c: PrefetchChunk[float32]
+  doAssert b.next(c) and c.count == 5
+  b.close()
+  doAssert not mapped(path)

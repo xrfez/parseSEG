@@ -963,7 +963,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
       as the pinned map owner (item 1); delete `readTracesRaw` and `writeGeometry(ed, f)`
       (items 3, 9); of the optionals, items 21 (`chunks`), 22 (umbrella) and 11 (a
       `copyWithGeometry` result object) are in; items 20 and 23 go to "Future". Steps:
-      - [ ] 14.2a prefetcher lifetime (items 1, 2)
+      - [x] 14.2a prefetcher lifetime (items 1, 2)
       - [ ] 14.2b boundary-only procs (items 3, 8, 9, 10)
       - [ ] 14.2c handles to seqs (items 4, 5)
       - [ ] 14.2d encapsulation and hidden parameters (items 11, 12, 13, 14, 16)
@@ -1567,3 +1567,4 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
   - Left for 14.2: `##` comments that still say "C ABI" (prefetch.nim:310, traceindex.nim:473/664,
     headerfields.nim:4, and some test headers) and the procs they describe.
 - 2026-11-09: 14.2 audit written (`docs/design/phase14_audit.md`, 23 items, commit plan 14.2a-e). Waiting for the owner to approve items before any code change.
+- 2026-11-09: 14.2a done (R2-5 fixed). The map sits behind a ref (`MapRef`, with a count of pins). A `Prefetcher` holds a `MapPin`, so `f.close()` only drops the file's reference and the unmap waits for the last prefetcher. A `SeismicFile` destroyed while pinned moves (does not copy) its entries and codecs into the map, so the worker's raw pointers stay valid. `waitReady` and `waiters` are deleted. New tprefetch blocks (close while prefetching, file destroyed first, two prefetchers on one map) check the mapping with `/proc/self/maps`. Under ASan: no memory errors. A 32 KB leak in 2 allocations was already there before this change (Nim thread runtime, not investigated). The decode path is unchanged.

@@ -137,8 +137,9 @@ moved; when it goes out of scope it unmaps itself, and `close` does that early.
 
 Everything a read returns is an owned copy: tensors, `FieldValue`s, header listings, byte
 copies and logs stay valid after the file is closed. The library never hands out pointers
-into the map. A `Prefetcher` reads the map through raw pointers, so in Nim the file must stay
-open (and its index unchanged) until the prefetcher is closed.
+into the map. A `Prefetcher` keeps the map alive itself: closing (or dropping) the file while
+it runs is safe, and the unmap waits for the prefetcher's `close`. Do not change the file's
+index (`applySurvey`, `applyGeometry`) while a prefetcher runs.
 
 ```nim
 import parseSEG

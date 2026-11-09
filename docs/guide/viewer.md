@@ -140,7 +140,8 @@ f.close()
 - `cols` fixes the row width (default: the longest trace of the range).
 - A trace that cannot be decoded is a zero row, counted in `c.failed`, with an error in
   `c.log` that names the trace.
-- Close the prefetcher before the file, and call its procs from one thread.
+- Call the prefetcher's procs from one thread. It keeps the file's map alive until its own
+  `close`, so the order in which the file and the prefetcher are closed does not matter.
 
 ## The header tab
 

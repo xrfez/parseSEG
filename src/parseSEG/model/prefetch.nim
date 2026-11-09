@@ -23,9 +23,14 @@
 ## notes the rows that failed in a plain array of the slot; the consumer
 ## turns those into the chunk's diagnostics. When the consumer takes a chunk,
 ## it takes the slot's tensor and allocates a fresh one for the slot, so a
-## returned tensor is never written again. Hence the contract: the
-## `SeismicFile` must stay open and its index unchanged until `close`, and
-## only one thread may call the consumer procs.
+## returned tensor is never written again.
+##
+## Lifetime: the prefetcher pins the file's map, so `f.close()` (or the file
+## going out of scope) while it runs is safe: the map, and if the file is
+## destroyed its trace entries and codecs, stay alive until the prefetcher's
+## `close`. What remains a rule: do not change the file's index
+## (`applySurvey`, `applyGeometry`, assigning to `f.index`) while a
+## prefetcher runs, and call the consumer procs from one thread.
 
 import std/locks
 import ../common/[diagnostics, errors]
@@ -59,7 +64,6 @@ type
     nextChunk: int   # next chunk the worker decodes
     takeChunk: int   # next chunk the consumer takes
     quit: bool
-    waiters: int     # threads in `waitReady`; `shutdown` waits for them to leave
     chunkTraces, cols: int
     mem: ptr UncheckedArray[byte]
     size: int64
@@ -71,6 +75,7 @@ type
   Prefetcher*[T: SampleType] = object
     ## Read-ahead state; not copyable. Call `close` when done.
     sh: ptr Shared[T]
+    pin: MapPin             # keeps the map (and a destroyed file's index) alive for the worker
     tensors: seq[Tensor[T]] # slot storage, consumer side
     last: int               # end of the whole range (exclusive)
     selection: seq[int]     # selection mode: the trace list (fixed for the prefetcher's life)
@@ -94,8 +99,6 @@ proc shutdown[T](sh: ptr Shared[T]) =
   acquire(sh.lock)
   sh.quit = true
   signal(sh.work)
-  broadcast(sh.ready)
-  while sh.waiters > 0: wait(sh.ready, sh.lock)
   release(sh.lock)
   joinThread(sh.thread)
   deinitCond(sh.work)
@@ -109,6 +112,7 @@ proc `=destroy`*[T](p: Prefetcher[T]) =
   # A forgotten `close` must not leave a worker writing into freed buffers:
   # join it before the slot tensors go.
   if p.sh != nil: shutdown(p.sh)
+  `=destroy`(p.pin) # after the shutdown: the worker reads the map
   `=destroy`(p.tensors)
   `=destroy`(p.selection) # after the shutdown: the worker reads it
   `=destroy`(p.path)
@@ -169,7 +173,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
     depth = 4, cols = -1): Prefetcher[T] =
   ## Starts decoding `traces` on a worker thread, `chunkTraces` at a time, at
   ## most `depth` chunks ahead. Rows have `cols` samples (-1: the range's
-  ## largest trace). `f` must stay open, its index unchanged, until `close`.
+  ## largest trace). `f` may be closed meanwhile (the prefetcher keeps the
+  ## map until its `close`), but its index must not change.
   ## Raises `ValueError` for traces outside the file (an empty range must
   ## still start in `0 .. f.len`), a closed or tape file, or a non-positive
   ## chunk size or depth.
@@ -198,7 +203,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   initLock(sh.lock)
   initCond(sh.work)
   initCond(sh.ready)
-  result = Prefetcher[T](sh: sh, last: f.len, untaken: sh.chunkCount, path: f.path)
+  result = Prefetcher[T](sh: sh, pin: f.pinMap, last: f.len, untaken: sh.chunkCount,
+    path: f.path)
   for i in 0..<depth:
     result.tensors.add newTensorUninit[T](rows, width)
     sh.slots[i].data = rawData(result.tensors[i])
@@ -306,24 +312,6 @@ proc next*[T](p: var Prefetcher[T], c: var PrefetchChunk[T]): bool =
   if more: p.take(c)
   more
 
-proc waitReady*[T](p: var Prefetcher[T], outer: var Lock) =
-  ## **Internal** (the C ABI). For a caller holding `outer`: waits until the
-  ## next chunk is decoded, the range is done or the prefetcher is closed,
-  ## with `outer` released meanwhile, then takes `outer` again. `close`,
-  ## called holding `outer`, waits for the waiter to leave before it frees
-  ## the ring. Then `tryNext` (or `atEnd`) tells what happened.
-  let sh = p.sh
-  if sh == nil: return
-  acquire(sh.lock)
-  inc sh.waiters
-  release(outer)
-  while not (sh.quit or sh.takeChunk >= sh.chunkCount or sh.headReady):
-    wait(sh.ready, sh.lock)
-  dec sh.waiters
-  if sh.quit: broadcast(sh.ready) # `shutdown` waits for the last waiter
-  release(sh.lock)
-  acquire(outer)
-
 proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   ## Restarts read-ahead over the positions `span` (traces in range mode).
   ## Chunks decoded for the old positions are dropped; one being decoded
@@ -345,7 +333,6 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   for i in 0..<sh.depth:
     if sh.slots[i].state == ssReady: sh.slots[i].state = ssFree
   signal(sh.work)
-  broadcast(sh.ready) # a `waitReady` for the old range re-checks
   release(sh.lock)
 
 proc close*[T](p: var Prefetcher[T]) =
@@ -353,5 +340,6 @@ proc close*[T](p: var Prefetcher[T]) =
   if p.sh != nil:
     shutdown(p.sh)
     p.sh = nil
+    p.pin = MapPin() # the last pin unmaps a file closed meanwhile
     p.tensors.setLen 0
     p.selection.setLen 0

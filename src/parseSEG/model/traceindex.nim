@@ -371,11 +371,20 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: 
 # ---------------------------------------------------------- seismic file --
 
 type
-  MapOwner = object
-    ## Owns a file's mapping: unmaps when it goes, so a `SeismicFile` that goes
-    ## out of scope without `close` leaves no mapping behind.
+  MapOwner {.acyclic.} = object
+    ## Owns a file's mapping: unmaps when the last reference goes. The
+    ## `SeismicFile` holds one until `close`; each running `Prefetcher` holds
+    ## one too (a `MapPin`), so closing the file while a prefetcher still
+    ## decodes defers the unmap to the prefetcher's `close`.
     src: MemFileSource
     tempPath: string ## A demultiplexed copy to delete with the map ("" if none).
+    pins: int        ## Live `MapPin`s (prefetchers); consumer thread only.
+    parkedEntries: seq[TraceEntry]
+      ## The index tables of a file destroyed while pinned: the prefetchers
+      ## read them through raw pointers, so they live as long as the map.
+    parkedCodecs: seq[TraceCodec]
+
+  MapRef = ref MapOwner
 
 proc `=destroy`(m: MapOwner) =
   if m.src != nil:
@@ -385,8 +394,23 @@ proc `=destroy`(m: MapOwner) =
   if m.tempPath.len > 0: discard tryRemoveFile(m.tempPath)
   `=destroy`(m.src)
   `=destroy`(m.tempPath)
+  `=destroy`(m.parkedEntries)
+  `=destroy`(m.parkedCodecs)
 
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
+
+type
+  MapPin* = object
+    ## **Internal** (the prefetcher). Keeps a file's map alive, and the
+    ## file's index tables if the file is destroyed first. Not copyable.
+    m: MapRef
+
+proc `=destroy`*(p: MapPin) =
+  if p.m != nil: dec p.m.pins
+  `=destroy`(p.m)
+
+proc `=copy`(dst: var MapPin, src: MapPin) {.error.}
+proc `=dup`(src: MapPin): MapPin {.error.}
 
 type
   SeismicFile* = object
@@ -397,10 +421,34 @@ type
       ## The temporary demultiplexed copy that is mapped and indexed instead
       ## of a multiplexed SEG-D file ("" for any other file); deleted on
       ## `close`. Index offsets and `copyBytes` refer to it.
-    map: MapOwner
+    map: MapRef ## nil once closed.
+
+proc `=destroy`(f: SeismicFile) =
+  # `f` is passed by reference and this is its last use, so its fields may
+  # be moved out (and `TraceIndex` has only the generic `var` destructor).
+  let pf = addr f
+  if f.map != nil and f.map.pins > 0:
+    # A prefetcher still reads `entries` and `codecs` through raw pointers:
+    # hand them to the map it keeps alive. A seq move keeps the payload's
+    # address, so nothing is copied and the pointers stay valid.
+    f.map.parkedEntries = move pf[].index.entries
+    f.map.parkedCodecs = move pf[].index.codecs
+  `=destroy`(pf[].index)
+  `=destroy`(f.path)
+  `=destroy`(f.demuxPath)
+  `=destroy`(f.map)
 
 proc `=copy`*(dst: var SeismicFile, src: SeismicFile) {.error.}
   # A copy would share the map, and outlive `close` with a dangling view.
+
+func mapSrc(f: SeismicFile): MemFileSource {.inline.} =
+  if f.map != nil: f.map.src else: nil
+
+proc pinMap*(f: SeismicFile): MapPin =
+  ## **Internal.** A pin on `f`'s map (an empty pin for a closed file).
+  if f.map != nil:
+    inc f.map.pins
+    result = MapPin(m: f.map)
 
 func multiplexed(ix: TraceIndex): bool =
   for r in ix.segdRecords:
@@ -452,7 +500,7 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
   ## mapped and indexed instead (`demuxPath`, a warning in `log`) and deleted
   ## on `close`; the file itself is never changed. With `writable`, such a
   ## file raises `ValueError`: edits would change only the copy.
-  result = SeismicFile(path: path, map: MapOwner(src: openMemFileSource(path, writable)))
+  result = SeismicFile(path: path, map: MapRef(src: openMemFileSource(path, writable)))
   let n = int(min(result.map.src.size, 8192))
   let kind = if n > 0: detectKind(result.map.src.memory.toOpenArray(0, n - 1)) else: skUnknown
   if kind != skUnknown:
@@ -470,15 +518,9 @@ proc openSeismic*(path: string, twosComplement8015 = false, keys = false,
 
 proc close*(f: var SeismicFile) =
   ## Unmaps the file and deletes a demultiplexed copy (`demuxPath`). The
-  ## index stays usable; range reads do not. (Not on the C/Python boundary:
-  ## there a prefetcher may share the map, and releasing the handle unmaps it
-  ## once the last user is gone.)
-  if f.map.src != nil:
-    f.map.src.close()
-    f.map.src = nil
-  if f.map.tempPath.len > 0:
-    discard tryRemoveFile(f.map.tempPath)
-    f.map.tempPath = ""
+  ## index stays usable; range reads do not. A prefetcher still running on
+  ## the file keeps the map until its own `close`. Idempotent.
+  f.map = nil
 
 func len*(f: SeismicFile): int {.inline.} =
   ## The number of traces.
@@ -529,9 +571,10 @@ proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   ## that is not SEG-2 or is closed, or a trace out of range.
   if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
   if trace notin 0 ..< f.len: f.raiseNoTrace(trace)
-  if f.map.src == nil: raise newException(ValueError, "the file is closed")
+  let src = f.mapSrc
+  if src == nil: raise newException(ValueError, "the file is closed")
   var log: DiagLog # already reported by the index walk
-  readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.index.seg2, trace,
+  readSeg2Trace(src.memory.toOpenArray(0, int(src.size) - 1), f.index.seg2, trace,
     log, f.path)
 
 proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
@@ -541,32 +584,36 @@ proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
   ## would bypass the editor's validation and undo journal (owner rule: files
   ## change only on an explicit write). Callers use `copyBytes`, the readers,
   ## or `traceField`/`fileField` instead.
-  if f.map.src != nil: f.map.src.memory else: nil
+  let src = f.mapSrc
+  if src != nil: src.memory else: nil
 
 func isOpen*(f: SeismicFile): bool {.inline.} =
   ## The file is still mapped (range reads work).
-  f.map.src != nil
+  f.mapSrc != nil
 
 proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
   ## A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
   ## hex view). Raises `ValueError` if the file is closed or the range lies
   ## outside it. Changing the copy never changes the file.
-  if f.map.src == nil: raise newException(ValueError, "the file is closed")
+  let src = f.mapSrc
+  if src == nil: raise newException(ValueError, "the file is closed")
   # `n > size - offset`, not `offset + n > size`: the sum can overflow.
-  if offset < 0 or offset > f.map.src.size or int64(n) > f.map.src.size - offset:
+  if offset < 0 or offset > src.size or int64(n) > src.size - offset:
     raise newException(ValueError, "bytes " & $offset & "+" & $n & " lie outside the file (" &
-      $f.map.src.size & " bytes)")
+      $src.size & " bytes)")
   result = newSeq[byte](n)
-  if n > 0: copyMem(addr result[0], addr f.map.src.memory[offset], n)
+  if n > 0: copyMem(addr result[0], addr src.memory[offset], n)
 
 proc mappedSize*(f: SeismicFile): int64 {.inline.} =
   ## **Internal.** Bytes mapped (0 after `close`). Not exported by `parseSEG`.
-  if f.map.src != nil: f.map.src.size else: 0
+  let src = f.mapSrc
+  if src != nil: src.size else: 0
 
 proc flush*(f: SeismicFile) =
   ## **Internal.** Writes modified pages of a writable map back to the file
   ## (`HeaderEditor.close`). Not exported by `parseSEG`.
-  if f.map.src != nil: f.map.src.flush()
+  let src = f.mapSrc
+  if src != nil: src.flush()
 
 # ------------------------------------------------- checks shared by model --
 # Exported for the sibling model modules (gathers, prefetch, survey/join);

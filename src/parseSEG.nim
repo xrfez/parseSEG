@@ -34,7 +34,7 @@ export convert, seg2convert
 import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif, summary, headerlist]
 export traceindex except unsafeMemory, decodeEntry, readTracesRaw, mappedSize, flush,
-  requireKeys, checkSpan, spanLen
+  requireKeys, checkSpan, spanLen, MapPin, pinMap
 export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
   isLayoutField, isNamedField, fieldValueOf
 export keys, gathers, prefetch, headernif, summary, headerlist
