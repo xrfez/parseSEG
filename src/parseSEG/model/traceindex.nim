@@ -41,7 +41,7 @@ import ../segd/[reader as segdreader, mux, demux]
 import ../seg2/[reader as seg2reader]
 import ./[tensors, keys, indextypes]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples, ../seg2/samples as seg2samples
-import ../private/[checks, decodeentry, progressticker, tensorrows]
+import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, segywalk]
 
 export memsource, diagnostics, keys, seismickind, progress, tensors, indextypes
 
@@ -125,7 +125,7 @@ proc reserveFor(ix: var TraceIndex, src: RecordSource, first: TraceEntry, dataBy
         ix.keys = move k
 
 proc indexSegy(src: RecordSource, keys: bool, tk: var ProgressTicker): TraceIndex =
-  var r = openSegy(src, headersOnly = true)
+  var r = openSegyWalk(src)
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
   result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
     order: r.file.byteOrder)
@@ -140,7 +140,7 @@ proc indexSegy(src: RecordSource, keys: bool, tk: var ProgressTicker): TraceInde
     result.entries.add TraceEntry(offset: t.offset, headerBytes: uint32(hb),
       numSamples: uint32(t.numSamples), channelSet: NoChannelSet, scanType: -1)
     result.maxSamples = max(result.maxSamples, t.numSamples)
-    if keys: result.keys.add gr.traceKeys(t)
+    if keys: result.keys.add segyKeys(gr, r.walkHeaders(t))
     if result.entries.len == 1:
       result.reserveFor(src, result.entries[0], result.codecs[0].dataBytes(t.numSamples), keys)
   result.segy = r.file
@@ -646,7 +646,6 @@ type
   KeyReader = object
     # Per-call state of `traceKeysInto`: buffers reused across traces.
     gr: GeometryReader
-    segy: SegyTrace
     segd: array[SegdLayout, SegdTrace]
 
 proc initKeyReader(f: SeismicFile): KeyReader =
@@ -665,20 +664,13 @@ proc keysOf(f: SeismicFile, r: var KeyReader, mem: ptr UncheckedArray[byte], siz
   let hb = int(e.headerBytes)
   case ix.kind
   of skSegy:
-    let order = ix.segy.byteOrder
     if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > size: raiseOutside(trace)
-    template t: untyped = r.segy
-    t.header = decodeTraceHeader(mem.toOpenArray(a, a + TraceHeaderSize - 1), order)
-    t.hasExt1 = hb >= 2 * TraceHeaderSize
+    # Straight from the mapped bytes: nothing decoded or copied.
     let extra = hb - 2 * TraceHeaderSize
-    if t.hasExt1:
-      t.ext1 = decodeTraceHeaderExt1(
-        mem.toOpenArray(a + TraceHeaderSize, a + 2 * TraceHeaderSize - 1), order)
-    t.proprietary.setLen max(extra, 0)
-    if extra > 0: copyMem(addr t.proprietary[0], addr mem[a + 2 * TraceHeaderSize], extra)
-    t.index = trace
-    t.offset = e.offset
-    r.gr.traceKeys(t)
+    segyKeys(r.gr, RawHeaders(std: cast[ByteBuf](addr mem[a]),
+      ext1: if hb >= 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + TraceHeaderSize]) else: nil,
+      prop: if extra > 0: cast[ByteBuf](addr mem[a + 2 * TraceHeaderSize]) else: nil,
+      propLen: max(extra, 0)))
   of skSegd:
     if e.offset < 0 or e.offset + hb > size or hb < SegdTraceHeaderSize: raiseOutside(trace)
     template rec: untyped = ix.segdRecords[e.record]

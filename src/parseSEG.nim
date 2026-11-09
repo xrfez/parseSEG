@@ -40,10 +40,10 @@ export convert.SegyTargetFormat, convert.ConvertOptions, convert.targetFormat,
   convert.convertSegy, convert.convertSegdToSegy, convert.convertSeg2ToSegy, convert.convertFile
 export seg2convert
 
-import parseSEG/model/[keys, indextypes, traceindex, gathers, prefetch, fieldvalues,
+import parseSEG/model/[keys, keytypes, indextypes, traceindex, gathers, prefetch, fieldvalues,
   headerfields, edit, headernif, summary, headerlist, sorting, tensors, writefile]
 import parseSEG/common/[seismickind, progress]
-export seismickind, progress, keys, indextypes, tensors, fieldvalues
+export seismickind, progress, keys, keytypes, indextypes, tensors, fieldvalues
 # Allowlists: traceindex, edit and convert also export helpers that need
 # their private fields (for the library's own modules), so their public
 # names are listed one by one, as are headerfields'. A new public name goes

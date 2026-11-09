@@ -37,124 +37,17 @@ import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
 import ../seg2/headers as seg2headers
 import ../common/years
-
-type
-  TraceKeys* = object
-    ## Geometry of one trace (NaN / 0 where unknown).
-    record*: float64     ## SEG-Y field record number; SEG-D file number.
-    ensemble*: float64   ## SEG-Y ensemble (CDP) number; NaN for SEG-D.
-    offset*: float64     ## SEG-Y source-receiver offset; NaN for SEG-D.
-    srcLine*, srcPoint*: float64
-    srcX*, srcY*: float64
-    rcvLine*, rcvPoint*: float64
-    rcvX*, rcvY*: float64
-    srcZ*, rcvZ*: float64 ## Source and receiver elevation (SEG-Y scaled; SEG-D coordinate 3).
-    cmpX*, cmpY*: float64 ## Midpoint: SEG-Y CDP X/Y, else halfway between source and receiver.
-    srcIndex*: int16     ## SEG-D source point index.
-    rcvIndex*: int16     ## SEG-D receiver point index.
-    depthIndex*, reshootIndex*: uint8 ## SEG-D Rev 3 THE#1 bytes 10 and 8.
-    sensorType*: uint8   ## SEG-D THE#1 byte 21.
-    component*: uint8    ## Distinguishes the components of one station (see module doc).
-    channel*: float64
-      ## Channel (trace) number in the field record: SEG-Y bytes 13-16, SEG-D
-      ## the demux trace number (Rev 3: extended when `FFFF`). Survey relation
-      ## records (SPS X) map (record, channel) to stations.
-    time*: float64
-      ## When the trace was recorded, in UTC POSIX seconds (fractional); NaN if
-      ## unknown. SEG-Y: trace bytes 157-168 in their time basis; SEG-D: GH#1,
-      ## for Rev 3 the trace's Timestamp block or the GH#3 time zero (see the
-      ## module documentation).
-
-func initTraceKeys*(): TraceKeys =
-  ## All values unknown.
-  TraceKeys(record: NaN, ensemble: NaN, offset: NaN, srcLine: NaN, srcPoint: NaN, srcX: NaN,
-    srcY: NaN, rcvLine: NaN, rcvPoint: NaN, rcvX: NaN, rcvY: NaN, srcZ: NaN, rcvZ: NaN,
-    cmpX: NaN, cmpY: NaN, channel: NaN, time: NaN)
-
-func hasSourceXY*(k: TraceKeys): bool {.inline.} =
-  ## Both source coordinates are known.
-  not (k.srcX.isNaN or k.srcY.isNaN)
-
-func hasReceiverXY*(k: TraceKeys): bool {.inline.} =
-  ## Both receiver coordinates are known.
-  not (k.rcvX.isNaN or k.rcvY.isNaN)
-
-func deriveGeometry*(k: var TraceKeys, overwrite = false) =
-  ## Fills `offset` (the source-receiver distance) and the midpoint from the
-  ## coordinates when both ends are known. An existing non-zero offset (e.g.
-  ## SEG-Y's signed header offset) and midpoint are kept unless `overwrite`;
-  ## a zero offset counts as unset (SEG-Y headers hold 0 when not filled).
-  if k.hasSourceXY and k.hasReceiverXY:
-    if overwrite or k.offset.isNaN or k.offset == 0:
-      k.offset = hypot(k.rcvX - k.srcX, k.rcvY - k.srcY)
-    if overwrite or k.cmpX.isNaN or k.cmpY.isNaN:
-      k.cmpX = (k.srcX + k.rcvX) / 2
-      k.cmpY = (k.srcY + k.rcvY) / 2
-
-func isComponentCode(code: int): bool {.inline.} =
-  # SEG-Y trace identification codes naming a sensor component: pressure,
-  # multicomponent V/X/I, rotated V/T/R (11-17), electric and magnetic field
-  # components (27-38), rotational pitch/roll/yaw (39-41).
-  code in 11..17 or code in 27..41
-
-func unset(x: float64): bool {.inline.} = x == 0 or x.isNaN
+import ../private/segykeys
+import ./keytypes
+export keytypes
 
 func isSourceBlock(t: uint8): bool {.inline.} = t in {0x15'u8..0x19'u8, 0x1F'u8}
-
-func civilSeconds(year, day, hour, minute, second: int): float64 =
-  # POSIX seconds of a date given as year and day of year, as if it were UTC;
-  # NaN when a field is out of range.
-  if year notin 1..9999 or day notin 1..366 or hour notin 0..23 or minute notin 0..59 or
-      second notin 0..60:
-    return NaN
-  let jan1 = daysFromCivil(year, 1, 1) * 86400
-  float64(jan1 + int64(day - 1) * 86400 + int64(hour) * 3600 + int64(minute) * 60 + second)
-
-proc segyTime(gr: GeometryReader, t: SegyTrace): float64 =
-  let h = t.header
-  if h.year == 0: return NaN
-  let basis = if h.timeBasisCode != 0: h.timeBasisCode else: gr.timeBasis
-  let s = civilSeconds(fullYear(int(h.year)), int(h.dayOfYear), int(h.hour), int(h.minute),
-    int(h.second))
-  let ns = if t.hasExt1: float64(t.ext1.nanoseconds) * 1e-9 else: 0.0
-  case basis
-  of 0, 2, 4: s + ns
-  of 5: # GPS time of day: as a SEG-D timestamp, which converts with the leap seconds
-    if s.isNaN: NaN
-    else: timestampToUnix(int64(round((s - float64(GpsEpochUnix)) * 1e6))) + ns
-  else: NaN
 
 proc traceKeys*(gr: GeometryReader, t: SegyTrace): TraceKeys =
   ## The keys of a SEG-Y trace, resolved through its file's layout
   ## (`initGeometryReader(file)`, made once per file).
-  let g = gr.geometry(t)
-  result = initTraceKeys()
-  result.record = g.fieldRecord
-  result.ensemble = g.ensemble
-  result.offset = g.offset
-  # Zero means "not set" in practice: a station at exactly (0, 0) or energy
-  # source point 0 does not identify anything.
-  let sp = if g.energySourcePoint.isNaN or g.energySourcePoint == 0: g.shotpoint
-           else: g.energySourcePoint
-  if sp != 0: result.srcPoint = sp
-  if not (unset(g.sourceX) and unset(g.sourceY)):
-    result.srcX = g.sourceX
-    result.srcY = g.sourceY
-  if not (unset(g.groupX) and unset(g.groupY)):
-    result.rcvX = g.groupX
-    result.rcvY = g.groupY
-  result.srcZ = g.sourceSurfaceElevation
-  result.rcvZ = g.receiverElevation
-  if not (unset(g.cdpX) and unset(g.cdpY)):
-    result.cmpX = g.cdpX
-    result.cmpY = g.cdpY
-  result.deriveGeometry()
-  if t.header.traceNumberInField > 0: result.channel = float64(t.header.traceNumberInField)
-  let code = int(t.header.traceIdCode)
-  let base = if code >= 0: code and 0x3FFF else: code
-  if isComponentCode(base): result.component = uint8(base)
-  result.time = gr.segyTime(t)
-
+  withRawHeaders(gr.planOrder, t, h):
+    result = segyKeys(gr, h)
 
 func finite(x: float64): bool {.inline.} = not x.isNaN and x != Inf and x != -Inf
 

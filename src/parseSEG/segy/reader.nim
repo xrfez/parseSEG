@@ -109,6 +109,11 @@ type
     fixedMismatches: int
       ## Fixed-length traces whose own ns/dt disagree (logged up to `MaxRepeats`).
     zeroSampleTraces: int ## Rev 0 traces sized from the binary header (logged up to `MaxRepeats`).
+    walk: bool
+      ## The index walk (`private/segywalk`): of the headers, decode only the
+      ## fields this module reads.
+    rawStd, rawExt1: array[TraceHeaderSize, byte]
+      ## The last trace's header and Extension 1 bytes, as read.
 
 func looksLikeTapeLabel(b: openArray[byte]): bool =
   # Storage unit sequence number (digits or blanks) and "SY" in bytes 5-6;
@@ -412,10 +417,13 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   let order = f.byteOrder
   t.index = r.tracesRead
   t.offset = r.offset
-  var hdr: array[TraceHeaderSize, byte]
-  if r.readAvail(hdr) < TraceHeaderSize:
+  if r.readAvail(r.rawStd) < TraceHeaderSize:
     raiseTruncated("trace header ends early", r.offset)
-  t.header = decodeTraceHeader(hdr, order)
+  if r.walk:
+    t.header.numSamples = getNum[uint16](r.rawStd, 114, order)
+    t.header.sampleInterval = getNum[uint16](r.rawStd, 116, order)
+  else:
+    t.header = decodeTraceHeader(r.rawStd, order)
 
   # Rev 2 additional trace headers; Ext1 comes first.
   var extNs = 0'u32
@@ -423,12 +431,17 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
   t.hasExt1 = false
   t.proprietary.setLen 0
   if f.revision.major >= 2 and f.binary.maxAddlTraceHeaders > 0:
-    var raw: array[TraceHeaderSize, byte]
-    if r.readAvail(raw) < TraceHeaderSize:
+    if r.readAvail(r.rawExt1) < TraceHeaderSize:
       raiseTruncated("trace header extension 1 ends early", r.offset)
     t.hasExt1 = true
-    t.ext1 = decodeTraceHeaderExt1(raw, order)
-    if not r.ext1Warned and not isExt1Name(raw):
+    if r.walk:
+      t.ext1.extNumSamples = getNum[uint32](r.rawExt1, 136, order)
+      t.ext1.extSampleInterval = getNum[float64](r.rawExt1, 144, order)
+      t.ext1.numAddlTraceHeaders = getNum[uint16](r.rawExt1, 156, order)
+      t.ext1.lastTraceFlag = getNum[uint16](r.rawExt1, 158, order)
+    else:
+      t.ext1 = decodeTraceHeaderExt1(r.rawExt1, order)
+    if not r.ext1Warned and not isExt1Name(r.rawExt1):
       r.ext1Warned = true
       r.log.report(sevWarning, dcBadValue, "the first additional trace header is not named " &
         "SEG00001; reading it as Trace Header Extension 1 anyway (reported once)",
