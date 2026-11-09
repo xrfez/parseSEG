@@ -958,7 +958,16 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 
       Keep the CLI (`bin/parseSEG`) and the zig CLI builds. The `PackageVersion` stays. The
       nimble version becomes 0.5.0, a breaking change.
-- [ ] 14.2 Simplify what the FFI shaped (an audit agent first, then the owner approves). Known
+- [ ] 14.2 Simplify what the FFI shaped (an audit agent first, then the owner approves).
+      **Owner decisions (2026-11-09)** on `docs/design/phase14_audit.md`: every [do] item; R2-5
+      as the pinned map owner (item 1); delete `readTracesRaw` and `writeGeometry(ed, f)`
+      (items 3, 9); of the optionals, items 21 (`chunks`), 22 (umbrella) and 11 (a
+      `copyWithGeometry` result object) are in; items 20 and 23 go to "Future". Steps:
+      - [ ] 14.2a prefetcher lifetime (items 1, 2)
+      - [ ] 14.2b boundary-only procs (items 3, 8, 9, 10)
+      - [ ] 14.2c handles to seqs (items 4, 5)
+      - [ ] 14.2d encapsulation and hidden parameters (items 11, 12, 13, 14, 16)
+      - [ ] 14.2e comments, umbrella, `chunks` (items 19, 21, 22) Known
       candidates:
       - **Handles:** handle-style types (`HeaderListing`, `HeaderPatch` and others), where a
         `seq`/iterator or plain proc would do.
@@ -991,6 +1000,8 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 - [ ] 14.4 Re-run `nim bench` (Nim only) and update `docs/benchmarks.md`, then do 13.5.
 
 ### Future (noted, not scheduled)
+- From the 14.2 audit, declined for now: a bounds-checked `mapped(f)` view for internal map
+  reads (item 20); `Option` fields instead of -1/NaN sentinels in `FileSummary` (item 23).
 - Sorting traces by header fields (offset, receiver, CMP, ...), decided 2026-11-07: a sort
   returns a **permutation** (a trace index list, 4 B/trace) over the index and never moves data.
   Neither the file nor a whole-file tensor is reordered; that would not scale to 40 GB.
