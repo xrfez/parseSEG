@@ -1678,3 +1678,4 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
   - The `...Raw` sample decoders are out of the umbrella.
   - Fixed the RST in two doc comments (`textheader.nim` `"C 1 "`, `convert.nim` `ext*`); our modules' docs now build without errors.
   - The remaining `nim docs` failure is Arraymancer's CUDA imports under `nimdoc`; it is logged in 15.3.
+- 2026-11-09: 15.3 idiom audit written (`docs/design/phase15_idiom_audit.md`, 23 items, steps 15.3a-i). Correction to the 15.2 follow-up: the `except` clauses do NOT hide the `...Raw` decoders. `segy/reader`, `segd/reader`, `seg2/headers` and `seg2/writer` re-export `samples` whole; a probe with only `import parseSEG` sees all three (item A1). The perf audit is still running; then the owner approves.
