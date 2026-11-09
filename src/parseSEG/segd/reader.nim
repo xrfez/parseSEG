@@ -45,7 +45,7 @@ import ../io/[records, diskio, pushback]
 import ../common/tensors
 import ./[blocks, samples, mux]
 export blocks, diagnostics
-export samples except decodeSegdSamplesRaw
+export samples except decodeSamplesRaw
 export tensors
 
 const

@@ -24,7 +24,7 @@ import std/[algorithm, strutils]
 import ../common/[errors, diagnostics]
 import ./[headers, samples]
 export headers, diagnostics
-export samples except decodeSeg2SamplesRaw
+export samples except decodeSamplesRaw
 
 type
   ListNote = enum
@@ -324,6 +324,6 @@ proc readSamples*[T: Seg2SampleType](data: openArray[byte], f: Seg2File, t: Seg2
     raiseTruncated("trace samples lie past the end of the file", t.dataOffset)
   if n > 0:
     let a = int(t.dataOffset)
-    decodeSeg2Samples(fmt, data.toOpenArray(a, a + nbytes - 1), dst.toOpenArray(0, n - 1),
+    decodeSamples(fmt, data.toOpenArray(a, a + nbytes - 1), dst.toOpenArray(0, n - 1),
       f.order, twosComplement)
   for k in n ..< dst.len: dst[k] = T(0)

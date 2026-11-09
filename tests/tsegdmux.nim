@@ -71,7 +71,7 @@ func twinOf(code: int): SegdSampleFormat = toSegdFormat(8000 + code).get
 proc sampleBytes(code, st, cs, ch, j: int): seq[byte] =
   ## One sample in the twin's bytes, which are the multiplexed bytes too.
   result = newSeq[byte](dataBytes(twinOf(code), 1))
-  encodeSegdSamples(twinOf(code), [valueOf(code, st, cs, ch, j)], result)
+  encodeSamples(twinOf(code), [valueOf(code, st, cs, ch, j)], result)
 
 func bcd6(n: int): array[3, byte] =
   var v = n
@@ -238,7 +238,7 @@ block decode_0015_by_hand:
     var o = newSeq[byte](10)
     demuxChannel(15, g, 10, 1, cs, ch, o)
     var x: array[1, float64]
-    decodeSegdSamples(sd8015, o, x)
+    decodeSamples(sd8015, o, x)
     doAssert x[0] == v[ch], $ch
   # Two's complement: 0xFFFC is -2 >> 1 = -1 LSB; read so on both sides.
   decodeMux0015(g, v, twosComplement = true)
@@ -246,7 +246,7 @@ block decode_0015_by_hand:
   var o = newSeq[byte](10)
   demuxChannel(15, g, 10, 1, cs, 1, o, twosComplement = true)
   var x: array[1, float64]
-  decodeSegdSamples(sd8015, o, x, twosComplement8015 = true)
+  decodeSamples(sd8015, o, x, twosComplement8015 = true)
   doAssert x[0] == v[1]
 
 # ---------------------------------------------------------- the reader --
@@ -282,7 +282,7 @@ block every_multiplexed_code:
     s.checkTraces(d.records[0])
     # Decoded values: the twin's decoder.
     var want: array[1, float32]
-    decodeSegdSamples(twinOf(code), sampleBytes(code, 0, 0, 1, 2), want)
+    decodeSamples(twinOf(code), sampleBytes(code, 0, 0, 1, 2), want)
     doAssert d.records[0].samples[1, 2] == want[0], $code
 
 block two_scan_types_split_by_dp:

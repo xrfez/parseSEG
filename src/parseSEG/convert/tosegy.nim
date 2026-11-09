@@ -692,7 +692,7 @@ proc toSegySamples(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, twosComplem
         copyFloatWords(float64, t.samples, order, t.numSamples, dst, c.opts.byteOrder)
     else:
       c.vals.setLen t.numSamples
-      decodeSegdSamples(f, t.samples, c.vals, twosComplement8015)
+      decodeSamples(f, t.samples, c.vals, twosComplement8015)
       if c.opts.applyDescale:
         let m = rec.descaleFactor(t)
         for v in c.vals.mitems: v *= m
@@ -801,7 +801,7 @@ const MappedSeg2Keys = ["SHOT_SEQUENCE_NUMBER", "CHANNEL_NUMBER", "CDP_NUMBER", 
   ## Trace keywords the SEG-Y headers hold (LINE_ID, station numbers: in
   ## `PSEGD001`, Rev 2 only).
 
-func segyFormatOf(f: Seg2Format, rev: SegyRevision): SampleFormat =
+func segyFormatOf(f: Seg2SampleFormat, rev: SegyRevision): SampleFormat =
   case f
   of s2Int16: sfInt16
   of s2Int32: sfInt32
@@ -812,7 +812,7 @@ func seg2SegyFormat(ix: TraceIndex, opts: ConvertOptions): SampleFormat =
   # One format for every trace (see the module doc).
   let rev = opts.revision
   if opts.format != stKeep: return opts.format.sampleFormat
-  var fs: set[Seg2Format]
+  var fs: set[Seg2SampleFormat]
   for c in ix.codecs:
     if c.seg2Format.isSome: fs.incl c.seg2Format.get
   if fs.card == 1:

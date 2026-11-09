@@ -104,9 +104,9 @@ template withSign(T: typedesc, v: untyped, sign: uint32): untyped =
 # Lengths are checked once, up front; the loops then load through unchecked
 # pointers, in every build.
 
-proc decodeSegdSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
+proc decodeSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
     dst: var openArray[T], twosComplement8015 = false) {.raises: [].} =
-  ## **Internal.** `decodeSegdSamples` without its checks: `src` must hold the
+  ## **Internal.** `decodeSamples` without its checks: `src` must hold the
   ## samples (and, SEG-Y, the format must suit `order`). Raises nothing, so
   ## worker threads make no exceptions (`tryDecodeEntry`).
   let n = dst.len
@@ -198,7 +198,7 @@ proc decodeSegdSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArra
     else:
       for i in 0..<n: d[i] = T(loadNum[float64](s, 8 * i, boLittle))
 
-proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
+proc decodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
     dst: var openArray[T], twosComplement8015 = false) =
   ## Decodes `dst.len` samples of format `f` from the start of `src`.
   ## `twosComplement8015` reads 8015 fractions as two's complement, as some
@@ -209,7 +209,7 @@ proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[b
     raiseTruncated("trace data has " & $src.len & " bytes, " & $dataBytes(f, n) &
       " needed for " & $n & " samples")
   if n == 0: return
-  decodeSegdSamplesRaw(f, src, dst, twosComplement8015)
+  decodeSamplesRaw(f, src, dst, twosComplement8015)
 
 {.pop.}
 
@@ -232,7 +232,7 @@ proc toInt(x: float64, lo, hi: int64, i: int): int64 =
     raiseFormat("sample " & $i & " = " & $x & " does not fit the integer format")
   int64(r)
 
-proc encodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
+proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
     dst: var openArray[byte]) =
   ## Encodes `src` as format `f` into the start of `dst`. Exponent formats
   ## quantize (rounding to nearest) and clamp at full scale; integer formats

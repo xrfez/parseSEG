@@ -84,7 +84,7 @@ func samplesIn(f: SegdSampleFormat, bytes: int): int =
 proc checkSegd[T](f: SegdSampleFormat, b: openArray[byte], twos: bool) =
   let n = samplesIn(f, b.len) - 3 # not a multiple of 4: the 8015 tail path too
   var got = newSeq[T](n)
-  decodeSegdSamples(f, b, got, twos)
+  decodeSamples(f, b, got, twos)
   for i in 0..<n:
     let want = oldSegd[T](f, b, i, twos)
     doAssert sameBits(got[i], want),
@@ -93,7 +93,7 @@ proc checkSegd[T](f: SegdSampleFormat, b: openArray[byte], twos: bool) =
 proc checkFloat20[T](b: openArray[byte], o: ByteOrder, twos: bool) =
   let n = b.len div 10 * 4 - 3
   var got = newSeq[T](n)
-  decodeSeg2Samples(s2Float20, b, got, o, twos)
+  decodeSamples(s2Float20, b, got, o, twos)
   for i in 0..<n:
     let want = oldFloat20[T](b, i, o, twos)
     doAssert sameBits(got[i], want),

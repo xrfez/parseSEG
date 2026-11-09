@@ -113,7 +113,7 @@ proc makeRecord(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData 
     var vals = newSeq[float64](ns)
     for i in 0..<ns: vals[i] = float64((i mod 9) - 4) * (if format in {sd8036, sd8038, sd9036, sd9038}: 1000.0 else: 0.125)
     t.samples = newSeq[byte](dataBytes(format, ns))
-    encodeSegdSamples(format, vals, t.samples)
+    encodeSamples(format, vals, t.samples)
     result.traces.add t
 
 proc makeStream(formats: openArray[SegdSampleFormat]): SegdData =

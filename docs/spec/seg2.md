@@ -354,7 +354,7 @@ Follow the per-standard pattern (`segy/` → `SegyFile`, `segd/` → `SegdRecord
 ```nim
 # src/parseSEG/seg2/{headers,reader,writer,samples}.nim
 type
-  Seg2Format* = enum s2I16 = 1, s2I32 = 2, s2Float20 = 3, s2F32 = 4, s2F64 = 5
+  Seg2SampleFormat* = enum s2I16 = 1, s2I32 = 2, s2Float20 = 3, s2F32 = 4, s2F64 = 5
   Seg2String* = object
     key*: string          # keyword as written (uppercase per spec; keep case)
     value*: string        # raw text after the separator, terminators stripped
@@ -369,7 +369,7 @@ type
     offset*: int64        # TDB offset
     blockSize*: uint16
     dataSize*, numSamples*: uint32
-    format*: uint8        # raw code; Seg2Format when 1..5
+    format*: uint8        # raw code; Seg2SampleFormat when 1..5
     strings*: seq[Seg2String]
 ```
 

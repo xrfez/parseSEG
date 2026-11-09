@@ -54,7 +54,7 @@ type
     order*: ByteOrder             ## SEG-Y and SEG-2 byte order.
     segdFormat*: Option[SegdSampleFormat]
       ## SEG-D format, when `kind == skSegd`; none if not decodable.
-    seg2Format*: Option[Seg2Format]
+    seg2Format*: Option[Seg2SampleFormat]
       ## SEG-2 format, when `kind == skSeg2`; none if not decodable.
     twosComplement8015*: bool
       ## SEG-D 8015 (and SEG-2 format 3) mantissas read as two's complement.

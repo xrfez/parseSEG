@@ -15,7 +15,7 @@
 ## is a 15-bit one's complement *integer* with a sign bit, so a value is
 ## `mantissa * 2^exponent` (at most 32767 * 2^15). No format-3 sample file
 ## exists yet; `twosComplement` reads the mantissas as two's complement, for
-## writers that use it. `encodeSeg2Samples` is the inverse. This module has
+## writers that use it. `encodeSamples` is the inverse. This module has
 ## no Arraymancer dependency.
 
 import std/[math, options]
@@ -23,7 +23,7 @@ import ../common/[endians, errors]
 export options
 
 type
-  Seg2Format* = enum
+  Seg2SampleFormat* = enum
     ## A SEG-2 sample format, by its code (Trace Descriptor Block byte 12).
     s2Int16 = 1   ## 16-bit two's complement integer.
     s2Int32 = 2   ## 32-bit two's complement integer.
@@ -33,12 +33,12 @@ type
 
   Seg2SampleType* = float32 | float64 ## Sample types the codecs decode into.
 
-func toSeg2Format*(code: int): Option[Seg2Format] =
+func toSeg2Format*(code: int): Option[Seg2SampleFormat] =
   ## The sample format of a format code; none for codes outside 1..5.
-  if code in ord(low(Seg2Format))..ord(high(Seg2Format)): some(Seg2Format(code))
-  else: none(Seg2Format)
+  if code in ord(low(Seg2SampleFormat))..ord(high(Seg2SampleFormat)): some(Seg2SampleFormat(code))
+  else: none(Seg2SampleFormat)
 
-func dataBytes*(f: Seg2Format, samples: int): int =
+func dataBytes*(f: Seg2SampleFormat, samples: int): int =
   ## Bytes holding `samples` samples (without the Data Block's padding to a
   ## multiple of 4). Format 3 packs 4 samples in 10 bytes; a count that is
   ## not a multiple of 4 (spec-invalid) is rounded up to whole groups.
@@ -48,7 +48,7 @@ func dataBytes*(f: Seg2Format, samples: int): int =
   of s2Float64: 8 * samples
   of s2Float20: (samples + 3) div 4 * 10
 
-func samplesIn*(f: Seg2Format, bytes: int): int =
+func samplesIn*(f: Seg2SampleFormat, bytes: int): int =
   ## How many whole samples (format 3: whole groups of 4) `bytes` bytes hold.
   let b = max(bytes, 0)
   case f
@@ -57,7 +57,7 @@ func samplesIn*(f: Seg2Format, bytes: int): int =
   of s2Float64: b div 8
   of s2Float20: b div 10 * 4
 
-func prefersFloat64*(f: Seg2Format): bool {.inline.} =
+func prefersFloat64*(f: Seg2SampleFormat): bool {.inline.} =
   ## True when float32 cannot hold the format's values without losing
   ## precision: IEEE double.
   f == s2Float64
@@ -67,9 +67,9 @@ template pow2(T: typedesc, e: uint32): untyped =
   when T is float32: cast[float32]((127'u32 + e) shl 23)
   else: cast[float64](uint64(1023'u32 + e) shl 52)
 
-proc decodeSeg2SamplesRaw*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
+proc decodeSamplesRaw*[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[byte],
     dst: var openArray[T], order: ByteOrder, twosComplement = false) {.raises: [].} =
-  ## **Internal.** `decodeSeg2Samples` without its checks: `src` must hold the
+  ## **Internal.** `decodeSamples` without its checks: `src` must hold the
   ## samples (and, SEG-Y, the format must suit `order`). Raises nothing, so
   ## worker threads make no exceptions (`tryDecodeEntry`).
   let n = dst.len
@@ -126,7 +126,7 @@ proc decodeSeg2SamplesRaw*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte
     {.pop.}
   if order == boLittle: loop(boLittle) else: loop(boBig)
 
-proc decodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
+proc decodeSamples*[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[byte],
     dst: var openArray[T], order: ByteOrder, twosComplement = false) =
   ## Decodes `dst.len` samples of format `f`, stored in `order`, from the
   ## start of `src`. `twosComplement` reads format-3 mantissas as two's
@@ -138,7 +138,7 @@ proc decodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
     raiseTruncated("trace data has " & $src.len & " bytes, " & $need & " needed for " & $n &
       " samples")
   if n == 0: return
-  decodeSeg2SamplesRaw(f, src, dst, order, twosComplement)
+  decodeSamplesRaw(f, src, dst, order, twosComplement)
 
 proc toInt(x: float64, lo, hi: int64, i: int): int64 =
   # `x` rounded to the nearest integer; raises when it is NaN or outside lo..hi.
@@ -163,7 +163,7 @@ proc float20Parts(x: float64, i: int): (int, int) =
     if abs(m) <= 32767: return (e, int(m))
   raiseFormat("sample " & $i & " = " & $x & " exceeds format 3's range (32767 * 2^15)")
 
-proc encodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[T],
+proc encodeSamples*[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[T],
     dst: var openArray[byte], order: ByteOrder, twosComplement = false) =
   ## Encodes `src` as format `f`, stored in `order`, into the start of `dst`
   ## (at least `dataBytes(f, src.len)` bytes). Integer formats round to

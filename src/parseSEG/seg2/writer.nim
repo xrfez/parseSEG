@@ -39,7 +39,7 @@ import std/strutils
 import ../common/[errors, diagnostics]
 import ./[headers, samples]
 export headers, diagnostics
-export samples except decodeSeg2SamplesRaw
+export samples except decodeSamplesRaw
 
 type
   Seg2WriteOptions* = object
@@ -219,7 +219,7 @@ proc writeTrace*[T: Seg2SampleType](w: var Seg2Writer, t: Seg2Trace, samples: op
   if fmt.isNone:
     raiseFormat("sample format code " & $t.formatCode & " is not defined (1-5)")
   var data = newSeq[byte](dataBytes(fmt.get, samples.len))
-  encodeSeg2Samples(fmt.get, samples, data, w.fdb.order, twosComplement)
+  encodeSamples(fmt.get, samples, data, w.fdb.order, twosComplement)
   w.writeBlock(t, t.formatCode, samples.len, data)
 
 proc close*(w: var Seg2Writer) =

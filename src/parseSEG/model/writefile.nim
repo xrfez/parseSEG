@@ -84,7 +84,7 @@ type
     recFormat: SegdSampleFormat
     # SEG-2
     seg2: Seg2Writer
-    seg2Format: Option[Seg2Format] ## none: each trace's own.
+    seg2Format: Option[Seg2SampleFormat] ## none: each trace's own.
 
   SeismicWriter* = object
     ## Writes traces "like" an input file; create with `openSeismicWriter`,
@@ -399,7 +399,7 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     s.startRecord(src, trace)
   var t = loadSegdTrace(src, trace, src.index.segdRecords[r], s.recFirst)
   t.samples = newSeq[byte](dataBytes(s.recFormat, samples.len))
-  encodeSegdSamples(s.recFormat, samples, t.samples)
+  encodeSamples(s.recFormat, samples, t.samples)
   s.segd.writeTrace(t)
   s.nextTrace = trace + 1
 

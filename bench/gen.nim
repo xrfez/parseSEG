@@ -157,7 +157,7 @@ proc genSegd(s: Spec, path: string, traces: int) =
   var blocks: seq[seq[byte]]
   for w in variants(s.samples, amplitude(s.format, s.container)):
     var b = newSeq[byte](dataBytes(fmt, s.samples))
-    encodeSegdSamples(fmt, w, b)
+    encodeSamples(fmt, w, b)
     blocks.add b
   let sink = openDiskSink(path)
   defer: sink.close()

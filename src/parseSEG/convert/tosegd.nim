@@ -228,17 +228,17 @@ proc samplesFor(c: var Conv, src: openArray[byte], nIn, nOut: int,
     if keep > 0: copyMem(addr result[0], addr src[0], keep)
     return
   var v = newSeq[float64](nIn)
-  decodeSegdSamples(fIn, src, v, c.opts.twosComplement8015)
+  decodeSamples(fIn, src, v, c.opts.twosComplement8015)
   v.setLen nOut
   try:
-    encodeSegdSamples(fOut, v, result)
+    encodeSamples(fOut, v, result)
   except SegFormatError:
     # A value out of the target's range: the trace is zeroed, and counted.
     for b in result.mitems: b = 0
     inc c.zeroed
     return
   var back = newSeq[float64](nOut)
-  decodeSegdSamples(fOut, result, back)
+  decodeSamples(fOut, result, back)
   for i in 0..<nOut:
     if back[i] != v[i] and not (back[i].isNaN and v[i].isNaN):
       inc c.inexact
@@ -911,7 +911,7 @@ const MappedSegdKeys = ["CHANNEL_NUMBER", "SAMPLE_INTERVAL", "DELAY", "SHOT_SEQU
   "LINE_ID", "RECEIVER", "SOURCE", "TRACE_TYPE", "STACK", "DESCALING_FACTOR", "ALIAS_FILTER",
   "LOW_CUT_FILTER", "NOTCH_FREQUENCY", "DATUM"]
 
-func segdFormatFor(formats: set[Seg2Format], rev3: bool): SegdSampleFormat =
+func segdFormatFor(formats: set[Seg2SampleFormat], rev3: bool): SegdSampleFormat =
   if formats.card == 0: sd8058
   elif formats <= {s2Int16}: sd8036
   elif formats <= {s2Int16, s2Int32}: sd8038
@@ -986,7 +986,7 @@ proc writeSeg2AsSegd(c: var Seg2Conv, f: SeismicFile, sink: RecordSink, opts: Se
   var outs: seq[OutTrace]
   var sets: seq[SetKey]
   var counts: seq[int]
-  var formats: set[Seg2Format]
+  var formats: set[Seg2SampleFormat]
   for i in 0..<f.len:
     let e = f.index.entries[i]
     let codec = f.index.codecs[e.record]
@@ -1152,9 +1152,9 @@ proc writeSeg2AsSegd(c: var Seg2Conv, f: SeismicFile, sink: RecordSink, opts: Se
     vals.setLen s.ns
     t.samples = newSeq[byte](dataBytes(fmt, s.ns))
     try:
-      encodeSegdSamples(fmt, vals, t.samples)
+      encodeSamples(fmt, vals, t.samples)
       back.setLen s.ns
-      decodeSegdSamples(fmt, t.samples, back)
+      decodeSamples(fmt, t.samples, back)
       for q in 0..<s.ns:
         if back[q] != vals[q] and not (back[q].isNaN and vals[q].isNaN):
           c.inexactTrace(o.index)

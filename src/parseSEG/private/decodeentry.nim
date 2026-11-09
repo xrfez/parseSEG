@@ -16,8 +16,8 @@ proc decodeRun[T: SampleType](c: TraceCodec, src: openArray[byte], dst: var open
   case c.kind
   # The unchecked forms: `tryDecodeEntry` checked the bytes and the order.
   of skSegy: decodeSamplesRaw(c.segyFormat.get, src, dst, c.order)
-  of skSegd: decodeSegdSamplesRaw(c.segdFormat.get, src, dst, c.twosComplement8015)
-  of skSeg2: decodeSeg2SamplesRaw(c.seg2Format.get, src, dst, c.order, c.twosComplement8015)
+  of skSegd: decodeSamplesRaw(c.segdFormat.get, src, dst, c.twosComplement8015)
+  of skSeg2: decodeSamplesRaw(c.seg2Format.get, src, dst, c.order, c.twosComplement8015)
   of skUnknown: discard
 
 func packedInFours(c: TraceCodec): bool {.inline.} =

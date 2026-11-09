@@ -21,7 +21,7 @@ import std/[algorithm, math, options, parseutils, strutils, times]
 import ../common/[endians, fieldlayout, years]
 import ./samples
 export options, endians
-export samples except decodeSeg2SamplesRaw
+export samples except decodeSamplesRaw
 
 const
   Seg2FileBlockId* = 0x3A55'u16  ## File Descriptor Block ID, in file byte order.
@@ -295,7 +295,7 @@ func traceType*(t: Seg2Trace): Option[Seg2TraceType] {.inline.} =
   ## `TRACE_TYPE`; none when missing or not a standard value.
   enumValue[Seg2TraceType](t, "TRACE_TYPE")
 
-func format*(t: Seg2Trace): Option[Seg2Format] {.inline.} =
+func format*(t: Seg2Trace): Option[Seg2SampleFormat] {.inline.} =
   ## The sample format; none for an undefined code.
   toSeg2Format(int(t.formatCode))
 

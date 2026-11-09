@@ -55,7 +55,7 @@ block exported_internals_stay_hidden:
   # that need a type's private fields (traceindex, edit, convert; left off
   # the umbrella's allowlists, which tdocs checks). Check each name here.
   const hidden = [
-    "decodeSamplesRaw", "decodeSegdSamplesRaw", "decodeSeg2SamplesRaw",
+    "decodeSamplesRaw",
     "convertJoined", "convertSegdToSegyJoined", "GeometryJoin",
     "unsafeMemory", "mappedSize", "MapPin", "pinMap", "openSeismicRw", "remapWritable",
     "requireOpen", "requireTrace", "requireKind",

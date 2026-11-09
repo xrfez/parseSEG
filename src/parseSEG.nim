@@ -24,13 +24,13 @@ export samples except decodeSamplesRaw
 import parseSEG/segd/[headers as segdheaders, samples as segdsamples, rev3 as segdrev3,
   reader as segdreader, writer as segdwriter, mux as segdmux,
   demux as segddemux]
-export segdsamples except decodeSegdSamplesRaw
+export segdsamples except decodeSamplesRaw
 export segdheaders, segdrev3, segdreader, segdwriter, segdmux,
   segddemux
 
 import parseSEG/seg2/[headers as seg2headers, samples as seg2samples, reader as seg2reader,
   writer as seg2writer]
-export seg2samples except decodeSeg2SamplesRaw
+export seg2samples except decodeSamplesRaw
 export seg2headers, seg2reader, seg2writer
 
 import parseSEG/vendor/[maps, apply, scaffold]

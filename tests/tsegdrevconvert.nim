@@ -26,7 +26,7 @@ proc toDisk(d: SegdData, path: string) =
 
 func decodeF64(f: SegdSampleFormat, b: openArray[byte], n: int): seq[float64] =
   result = newSeq[float64](n)
-  decodeSegdSamples(f, b, result)
+  decodeSamples(f, b, result)
 
 # ------------------------------------------------------ 63.sgd: Rev 2.0 → 3.0 --
 
@@ -213,7 +213,7 @@ proc makeRev2(fileNo: int, format: SegdSampleFormat, ns = 52): SegdRecordData =
     for i in 0..<ns:
       vals[i] = float64((i mod 9) - 4) * (if format in {sd8036, sd8038, sd9036, sd9038}: 1000.0 else: 0.125)
     t.samples = newSeq[byte](dataBytes(format, ns))
-    encodeSegdSamples(format, vals, t.samples)
+    encodeSamples(format, vals, t.samples)
     result.traces.add t
 
 block synthetic_rev2_every_format_to_rev3_and_back:
@@ -320,7 +320,7 @@ proc makeRev3(format: SegdSampleFormat, vals: openArray[float64]): SegdData =
     t.ext1Rev3 = some SegdTraceHeaderExt1Rev3(receiverLineNumber: 7, receiverPointNumber: int32(k),
       numSamples: uint32(ns), sensorType: 2, groupIndex: 1, blockType: 0x40)
     t.samples = newSeq[byte](dataBytes(format, ns))
-    encodeSegdSamples(format, vals, t.samples)
+    encodeSamples(format, vals, t.samples)
     traces.add t
   computeRev3Sizes(r, traces)
   r.traceCount = 2
@@ -581,7 +581,7 @@ block rev0_demux_task_4_6:
     var vals = newSeq[float64](ns)
     for i in 0..<ns: vals[i] = float64(i - 20) * 0.5
     t.samples = newSeq[byte](dataBytes(sd8048, ns))
-    encodeSegdSamples(sd8048, vals, t.samples)
+    encodeSamples(sd8048, vals, t.samples)
     rd.traces.add t
   d.records.add rd
   toDisk(d, tmp / "rev0.sgd")

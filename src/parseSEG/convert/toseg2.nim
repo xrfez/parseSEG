@@ -52,7 +52,7 @@ type
 
 # ---------------------------------------------------------------- to SEG-2 --
 
-func seg2FormatFor(c: TraceCodec): Seg2Format =
+func seg2FormatFor(c: TraceCodec): Seg2SampleFormat =
   ## The SEG-2 format that holds every sample of codec `c` exactly.
   case c.kind
   of skSegy:
@@ -301,7 +301,7 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
       else:
         var t = if f.kind == skSeg2: f.seg2Trace(i) else: Seg2Trace()
         if f.kind != skSeg2: c.traceStrings(f, i, t)
-        let fmt = if opts.format != s2tKeep: Seg2Format(ord(opts.format))
+        let fmt = if opts.format != s2tKeep: Seg2SampleFormat(ord(opts.format))
                   else: seg2FormatFor(codec)
         t.formatCode = uint8(ord(fmt))
         var ok = true
@@ -314,9 +314,9 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
           t.numSamples = uint32(vals.len)
           data.setLen dataBytes(fmt, vals.len)
           try:
-            encodeSeg2Samples(fmt, vals, data, fdb.order)
+            encodeSamples(fmt, vals, data, fdb.order)
             back.setLen vals.len
-            decodeSeg2Samples(fmt, data, back, fdb.order)
+            decodeSamples(fmt, data, back, fdb.order)
             for k in 0..<vals.len:
               if back[k] != vals[k] and not (back[k].isNaN and vals[k].isNaN):
                 c.inexactTrace(i)

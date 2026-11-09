@@ -186,7 +186,7 @@ proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool,
   for t in traces(data, f, log, src.name):
     # Pointers come in any order: the share of traces done, in bytes.
     if not tk.tick(min(int64(result.entries.len) * size div count, size)): raiseCancelled()
-    let fmt = if t.valid: t.format else: none(Seg2Format)
+    let fmt = if t.valid: t.format else: none(Seg2SampleFormat)
     var c = 0
     while c < result.codecs.len and result.codecs[c].seg2Format != fmt: inc c
     if c == result.codecs.len:

@@ -683,7 +683,7 @@ files byte 20 is neither Rev 0's bytes-per-scan digit pair nor Rev 2's zero.
 | CSD 27-32 | decoded as ext CS number, EFH/THE, VS, streamer, array forming | `headers.nim:101-106` |
 | Diagnostics | info "array forming code is 0" for every non-dummy channel set | `reader.nim:390-393` |
 | Trailer | none without GH#2 | `reader.nim:575` |
-| Sample decode 8015-8048 | layouts identical to Rev 0 | `samples.nim:59-…` (`decodeSegdSamples`) |
+| Sample decode 8015-8048 | layouts identical to Rev 0 | `samples.nim:59-…` (`decodeSamples`) |
 | Writer | records with `hasGh2 = false` accepted (GH count must agree); only demux formats; no Rev 0 format/field checks | `src/parseSEG/segd/writer.nim:170-212` |
 | Revision conversion | Rev 0 → 2.x: adds GH#2, copies everything else; → 3.0: copies CSD VS/ARY | `src/parseSEG/segd/revconvert.nim:597-602` (to 2.x), `revconvert.nim:185-187` (to 3.0) |
 

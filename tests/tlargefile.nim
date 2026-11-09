@@ -145,7 +145,7 @@ proc makeSegd(path: string): bool =
     th[29] = byte(DSamples and 0xFF)
     if k == 0 or k == DTraces - 1:
       var s = newSeq[byte](4000)
-      encodeSegdSamples(sd8058, ramp(1000, float32(k + 1)), s)
+      encodeSamples(sd8058, ramp(1000, float32(k + 1)), s)
       th.add s
     pieces.add (int64(DHeader) + int64(k) * DTraceBytes, th)
   writeSparse(path, DSize, pieces)

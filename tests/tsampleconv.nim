@@ -63,7 +63,7 @@ block copy_float_words_matches_the_float64_round_trip:
         let next = if srcOrder == boBig: hi + 1 else: hi - 1
         raw[next] = raw[next] or (if size == 4: 0x80 else: 0xF0)
       var vals = newSeq[float64](n)
-      decodeSegdSamples(sf, raw, vals)
+      decodeSamples(sf, raw, vals)
       for dstOrder in [boBig, boLittle, boPairSwapped]:
         var want = newSeq[byte](size * n)
         encodeSamples(fmt, vals, want, dstOrder)

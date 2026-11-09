@@ -467,24 +467,24 @@ proc rewrite(src, dst: string, floats = false) =
 
 block encode_decode_all_formats:
   for o in [boLittle, boBig]:
-    for fmt in Seg2Format:
+    for fmt in Seg2SampleFormat:
       let vals = if fmt == s2Float20: f20Values
                  elif fmt == s2Int32: @[1.0, -1.0, 2147483647.0, -2147483648.0]
                  elif fmt == s2Float32: @[0.5, -1.25, 17179869184.0, -3.0]
                  else: ramp
       for twos in [false, true]:
         var b = newSeq[byte](dataBytes(fmt, vals.len))
-        encodeSeg2Samples(fmt, vals, b, o, twos)
+        encodeSamples(fmt, vals, b, o, twos)
         var back = newSeq[float64](vals.len)
-        decodeSeg2Samples(fmt, b, back, o, twos)
+        decodeSamples(fmt, b, back, o, twos)
         doAssert back == vals, $fmt & " " & $o & " " & $back
   var b = newSeq[byte](10)
-  doAssertRaises(SegFormatError): encodeSeg2Samples(s2Int16, [40000.0], b, boLittle)
-  doAssertRaises(SegFormatError): encodeSeg2Samples(s2Int32, [NaN], b, boLittle)
-  doAssertRaises(SegFormatError): encodeSeg2Samples(s2Float20, [32768.0 * 32768.0], b, boLittle)
-  doAssertRaises(ValueError): encodeSeg2Samples(s2Float64, [1.0, 2.0], b, boLittle)
+  doAssertRaises(SegFormatError): encodeSamples(s2Int16, [40000.0], b, boLittle)
+  doAssertRaises(SegFormatError): encodeSamples(s2Int32, [NaN], b, boLittle)
+  doAssertRaises(SegFormatError): encodeSamples(s2Float20, [32768.0 * 32768.0], b, boLittle)
+  doAssertRaises(ValueError): encodeSamples(s2Float64, [1.0, 2.0], b, boLittle)
   # format 3: the smallest exponent; -1 is one's complement 0xFFFE
-  encodeSeg2Samples(s2Float20, [-1.0, 65536.0], b, boLittle)
+  encodeSamples(s2Float20, [-1.0, 65536.0], b, boLittle)
   doAssert getNum[uint16](b, 2, boLittle) == 0xFFFE and getNum[uint16](b, 0, boLittle) == 0x0020
   doAssert getNum[uint16](b, 4, boLittle) == 0x4000 # 65536 = 16384 * 2^2
 

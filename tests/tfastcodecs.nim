@@ -157,7 +157,7 @@ proc refSegd[T](f: SegdSampleFormat, b: openArray[byte], n: int, twos: bool): se
 proc checkSegd[T](f: SegdSampleFormat, n: int, twos: bool) =
   let b = randomBytes(dataBytes(f, n) + 5)
   var got = newSeq[T](n)
-  decodeSegdSamples(f, b, got, twos)
+  decodeSamples(f, b, got, twos)
   let want = refSegd[T](f, b, n, twos)
   for i in 0..<n:
     doAssert sameBits(got[i], want[i]) or (got[i].isNaN and want[i].isNaN),
@@ -170,13 +170,13 @@ block segd_formats_and_types:
         checkSegd[float32](f, n, twos)
         checkSegd[float64](f, n, twos)
   var dst = newSeq[float32](8)
-  doAssertRaises(SegTruncatedError): decodeSegdSamples(sd8015, newSeq[byte](19), dst)
-  doAssertRaises(SegTruncatedError): decodeSegdSamples(sd9058, newSeq[byte](31), dst)
+  doAssertRaises(SegTruncatedError): decodeSamples(sd8015, newSeq[byte](19), dst)
+  doAssertRaises(SegTruncatedError): decodeSamples(sd9058, newSeq[byte](31), dst)
 
-proc checkSeg2[T](f: Seg2Format, o: ByteOrder, n: int, twos: bool) =
+proc checkSeg2[T](f: Seg2SampleFormat, o: ByteOrder, n: int, twos: bool) =
   let b = randomBytes(dataBytes(f, n) + 2)
   var got = newSeq[T](n)
-  decodeSeg2Samples(f, b, got, o, twos)
+  decodeSamples(f, b, got, o, twos)
   for i in 0..<n:
     let want = case f
       of s2Int16: T(getNum[int16](b, 2*i, o))
@@ -194,7 +194,7 @@ proc checkSeg2[T](f: Seg2Format, o: ByteOrder, n: int, twos: bool) =
     doAssert sameBits(got[i], want) or (got[i].isNaN and want.isNaN), $f & " " & $o & " " & $i
 
 block seg2_formats_orders_and_types:
-  for f in Seg2Format:
+  for f in Seg2SampleFormat:
     for o in [boLittle, boBig]:
       for n in [0, 1, 4, 5, 999]:
         for twos in [false, true]:
@@ -202,7 +202,7 @@ block seg2_formats_orders_and_types:
           checkSeg2[float64](f, o, n, twos)
   var dst = newSeq[float64](4)
   doAssertRaises(SegTruncatedError):
-    decodeSeg2Samples(s2Float64, newSeq[byte](31), dst, boLittle)
+    decodeSamples(s2Float64, newSeq[byte](31), dst, boLittle)
 
 echo "tfastcodecs: ok"
 

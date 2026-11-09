@@ -90,7 +90,7 @@ block lossless_format_choice:
   var vals = newSeq[float64](1000)
   for j in 0..<1000: vals[j] = float64(j * 1001 - 500_000)
   rd.traces[0].samples = newSeq[byte](dataBytes(sd8038, 1000))
-  encodeSegdSamples(sd8038, vals, rd.traces[0].samples)
+  encodeSamples(sd8038, vals, rd.traces[0].samples)
   d.records[0] = rd
   let sink = openDiskSink(tmp / "i32.sgd")
   doAssert writeSegd(sink, d).len == 0
@@ -185,7 +185,7 @@ proc recordAs(f: SegdSampleFormat, vals: seq[float64], fileNo: int): SegdRecordD
   result.record.gh1.formatCode = ord(f)
   result.record.gh1.fileNumber = fileNo
   result.traces[0].samples = newSeq[byte](dataBytes(f, vals.len))
-  encodeSegdSamples(f, vals, result.traces[0].samples)
+  encodeSamples(f, vals, result.traces[0].samples)
 
 proc decoded(y: SegyData, i: int): seq[float64] =
   result = newSeq[float64](y.traces[i].numSamples)

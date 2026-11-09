@@ -97,7 +97,7 @@ proc makeRev3Record(fileNo: int, format: SegdSampleFormat, ns = 40): SegdRecordD
     var vals = newSeq[float64](ns)
     for i in 0..<ns: vals[i] = float64((i mod 7) - 3) * (if format in {sd8036, sd8038, sd9036, sd9038}: 100.0 else: 0.25)
     t.samples = newSeq[byte](dataBytes(format, ns))
-    encodeSegdSamples(format, vals, t.samples)
+    encodeSamples(format, vals, t.samples)
     traces.add t
   computeRev3Sizes(r, traces)
   r.traceCount = 4
