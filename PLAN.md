@@ -1555,3 +1555,4 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
   - `AbiVersion` was already gone with `abi/`; nimble version 0.5.0.
   - Left for 14.2: `##` comments that still say "C ABI" (prefetch.nim:310, traceindex.nim:473/664,
     headerfields.nim:4, and some test headers) and the procs they describe.
+- 2026-11-09: 14.2 audit written (`docs/design/phase14_audit.md`, 23 items, commit plan 14.2a-e). Waiting for the owner to approve items before any code change.
