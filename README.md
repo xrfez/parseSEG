@@ -78,7 +78,7 @@ Trace numbers are 0-based positions in the file. Ranges are Nim slices and inclu
 ### Headers, keys and gathers
 
 ```nim
-var f = openSeismic("line.sgy", keys = true)      # keys: per-trace geometry
+var f = openSeismic("survey.sgy", keys = true)      # keys: per-trace geometry
 echo f.traceField(3, "trace.sourceX")             # any field by name -> FieldValue
 echo f.fileField("binary.sampleInterval")         # SEG-D: recordField(f, r, "gh1.year")
 let offsets = f.traceFieldColumn("trace.offset", 0 ..< f.len)   # seq[float64]
@@ -94,8 +94,8 @@ for row in f.traceHeaders(3): echo row.field, " = ", row.value, " @", row.offset
 ### Large files: read ahead, threads, index cache
 
 ```nim
-var f = openSeismic("big.sgy", opts = OpenOptions(cache: "big.sgy.idx"))
-if not f.fromCache: f.saveIndex("big.sgy.idx")    # the next open skips the header walk
+var f = openSeismic("survey.sgy", opts = OpenOptions(cache: "survey.sgy.idx"))
+if not f.fromCache: f.saveIndex("survey.sgy.idx")    # the next open skips the header walk
 
 var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 256, depth = 4, cols = f.maxSamples,
                                workers = 4)       # decodes on 4 threads, chunks arrive in order
@@ -139,7 +139,7 @@ doAssert not undo.isFatal
 ```nim
 let log = convertFile("shot.sgd", "shot.sgy")      # any standard to SEG-Y (lossless format by default)
 for d in log: echo d                               # what the target had no place for
-discard convertFile("line.sgy", "line_rev1.sgy",
+discard convertFile("survey.sgy", "survey_rev1.sgy",
   ConvertOptions(revision: SegyRevision(major: 1, minor: 0), format: st5))
 discard convertFile("shot.sgd", "shot.sg2", ConvertOptions(target: skSeg2))
 ```
