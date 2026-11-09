@@ -149,11 +149,12 @@ g.addSps("line.sps")
 copyFile("SEG Spec/exampleFiles/63.sgd", "shot.sgd")
 var f = openSeismic("shot.sgd", keys = true)
 discard f.applySurvey(g, overwrite = true)
-let plan = f.geometryChanges()            # a dry run: nothing is written
-echo plan.traces, " trace(s) would change; ", plan.unwritable, " value(s) have no slot"
-for d in f.previewGeometry(): echo "  ", d.msg
+var report: DiagLog
+let plan = f.geometryChanges(GeometryFields(), report)   # a dry run: nothing is written
+echo "would change ", plan                # traces per kind, values with no slot
+for d in report: echo "  ", d.msg
 var ed = openEditor("shot.sgd")
-let done = ed.writeGeometry(f)
+let done = ed.writeGeometry(f.index)
 ed.close()
 f.close()
 doAssert done.receiverStations == 1

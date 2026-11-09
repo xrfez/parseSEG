@@ -146,13 +146,6 @@ block selections:
   p.seek(60 ..< p.len)
   doAssert p.next(c) and c.first == 60 and c.samples[0, _] == all[sel[60], _]
   p.close()
-  # Raw decode into a caller buffer with a row stride (the C ABI path).
-  var buf = newSeq[float32](3 * 2100)
-  var log: DiagLog
-  doAssert f.readTracesRaw([7, 3, 7], cast[ptr UncheckedArray[float32]](addr buf[0]), 2001,
-    2100, log) == 0
-  for j in 0..<2001:
-    doAssert buf[j] == all[7, j] and buf[2100 + j] == all[3, j] and buf[4200 + j] == all[7, j]
   f.close()
 
 block failed_rows_are_logged:

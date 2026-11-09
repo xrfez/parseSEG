@@ -1,6 +1,6 @@
 ## Explicit write-back of joined survey geometry (task 10.5): `writeGeometry`
 ## through the journaled editor (and its rollback), `geometryChanges` /
-## `previewGeometry` (nothing written), `copyWithGeometry` and
+## `geometryChanges` (nothing written), `copyWithGeometry` and
 ## `convertWithGeometry`. Synthetic SPS files and SEG-Y files built here,
 ## plus copies of the sample files (the originals are never written).
 
@@ -91,11 +91,11 @@ block segy_in_place_scalar_journal_and_rollback:
   doAssert c.receiverStations == 0 and c.unwritable == 8, $c # lines/points: no slot
   doAssert log.has("source station: the file's layout has no field")
   doAssert log.has("receiver station: the file's layout has no field")
-  doAssert f.previewGeometry().has("would change 4 traces", sevInfo)
+  doAssert ($c).startsWith("4 traces"), $c
   doAssert bytesOf(path) == original
   # In place, journaled.
   var ed = openEditor(path)
-  let w = ed.writeGeometry(f)
+  let w = ed.writeGeometry(f.index)
   doAssert w == c, $w
   ed.close()
   f.close()
@@ -136,7 +136,7 @@ block segy_scalar_choice_overflow_and_precision:
   var f = openSeismic(path, keys = true)
   discard f.applySurvey(g)
   var ed = openEditor(path)
-  let w = ed.writeGeometry(f, GeometryFields(stations: false))
+  let w = ed.writeGeometry(f.index, GeometryFields(stations: false))
   ed.close()
   f.close()
   doAssert w.receiverXy == 1 and w.unwritable == 2, $w # x and y of trace 1
@@ -173,7 +173,7 @@ block segd_rev2_the1_in_place:
   var f = openSeismic(path, keys = true)
   doAssert f.applySurvey(g, overwrite = true) == 1
   var ed = openEditor(path)
-  let w = ed.writeGeometry(f)
+  let w = ed.writeGeometry(f.index)
   ed.close()
   f.close()
   doAssert w.receiverStations == 1 and w.receiverXy == 0, $w
@@ -200,7 +200,7 @@ block segd_rev3_position_blocks:
   doAssert c.receiverXy == 2 and c.receiverZ == 2, $c
   doAssert c.sourceXy == 0 and c.unwritable > 0
   var ed = openEditor(path)
-  doAssert ed.writeGeometry(f) == c
+  doAssert ed.writeGeometry(f.index) == c
   ed.close()
   f.close()
   doAssert ed.log.has("source X/Y: the trace has no source Position block")
@@ -249,7 +249,7 @@ block refusals:
   var f = openSeismic(path)
   doAssertRaises ValueError: discard f.geometryChanges() # no keys
   var ed = openEditor(path)
-  doAssertRaises ValueError: discard ed.writeGeometry(f) # no keys
+  doAssertRaises ValueError: discard ed.writeGeometry(f.index) # no keys
   ed.close()
   f.close()
   doAssert copyWithGeometry(path, path, initSurveyGeometry()).isFatal
@@ -282,7 +282,7 @@ when defined(linux):
     limitFileSize(int(session) + 20)
     var w: GeometryChanges
     try:
-      w = ed.writeGeometry(f)
+      w = ed.writeGeometry(f.index)
     finally:
       limitFileSize(-1)
     doAssert w.traces == 0 and w.sourceXy == 0 and w.offsets == 0, $w

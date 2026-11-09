@@ -9,7 +9,7 @@
 ##   journaled first, so `rollbackJournal` undoes it;
 ## - `copyWithGeometry` writes a copy of the file (same standard and layout)
 ##   with the geometry, `convertWithGeometry` a converted SEG-Y file;
-## - `geometryChanges` (`previewGeometry`) only reports what would change.
+## - `geometryChanges` only reports what would change.
 ##
 ## A value is written when the joined key differs from what the trace's
 ## headers hold (as `traceKeys` reads them); unknown (NaN) values are never
@@ -162,7 +162,8 @@ proc count(p: var Planner, changed: set[Value]) =
   if vSrcStation in changed: inc p.changes.sourceStations
   if vRcvStation in changed: inc p.changes.receiverStations
 
-func describe(c: GeometryChanges): string =
+func `$`*(c: GeometryChanges): string =
+  ## A one-line summary: traces changed per kind, and the values with no slot.
   $c.traces & " traces (source X/Y " & $c.sourceXy & ", receiver X/Y " & $c.receiverXy &
     ", elevations " & $c.sourceZ & "/" & $c.receiverZ & ", midpoints " & $c.midpoints &
     ", offsets " & $c.offsets & ", stations " & $c.sourceStations & "/" &
@@ -700,19 +701,11 @@ proc geometryChanges*(f: SeismicFile, fields: GeometryFields, log: var DiagLog):
 
 proc geometryChanges*(f: SeismicFile, fields = GeometryFields()): GeometryChanges =
   ## What `writeGeometry` would change in `f` (opened with `keys = true`, its
-  ## keys joined by `applySurvey`); nothing is written. `previewGeometry`
-  ## gives the reports. Raises `ValueError` for a file without keys, a closed
+  ## keys joined by `applySurvey`); nothing is written. Pass a log for the
+  ## reports; `$` summarizes the result. Raises `ValueError` for a file without keys, a closed
   ## file, SEG-2 (not supported yet) or an unrecognized file.
   var log: DiagLog
   f.geometryChanges(fields, log)
-
-proc previewGeometry*(f: SeismicFile, fields = GeometryFields()): DiagLog =
-  ## The reports `writeGeometry` would make on `f` (values without a slot,
-  ## values that do not fit), plus an info summary of what would change;
-  ## nothing is written. Raises like `geometryChanges`.
-  let c = f.geometryChanges(fields, result)
-  result.report(sevInfo, dcValidation, "would change " & describe(c),
-    loc = Location(file: f.path))
 
 proc writeGeometry*(ed: var HeaderEditor, ix: TraceIndex,
     fields = GeometryFields()): GeometryChanges =
@@ -763,12 +756,6 @@ proc writeGeometry*(ed: var HeaderEditor, ix: TraceIndex,
       ed.log.report(sevFatal, dcIo, $dropped & " traces' geometry was not written: the " &
         "journal could not be synced", loc = Location(file: ed.file.path))
 
-proc writeGeometry*(ed: var HeaderEditor, f: SeismicFile,
-    fields = GeometryFields()): GeometryChanges =
-  ## `writeGeometry` with the joined keys of `f`: the editor's file, opened
-  ## again with `keys = true` and joined by `applySurvey`.
-  ed.writeGeometry(f.index, fields)
-
 # ------------------------------------------------------------------ files --
 
 proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overwrite: bool,
@@ -818,7 +805,7 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry,
       f.close()
     if not result.isFatal:
       changes = writeInPlace(tmp, g, fields, overwrite, result)
-      result.report(sevInfo, dcValidation, "geometry written: " & describe(changes),
+      result.report(sevInfo, dcValidation, "geometry written: " & $changes,
         loc = Location(file: dstPath))
   except CatchableError as e:
     result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))
@@ -866,7 +853,7 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
     if not result.isFatal:
       try:
         let c = writeInPlace(tmp, g, fields, overwrite, result)
-        result.report(sevInfo, dcValidation, "geometry written: " & describe(c),
+        result.report(sevInfo, dcValidation, "geometry written: " & $c,
           loc = Location(file: dstPath))
       except CatchableError as e:
         result.report(sevFatal, dcIo, e.msg, loc = Location(file: dstPath))

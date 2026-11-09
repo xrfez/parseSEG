@@ -505,7 +505,7 @@ proc write() =
         k.rcvPoint += 1 # SEG-D 2.1 holds stations, not coordinates
     ed = openEditor(copy, journal)
     var ch: GeometryChanges
-    let tGeom = timed: ch = ed.writeGeometry(f)
+    let tGeom = timed: ch = ed.writeGeometry(f.index)
     ed.close()
     f.close()
     rep.row ["writeGeometry (journaled, batched)", name, "-", &"{tGeom:.2f}", "-",

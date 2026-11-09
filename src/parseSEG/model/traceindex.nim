@@ -703,21 +703,6 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
   decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], log, T)
 
-proc readTracesRaw*[T: SampleType](f: SeismicFile, traces: openArray[int],
-    dst: ptr UncheckedArray[T], cols, rowStride: int, log: var DiagLog): int =
-  ## **Internal** (not exported by `parseSEG`). Decodes the selected traces
-  ## into a buffer the caller owns: trace `traces[k]` into
-  ## `dst[k * rowStride ..< k * rowStride + cols]`, for hosts that decode
-  ## straight into their own arrays (the C ABI, numpy). The caller guarantees
-  ## the buffer's size; `rowStride >= cols`.
-  f.checkReadable(traces.len)
-  f.checkSelection(traces)
-  if cols < 0 or rowStride < cols: raise newException(ValueError, "need 0 <= cols <= rowStride")
-  template trace(k: int): int = traces[k]
-  template rowOf(k: int): ptr UncheckedArray[T] =
-    cast[ptr UncheckedArray[T]](addr dst[k * rowStride])
-  decodeLoop(f, traces.len, trace, rowOf, cols, log, T)
-
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
     row = 0): int =
   ## As above, without a log: returns the number of traces that could not be

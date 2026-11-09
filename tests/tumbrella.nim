@@ -19,7 +19,7 @@ doAssert declared(copyBytes) and declared(isOpen)
 
 # Model internals (raw-pointer decoders, the map's size, shared checks) stay
 # inside the library.
-doAssert not declared(decodeEntry) and not declared(readTracesRaw) and
+doAssert not declared(decodeEntry) and not declared(pinMap) and not declared(MapPin) and
   not declared(mappedSize) and not declared(rowPtr) and not declared(requireKeys) and
   not declared(checkSpan)
 doAssert not declared(locate) and not declared(readField) and not declared(withBlockType) and

@@ -561,11 +561,11 @@ block named_fields_listing_and_edits:
   doAssert f.findTraceField(0, "trace.NO_SUCH").isNone
   doAssert f.findTraceField(0, "ext1.x").isNone
   doAssert "blockSize" in fieldNames(hbSeg2Trace) and "pointerBytes" in fieldNames(hbSeg2File)
-  doAssert f.seg2StringCount(-1) == 5 and f.seg2StringCount(0) == 6
-  doAssert f.seg2Keyword(-1, 4) == "UNITS" and f.seg2Value(-1, 4) == "METERS"
-  doAssert f.seg2Keyword(2, 1) == "RECEIVER_LOCATION" and f.seg2Value(2, 1) == "30 4 -1"
-  doAssertRaises(ValueError): discard f.seg2Value(0, 6)
-  doAssertRaises(ValueError): discard f.seg2StringCount(5)
+  doAssert f.seg2Strings(-1).len == 5 and f.seg2Strings(0).len == 6
+  doAssert f.seg2Strings(-1)[4].key == "UNITS" and f.seg2Strings(-1)[4].value == "METERS"
+  let s2 = f.seg2Strings(2)[1]
+  doAssert s2.key == "RECEIVER_LOCATION" and s2.value == "30 4 -1"
+  doAssertRaises(ValueError): discard f.seg2Strings(5)
   # header export: fixed fields and strings; an unchanged import changes nothing
   f.exportHeaders(tmp / "named.nif")
   let doc = readFile(tmp / "named.nif")

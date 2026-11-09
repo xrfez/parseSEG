@@ -16,8 +16,8 @@
 ## `file.revision`, ...) and the block's keyword strings (`trace.
 ## SAMPLE_INTERVAL`, `file.UNITS`; matched case-insensitively, the first
 ## string with the keyword), whose values come back verbatim as `fvText`.
-## `fieldNames` lists the fixed fields; `seg2StringCount`, `seg2Keyword` and
-## `seg2Value` list the strings of a block. SEG-2 fields are read-only: a
+## `fieldNames` lists the fixed fields; `seg2Strings` lists the strings of a
+## block. SEG-2 fields are read-only: a
 ## string edit changes the block's size, so the editor refuses SEG-2 edits
 ## and the file is rewritten instead (`seg2/writer`, `convertFile`).
 ##
@@ -519,30 +519,6 @@ proc seg2Strings*(f: SeismicFile, trace: int): seq[Seg2String] =
   if f.kind != skSeg2: raise newException(ValueError, "not a SEG-2 file")
   if trace == -1: f.index.seg2.strings
   else: f.seg2Trace(trace).strings
-
-proc seg2StringCount*(f: SeismicFile, trace: int): int =
-  ## How many keyword strings SEG-2 trace `trace` has (-1: the File
-  ## Descriptor Block); read them with `seg2Keyword` and `seg2Value`. Raises
-  ## `ValueError` like `seg2Strings`.
-  f.seg2Strings(trace).len
-
-proc seg2String(f: SeismicFile, trace, n: int): Seg2String =
-  let s = f.seg2Strings(trace)
-  if n notin 0 ..< s.len:
-    raise newException(ValueError, "no string " & $n & " (the block has " & $s.len & ")")
-  s[n]
-
-proc seg2Keyword*(f: SeismicFile, trace, n: int): string =
-  ## The keyword of string `n` of SEG-2 trace `trace` (-1: the File
-  ## Descriptor Block), as written. Raises `ValueError` like `seg2Strings`,
-  ## and for `n` out of range.
-  f.seg2String(trace, n).key
-
-proc seg2Value*(f: SeismicFile, trace, n: int): string =
-  ## The value of string `n` of SEG-2 trace `trace` (-1: the File
-  ## Descriptor Block), terminators stripped (NOTE lines are separated by
-  ## the file's Line Terminator). Raises `ValueError` like `seg2Keyword`.
-  f.seg2String(trace, n).value
 
 # ---------------------------------------------------------- sample timing --
 
