@@ -31,7 +31,7 @@ proc indexOf(src: RecordSource, kind: SeismicKind): TraceIndex =
   try: result = buildIndex(src, kind)
   finally: src.close()
 
-block detect_kind:
+sampleBlock detect_kind:
   for n in segdFiles:
     doAssert detectKind(readBytes(exampleDir / n)) == skSegd, n
   for n in segyFiles:
@@ -44,7 +44,7 @@ block detect_kind:
   b[0] = 0x43
   doAssert detectKind(b) == skSegd
 
-block index_matches_full_read_segd:
+sampleBlock index_matches_full_read_segd:
   for n in segdFiles:
     var f = openSeismic(exampleDir / n)
     let full = readSegd(exampleDir / n)
@@ -67,7 +67,7 @@ block index_matches_full_read_segd:
         inc row
     f.close()
 
-block index_matches_full_read_segy:
+sampleBlock index_matches_full_read_segy:
   for n in segyFiles:
     var f = openSeismic(exampleDir / n)
     let full = readSegy(exampleDir / n)
@@ -86,7 +86,7 @@ block index_matches_full_read_segy:
     doAssert float32(wide[0, 0]) == full.samples[f.len - 1, 0]
     f.close()
 
-block index_on_every_source_kind:
+sampleBlock index_on_every_source_kind:
   # Disk (seek), memory map, and a tape image (read and discard) agree.
   for n in segdFiles:
     let d = readSegd(exampleDir / n)
@@ -104,7 +104,7 @@ block index_on_every_source_kind:
     let c = indexOf(openTapeImageSource(tmp / "y.tap"), skSegy)
     doAssert c.len == a.len and c.segy.binary == a.segy.binary
 
-block headers_only_reads:
+sampleBlock headers_only_reads:
   for n in segdFiles:
     let full = readSegd(exampleDir / n)
     for h in [readSegdHeaders(exampleDir / n), (block:
@@ -137,7 +137,7 @@ block headers_only_reads:
     var x = newTraceTensor[float32](1, 10)
     doAssertRaises(SegFormatError): h.file.decodeInto(h.traces[0], x, 0)
 
-block truncated_last_trace:
+sampleBlock truncated_last_trace:
   # Headers-only walks must notice samples cut short, like full reads.
   for (n, kind) in [("BO_3D-Inglewood_rev21_v7.sgy", skSegy), ("inova_rev30_5traces.sgd", skSegd)]:
     let b = readBytes(exampleDir / n)
@@ -149,7 +149,7 @@ block truncated_last_trace:
     doAssert f.log.isFatal, n
     f.close()
 
-block range_read_of_damaged_trace_is_logged:
+sampleBlock range_read_of_damaged_trace_is_logged:
   # An entry pointing past the mapped bytes is logged and left zero.
   var f = openSeismic(exampleDir / "Sweep0.sgy")
   f.index.entries[0].numSamples = 1_000_000
@@ -187,7 +187,7 @@ block not_seismic:
   doAssert g.len == 0 and g.log.isFatal
   g.close()
 
-block memfile_source_basics:
+sampleBlock memfile_source_basics:
   let src = openMemFileSource(exampleDir / "63.sgd", chunk = 100)
   var buf: seq[byte]
   doAssert src.readRecord(buf) == rkData and buf.len == 100
@@ -216,7 +216,7 @@ block disk_source_sees_a_growing_file:
   doAssert src.readRecord(buf) == rkEndOfData
   src.close()
 
-block segy_repeated_trace_warnings_are_capped:
+sampleBlock segy_repeated_trace_warnings_are_capped:
   # A Rev 1 fixed-length file whose 9 trace headers all disagree with the
   # binary header: 5 warnings and one summary, in both read modes.
   let d0 = readSegy(exampleDir / "Sweep0.sgy")
@@ -260,7 +260,7 @@ method seekForward(s: CountingSource; n: int64): int64 {.raises: [CatchableError
   if result > 0: s.seeked += result
   s.offset = s.inner.offset
 
-block headers_only_walk_copies_only_headers:
+sampleBlock headers_only_walk_copies_only_headers:
   # Review finding: refills after a seek fetched whole chunks, so a header
   # walk copied nearly the whole file. Inglewood: 200 traces of 8244 bytes.
   for inner in [RecordSource(openDiskSource(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")),
@@ -272,7 +272,7 @@ block headers_only_walk_copies_only_headers:
     doAssert c.seeked > traceArea * 9 div 10, $c.seeked
     inner.close()
 
-block skip_guards:
+sampleBlock skip_guards:
   let src = openDiskSource("/dev/zero") # a device: no size, reads still work
   var buf: seq[byte]
   doAssert src.readRecord(buf, 4096) == rkData and buf.len == 4096
@@ -281,7 +281,7 @@ block skip_guards:
   var p = initPushbackInput(openMemFileSource(exampleDir / "63.sgd"))
   doAssert p.skip(-5) == 0 and p.offset == 0
 
-block empty_ranges_must_start_in_the_file:
+sampleBlock empty_ranges_must_start_in_the_file:
   # 12.4: an empty range is valid only when it starts in `0 .. len`.
   var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd")
   doAssert f.len == 5
@@ -323,7 +323,7 @@ block index_memory_is_reserved_from_the_file_size:
 # character-device (a7) findings are `headers_only_walk_copies_only_headers` and
 # `skip_guards` above.
 
-block p6_a1_channel_set_index_beyond_int16:
+sampleBlock p6_a1_channel_set_index_beyond_int16:
   # 32768 dummy descriptors before the real one: the trace's set index is 32768.
   var b = readBytes(exampleDir / "63.sgd")
   b[28] = 0xFF # channel sets per scan type: see GH#2
@@ -341,7 +341,7 @@ block p6_a1_channel_set_index_beyond_int16:
   doAssert f.readTraces(0..0).shape == [1, 1000]
   f.close()
 
-block p6_a3_segd_file_number_43xx_with_format_like_bytes:
+sampleBlock p6_a3_segd_file_number_43xx_with_format_like_bytes:
   var b = readBytes(exampleDir / "63.sgd")
   b[0] = 0x43
   b[1] = 0x21
@@ -353,7 +353,7 @@ block p6_a3_segd_file_number_43xx_with_format_like_bytes:
   doAssert f.kind == skSegd and f.len == 1 and not f.log.isFatal
   f.close()
 
-block p6_a4_segy_with_undefined_format_code_is_still_segy:
+sampleBlock p6_a4_segy_with_undefined_format_code_is_still_segy:
   var b = readBytes(exampleDir / "Sweep0.sgy")
   b[3224] = 0
   b[3225] = 0
@@ -366,7 +366,7 @@ block p6_a4_segy_with_undefined_format_code_is_still_segy:
   doAssert formatDiag and f.index.segy.text.data[0] == byte(0x43)
   f.close()
 
-block p6_a6_closed_maps_fail_cleanly:
+sampleBlock p6_a6_closed_maps_fail_cleanly:
   let s = openMemFileSource(exampleDir / "63.sgd")
   s.close()
   var buf: seq[byte]

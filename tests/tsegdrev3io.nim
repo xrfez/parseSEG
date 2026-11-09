@@ -218,7 +218,7 @@ block real_rev3_file_rewrites_byte_identically:
     doAssert readBytes(tmp / "big.sgd") == readBytes(bigFile)
     removeFile(tmp / "big.sgd")
 
-block committed_rev3_fixture:
+sampleBlock committed_rev3_fixture:
   # 5 traces of the real INOVA Rev 3.0 record, all headers as recorded
   # (tools/make_rev3_fixture.nim): always available, unlike the 65 MB file.
   let fixture = exampleDir / "inova_rev30_5traces.sgd"
@@ -267,7 +267,7 @@ block r1_fixrec_gaps_below_a_header:
       doAssert e.log.len == 0, "block " & $bs & ": " & $e.log[0]
       same(d, e)
 
-block r2_huge_trailer_sizes_are_not_a_defect:
+sampleBlock r2_huge_trailer_sizes_are_not_a_defect:
   var b = readBytes(exampleDir / "inova_rev30_5traces.sgd")
   for i in 44..47: b[i] = 0xFF            # GH#2 bytes 13-16: trailer count unknown
   for i in 72..79: b[i] = 0xFF            # GH#3 recordSize

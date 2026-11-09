@@ -46,7 +46,7 @@ proc segyWithExt1(path: string) =
   w.close()
   sink.close()
 
-block segy_trace_and_binary_edits_and_rollback:
+sampleBlock segy_trace_and_binary_edits_and_rollback:
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
@@ -74,7 +74,7 @@ block segy_trace_and_binary_edits_and_rollback:
   doAssert applyJournal(path, journal).len == 0
   doAssert readBytes(path) == edited
 
-block refused_edits_change_nothing:
+sampleBlock refused_edits_change_nothing:
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
@@ -97,7 +97,7 @@ block refused_edits_change_nothing:
   ed.close()
   doAssert readBytes(path) == original and editLines(journal) == 0
 
-block segy_little_endian_and_ext1:
+sampleBlock segy_little_endian_and_ext1:
   let (path, journal) = fresh("Sweep0.sgy")
   var ed = openEditor(path)
   doAssert ed.setTraceField(0, "trace.sourceX", -123456)
@@ -119,7 +119,7 @@ block segy_little_endian_and_ext1:
   doAssert d.traces[2].ext1.extSourceX == 512300.25
   doAssert d.traces[2].ext1.extTraceSeqLine == 18_000_000_000'u64
 
-block segd_rev2_edits:
+sampleBlock segd_rev2_edits:
   let (path, journal) = fresh("63.sgd")
   let original = readBytes(path)
   var ed = openEditor(path)
@@ -147,7 +147,7 @@ block segd_rev2_edits:
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == original
 
-block segd_rev3_edits:
+sampleBlock segd_rev3_edits:
   let (path, journal) = fresh("inova_rev30_5traces.sgd")
   var ed = openEditor(path)
   doAssert ed.setTraceField(4, "ext1.receiverLineNumber", 1234)   # Rev 3 layout
@@ -162,7 +162,7 @@ block segd_rev3_edits:
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == readBytes(exampleDir / "inova_rev30_5traces.sgd")
 
-block journal_conflicts_crashes_and_damage:
+sampleBlock journal_conflicts_crashes_and_damage:
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
@@ -205,7 +205,7 @@ block journal_conflicts_crashes_and_damage:
   # A missing journal is a fatal diagnostic, not an exception.
   doAssert rollbackJournal(p2, tmp / "nope.nif").isFatal
 
-block edit_through_the_mapped_index:
+sampleBlock edit_through_the_mapped_index:
   # Values written through the editor are what range reads see next.
   let (path, _) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   var ed = openEditor(path)
@@ -214,11 +214,11 @@ block edit_through_the_mapped_index:
   doAssert t.shape == [1, 2001]
   ed.close()
 
-block journal_is_the_file:
+sampleBlock journal_is_the_file:
   let (path, _) = fresh("Sweep0.sgy")
   doAssertRaises(ValueError): discard openEditor(path, path)
 
-block current_fields_raise_like_the_reads:
+sampleBlock current_fields_raise_like_the_reads:
   let (path, _) = fresh("Sweep0.sgy")
   var ed = openEditor(path)
   ed.beginBatch()
@@ -247,7 +247,7 @@ when defined(linux):
         return
     doAssert false, "the journal is not open"
 
-  block journal_sync_failure_refuses_the_edit:
+  sampleBlock journal_sync_failure_refuses_the_edit:
     # The map is written only after its journal entry is on disk: when the
     # journal cannot be written or synced, the edit is refused (false and an
     # error in `log`), never raised, and the file keeps its bytes. /dev/full
@@ -281,7 +281,7 @@ when defined(linux):
     lim.rlim_cur = if bytes < 0: lim.rlim_max else: bytes
     doAssert setrlimit(RLIMIT_FSIZE, lim) == 0
 
-  block failed_entries_are_cut_from_the_journal:
+  sampleBlock failed_entries_are_cut_from_the_journal:
     # A batch whose journal write fails part-way (the disk fills up) leaves
     # no entry behind: `applyJournal` must not redo refused edits.
     let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
@@ -307,7 +307,7 @@ when defined(linux):
     doAssert diffCount(readBytes(path), original) > 0
     doAssert rollbackJournal(path, journal).len == 0 and readBytes(path) == original
 
-  block close_raises_when_the_last_batch_is_lost:
+  sampleBlock close_raises_when_the_last_batch_is_lost:
     let (path, journal) = fresh("Sweep0.sgy")
     let original = readBytes(path)
     var ed = openEditor(path)
@@ -317,7 +317,7 @@ when defined(linux):
     doAssertRaises(IOError): ed.close()
     doAssert readBytes(path) == original and editLines(journal) == 0
 
-  block current_field_needs_no_sync:
+  sampleBlock current_field_needs_no_sync:
     # Since 13.2 a batch's pending edits are read without a sync, so a
     # journal that fails shows only when the batch ends.
     let (path, journal) = fresh("Sweep0.sgy")
@@ -330,7 +330,7 @@ when defined(linux):
     doAssertRaises(IOError): ed.close()
     doAssert ed.edits == 0 and readBytes(path) == original
 
-block batch_edits_several_fields_of_one_header_without_a_flush:
+sampleBlock batch_edits_several_fields_of_one_header_without_a_flush:
   # Task 13.2 (review R2-2): a second field of a header with a pending edit
   # used to flush the batch (one fsync per trace). The edit now decodes the
   # header with the pending bytes laid over it, so nothing reaches the map
@@ -358,7 +358,7 @@ block batch_edits_several_fields_of_one_header_without_a_flush:
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == orig
 
-block editor_from_an_open_file:
+sampleBlock editor_from_an_open_file:
   # 14.3c: the editor takes over the open file and its index (no second
   # open or walk); journal, rollback and refusals as `openEditor(path)`.
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
@@ -383,7 +383,7 @@ block editor_from_an_open_file:
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == orig
 
-block editor_from_an_open_file_released:
+sampleBlock editor_from_an_open_file_released:
   # `release` hands the file back, still mapped and as edited.
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let orig = readBytes(path)
@@ -401,7 +401,7 @@ block editor_from_an_open_file_released:
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == orig
 
-block editor_from_an_open_file_refusals:
+sampleBlock editor_from_an_open_file_refusals:
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let orig = readBytes(path)
   var closed = openSeismic(path)
@@ -418,7 +418,7 @@ block editor_from_an_open_file_refusals:
   doAssert not fileExists(journal), "nothing opened on a refusal"
   doAssert readBytes(path)[0 ..< orig.len] == orig
 
-block editor_from_a_file_with_a_running_prefetcher:
+sampleBlock editor_from_a_file_with_a_running_prefetcher:
   # The prefetcher pins the old read-only map and the index tables it reads;
   # the editor maps anew and works on copies, so closing the editor first
   # leaves the prefetcher reading valid memory.
@@ -456,7 +456,7 @@ block p6_b1_edits_refused_on_files_that_are_not_seismic:
   ed.close()
   doAssert readFile(tmp / "junk.bin") == repeat('\xEE', 8000)
 
-block p6_b2_repeated_rollback_with_overlapping_spans:
+sampleBlock p6_b2_repeated_rollback_with_overlapping_spans:
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
@@ -471,7 +471,7 @@ block p6_b2_repeated_rollback_with_overlapping_spans:
     doAssert applyJournal(path, journal).len == 0
     doAssert readBytes(path) == edited
 
-block p6_b3_field_edited_twice_has_no_spurious_conflicts:
+sampleBlock p6_b3_field_edited_twice_has_no_spurious_conflicts:
   let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   let original = readBytes(path)
   var ed = openEditor(path)
@@ -484,7 +484,7 @@ block p6_b3_field_edited_twice_has_no_spurious_conflicts:
   doAssert applyJournal(path, journal).len == 0 and applyJournal(path, journal).len == 0
   doAssert readBytes(path) == edited
 
-block p6_b4_hostile_journals_stay_bounded:
+sampleBlock p6_b4_hostile_journals_stay_bounded:
   let j = tmp / "hostile.nif"
   block:
     var f = open(j, fmWrite)
@@ -503,7 +503,7 @@ block p6_b4_hostile_journals_stay_bounded:
   let r = rollbackJournal(path, j)
   doAssert r.count(sevError) == 5 and r.count(sevInfo) == 1
 
-block p6_b5_huge_general_header_numbers_are_refused:
+sampleBlock p6_b5_huge_general_header_numbers_are_refused:
   let (path, _) = fresh("63.sgd")
   var ed = openEditor(path)
   var raised = false

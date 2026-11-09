@@ -30,7 +30,7 @@ func decodeF64(f: SegdSampleFormat, b: openArray[byte], n: int): seq[float64] =
 
 # ------------------------------------------------------ 63.sgd: Rev 2.0 → 3.0 --
 
-block rev20_sample_to_rev3_and_back:
+sampleBlock rev20_sample_to_rev3_and_back:
   let src = exampleDir / "63.sgd"
   let orig = readSegd(src)
   let o = orig.records[0]
@@ -95,7 +95,7 @@ block rev20_sample_to_rev3_and_back:
   doAssert tb.ext1.get.receiverPointNumber == t2.ext1.get.receiverPointNumber
   doAssert tb.header.traceNumber == t2.header.traceNumber
 
-block rev20_to_rev21_changes_only_the_revision:
+sampleBlock rev20_to_rev21_changes_only_the_revision:
   let log = convertSegdRevision(exampleDir / "63.sgd", tmp / "63_21.sgd", rev(2, 1))
   doAssert log.clean, $log
   var want = readBytes(exampleDir / "63.sgd")
@@ -104,7 +104,7 @@ block rev20_to_rev21_changes_only_the_revision:
 
 # ----------------------------------------------- INOVA: Rev 3.0 → 2.1 → 3.0 --
 
-block rev30_sample_to_rev21_and_back:
+sampleBlock rev30_sample_to_rev21_and_back:
   let src = exampleDir / "inova_rev30_5traces.sgd"
   let orig = readSegd(src)
   let o = orig.records[0]
@@ -354,7 +354,7 @@ block rev3_8080_to_rev2_and_format_changes:
   doAssert decodeF64(sd8038, i32.records[0].traces[0].samples, 5) ==
     @[1.0, -2.0, 300.0, 4.0, 5.0]
 
-block rev31_target_and_little_endian_formats:
+sampleBlock rev31_target_and_little_endian_formats:
   # INOVA 3.0 -> 3.1 in 9058 (little-endian) -> 3.0 (back to 8058).
   let src = exampleDir / "inova_rev30_5traces.sgd"
   var o = rev(3, 1)
@@ -416,7 +416,7 @@ block records_rev2_cannot_hold_are_skipped:
   let log2 = convertSegdRevision(tmp / "many.sgd", tmp / "many_r2.sgd", w)
   doAssert log2.has("10000 channels; Rev 2 holds 9999", sevError), $log2
 
-block invalid_requests:
+sampleBlock invalid_requests:
   for (ma, mi) in [(1, 0), (3, 2), (2, 5), (4, 0)]:
     let log = convertSegdRevision(exampleDir / "63.sgd", tmp / "x.sgd", rev(ma, mi))
     doAssert log.isFatal and log.has("is not 2.0, 2.1, 3.0 or 3.1", sevFatal)
@@ -516,7 +516,7 @@ block review_orphan_traces_skip_their_record:
   let x = decodeAll(tmp / "orph_r3.sgd")
   doAssert x.records.len == 1 and x.records[0].record.gh1.fileNumber == 2
 
-block review_value_edges:
+sampleBlock review_value_edges:
   # (5) Long record lengths wrapped; (8) undefined channel types were silent;
   # (9) 8015 padding copied stale samples; 2.0 → 2.1 kept undefined bytes.
   var d: SegdData
@@ -618,7 +618,7 @@ proc tmpFiles(dir: string): seq[string] =
   for p in walkDir(dir):
     if p.path.endsWith(".tmp"): result.add p.path
 
-block r13_r4_2_rev3_trailer_count_is_bounded:
+sampleBlock r13_r4_2_rev3_trailer_count_is_bounded:
   # GH#2 bytes 13-16 announced 2^31 trailer blocks: Rev 3 -> Rev 3 allocated
   # 32 x that (64 GB) before reading a trace.
   let rev3 = r13 / "63_r3.sgd"

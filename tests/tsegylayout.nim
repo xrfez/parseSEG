@@ -34,7 +34,7 @@ block standard_layouts:
   doAssert r2.named("inline").len == 1 and r2.named("iline")[0].bytePos == 189
   doAssert r2.named("sht_x").len == 2 and r2.named("sht_x")[1].ifNonZero
 
-block inglewood_layout_stanza:
+sampleBlock inglewood_layout_stanza:
   let d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   doAssert d.log.len == 0
   let lay = d.file.layout
@@ -49,7 +49,7 @@ block inglewood_layout_stanza:
   doAssert d.file.fieldValue(d.traces[5], "INLINE") == some(1001.0)
   doAssert d.file.fieldValue(d.traces[5], "no_such_entry").isNone
 
-block standard_values_with_scalars_and_ext1:
+sampleBlock standard_values_with_scalars_and_ext1:
   # A Rev 2.1 file without a Layout stanza: standard bytes, scalars, Ext1.
   var d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   var f = SegyFile(text: d.file.text, binary: d.file.binary, byteOrder: boBig,
@@ -80,7 +80,7 @@ block standard_values_with_scalars_and_ext1:
   doAssert f.fieldValue(t, "delay") == some(125.0)
   doAssert f.geometry(t).inline.isNaN
 
-block layout_stanza_with_proprietary_extension:
+sampleBlock layout_stanza_with_proprietary_extension:
   var d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let xml = """<?xml version="1.0"?>
 <segy-layout name="acme">
@@ -115,7 +115,7 @@ block layout_stanza_with_proprietary_extension:
   doAssert abs(e.file.fieldValue(e.traces[3], "gun_pressure").get - 200.0) < 1e-9
   doAssert e.file.geometry(e.traces[3]).inline == 503.0
 
-block malformed_layout_falls_back:
+sampleBlock malformed_layout_falls_back:
   for bad in ["<segy-layout><entry name=\"x\" byte=\"239\" type=\"int4\"/></segy-layout>",
       "<segy-layout><entry name=\"x\" byte=\"1\" type=\"float\"/></segy-layout>",
       "<other/>", "not xml at all <"]:
@@ -181,7 +181,7 @@ block segyreview2_f1_hostile_layout_entities:
   let d = readSegy(path)
   doAssert d.traces.len == 3 and d.log.warned("invalid character reference")
 
-block segyreview2_f8_wide_scalar_is_not_wrapped:
+sampleBlock segyreview2_f8_wide_scalar_is_not_wrapped:
   var d = readSegy(ingle)
   let xml = """<segy-layout><entry name="co_scal" byte="181" type="int4"/>
 <entry name="sht_x" byte="73" type="coor4"/></segy-layout>"""

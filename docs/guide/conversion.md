@@ -17,12 +17,12 @@ long conversions ([processing.md](processing.md#batch-conversions-with-progress-
 import parseSEG
 
 # SEG-D Rev 3.0 to SEG-Y Rev 2.1 (the defaults: big-endian, EBCDIC, lossless format).
-let log = convertFile("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", "inova.sgy")
+let log = convertFile("shot.sgd", "shot.sgy")
 for d in log: echo d                      # what SEG-Y had no place for, once per kind
 doAssert not log.isFatal
 
-var a = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd")
-var b = openSeismic("inova.sgy")
+var a = openSeismic("shot.sgd")
+var b = openSeismic("shot.sgy")
 doAssert b.kind == skSegy and b.len == a.len
 doAssert b.readTraces(0 ..< b.len) == a.readTraces(0 ..< a.len)   # samples are exact
 ```
@@ -51,7 +51,7 @@ error.
 import parseSEG
 
 # SEG-Y Rev 2.1 to Rev 1.0, IEEE float.
-var log = convertFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "rev1.sgy",
+var log = convertFile("survey.sgy", "rev1.sgy",
   ConvertOptions(revision: SegyRevision(major: 1, minor: 0), format: st5))
 echo log.count(sevInfo), " notes on what Rev 1.0 cannot hold"
 doAssert not log.isFatal
@@ -59,19 +59,19 @@ var r1 = openSeismic("rev1.sgy")
 doAssert r1.fileField("binary.formatCode").intVal == 5
 
 # SEG-D Rev 2.0 to Rev 3.0 (and back with revision 2.1): samples copied byte for byte.
-log = convertSegdRevision("SEG Spec/exampleFiles/63.sgd", "63_rev3.sgd",
+log = convertSegdRevision("record.sgd", "record_rev3.sgd",
   SegdConvertOptions(revision: SegdRevision(major: 3, minor: 0)))
 doAssert not log.isFatal
-var r3 = openSeismic("63_rev3.sgd")
+var r3 = openSeismic("record_rev3.sgd")
 doAssert r3.summary.revision.major == 3
 
 # Any standard to SEG-2, and SEG-2 back to SEG-D.
-log = convertFile("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", "inova.sg2",
+log = convertFile("shot.sgd", "shot.sg2",
   ConvertOptions(target: skSeg2))
 doAssert not log.isFatal
-log = convertFile("inova.sg2", "inova_back.sgd", ConvertOptions(target: skSegd))
+log = convertFile("shot.sg2", "shot_back.sgd", ConvertOptions(target: skSegd))
 doAssert not log.isFatal
-var s2 = openSeismic("inova.sg2")
+var s2 = openSeismic("shot.sg2")
 doAssert s2.kind == skSeg2 and s2.traceField(0, "trace.SAMPLE_INTERVAL").text == "0.001"
 ```
 
@@ -112,7 +112,7 @@ for d in g.log: echo d                    # problems met in the survey file
 echo g.sourceCount, " source(s), ", g.receiverCount, " receiver(s), ",
   g.relationCount, " relation run(s)"
 
-var f = openSeismic("SEG Spec/exampleFiles/63.sgd", keys = true)
+var f = openSeismic("record.sgd", keys = true)
 doAssert f.traceKeys(0).rcvX.isNaN        # the SEG-D 2.0 headers have no coordinates
 let changed = f.applySurvey(g, overwrite = true)
 let k = f.traceKeys(0)
@@ -150,8 +150,8 @@ var g = initSurveyGeometry()
 g.addSps("line.sps")
 
 # 1. In place, journaled and undoable: same-size header fields only.
-copyFile("SEG Spec/exampleFiles/63.sgd", "shot.sgd")
-var f = openSeismic("shot.sgd", keys = true)
+copyFile("record.sgd", "field.sgd")
+var f = openSeismic("field.sgd", keys = true)
 discard f.applySurvey(g, overwrite = true)
 var report: DiagLog
 let plan = f.geometryChanges(GeometryFields(), report)   # a dry run: nothing is written
@@ -161,20 +161,20 @@ var ed = openEditor(move f)               # takes over the open file and its joi
 let done = ed.writeGeometry()
 ed.close()
 doAssert done.receiverStations == 1
-var check = openSeismic("shot.sgd", keys = true)
+var check = openSeismic("field.sgd", keys = true)
 doAssert check.traceKeys(0).rcvPoint == 101
-doAssert rollbackJournal("shot.sgd", "shot.sgd.edits.nif").len == 0   # undo, if wanted
+doAssert rollbackJournal("field.sgd", "field.sgd.edits.nif").len == 0   # undo, if wanted
 
 # 2. Into a copy in the same standard.
-let copied = copyWithGeometry("SEG Spec/exampleFiles/63.sgd", "shot_geo.sgd", g,
+let copied = copyWithGeometry("record.sgd", "record_geo.sgd", g,
   overwrite = true)
 doAssert not copied.log.hasErrors and copied.changes.receiverStations == 1
 
 # 3. Converted to SEG-Y, which has coordinate fields for everything.
-let convLog = convertWithGeometry("SEG Spec/exampleFiles/63.sgd", "shot_geo.sgy", g,
+let convLog = convertWithGeometry("record.sgd", "record_geo.sgy", g,
   overwrite = true)
 doAssert not convLog.isFatal
-var y = openSeismic("shot_geo.sgy", keys = true)
+var y = openSeismic("record_geo.sgy", keys = true)
 doAssert y.traceKeys(0).rcvX == 500100
 ```
 

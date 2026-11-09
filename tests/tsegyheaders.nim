@@ -67,7 +67,7 @@ block text_header_basics:
   doAssert detectTextEncoding(encodeText("  some text here", teEbcdic)) == teEbcdic
   doAssert detectTextEncoding(encodeText("  some text here", teAscii)) == teAscii
 
-block sweep0_rev0_little_endian:
+sampleBlock sweep0_rev0_little_endian:
   let f = readBytes(exampleDir / "Sweep0.sgy")
   let t = decodeTextHeader(f)
   doAssert t.encoding == teAscii
@@ -97,7 +97,7 @@ block sweep0_rev0_little_endian:
   th.encode(hb, boLittle)
   doAssert hb == f[3600..<3840]
 
-block inglewood_rev21_big_endian:
+sampleBlock inglewood_rev21_big_endian:
   let f = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let t = decodeTextHeader(f)
   doAssert t.encoding == teEbcdic

@@ -748,7 +748,7 @@ proc tmpFiles(dir: string): seq[string] =
 
 # A small SEG-2 file (63.sgd's one trace) to damage.
 let seg2 = r13 / "63.sg2"
-doAssert not convertFile(exampleDir / "63.sgd", seg2, ConvertOptions(target: skSeg2)).isFatal
+doAssert not convertFile(sampleOr("63.sgd"), seg2, ConvertOptions(target: skSeg2)).isFatal
 
 block r13_r4_1_seg2_sample_counts_are_bounded_by_the_file:
   # A 4 KB file declaring 2^32 - 1 samples (undefined format), or 2^30
@@ -814,7 +814,7 @@ block r13_r1_3_one_century_pivot:
   doAssert fullYear(0) == 2000 and fullYear(49) == 2049 and fullYear(50) == 1950
   doAssert fullYear(99) == 1999 and fullYear(1988) == 1988
   # SEG-D -> SEG-2 dates were put in 2000-2099 (63.sgd: a 19xx date).
-  var d = openSeismic(exampleDir / "63.sgd", keys = true)
+  var d = openSeismic(sampleOr("63.sgd"), keys = true)
   let expected = d.traceKeys(0).time
   d.close()
   var f = openSeismic(seg2, keys = true)

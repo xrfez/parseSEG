@@ -70,7 +70,7 @@ block encode_refuses_bad_values:
   encodeSamples(sfInt64, [float64(high(int64))], b) # = 2^63 as a float64: clamps
   doAssert beI64(b, 0) == high(int64)
 
-block detect_byte_order:
+sampleBlock detect_byte_order:
   let sweep = readBytes(exampleDir / "Sweep0.sgy")
   let d = detectByteOrder(sweep.toOpenArray(3200, 3599))
   doAssert d.order == boLittle and not d.fromMarker and d.plausible
@@ -90,7 +90,7 @@ block detect_byte_order:
   for i in 0..<junk.len: junk[i] = 0xEE
   doAssert not detectByteOrder(junk).plausible
 
-block sweep0_samples_into_tensor:
+sampleBlock sweep0_samples_into_tensor:
   let f = readBytes(exampleDir / "Sweep0.sgy")
   let order = detectByteOrder(f.toOpenArray(3200, 3599)).order
   let th = decodeTraceHeader(f.toOpenArray(3600, 3839), order)
@@ -104,7 +104,7 @@ block sweep0_samples_into_tensor:
   t.encodeTrace(0, sfFloat32, back, ns, order)
   doAssert back == f[3840..^1]
 
-block inglewood_ibm_samples:
+sampleBlock inglewood_ibm_samples:
   let f = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   const first = 333200
   const recLen = 240 + 2001 * 4
@@ -125,7 +125,7 @@ block inglewood_ibm_samples:
   let p = first + 100 * recLen + 240
   doAssert back == f[p..<p + 2001 * 4]
 
-block inglewood_extended_header:
+sampleBlock inglewood_extended_header:
   let f = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let bh = decodeBinaryHeader(f.toOpenArray(3200, 3599), boBig)
   var h = initExtendedTextHeader()

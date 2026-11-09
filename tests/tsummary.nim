@@ -32,7 +32,7 @@ proc edited(src, name: string, edits: openArray[(HeaderScope, int, string, Field
   ed.close()
   removeFile(result & ".edits.nif")
 
-block segd_rev2_sample:
+sampleBlock segd_rev2_sample:
   # Values as tools/walks/segd2_walk.py prints them for 63.sgd: file 63,
   # format 8058, 1 trace of 1000 samples at 2 ms, record length 2.048 s
   # (GH#1 RR.R 2.0 x 1.024), one channel set 0-2000 ms.
@@ -51,7 +51,7 @@ block segd_rev2_sample:
   doAssert cs[0].samplesPerTrace == 1000 and cs[0].sampleIntervalUs == 2000
   doAssert cs[0].startTimeMs == 0 and cs[0].endTimeMs == 2000
 
-block segd_rev3_sample:
+sampleBlock segd_rev3_sample:
   # tools/walks/segd3_walk.py: file 151, 4 channel sets (aux 0x20, 0x30,
   # 0x70, seismic 0x10), ns 4001 at 1000 µs, extended record length 4 s, a
   # Location Data stanza (EPSG 32050) in 0x55 blocks.
@@ -76,7 +76,7 @@ block segd_rev3_sample:
   doAssert types == @[0x20, 0x30, 0x70, 0x10] and traces == 5
   doAssert cs[3].traceCount == 2 and cs[3].number == 4
 
-block segy_rev21_sample:
+sampleBlock segy_rev21_sample:
   # tools/walks/segy21_walk.py: big-endian, format 1, dt 2000, ns 2001,
   # measurement system 1 (m), trace bytes 89-90 zero, an OGP P1/11 stanza.
   let f = openSeismic(inglewood)
@@ -89,7 +89,7 @@ block segy_rev21_sample:
   doAssert f.crsText.startsWith("IOGP,IOGP P1") and "HC,1,6,1" in f.crsText
   doAssert f.channelSets.len == 0
 
-block segy_rev0_little_endian:
+sampleBlock segy_rev0_little_endian:
   let f = openSeismic(sweep)
   let s = f.summary
   doAssert $s.revision == "0.0" and s.byteOrder == boLittle and s.formatCode == 5
@@ -98,7 +98,7 @@ block segy_rev0_little_endian:
   doAssert s.coordinateUnits == cuFeet # binary 3255 = 2
   doAssert s.crsFormat == ctNone and f.crsText == ""
 
-block segy_coordinate_units:
+sampleBlock segy_coordinate_units:
   template units(path: string): CoordinateUnits = openSeismic(path).summary.coordinateUnits
   let deg = edited(sweep, "deg.sgy", [(hsTrace, 0, "trace.coordinateUnits", toFieldValue(3))])
   doAssert units(deg) == cuDegrees
@@ -123,7 +123,7 @@ block segy_coordinate_units:
   let s = openSeismic(fr).summary
   doAssert s.firstFieldRecord == 7 and s.lastFieldRecord == 9
 
-block segy_non_uniform_traces:
+sampleBlock segy_non_uniform_traces:
   # Variable-length traces: one trace with another interval, one with fewer
   # samples (the fixed-length flag cleared).
   var d = readSegy(inglewood)
@@ -152,7 +152,7 @@ block segy_non_uniform_traces:
   f.close()
   doAssertRaises(ValueError): discard f.summary
 
-block segd_mixed_records:
+sampleBlock segd_mixed_records:
   # 63.sgd followed by its Rev 2.1 conversion (file number 64): two records
   # of two revisions.
   let r21 = tmp / "63_r21.sgd"

@@ -25,9 +25,9 @@ block layouts_tile_their_blocks:
   checkNibbleTiling(segdTraceHeaderFields, 20)
   checkNibbleTiling(segdTraceHeaderExt1Fields, 32)
 
-let f = readBytes(exampleDir / "63.sgd")
+let f = if haveSamples: readBytes(exampleDir / "63.sgd") else: newSeq[byte]()
 
-block sample_63_headers:
+sampleBlock sample_63_headers:
   # Values from the verified walk (docs/spec/segd_rev2_0_delta.md §4).
   let g1 = decodeBlock[SegdGeneralHeader1](f.toOpenArray(0, 31))
   doAssert g1.fileNumber == 63 and g1.formatCode == 8058 and g1.year == 24
@@ -70,7 +70,7 @@ block sample_63_headers:
   doAssert c.encoded == c.raw and t.encoded == t.raw and e.encoded == e.raw
   for i in 0..31: doAssert g1.raw[i] == f[i]
 
-block edits_touch_only_their_field:
+sampleBlock edits_touch_only_their_field:
   var g1 = decodeBlock[SegdGeneralHeader1](f.toOpenArray(0, 31))
   g1.julianDay = 7 # shares byte 12 with the binary additionalGhBlocks nibble
   let b = g1.encoded
@@ -84,7 +84,7 @@ block edits_touch_only_their_field:
   g1.fileNumber = 12345
   doAssertRaises SegFormatError: discard g1.encoded
 
-block invalid_bcd_and_undefined_bytes_survive:
+sampleBlock invalid_bcd_and_undefined_bytes_survive:
   var raw = f[0..31]
   raw[14] = 0x7A # minute: "7A" is not BCD
   raw[19] = 0x55 # bytes 20-22 should be zero
@@ -112,7 +112,7 @@ block fixed_point_and_mp:
   let tb = t.encoded
   doAssert tb[6..8] == @[0x00'u8, 0x01, 0x09] and decodeBlock[SegdTraceHeader](tb).firstTimingWord == 1.03515625
 
-block trailer_and_label:
+sampleBlock trailer_and_label:
   checkNibbleTiling(segdTrailerBlockFields, 32)
   var tb = SegdTrailerBlock(trailerNumber: 1, channelType: 0xC)
   let b = tb.encoded

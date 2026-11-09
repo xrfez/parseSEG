@@ -5,15 +5,17 @@
 ## Each block becomes one module (`doc_<page>_<n>.nim`), imported in page
 ## order by one generated main program: one compile for all of them. Their
 ## top-level code runs at start-up, in that order. The program runs in a
-## fresh scratch directory that holds `SEG Spec` with a link to the sample
-## files, so the examples use the same relative paths a reader would
-## (`"SEG Spec/exampleFiles/63.sgd"`) and write their outputs next to
-## themselves. Blocks tagged otherwise (`sh`, `text`) are not run.
+## fresh scratch directory that holds the demo files of `tools/demofiles`
+## (`survey.sgy`, `shot.sgd`, `record.sgd`, `line.sg2`), written by the
+## library's writers, so the examples use the plain names a reader would and
+## write their outputs next to themselves. Blocks tagged otherwise (`sh`,
+## `text`) are not run.
 ##
 ## It also checks the umbrella's allowlists against `docs/api.md`.
 
 import std/[algorithm, assertions, os, osproc, sets, strutils]
 import ./utils/srcnames
+import ../tools/demofiles
 
 const
   root = currentSourcePath().parentDir.parentDir
@@ -59,15 +61,10 @@ proc ident(s: string): string =
   for c in s: result.add(if c in IdentChars: c else: '_')
 
 proc newRunDir(base: string): string =
-  ## A fresh scratch directory holding `SEG Spec/exampleFiles`.
+  ## A fresh scratch directory holding the demo files.
   result = base / "run"
   removeDir(result)
-  createDir(result / "SEG Spec")
-  let samples = root / "SEG Spec" / "exampleFiles"
-  when defined(posix):
-    createSymlink(samples, result / "SEG Spec" / "exampleFiles")
-  else:
-    copyDir(samples, result / "SEG Spec" / "exampleFiles")
+  writeDemoFiles(result)
 
 proc nimPaths(): string =
   ## The project's search paths, absolute, for a program outside the tree.

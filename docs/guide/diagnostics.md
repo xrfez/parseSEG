@@ -36,7 +36,7 @@ except IOError, OSError:
   echo "cannot open: ", getCurrentExceptionMsg()
 
 # A bad argument is the caller's problem: ValueError, with the reason.
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 try:
   discard f.traceField(0, "trace.noSuchField")
   doAssert false
@@ -57,14 +57,14 @@ A `Diagnostic` has:
   empty when not applicable;
 - `msg`: a sentence for humans.
 
-`$d` gives a one-line form (`warning badValue @4340 [63.sgd, record 0, field ...]: ...`).
+`$d` gives a one-line form (`warning badValue @4340 [record.sgd, record 0, field ...]: ...`).
 A `DiagLog` has `len`, `[]`, `items`, `count(severity)`, `hasErrors` (an error or fatal
 entry), `isFatal`, and `toNif` / `writeNif` (and `readDiagnostics` / `parseDiagnostics` to
 read them back).
 
 ## A damaged file, end to end
 
-Here the last trace of a copy of the Inglewood file is cut short, as an interrupted copy
+Here the last trace of a copy of `survey.sgy` is cut short, as an interrupted copy
 would leave it. The index walk stops at the cut with a `fatal` `truncated` entry that names
 the trace and the byte offset; the index holds every trace before it, and those read
 normally.
@@ -72,7 +72,7 @@ normally.
 ```nim
 import parseSEG
 
-let whole = readFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+let whole = readFile("survey.sgy")
 writeFile("cut.sgy", whole[0 ..< whole.len - 1000])   # lose the last 1000 bytes
 
 var f = openSeismic("cut.sgy")
@@ -150,9 +150,9 @@ outputs and a viewer can show them later.
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/63.sgd")
-f.log.writeNif("63.diagnostics.nif")
-echo readFile("63.diagnostics.nif")
-let back = readDiagnostics("63.diagnostics.nif")
+var f = openSeismic("record.sgd")
+f.log.writeNif("record.diagnostics.nif")
+echo readFile("record.diagnostics.nif")
+let back = readDiagnostics("record.diagnostics.nif")
 doAssert back.len == f.log.len and back.count(sevInfo) == 2
 ```

@@ -12,7 +12,7 @@ proc raisesValue(body: proc ()) =
     doAssert false, "no ValueError"
   except ValueError: discard
 
-block file_accessors:
+sampleBlock file_accessors:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy", keys = true)
   doAssert f.kind == skSegy and f.len == 200 and f.recordCount == 1 and f.maxSamples == 2001
   doAssert f.hasKeys and f.isOpen and f.traceEntry(5).numSamples == 2001
@@ -52,7 +52,7 @@ block unknown_file:
       doAssert false
     except IndexDefect: discard
 
-block prefetch_ranges:
+sampleBlock prefetch_ranges:
   var f = openSeismic(exampleDir / "Sweep0.sgy")
   raisesValue(proc () = discard newPrefetcher[float32](f, 0 .. f.len))
   raisesValue(proc () = discard newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 0))

@@ -143,7 +143,7 @@ block segy_scalar_choice_overflow_and_precision:
   doAssert d.traces[0].header.coordinateScalar == -10000
   doAssert d.traces[1].header.groupX == 0, "refused: left alone"
 
-block segy_rev2_station_header_via_layout:
+sampleBlock segy_rev2_station_header_via_layout:
   # SEG-D 63.sgd converted to SEG-Y Rev 2.1 carries line/point in the
   # PSEGD001 header its Layout stanza describes.
   let segy = tmp / "63.sgy"
@@ -161,7 +161,7 @@ block segy_rev2_station_header_via_layout:
   doAssert d.file.fieldValue(d.traces[0], "rec_point") == some(105.0)
   f.close()
 
-block segd_rev2_the1_in_place:
+sampleBlock segd_rev2_the1_in_place:
   let path = copySample("63.sgd")
   let original = bytesOf(path)
   let g = sps("d.sps", r21('R', "14", "105.5", '1', "500100.0", "6000000.0", "12.5"),
@@ -182,7 +182,7 @@ block segd_rev2_the1_in_place:
   doAssert rollbackJournal(path, path & ".edits.nif").len == 0
   doAssert bytesOf(path) == original
 
-block segd_rev3_position_blocks:
+sampleBlock segd_rev3_position_blocks:
   # The INOVA traces 3 and 4 carry receiver Position blocks (100/101, 100/102);
   # the source position is record-level (general headers).
   let path = copySample("inova_rev30_5traces.sgd")
@@ -210,7 +210,7 @@ block segd_rev3_position_blocks:
   doAssert rollbackJournal(path, path & ".edits.nif").len == 0
   doAssert bytesOf(path) == original
 
-block convert_with_geometry_from_segd:
+sampleBlock convert_with_geometry_from_segd:
   let g = sps("e.sps", r21('R', "13", "104", '1', "500100.0", "6000000.0", "12.5"),
     r21('S', "13", "99.5", '1', "500000.0", "6000400.0", "10.0"))
   let dst = tmp / "63conv.sgy"

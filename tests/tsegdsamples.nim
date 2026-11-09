@@ -106,7 +106,7 @@ block refusals:
   var one = [0.0]
   doAssertRaises SegTruncatedError: decodeSamples(sd8058, [1'u8, 2], one)
 
-block sample_63_into_tensor:
+sampleBlock sample_63_into_tensor:
   let s = readFile(exampleDir / "63.sgd")
   var raw = newSeq[byte](s.len)
   for i, c in s: raw[i] = byte(c)

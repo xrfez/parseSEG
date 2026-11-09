@@ -53,8 +53,8 @@ proc progressOf(bar: Bar): Progress =
     if total > 0: bar.percent = int(done * 100 div total)
     not bar.cancelled
 
-let path = "SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy"
-let cache = getTempDir() / "inglewood.pidx" # anywhere writable; one cache per file
+let path = "survey.sgy"
+let cache = getTempDir() / "survey.pidx" # anywhere writable; one cache per file
 removeFile(cache)
 let bar = Bar()
 var f = openSeismic(path, keys = true, progress = progressOf(bar), opts = OpenOptions(cache: cache))
@@ -96,7 +96,7 @@ navigate.
 import std/[math, strutils]
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
+var f = openSeismic("shot.sgd", keys = true)
 let s = f.summary
 echo s.standard, " rev ", s.revision.major, ".", s.revision.minor, ", ", s.traceCount,
   " traces, ", s.recordCount, " record(s), ", s.sampleIntervalUs, " us, ",
@@ -122,11 +122,12 @@ Things worth knowing for the overview:
 - `summary` fields that differ between traces are NaN or -1 (`sampleIntervalUs`,
   `samplesPerTrace`). For SEG-D, take intervals and windows per channel set
   (`channelSets`) or per trace (`f.sampleIntervalUs(i)`).
-- SEG-D traces are in file order, which is not necessarily channel set order: in the sample
+- SEG-D traces are in file order, which is not necessarily channel set order: in the example
   above, trace 1 is in channel set index 2 and trace 2 in index 1. Use
   `traceEntry(i).channelSetIndex` instead of assuming.
-- Gather kinds are derived from the keys. A post-stack SEG-Y volume such as the Inglewood
-  sample is a single gather of kind `gkUnknown`: there is no source or receiver to group by.
+- Gather kinds are derived from the keys. A post-stack SEG-Y volume has no source or
+  receiver to group by: in `survey.sgy`, whose traces carry CDP numbers, each trace is a
+  one-trace `gkCmp` gather; a volume without them is one gather of kind `gkUnknown`.
 
 ### Gathers and multi-component stations
 
@@ -138,7 +139,7 @@ components side by side.
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
+var f = openSeismic("shot.sgd", keys = true)
 let g = f.gathers[0]
 var seismic: seq[int]
 for i in g.traces:
@@ -161,7 +162,7 @@ Rows are cut or zero-padded to the buffer's width.
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 
 # A range: the 50 traces from trace 100 on, all samples.
 let panel = f.readTraces(100 ..< 150)
@@ -171,7 +172,6 @@ doAssert panel.shape == [50, 2001]
 var view = newTraceTensor[float32](64, 2001)
 var log: DiagLog
 for first in countup(0, 128, 64):            # the user scrolls right
-  # (this sample holds live data in traces 93..116 only: the other panels are zero)
   let failed = f.readTracesInto(first ..< first + 64, view, 0, log)
   doAssert failed == 0                        # undecodable traces would be zero rows
   echo "traces ", first, "..", first + 63, ": peak ", max(abs(view))
@@ -190,7 +190,7 @@ the buffer's width must be the window's length.
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 # Samples 1000..1499 of traces 90..119: a zoomed-in panel.
 let zoom = f.readTraces(90 ..< 120, 1000 .. 1499)
 doAssert zoom.shape == [30, 500]
@@ -222,7 +222,7 @@ does the same over columns of your own, such as `TraceKeys` fields.
 import std/sequtils
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 let order = f.sortTraces(["trace.crosslineNumber", "trace.inlineNumber"])
 let firstColumn = f.readTraces(order[0 ..< 10], 0 .. 499)   # the sorted view, a window
 doAssert order.len == f.len and firstColumn.shape == [10, 500]
@@ -246,7 +246,7 @@ numeric header field for many traces (a plot axis, a colour bar), resolving the 
 import std/math
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy") # no stored keys
+var f = openSeismic("survey.sgy") # no stored keys
 let ks = f.traceKeys(0 ..< 10)                 # the keys of what is on screen
 let sx = f.traceFieldColumn("trace.sourceX", 0 ..< 10)
 var buf = newSeq[float64](3)                   # reused across redraws
@@ -272,7 +272,7 @@ and `cols` choose a sample window, as `readTraces(traces, samples)` does.
 import std/os
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 32, depth = 4)
 var c: PrefetchChunk[float32]
 var shown = 0
@@ -328,7 +328,7 @@ the chunk shape that nothing else shares is reused: a copy or a view you kept st
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 32, depth = 4)
 var c: PrefetchChunk[float32]
 var shown = 0
@@ -357,7 +357,7 @@ bytes for a hex pane, and the row's offset and size highlight the field in it.
 import std/strutils
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/63.sgd")
+var f = openSeismic("record.sgd")
 let rows = f.traceHeaders(0)
 var shownBlocks: seq[string]
 for r in rows:
@@ -398,9 +398,9 @@ record the same way. Both raise `ValueError` for another standard.
 import std/strutils
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 let lines = f.textHeader.splitLines
-echo lines[0]                            # "C01 AREA    : Taranaki_Basin - ..."
+echo lines[0]                            # "C01 parseSEG demo survey: ..."
 echo f.extendedTextHeaders.len, " extended textual records"
 doAssert lines.len == 40 and lines[0].len == 80
 f.close()
@@ -415,20 +415,20 @@ Unknown values are NaN. `time` is the trace's UTC time in POSIX seconds (fractio
 import std/[math, times]
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
+var f = openSeismic("shot.sgd", keys = true)
 let k = f.traceKeys(3)
 echo "source ", k.srcLine, "/", k.srcPoint, " at (", k.srcX, ", ", k.srcY, ")"
 echo "receiver ", k.rcvLine, "/", k.rcvPoint, " at (", k.rcvX, ", ", k.rcvY, ")"
 echo "offset ", round(k.offset, 1), ", recorded ", fromUnixFloat(k.time).utc
 echo "sample interval ", f.sampleIntervalUs(3), " us"
-doAssert abs(k.offset - 8490.11) < 0.01 and f.sampleIntervalUs(3) == 1000
+doAssert abs(k.offset - 10000) < 0.01 and f.sampleIntervalUs(3) == 1000
 ```
 
 ### Inline and crossline of post-stack SEG-Y
 
 `TraceKeys` describes acquisition geometry. Post-stack volumes are addressed by inline and
 crossline instead, which many files keep in non-standard bytes and describe in a SEG-Y
-Layout stanza (the Inglewood sample keeps the inline at byte 13). The streaming SEG-Y
+Layout stanza (`survey.sgy` keeps the inline at byte 13). The streaming SEG-Y
 reader resolves those names through the file's layout (`fieldValue(file, trace, "iline")`);
 read the headers once with `headersOnly` and keep the numbers:
 
@@ -436,7 +436,7 @@ read the headers once with `headersOnly` and keep the numbers:
 import std/options
 import parseSEG
 
-var src = openDiskSource("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var src = openDiskSource("survey.sgy")
 var r = openSegy(src, headersOnly = true)    # headers only: sample bytes are skipped
 var t: SegyTrace
 var inlines, crosslines: seq[int]

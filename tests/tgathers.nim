@@ -32,7 +32,7 @@ proc writeSegdFile(d: SegdData, path: string) =
   try: doAssert writeSegd(sink, d).len == 0
   finally: sink.close()
 
-block sample_files:
+sampleBlock sample_files:
   for (n, want) in [("63.sgd", gkShot), ("inova_rev30_5traces.sgd", gkShot),
       ("Sweep0.sgy", gkUnknown), ("BO_3D-Inglewood_rev21_v7.sgy", gkUnknown)]:
     var f = openSeismic(exampleDir / n, keys = true)
@@ -97,7 +97,7 @@ block component_groups_and_single_stations:
   let two = segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 2, rx = 5, comp = 12)])
   doAssert two.componentGroups(0..1).len == 2
 
-block segy_end_to_end:
+sampleBlock segy_end_to_end:
   # Sweep0 copied into a sorted receiver-gather file with component codes.
   let d0 = readSegy(exampleDir / "Sweep0.sgy")
   var d = d0
@@ -125,7 +125,7 @@ block segy_end_to_end:
   doAssert f.index.keys[4].rcvX == 1100 and f.index.keys[4].component == 12
   f.close()
 
-block segd_rev2_multicomponent:
+sampleBlock segd_rev2_multicomponent:
   # 63.sgd's trace repeated: 2 stations x 3 sensor types (geophone V/I/X).
   var d = readSegd(exampleDir / "63.sgd")
   var rd = d.records[0]
@@ -150,7 +150,7 @@ block segd_rev2_multicomponent:
   doAssert cg[1].station.rcvPoint == 105
   f.close()
 
-block segd_rev3_receiver_gather:
+sampleBlock segd_rev3_receiver_gather:
   # The INOVA record turned into a receiver gather: both seismic traces get
   # the same receiver and their own Source Description block (0x16) in place
   # of the first vendor extension.
@@ -177,7 +177,7 @@ block segd_rev3_receiver_gather:
   doAssert f.index.keys[0].srcPoint == 113
   f.close()
 
-block segd_rev3_positions_offsets_and_midpoints:
+sampleBlock segd_rev3_positions_offsets_and_midpoints:
   # Task 8.5: Rev 3 Position blocks give coordinates; the record-level one
   # (INOVA writes it before the Source Description) is the source's.
   var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd", keys = true)
@@ -190,7 +190,7 @@ block segd_rev3_positions_offsets_and_midpoints:
   doAssert f.index.keys[0].rcvX.isNaN and f.index.keys[0].offset.isNaN
   f.close()
 
-block external_geometry_joins_on_stations:
+sampleBlock external_geometry_joins_on_stations:
   # SEG-D 2.x has no coordinates: join them from a table (SPS in Phase 10).
   var f = openSeismic(exampleDir / "63.sgd", keys = true)
   let k0 = f.index.keys[0]
@@ -215,7 +215,7 @@ block external_geometry_joins_on_stations:
     doAssert y.index.keys[i].cmpX == gm.cdpX and y.index.keys[i].cmpY == gm.cdpY
   y.close()
 
-block component_group_ids_match_the_groups:
+sampleBlock component_group_ids_match_the_groups:
   # Task 13.2 (review R2-3): ids come from one table, not from the groups;
   # they must still number the groups in order of first appearance.
   for name in ["inova_rev30_5traces.sgd", "BO_3D-Inglewood_rev21_v7.sgy", "63.sgd"]:

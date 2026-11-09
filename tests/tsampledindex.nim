@@ -12,7 +12,7 @@ import parseSEG/common/binstore
 import ./utils/testutils
 
 let tmp = scratchDir("parseseg_tsampledindex")
-let bo = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+let bo = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
 
 proc convert(src, name: string, o: ConvertOptions): string =
   result = tmp / name
@@ -20,7 +20,7 @@ proc convert(src, name: string, o: ConvertOptions): string =
   doAssert not log.isFatal, name & ": " & $log
 
 proc fixtures(): seq[string] =
-  for p in walkFiles(exampleDir / "*"): result.add p
+  for p in inputFiles(): result.add p
   result.add convert(bo, "bo_rev1.sgy", ConvertOptions(revision: SegyRevision(major: 1)))
   result.add convert(bo, "bo_rev1_ibm.sgy",
     ConvertOptions(revision: SegyRevision(major: 1), format: st1))
@@ -29,7 +29,7 @@ proc fixtures(): seq[string] =
   result.add convert(bo, "bo_int16.sgy", ConvertOptions(format: st3))
   result.add convert(bo, "bo_rev20.sgy", ConvertOptions(revision: SegyRevision(major: 2)))
   result.add convert(bo, "bo_rev0.sgy", ConvertOptions(revision: SegyRevision(major: 0)))
-  result.add convert(exampleDir / "63.sgd", "d63_rev1.sgy",
+  result.add convert(sampleOr("63.sgd"), "d63_rev1.sgy",
     ConvertOptions(revision: SegyRevision(major: 1)))
 
 proc sampled(log: DiagLog): bool =

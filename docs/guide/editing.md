@@ -19,7 +19,7 @@ refused edit. Field names are the ones the header listings show (`<block>.<field
 import std/os
 import parseSEG
 
-copyFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "line.sgy")
+copyFile("survey.sgy", "line.sgy")
 
 var ed = openEditor("line.sgy", "line.sgy.journal.nif")
 doAssert ed.setTraceField(5, "trace.sourceX", 1_700_000)
@@ -67,7 +67,7 @@ its own map and sees the edits too.
 import std/os
 import parseSEG
 
-copyFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "view.sgy")
+copyFile("survey.sgy", "view.sgy")
 var f = openSeismic("view.sgy")
 echo "trace 2 static: ", f.traceField(2, "trace.totalStatic")
 var ed = openEditor(move f)                 # `move`: `f` is a global here
@@ -88,7 +88,7 @@ are not written (`endBatch` returns `false`, and `ed.log` says how many were dro
 import std/os
 import parseSEG
 
-copyFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "statics.sgy")
+copyFile("survey.sgy", "statics.sgy")
 var ed = openEditor("statics.sgy")
 ed.beginBatch()
 for i in 0 ..< ed.file.len:
@@ -112,17 +112,17 @@ that hold neither the original nor the edited value) instead of overwriting them
 import std/os
 import parseSEG
 
-copyFile("SEG Spec/exampleFiles/Sweep0.sgy", "sweep.sgy")
-let original = readFile("sweep.sgy")
-var ed = openEditor("sweep.sgy")
+copyFile("survey.sgy", "undo.sgy")
+let original = readFile("undo.sgy")
+var ed = openEditor("undo.sgy")
 doAssert ed.setTraceField(0, "trace.sourceX", 250)
 ed.close()
-echo readFile("sweep.sgy.edits.nif")
+echo readFile("undo.sgy.edits.nif")
 
-let undo = rollbackJournal("sweep.sgy", "sweep.sgy.edits.nif")
-doAssert undo.len == 0 and readFile("sweep.sgy") == original
-let redo = applyJournal("sweep.sgy", "sweep.sgy.edits.nif")
-doAssert redo.len == 0 and readFile("sweep.sgy") != original
+let undo = rollbackJournal("undo.sgy", "undo.sgy.edits.nif")
+doAssert undo.len == 0 and readFile("undo.sgy") == original
+let redo = applyJournal("undo.sgy", "undo.sgy.edits.nif")
+doAssert redo.len == 0 and readFile("undo.sgy") != original
 ```
 
 ## Header documents: export, edit, import as a patch
@@ -137,27 +137,27 @@ Start with a dry run.
 import std/[os, strutils]
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/63.sgd")
-exportHeaders(f, "63.headers.nif", raw = false)
+var f = openSeismic("record.sgd")
+exportHeaders(f, "record.headers.nif", raw = false)
 f.close()
 
 # Change one value in the document, as a user or a script would.
-var doc = readFile("63.headers.nif")
+var doc = readFile("record.headers.nif")
 doAssert "(f receiverPointNumber 104)" in doc
 doc = doc.replace("(f receiverPointNumber 104)", "(f receiverPointNumber 105)")
-writeFile("63.headers.nif", doc)
+writeFile("record.headers.nif", doc)
 
-let plan = importHeaders("SEG Spec/exampleFiles/63.sgd", "63.headers.nif",
+let plan = importHeaders("record.sgd", "record.headers.nif",
   ImportOptions(dryRun: true))
 echo "a dry run would change ", plan.applied, " field(s)"
 
-# Apply it to a copy: the original sample file stays as it is.
-let done = importHeaders("SEG Spec/exampleFiles/63.sgd", "63.headers.nif",
-  ImportOptions(outPath: "63_fixed.sgd",
+# Apply it to a copy: the original file stays as it is.
+let done = importHeaders("record.sgd", "record.headers.nif",
+  ImportOptions(outPath: "record_fixed.sgd",
     onChange: proc (c: HeaderChange) = echo "  ", c.name, ": ", c.old, " -> ", c.new))
 for d in done.log: echo d
 doAssert plan.applied == 1 and done.applied == 1 and done.refused == 0
-var g = openSeismic("63_fixed.sgd")
+var g = openSeismic("record_fixed.sgd")
 doAssert g.traceField(0, "ext1.receiverPointNumber").intVal == 105
 ```
 
@@ -181,7 +181,7 @@ writeHeaderPatch([
   initHeaderChange(hsTrace, 5, "trace.sourceX", toFieldValue(1_700_000)),
   initHeaderChange(hsFile, 0, "binary.jobId", toFieldValue(7))], "pending.nif")
 
-copyFile("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "survey.sgy")
+copyFile("survey.sgy", "patched.sgy")
 let r = importHeaders("survey.sgy", "pending.nif")         # in place, journaled
 doAssert r.applied == 2 and fileExists("survey.sgy.edits.nif")
 var f = openSeismic("survey.sgy")

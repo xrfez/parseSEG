@@ -22,21 +22,23 @@ IEEE SEG-Y: 11 → 22 GB/s, SEG-D 8058: 11 → 23 GB/s, little-endian IEEE and 9
 GB/s, one thread). Use the baseline (no `-march`, or `-march=x86-64`) only for CPUs or VMs
 without AVX2. `nim cli` builds for x86-64-v3; `nim nimPortable` is the baseline build.
 
-The examples use the sample files in `SEG Spec/exampleFiles/`:
+The examples use four small files that `tools/demofiles.nim` writes with the library's own
+writers (`nim c -r --path:src tools/demofiles.nim <dir>`; `tests/tdocs.nim` writes them next
+to the examples before it runs them):
 
 | File | What it is |
 |---|---|
-| `63.sgd` | SEG-D Rev 2.0, one record with one trace (format 8058) |
-| `inova_rev30_5traces.sgd` | SEG-D Rev 3.0, one record: 3 auxiliary and 2 seismic traces, 4001 samples at 1 ms |
-| `Sweep0.sgy` | SEG-Y Rev 0, little-endian, one 12001-sample sweep trace |
-| `BO_3D-Inglewood_rev21_v7.sgy` | SEG-Y Rev 2.1, 200 post-stack traces of 2001 samples at 2 ms, IBM float (live data in traces 93-116 only, the rest are zero) |
+| `survey.sgy` | SEG-Y Rev 2.1, big-endian, IBM float: a post-stack line of 200 traces of 2001 samples at 2 ms (inline 1001, crosslines 1-200, in trace bytes 13 and 17 as its Layout stanza says) |
+| `shot.sgd` | SEG-D Rev 3.0, format 8058, one shot record: 3 auxiliary and 2 seismic traces of 4001 samples at 1 ms, with source and receiver positions |
+| `record.sgd` | SEG-D Rev 2.0, format 8058, record 63: one seismic trace of 1000 samples at 2 ms, station numbers but no coordinates, two out-of-range values (info diagnostics) |
+| `line.sg2` | SEG-2, little-endian, float32: 24 traces of 1000 samples at 0.5 ms |
 
 ## A first program
 
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd")
+var f = openSeismic("shot.sgd")
 echo f.kind, ": ", f.len, " traces in ", f.recordCount, " record(s), up to ",
   f.maxSamples, " samples"
 let s = f.summary
@@ -118,7 +120,7 @@ the writers, the converters, or the journaled `HeaderEditor` ([editing.md](editi
 import std/[math, strutils]
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd", keys = true)
+var f = openSeismic("shot.sgd", keys = true)
 for i in 0 ..< f.len:
   let e = f.traceEntry(i)
   let k = f.traceKeys(i)
@@ -134,7 +136,7 @@ for g in f.gathers:
 
 doAssert not isSeismic(f.index, 0) and isSeismic(f.index, 3)
 doAssert f.gathers[0].kind == gkShot and f.traceKeys(3).rcvLine == 100
-doAssert not f.traceKeys(0).srcX.isNaN and f.recordField(0, "gh1.fileNumber").intVal == 151
+doAssert not f.traceKeys(0).srcX.isNaN and f.recordField(0, "gh1.fileNumber").intVal == 12
 ```
 
 ## Lifetimes: what you may keep after `close`
@@ -156,10 +158,10 @@ import parseSEG
 
 var kept: Tensor[float32]
 block:
-  var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", keys = true)
+  var f = openSeismic("survey.sgy", keys = true)
   kept = f.readTraces(0..9)
   f.close()
-  doAssert f.len == 200 and f.gathers.len == 1  # the index outlives the map
+  doAssert f.len == 200 and f.gathers.len == 200  # the index outlives the map
   try:
     discard f.readTraces(0..0)
     doAssert false

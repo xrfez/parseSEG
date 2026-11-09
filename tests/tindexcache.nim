@@ -16,9 +16,9 @@ import ./utils/testutils
 let tmp = scratchDir("parseseg_tindexcache")
 
 let
-  d63 = exampleDir / "63.sgd"
-  inova = exampleDir / "inova_rev30_5traces.sgd"
-  bo = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  d63 = sampleOr("63.sgd")
+  inova = sampleOr("inova_rev30_5traces.sgd")
+  bo = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
 
 proc convert(src, name: string, o: ConvertOptions): string =
   result = tmp / name
@@ -26,7 +26,7 @@ proc convert(src, name: string, o: ConvertOptions): string =
   doAssert not log.isFatal, name & ": " & $log
 
 proc fixtures(): seq[string] =
-  for n in walkFiles(exampleDir / "*"): result.add n
+  for n in inputFiles(): result.add n
   result.add convert(bo, "bo_le.sgy", ConvertOptions(byteOrder: boLittle, format: st2))
   result.add convert(d63, "d63_rev1.sgy", ConvertOptions(revision: SegyRevision(major: 1)))
   for (name, rev) in [("d63_20.sgd", (2'u8, 0'u8)), ("d63_21.sgd", (2'u8, 1'u8)),

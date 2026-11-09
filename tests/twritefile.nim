@@ -7,6 +7,7 @@ import std/[assertions, math, os, strutils]
 import parseSEG
 import ./utils/testutils
 
+requireSamples()
 let tmp = scratchDir("parseseg_twritefile")
 
 proc convert(src, name: string, o: ConvertOptions): string =

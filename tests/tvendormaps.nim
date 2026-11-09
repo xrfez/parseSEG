@@ -177,7 +177,7 @@ block malformed_maps_are_diagnostics:
   doAssert r.maps.len == 1 and r.maps[0].name == "o"
   doAssert l.count(sevWarning) == 1 and l.count(sevInfo) == 1 # bad.nif skipped; overlap noted
 
-block applied_to_63_sgd:
+sampleBlock applied_to_63_sgd:
   # Geo Space (manufacturer 9) extended header: 3 blocks, kept raw by the
   # reader. A map decodes block 1's first bytes; raw bytes stay intact.
   let d = readSegd(exampleDir / "63.sgd")
@@ -199,7 +199,7 @@ block applied_to_63_sgd:
   let tb = r.decodeVendorAreas(rec, d.records[0].traces[0], l, "63.sgd")
   doAssert tb.len == 1 and tb[0]["w"].intVal == int64(beU16(d.records[0].traces[0].extensions, 32))
 
-block applied_to_segy:
+sampleBlock applied_to_segy:
   let f = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   var r: VendorRegistry
   r.addMap loadVendorMap("""(.nif27)
@@ -263,7 +263,7 @@ block review_revision_minor_ten:
   c.revision = VendorRevision(major: 2, minor: 10)
   doAssert r.decodeInto(c, area(vtExternalHeader), [1'u8], blk, l)
 
-block rev3_user_blocks_by_type:
+sampleBlock rev3_user_blocks_by_type:
   # INOVA (manufacturer 50) user blocks 0xB0-0xB8 on every trace of the Rev 3
   # fixture, handed over by block type.
   let d = readSegd(exampleDir / "inova_rev30_5traces.sgd")
@@ -285,7 +285,7 @@ block rev3_user_blocks_by_type:
     doAssert tb[0]["first"].intVal == int64(beU32(t.extensions, at))
   doAssert l.len == 0
 
-block rev3_position_and_trailer_offered:
+sampleBlock rev3_position_and_trailer_offered:
   let d = readSegd(exampleDir / "inova_rev30_5traces.sgd")
   var rec = d.records[0].record
   var r: VendorRegistry
@@ -309,7 +309,7 @@ block rev3_position_and_trailer_offered:
   doAssert names == @["position96", "edits"], $names
   doAssert bs[0]["t3"].intVal == 0x52 and bs[1]["head"].text == "V 1.0"
 
-block review_12_3_match_and_trim:
+sampleBlock review_12_3_match_and_trim:
   # (serial a b) bounds, (serial a) a single serial; (trim) and (format) typed.
   let m = loadVendorMap("""(.nif27)
 (vendormap "s" (match (format segy) (serial 5 9))

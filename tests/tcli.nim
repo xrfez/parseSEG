@@ -1,9 +1,12 @@
 ## The `parseSEG` command line tool (Phase 7) end to end: builds it as
-## `nim cli` does and runs every command on the sample files, checking the
-## output, the files written and the exit status (0 ok, 1 errors, 2 usage).
+## `nim cli` does and runs every command on the generated demo files
+## (`tools/demofiles`) and on the sample files (skipped when they are not
+## present), checking the output, the files written and the exit status (0
+## ok, 1 errors, 2 usage).
 
 import std/[assertions, os, osproc, strutils]
 import parseSEG/version
+import ./utils/testutils
 
 const
   root = currentSourcePath().parentDir.parentDir
@@ -42,9 +45,42 @@ proc fresh(src: string): string =
   for j in [result & ".edits.nif", result & ".j.nif"]:
     if fileExists(j): removeFile(j)
 
+# ------------------------------------- the demo files (always available) --
+
+block demo_files:
+  let demo = demoDir()
+  let survey = demo / "survey.sgy"
+  let shot = demo / "shot.sgd"
+  let rec = demo / "record.sgd"
+  let line = demo / "line.sg2"
+  let a = ok("info", survey, "--keys")
+  doAssert "SEG-Y rev 2.1" in a and "1 (IBM float)" in a and "200 (up to 2001 samples" in a
+  let b = ok("info", shot, "--keys")
+  doAssert "SEG-D rev 3.0" in b and "5 (up to 4001 samples" in b and "1 shot" in b and
+    "CRS stanza" in b and "field rec:   12 .. 12" in b
+  doAssert "SEG-D rev 2.0" in ok("info", rec) and "SEG-2 rev 1" in ok("info", line)
+  doAssert ok("diag", rec).count("info:") == 2 and "no diagnostics" in ok("diag", shot)
+  let d = ok("dump", survey, "--traces=4..5", "--fields=trace.cdpX")
+  doAssert d.strip.splitLines[2].startsWith("5\t") and "\t500125" in d
+  doAssert "gh3.sourcePointNumber = 99.5" in ok("dump", rec, "--records=0")
+  # Conversions between the three standards, and back.
+  discard ok("convert", rec, tmp / "demo_rec.sgy", "--rev=1", "--text=ascii")
+  doAssert "SEG-Y rev 1.0" in ok("info", tmp / "demo_rec.sgy")
+  discard ok("convert", shot, tmp / "demo_shot.sg2", "--to=seg2")
+  discard ok("convert", tmp / "demo_shot.sg2", tmp / "demo_shot.sgd", "--to=segd", "--rev=2.1")
+  doAssert "SEG-D rev 2.1" in ok("info", tmp / "demo_shot.sgd")
+  discard ok("convert", line, tmp / "demo_line.sgy")
+  doAssert "24 (up to 1000 samples" in ok("info", tmp / "demo_line.sgy")
+  # An edit, undone through the journal.
+  let f = fresh(survey)
+  doAssert "1 edits written" in ok("edit", f, "t5:trace.sourceX=1200")
+  doAssert "\t1200" in ok("dump", f, "--traces=5", "--fields=trace.sourceX")
+  discard ok("journal", "rollback", f, f & ".edits.nif")
+  doAssert readFile(f) == readFile(survey)
+
 # -------------------------------------------------------- 7.1: inspecting --
 
-block usage_and_version:
+sampleBlock usage_and_version:
   doAssert PackageVersion != "unknown" and "parseSEG " & PackageVersion in ok("version")
   doAssert "Usage: parseSEG" in ok("help")
   doAssert "unknown command" in fails(2, "frobnicate")
@@ -55,7 +91,7 @@ block usage_and_version:
   writeFile(tmp / "junk.bin", "not seismic data at all")
   doAssert "is not SEG-Y, SEG-D or SEG-2" in fails(1, "info", tmp / "junk.bin")
 
-block info:
+sampleBlock info:
   let a = ok("info", inglewood, "--keys")
   doAssert "SEG-Y rev 2.1" in a and "1 (IBM float)" in a and "200 (up to 2001 samples" in a
   doAssert "2000.0 µs" in a and "gathers:" in a and "0 fatal, 0 error" in a
@@ -67,7 +103,7 @@ block info:
   doAssert "coordinates: unknown, CRS stanza (155 chars)" in ok("info", inova)
   doAssert "coordinates: meters, CRS P1/11" in ok("info", inglewood)
 
-block dump:
+sampleBlock dump:
   let d = fails(1, "dump", inglewood, "--traces=4..5", "--fields=trace.sourceX,trace.bogus")
   let lines = d.strip.splitLines
   doAssert lines[0].startsWith("trace\toffset\tsamples") and "trace.sourceX" in lines[0]
@@ -90,7 +126,7 @@ block dump:
   doAssert "out of range" in fails(2, "dump", inglewood, "--traces=200")
   doAssert "bad trace selection" in fails(2, "dump", inglewood, "--traces=x")
 
-block diag:
+sampleBlock diag:
   let d = ok("diag", s63)
   doAssert d.count("info:") == 2 and "array forming" in d
   doAssert "no diagnostics" in ok("diag", s63, "--min=warning")
@@ -100,7 +136,7 @@ block diag:
 
 # -------------------------------------------------------- 7.1: converting --
 
-block convert:
+sampleBlock convert:
   let o = ok("convert", s63, tmp / "63.sgy", "--rev=1", "--text=ascii")
   doAssert "written" in o
   doAssert "SEG-Y rev 1.0" in ok("info", tmp / "63.sgy")
@@ -143,7 +179,7 @@ block convert:
 
 # -------------------------------------------------------- 7.3: editing --
 
-block edit_and_journal:
+sampleBlock edit_and_journal:
   let f = fresh(inglewood)
   let o = ok("edit", f, "t5:trace.sourceX=1200", "t0..2:trace.groupStatic=-7",
     "file:binary.jobId=7", "t0:trace.headerName=\"AB\"")
@@ -166,7 +202,7 @@ block edit_and_journal:
   doAssert "(standard segd)" in h and "(block gh1" in h and "(f year 25)" in h
   doAssert "(block gh3" in h and "(f sourcePointNumber 99.5)" in h
 
-block headers_export_and_import:
+sampleBlock headers_export_and_import:
   let f = fresh(inglewood)
   doAssert "200 traces exported" in ok("headers", "export", f, "-o", tmp / "h.nif")
   let h = readFile(tmp / "h.nif")
@@ -203,7 +239,7 @@ block headers_export_and_import:
 
 # --------------------------------------------------- 7.1b: vendor maps --
 
-block vendormaps:
+sampleBlock vendormaps:
   let example = root / "tests" / "vendormaps" / "example.nif"
   doAssert "acme-extended version 1, 3 targets, ok" in ok("vendormap", "check", example)
   writeFile(tmp / "broken_map.nif", "(vendormap \"x\" (version 1) (target")
@@ -225,7 +261,7 @@ block vendormaps:
 
 # ------------------------------------------- Phase 7 review regressions --
 
-block survey:
+sampleBlock survey:
   let sps = tmp / "t.sps"
   writeFile(sps, [
     "H00 SPS format version number   SPS 2.1;",
@@ -254,7 +290,7 @@ block survey:
   discard fails(2, "survey", sps, "--decimals=1,1")   # P1 only
   discard fails(2, "keys", s63, "--overwrite")        # needs --sps or --p1
 
-block survey_apply:
+sampleBlock survey_apply:
   let sps = tmp / "t.sps" # from the survey block: record 63 -> stations 20/205, 10/101
   let path = fresh(s63)
   let original = readFile(path)
@@ -277,7 +313,7 @@ block survey_apply:
   discard fails(2, "survey-apply", s63, "--sps=" & sps, "--values=nope")
   discard fails(2, "survey-apply", s63, "--sps=" & sps, "-o", s63)
 
-block review_outputs_never_clobber_inputs:
+sampleBlock review_outputs_never_clobber_inputs:
   let f = fresh(inglewood)
   doAssert "is the input file" in fails(2, "headers", "export", f, "-o", f)
   doAssert "is the input file" in fails(2, "vendormap", "scaffold", f, "-o", f)
@@ -292,7 +328,7 @@ block review_outputs_never_clobber_inputs:
   writeFile(tmp / "half.sgy", readFile(inglewood)[0 ..< 1_000_000])
   discard run("convert", tmp / "half.sgy", tmp / "fromhalf.sgy")
 
-block review_option_values_are_required:
+sampleBlock review_option_values_are_required:
   let f = fresh(inglewood)
   doAssert "needs a value" in fails(2, "headers", "import", f, tmp / "h.nif", "-o")
   doAssert readFile(f) == readFile(inglewood)
@@ -301,7 +337,7 @@ block review_option_values_are_required:
   doAssert "takes no value" in fails(2, "info", f, "--keys=1")
   doAssert "SEG-Y rev 2.1" in ok("--keys", "info", f) # options before the command
 
-block review_edit_validates_first:
+sampleBlock review_edit_validates_first:
   let f = fresh(inglewood)
   for bad in ["bad", "q9:trace.sourceX=1", "t999:trace.sourceX=1", "t5..2:trace.sourceX=1",
       "t0:trace.nope=1", "t0:trace.sourceX=", "r0:binary.jobId=7"]:
@@ -320,7 +356,7 @@ block review_edit_validates_first:
   discard ok("journal", "rollback", f, f & ".edits.nif")
   doAssert readFile(f) == readFile(inglewood)
 
-block review_ranges_and_revisions:
+sampleBlock review_ranges_and_revisions:
   doAssert "out of range" in fails(2, "dump", inglewood, "--traces=0..99999999999")
   doAssert "empty trace range" in fails(2, "dump", inglewood, "--traces=5..2")
   for r in ["256", "258.1", "300", "-1", "2.1.1", "x.y", "2."]:
@@ -332,7 +368,7 @@ block review_ranges_and_revisions:
   discard ok("convert", tmp / "d.raw", tmp / "fromraw.sgd")
   doAssert "SEG-D rev 3.0" in ok("info", tmp / "fromraw.sgd")
 
-block review_exit_codes_and_messages:
+sampleBlock review_exit_codes_and_messages:
   writeFile(tmp / "t3600.sgy", readFile(inglewood)[0 ..< 3600])
   discard fails(1, "dump", tmp / "t3600.sgy")
   doAssert "fatal" in fails(1, "info", tmp / "t3600.sgy")

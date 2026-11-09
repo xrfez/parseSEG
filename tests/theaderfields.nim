@@ -34,7 +34,7 @@ proc same[T](f: SeismicFile, get: proc (name: string): Option[FieldValue], h: T,
         doAssert v.kind == fvInt and v.intVal == int64(x), blockName & "." & n & " " & $v
         inc result
 
-block segy_every_field_of_every_trace:
+sampleBlock segy_every_field_of_every_trace:
   for n in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy"]:
     var f = openSeismic(exampleDir / n)
     let d = readSegyHeaders(exampleDir / n)
@@ -45,7 +45,7 @@ block segy_every_field_of_every_trace:
     doAssert f.same(getFile, d.file.binary, "binary") > 40
     f.close()
 
-block segd_every_field_of_every_trace:
+sampleBlock segd_every_field_of_every_trace:
   for n in ["63.sgd", "inova_rev30_5traces.sgd"]:
     var f = openSeismic(exampleDir / n)
     let d = readSegdHeaders(exampleDir / n)
@@ -68,7 +68,7 @@ block segd_every_field_of_every_trace:
         inc i
     f.close()
 
-block names_errors_and_edits:
+sampleBlock names_errors_and_edits:
   doAssert "sourceX" in fieldNames(hbSegyTrace) and "raw" notin fieldNames(hbSegdTrace)
   doAssert "unassigned1" notin fieldNames(hbSegyBinary) # raw bytes
   doAssert "headerName" in fieldNames(hbSegyTrace)      # text
@@ -103,7 +103,7 @@ block names_errors_and_edits:
   doAssert ed.file.traceField(0, "trace.groupX").intVal == 4321
   ed.close()
 
-block sample_intervals:
+sampleBlock sample_intervals:
   for (n, us) in [("BO_3D-Inglewood_rev21_v7.sgy", 2000.0), ("Sweep0.sgy", 1000.0),
       ("63.sgd", -1.0), ("inova_rev30_5traces.sgd", -1.0)]:
     var f = openSeismic(exampleDir / n)

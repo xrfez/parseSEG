@@ -8,8 +8,9 @@ results).
 
 `docs/api.md` stays the reference (every public name, one line each); these pages show how
 the pieces fit together. Every code example on these pages is compiled and run by
-`tests/tdocs.nim` against the sample files in `SEG Spec/exampleFiles/`, so the examples
-match the code.
+`tests/tdocs.nim` against small files that `tools/demofiles.nim` generates (`survey.sgy`,
+`shot.sgd`, `record.sgd`, `line.sg2`; see [getting-started.md](getting-started.md)), so the
+examples match the code.
 
 ## Which page to read
 

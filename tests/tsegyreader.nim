@@ -23,7 +23,7 @@ proc copyTo(d: SegyData, path: string, opts: SegyWriteOptions) =
 
 proc errorsAndWorse(log: DiagLog): int = log.count(sevError) + log.count(sevFatal)
 
-block sweep0:
+sampleBlock sweep0:
   let d = readSegy(exampleDir / "Sweep0.sgy")
   doAssert d.log.len == 1
   doAssert d.log[0].severity == sevInfo and d.log[0].code == dcByteOrder
@@ -35,7 +35,7 @@ block sweep0:
   doAssert d.samples.shape == [1, 12001]
   doAssert d.samples[0, 6000] == -0.04068503528833389'f32
 
-block inglewood:
+sampleBlock inglewood:
   let d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   doAssert d.log.len == 0, $d.log[0]
   doAssert d.file.byteOrder == boBig and d.file.byteOrderDeclared
@@ -46,14 +46,14 @@ block inglewood:
   doAssert d.samples[100, 1000] == 5572.83203125'f32
   doAssert d.file.trailer.recordCount == 0
 
-block byte_identical_round_trips:
+sampleBlock byte_identical_round_trips:
   for name in ["Sweep0.sgy", "BO_3D-Inglewood_rev21_v7.sgy"]:
     let d = readSegy(exampleDir / name)
     let outPath = tmp / name
     d.copyTo(outPath, initSegyWriteOptions(d.file))
     doAssert readBytes(outPath) == readBytes(exampleDir / name), name
 
-block byte_order_conversion:
+sampleBlock byte_order_conversion:
   for (name, target) in [("BO_3D-Inglewood_rev21_v7.sgy", boLittle),
       ("BO_3D-Inglewood_rev21_v7.sgy", boPairSwapped), ("Sweep0.sgy", boBig)]:
     let d = readSegy(exampleDir / name)
@@ -72,7 +72,7 @@ block byte_order_conversion:
     e.copyTo(back, SegyWriteOptions(byteOrder: d.file.byteOrder, lenient: true))
     doAssert readBytes(back) == readBytes(exampleDir / name)
 
-block tape_image_round_trip:
+sampleBlock tape_image_round_trip:
   let d = readSegy(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let tap = tmp / "inglewood.tap"
   rewrite(d, openTapeImageSink(tap), initSegyWriteOptions(d.file))
@@ -91,7 +91,7 @@ block tape_image_round_trip:
   doAssert e.traces.len == 200 and e.samples == d.samples
   doAssert e.file.extended.data == d.file.extended.data
 
-block tape_label:
+sampleBlock tape_label:
   var d = readSegy(exampleDir / "Sweep0.sgy")
   var label = newSeq[byte](TapeLabelSize)
   let text = align("1", 4) & "SY1.0RECORDB1  " & align("0", 10) & align("0", 10) &
@@ -126,7 +126,7 @@ block tape_label:
   except SegFormatError as e:
     doAssert "100-byte tape label" in e.msg, e.msg
 
-block truncated_file:
+sampleBlock truncated_file:
   let full = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   let cut = tmp / "cut.sgy"
   writeBytes(cut, full[0 ..< 333200 + 150 * 8244 + 1000])
@@ -137,7 +137,7 @@ block truncated_file:
   doAssert fatal.code == dcTruncated and fatal.loc.trace == 150
   doAssert fatal.offset == 333200 + 150 * 8244 + 1000
 
-block undefined_format_code:
+sampleBlock undefined_format_code:
   var b = readBytes(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
   b[3224] = 0
   b[3225] = 99
@@ -237,19 +237,19 @@ proc patched(name: string, edits: openArray[(int, seq[byte])]): string =
 
 const ingle = "BO_3D-Inglewood_rev21_v7.sgy"
 
-block review_huge_first_trace_offset_is_logged_not_fatal:
+sampleBlock review_huge_first_trace_offset_is_logged_not_fatal:
   let d = readSegy(patched(ingle, [(3520, newSeq[byte](8).mapIt(0xFF'u8))]))
   doAssert d.traces.len == 200 and not d.log.isFatal
   doAssert d.log[0].loc.field == "binary.firstTraceOffset"
 
-block review_huge_counts_do_not_allocate_unboundedly:
+sampleBlock review_huge_counts_do_not_allocate_unboundedly:
   # Rev 2.0 with 0x7FFFFFFF additional headers per trace: the read stops at
   # the end of the 2 MB file instead of allocating ~500 GB.
   let d = readSegy(patched(ingle, [(3500, @[2'u8, 0]), (3506, @[0x7F'u8, 0xFF, 0xFF, 0xFF])]))
   doAssert d.log.isFatal and d.traces.len == 0
   doAssert d.log[d.log.len - 1].code == dcTruncated
 
-block review_missing_endtext_does_not_swallow_traces:
+sampleBlock review_missing_endtext_does_not_swallow_traces:
   var blank = newSeq[byte](15)
   for i in 0..<blank.len: blank[i] = 0x20
   let d = readSegy(patched(ingle, [(330000, blank)])) # EndText name blanked
@@ -261,7 +261,7 @@ block review_missing_endtext_does_not_swallow_traces:
     if e.loc.field == "extended" and e.offset == 333200: warned = true
   doAssert warned
 
-block review_headers_survive_a_fatal_error:
+sampleBlock review_headers_survive_a_fatal_error:
   let full = readBytes(exampleDir / ingle)
   let cut = tmp / "cut_in_ext.sgy"
   writeBytes(cut, full[0 ..< 50000])
@@ -270,7 +270,7 @@ block review_headers_survive_a_fatal_error:
   doAssert d.file.revision == SegyRevision(major: 2, minor: 1)
   doAssert d.file.binary.lineNumber == 360 and d.file.extended.recordCount == 14
 
-block review_le_trace_numbers_are_not_taken_for_a_trailer:
+sampleBlock review_le_trace_numbers_are_not_taken_for_a_trailer:
   var d = readSegy(exampleDir / ingle)
   d.file.binary.numTrailerRecords = -1
   d.traces[5].header.traceSeqLine = 10280 # 0x2828 = "((" in little-endian
@@ -280,7 +280,7 @@ block review_le_trace_numbers_are_not_taken_for_a_trailer:
   doAssert e.traces.len == 200 and e.log.len == 0
   doAssert e.traces[5].header.traceSeqLine == 10280
 
-block review_undefined_revision_gets_rev0_rules:
+sampleBlock review_undefined_revision_gets_rev0_rules:
   var blanks = newSeq[byte](340)
   for i in 0..<blanks.len: blanks[i] = 0x20
   let d = readSegy(patched("Sweep0.sgy", [(3260, blanks)]))
@@ -288,19 +288,19 @@ block review_undefined_revision_gets_rev0_rules:
   doAssert d.file.revision == SegyRevision(major: 0, minor: 0)
   doAssert d.file.binary.revision == SegyRevision(major: 32, minor: 32)
 
-block review_little_endian_rev1_revision:
+sampleBlock review_little_endian_rev1_revision:
   let d = readSegy(patched("Sweep0.sgy", [(3500, @[0'u8, 1])]))
   doAssert d.file.revision == SegyRevision(major: 1, minor: 0)
   doAssert d.traces.len == 1 and not d.log.isFatal
 
-block review_label_needs_a_c_after_it:
+sampleBlock review_label_needs_a_c_after_it:
   # A textual header that starts like a label but is not followed by 'C'.
   let d = readSegy(patched("Sweep0.sgy", [(0, @[byte(' '), byte('1'), byte(' '), byte(' '),
     byte('S'), byte('Y')])]))
   doAssert d.file.tapeLabel.len == 0 and d.traces.len == 1
   doAssert d.file.firstTraceOffset == 3600
 
-block review_writer_checks:
+sampleBlock review_writer_checks:
   let d = readSegy(exampleDir / "Sweep0.sgy")
   doAssertRaises SegFormatError: # pair-swapped Rev 0 cannot be read back
     d.copyTo(tmp / "pair_rev0.sgy", SegyWriteOptions(byteOrder: boPairSwapped))
@@ -332,7 +332,7 @@ proc writeLog(d: SegyData, path: string, opts: SegyWriteOptions): DiagLog =
   sink.close()
   result = w.log
 
-block as_read_little_endian_rev0_is_written_back:
+sampleBlock as_read_little_endian_rev0_is_written_back:
   let d = readSegy(exampleDir / "Sweep0.sgy")
   let log = writeLog(d, tmp / "asread_sweep.sgy", initSegyWriteOptions(d.file))
   doAssert log.len == 1 and log[0].severity == sevWarning
@@ -353,7 +353,7 @@ block as_read_little_endian_rev0_is_written_back:
   doAssertRaises SegFormatError:
     be.copyTo(tmp / "sweep_back_le.sgy", SegyWriteOptions(byteOrder: boLittle))
 
-block as_read_invalid_values_are_judged_per_field:
+sampleBlock as_read_invalid_values_are_judged_per_field:
   # Sweep0 (LE) with a zero sample interval: read with a warning ...
   let path = patched("Sweep0.sgy", [(3216, @[0'u8, 0])])
   var d = readSegy(path)
@@ -374,7 +374,7 @@ block as_read_invalid_values_are_judged_per_field:
   let lenientLog = writeLog(g, tmp / "dt0_lenient.sgy", initSegyWriteOptions(g.file, true))
   doAssert lenientLog.count(sevError) == 0 and lenientLog.count(sevWarning) > 0
 
-block as_read_missing_endtext_is_written_back:
+sampleBlock as_read_missing_endtext_is_written_back:
   var blank = newSeq[byte](15)
   for i in 0..<blank.len: blank[i] = 0x20
   let path = patched(ingle, [(330000, blank)])
@@ -431,7 +431,7 @@ block ext1_byte_order_conversion:
     prev = e
   doAssert readBytes(tmp / "ext1_big.sgy") == readBytes(path)
 
-block rev0_zero_sample_count_task_3_5:
+sampleBlock rev0_zero_sample_count_task_3_5:
   # Sweep0.sgy is Rev 0, little-endian, one trace of 12001 samples. Rev 0
   # writers sometimes left trace bytes 115-116 at 0: the binary count is used.
   var s = readFile(exampleDir / "Sweep0.sgy")
@@ -447,7 +447,7 @@ block rev0_zero_sample_count_task_3_5:
   let orig = readSegy(exampleDir / "Sweep0.sgy")
   doAssert d.traces[0].samples == orig.traces[0].samples
 
-block rev20_files_task_3_5:
+sampleBlock rev20_files_task_3_5:
   # 2.1 -> 2.0: Rev 2.0 does not require ((SEG:EndText)), and reads back as 2.0.
   let src = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
   let log = convertFile(src, tmp / "ingle20.sgy",
@@ -487,7 +487,7 @@ proc makeFile(ext, trailer: ExtendedTextHeader, nExt: int16, nTrailer: int32): S
     t.samples = newSeq[byte](8)
     result.traces.add t
 
-block segyreview2_f2_format_code_edit_is_refused:
+sampleBlock segyreview2_f2_format_code_edit_is_refused:
   var d = readSegy(exampleDir / "Sweep0.sgy")
   d.file.binary.formatCode = 8
   doAssertRaises SegFormatError: discard d.write(tmp / "fmt.sgy", d.strict)
@@ -529,7 +529,7 @@ block segyreview2_f4_inconsistent_files_write_back_as_read:
   g.file.binary.numExtTextHeaders = 1
   doAssertRaises SegFormatError: discard g.write(tmp / "edited.sgy", g.strict)
 
-block segyreview2_f5_cross_field_problems_are_not_downgraded:
+sampleBlock segyreview2_f5_cross_field_problems_are_not_downgraded:
   # Rev 1 little-endian, revision edited to 2.1: the (unchanged) zero marker
   # is now a new problem.
   var b = readBytes(exampleDir / "Sweep0.sgy")

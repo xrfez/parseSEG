@@ -49,10 +49,22 @@ jobs:
           mv bin/parseSEG bin/parseSEG-x86-64-v1
           nim cli
 
+      # The sample files are not in the repository: smoke-test on the demo
+      # files the library's own writers generate (tools/demofiles.nim).
+      - name: Generate the demo files
+        run: nim c -r --hints:off --path:src -o:bin/demofiles tools/demofiles.nim demo
+
       - name: CLI smoke test (both builds)
         run: |
-          bin/parseSEG info "SEG Spec/exampleFiles/63.sgd"
-          bin/parseSEG-x86-64-v1 info "SEG Spec/exampleFiles/63.sgd"
+          for exe in bin/parseSEG bin/parseSEG-x86-64-v1; do
+            $exe info demo/survey.sgy --keys
+            $exe info demo/shot.sgd --keys
+            $exe convert demo/record.sgd record.sgy
+            $exe info record.sgy
+            $exe convert demo/line.sg2 line.sgd --to=segd
+            $exe info line.sgd
+            rm record.sgy line.sgd
+          done
 
       - name: Upload the Linux build
         uses: actions/upload-artifact@v4
@@ -82,12 +94,18 @@ jobs:
       - name: Build the command line tool
         run: nim cli
 
+      - name: Generate the demo files
+        run: nim c -r --hints:off --path:src -o:bin/demofiles tools/demofiles.nim demo
+
       - name: CLI smoke test
         shell: bash
         run: |
-          bin/parseSEG info "SEG Spec/exampleFiles/inova_rev30_5traces.sgd" --keys
-          bin/parseSEG convert "SEG Spec/exampleFiles/63.sgd" 63.sgy
-          bin/parseSEG info 63.sgy
+          bin/parseSEG info demo/shot.sgd --keys
+          bin/parseSEG info demo/survey.sgy
+          bin/parseSEG convert demo/record.sgd record.sgy
+          bin/parseSEG info record.sgy
+          bin/parseSEG convert demo/line.sg2 line.sgd --to=segd
+          bin/parseSEG info line.sgd
 
       - name: Upload
         uses: actions/upload-artifact@v4

@@ -150,7 +150,7 @@ proc makeSegd(path: string): bool =
     pieces.add (int64(DHeader) + int64(k) * DTraceBytes, th)
   writeSparse(path, DSize, pieces)
 
-block segd_larger_than_4_gib:
+sampleBlock segd_larger_than_4_gib:
   let path = tmp / "big.sgd"
   if not makeSegd(path):
     echo "tlargefile: the file system does not keep sparse files; SEG-D part skipped"

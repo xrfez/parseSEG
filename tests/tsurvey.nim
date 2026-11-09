@@ -7,6 +7,7 @@ import std/[assertions, options, streams, strutils, math, os, tables]
 import parseSEG
 import parseSEG/common/ebcdic
 import parseSEG/survey/cards # column helpers (internal)
+import ./utils/testutils
 
 proc rec(first: char, fields: openArray[(int, string)]): string =
   ## An 80-column record with `fields` placed at their 1-based columns.
@@ -270,7 +271,7 @@ block join_line_names:
   doAssert stationKey(4960, 12340, 3) in g4.table.sources
   doAssert g4.table.sources[stationKey(4960, 12340, 3)].z == 857
 
-block join_to_a_real_file:
+sampleBlock join_to_a_real_file:
   # 63.sgd (SEG-D 2.0): file 63, one trace (channel 1), stations in THE#1.
   let dir = getTempDir() / "tsurvey2"
   createDir(dir)

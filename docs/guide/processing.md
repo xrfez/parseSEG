@@ -23,7 +23,7 @@ allocation.
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 const Chunk = 64
 var buf = newTraceTensor[float64](Chunk, f.maxSamples)   # float64: room for any format
 var log: DiagLog
@@ -53,7 +53,7 @@ A `Prefetcher` decodes the next chunks on a worker thread while you process the 
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 3)
 var peak = 0'f32
 var traces = 0
@@ -78,7 +78,7 @@ per trace or per channel set rather than per file.
 ```nim
 import parseSEG
 
-var f = openSeismic("SEG Spec/exampleFiles/inova_rev30_5traces.sgd")
+var f = openSeismic("shot.sgd")
 var seismic: seq[int]
 for i in 0 ..< f.len:
   if isSeismic(f.index, i): seismic.add i
@@ -117,7 +117,7 @@ proc work(job: ptr Job) {.thread.} =
     job.sumAbs += sum(abs(buf[0 .. last - first, _].astype(float64)))
     first = last + 1
 
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var f = openSeismic("survey.sgy")
 const Workers = 4
 var jobs: array[Workers, Job]
 var threads: array[Workers, Thread[ptr Job]]
@@ -160,8 +160,7 @@ same code works for SEG-Y, SEG-D and SEG-2.
 import std/os
 import parseSEG
 
-for input in ["SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy",
-    "SEG Spec/exampleFiles/inova_rev30_5traces.sgd"]:
+for input in ["survey.sgy", "shot.sgd", "line.sg2"]:
   var f = openSeismic(input)
   let output = "gain_" & input.extractFilename
   var w = openSeismicWriter(output, like = f)
@@ -208,12 +207,12 @@ Options and rules:
 import parseSEG
 
 # Keep the first 1000 samples of each trace: the headers follow.
-var f = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
-var w = openSeismicWriter("inglewood_1000.sgy", like = f)
+var f = openSeismic("survey.sgy")
+var w = openSeismicWriter("survey_1000.sgy", like = f)
 let x = f.readTraces(0 ..< f.len)
 for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = 1000)
 discard w.close()
-var g = openSeismic("inglewood_1000.sgy")
+var g = openSeismic("survey_1000.sgy")
 doAssert g.maxSamples == 1000 and g.fileField("binary.samplesPerTrace").intVal == 1000
 ```
 
@@ -229,10 +228,10 @@ writes and refuses spec-invalid output unless `lenient`).
 import std/options
 import parseSEG
 
-var src = openDiskSource("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var src = openDiskSource("survey.sgy")
 var r = openSegy(src)
 let fmt = r.file.format.get                  # format 1 (IBM float) in this file
-var sink = openDiskSink("inglewood_gain.sgy")
+var sink = openDiskSink("survey_gain.sgy")
 var w = openSegyWriter(sink, r.file, initSegyWriteOptions(r.file))
 var t: SegyTrace
 var x: seq[float32]
@@ -248,8 +247,8 @@ src.close()
 for d in r.log: echo d
 for d in w.log: echo d
 
-var a = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
-var b = openSeismic("inglewood_gain.sgy")
+var a = openSeismic("survey.sgy")
+var b = openSeismic("survey_gain.sgy")
 let (before, after) = (a.readTraces(100..100), b.readTraces(100..100))
 echo "largest change from an exact gain of 2: ", max(abs(after - 2'f32 * before))
 doAssert b.len == a.len and max(abs(after - 2'f32 * before)) <= 1e-6 * max(abs(after))
@@ -262,13 +261,13 @@ format code, and encode each trace in that format:
 import std/options
 import parseSEG
 
-var src = openDiskSource("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
+var src = openDiskSource("survey.sgy")
 var r = openSegy(src)
 let inFormat = r.file.format.get
 var outFile = r.file                       # the headers, with IEEE float samples
 outFile.binary.formatCode = 5
 outFile.format = some(sfFloat32)
-var sink = openDiskSink("inglewood_f32.sgy")
+var sink = openDiskSink("survey_f32.sgy")
 var w = openSegyWriter(sink, outFile, initSegyWriteOptions(outFile))
 var t: SegyTrace
 var x: seq[float32]
@@ -282,8 +281,8 @@ w.close()
 sink.close()
 src.close()
 
-var a = openSeismic("SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy")
-var b = openSeismic("inglewood_f32.sgy")
+var a = openSeismic("survey.sgy")
+var b = openSeismic("survey_f32.sgy")
 doAssert b.summary.formatCode == 5 and b.readTraces(0 ..< b.len) == a.readTraces(0 ..< a.len)
 ```
 
@@ -320,8 +319,8 @@ proc hook(job: Job): Progress =
     if total > 0: job.lastPercent = int(done * 100 div total)
     not job.stop
 
-let inputs = ["SEG Spec/exampleFiles/inova_rev30_5traces.sgd",
-  "SEG Spec/exampleFiles/BO_3D-Inglewood_rev21_v7.sgy", "SEG Spec/exampleFiles/63.sgd"]
+let inputs = ["shot.sgd",
+  "survey.sgy", "record.sgd"]
 for k, input in inputs:
   let job = Job(name: input.extractFilename, stop: k == 2)  # cancel the last one
   let output = "batch_" & job.name.changeFileExt("sgy")

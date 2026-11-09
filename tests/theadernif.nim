@@ -21,7 +21,7 @@ proc exportOf(path, to: string, raw = true) =
   exportHeaders(f, to, raw)
   f.close()
 
-block round_trips_change_nothing:
+sampleBlock round_trips_change_nothing:
   for n in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy", "63.sgd", "inova_rev30_5traces.sgd"]:
     let p = fresh(n)
     exportOf(p, tmp / "rt.nif")
@@ -29,7 +29,7 @@ block round_trips_change_nothing:
     doAssert r.applied == 0 and r.refused == 0 and not r.log.hasErrors, n & " " & $r.log
     doAssert readFile(p) == readFile(ex / n), n
 
-block hostile_documents_are_diagnostics:
+sampleBlock hostile_documents_are_diagnostics:
   let p = fresh("63.sgd")
   for (doc, what) in [("", "empty"), ("(headers (trace 0 (block trace (f traceNumber 1E))))", "bad number"),
       ("(headers (trace 0 (block trace (f traceNumber 1.5E+))))", "bad number"),
@@ -45,7 +45,7 @@ block hostile_documents_are_diagnostics:
     doAssert r.log.has(what, sevFatal), what & ": " & $r.log
   doAssert readFile(p) == readFile(ex / "63.sgd")
 
-block last_entry_wins_and_exact_floats:
+sampleBlock last_entry_wins_and_exact_floats:
   let p = fresh("63.sgd")
   writeFile(tmp / "dup.nif", "(headers (record 0 (block gh1 (f fileNumber 1) (f fileNumber 63))))")
   var r = importHeaders(p, tmp / "dup.nif")
@@ -66,7 +66,7 @@ block last_entry_wins_and_exact_floats:
   writeFile(tmp / "z0.nif", "(headers (trace 0 (block ext1 (f extReceiverLineNumber 0.0))))")
   doAssert importHeaders(p, tmp / "z0.nif", ImportOptions(dryRun: true)).applied == 0
 
-block documents_for_another_file:
+sampleBlock documents_for_another_file:
   let p = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   exportOf(ex / "Sweep0.sgy", tmp / "sweep.nif")
   var r = importHeaders(p, tmp / "sweep.nif")
@@ -75,7 +75,7 @@ block documents_for_another_file:
   r = importHeaders(p, tmp / "sweep.nif", ImportOptions(force: true, dryRun: true))
   doAssert r.applied > 0 and r.log.has("applied anyway", sevWarning)
 
-block outputs_journals_and_copies:
+sampleBlock outputs_journals_and_copies:
   let p = fresh("63.sgd")
   exportOf(p, tmp / "doc.nif")
   doAssertRaises(ValueError):
@@ -103,13 +103,13 @@ block outputs_journals_and_copies:
   r = importHeaders(p, tmp / "doc.nif", ImportOptions(outPath: o))
   doAssert fileExists(o) and r.applied == 0
 
-block many_errors_are_capped:
+sampleBlock many_errors_are_capped:
   let p = fresh("63.sgd")
   exportOf(ex / "BO_3D-Inglewood_rev21_v7.sgy", tmp / "big.nif")
   let r = importHeaders(p, tmp / "big.nif", ImportOptions(force: true, dryRun: true))
   doAssert r.log.len < 100 and r.log.has("more entries name fields", sevError), $r.log.len
 
-block scaffold_escapes_and_ranges:
+sampleBlock scaffold_escapes_and_ranges:
   # Unassigned SEG-Y bytes with awkward text, and a binary byte in 3507-3600.
   let p = fresh("BO_3D-Inglewood_rev21_v7.sgy")
   var b = readFile(p)
@@ -153,7 +153,7 @@ when defined(linux):
       limitFileSize(-1)
     seen = n
 
-  block failed_journal_syncs_are_reported:
+  sampleBlock failed_journal_syncs_are_reported:
     # 12.4: batched edits reach the file only when their journal entries are
     # synced; when that fails, `applied` must not claim written changes.
     let name = "BO_3D-Inglewood_rev21_v7.sgy"

@@ -22,7 +22,7 @@ proc value(d: SegyData, i: int, name: string): float64 =
   doAssert v.isSome, name
   v.get
 
-block segd_rev2_to_segy_rev21:
+sampleBlock segd_rev2_to_segy_rev21:
   let src = exampleDir / "63.sgd"
   let log = convertFile(src, tmp / "63.sgy")
   doAssert log.errorsAndWorse == 0, $log
@@ -46,7 +46,7 @@ block segd_rev2_to_segy_rev21:
   doAssert t.header.energySourcePoint == 100 and t.header.shotpointScalar == -100
   doAssert t.header.shotpointNumber == 9950
 
-block segd_rev3_to_segy_with_coordinates:
+sampleBlock segd_rev3_to_segy_with_coordinates:
   let src = exampleDir / "inova_rev30_5traces.sgd"
   doAssert convertFile(src, tmp / "inova.sgy").errorsAndWorse == 0
   let d = readSegy(tmp / "inova.sgy")
@@ -65,7 +65,7 @@ block segd_rev3_to_segy_with_coordinates:
   doAssert t.header.timeBasisCode == 4 and t.header.year >= 2000 # from the GH#3 time zero
   doAssert d.value(3, "segd_channel_type") == 0x10
 
-block segd_to_segy_rev1_and_descale:
+sampleBlock segd_to_segy_rev1_and_descale:
   let src = exampleDir / "63.sgd"
   let log = convertFile(src, tmp / "63r1.sgy", ConvertOptions(revision: SegyRevision(major: 1)))
   doAssert log.errorsAndWorse == 0 and log.noted("no field for SEG-D receiver/source line")
@@ -81,7 +81,7 @@ block segd_to_segy_rev1_and_descale:
   for j in 0..<1000:
     doAssert m.samples[0, j] == float32(float64(s.records[0].samples[0, j]) * pow(2.0, mp))
 
-block lossless_format_choice:
+sampleBlock lossless_format_choice:
   # An 8038 (int32) record converts to SEG-Y format 2, exactly.
   var d = readSegd(exampleDir / "63.sgd")
   var rd = d.records[0]
@@ -106,7 +106,7 @@ block lossless_format_choice:
     ConvertOptions(format: st8)) # int8
   doAssert log.count(sevError) == 1 and log.noted("do not fit")
 
-block segy_revision_and_byte_order_changes:
+sampleBlock segy_revision_and_byte_order_changes:
   let ing = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
   let a = readSegy(ing)
   # Rev 2.1 IBM → Rev 1 IEEE float: same values, extended text kept.
@@ -136,7 +136,7 @@ block segy_revision_and_byte_order_changes:
   doAssert log.noted("Rev 0 has no extended textual headers")
   doAssert readSegy(tmp / "ing_r0.sgy").traces.len == 200
 
-block invalid_targets_and_inputs:
+sampleBlock invalid_targets_and_inputs:
   let sw = exampleDir / "Sweep0.sgy"
   for o in [ConvertOptions(revision: SegyRevision(major: 1), byteOrder: boLittle),
       ConvertOptions(revision: SegyRevision(major: 1), format: st6), # float64 needs Rev 2
@@ -151,7 +151,7 @@ block converted_samples_equal_the_input_with_reused_buffers:
   # of every trace must still be the input's (multi-trace files, so buffers
   # are reused from trace to trace).
   for name in ["inova_rev30_5traces.sgd", "00000151_12900_11300.sgd"]:
-    let src = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles" / name
+    let src = if name.startsWith("inova"): sampleOr(name) else: exampleDir / name
     if fileExists(src):
       let dst = getTempDir() / ("parseseg_reuse_" & name & ".sgy")
       let log = convertFile(src, dst, ConvertOptions())
@@ -178,8 +178,9 @@ proc writeSegdFile(d: SegdData, path: string) =
   sink.close()
 
 proc recordAs(f: SegdSampleFormat, vals: seq[float64], fileNo: int): SegdRecordData =
-  ## 63.sgd's record with its one trace re-encoded as format `f`.
-  let d = readSegd(exampleDir / "63.sgd")
+  ## 63.sgd's record (or the demo file standing in for it) with its one trace
+  ## re-encoded as format `f`.
+  let d = readSegd(sampleOr("63.sgd"))
   result = d.records[0]
   result.record.format = some(f)
   result.record.gh1.formatCode = ord(f)
@@ -220,7 +221,7 @@ block p8_b1_records_in_different_formats_convert_exactly:
   sink.close()
   doAssert log.warned("1 traces (the first is trace 1) could not be written exactly")
 
-block p8_b2_out_of_range_time_zero_does_not_raise:
+sampleBlock p8_b2_out_of_range_time_zero_does_not_raise:
   for tz in [high(int64), low(int64)]:
     var d = readSegd(exampleDir / "inova_rev30_5traces.sgd")
     d.records[0].record.gh3.timeZero = tz
@@ -291,7 +292,7 @@ block p8_b6_losses_are_reported_and_ibm_is_copied:
       doAssert getNum[uint32](z.traces[0].samples, 4 * j, order) ==
         getNum[uint32](words, 4 * j, boBig)
 
-block p8_b7_rev1_fractional_interval_is_rounded_in_the_binary_header:
+sampleBlock p8_b7_rev1_fractional_interval_is_rounded_in_the_binary_header:
   var d = readSegd(exampleDir / "63.sgd")
   d.records[0].record.gh1.baseScanInterval16 = 1 # 62.5 µs
   writeSegdFile(d, tmp / "625.sgd")
@@ -301,7 +302,7 @@ block p8_b7_rev1_fractional_interval_is_rounded_in_the_binary_header:
   doAssert y.file.binary.sampleInterval == 62 or y.file.binary.sampleInterval == 63
   doAssert not y.log.warned("sample interval is 0")
 
-block p8_b8_station_header_survives_a_byte_order_change:
+sampleBlock p8_b8_station_header_survives_a_byte_order_change:
   doAssert convertFile(exampleDir / "63.sgd", tmp / "st_be.sgy").errorsAndWorse == 0
   let log = convertFile(tmp / "st_be.sgy", tmp / "st_le.sgy", ConvertOptions(byteOrder: boLittle))
   doAssert log.errorsAndWorse == 0 and not log.warned("no known layout")
@@ -309,7 +310,7 @@ block p8_b8_station_header_survives_a_byte_order_change:
   doAssert y.file.fieldValue(y.traces[0], "rec_line") == some(13.0)
   doAssert y.file.fieldValue(y.traces[0], "sht_point") == some(99.5)
 
-block p8_b9_converting_a_file_onto_itself_is_refused:
+sampleBlock p8_b9_converting_a_file_onto_itself_is_refused:
   copyFile(exampleDir / "Sweep0.sgy", tmp / "self.sgy")
   let before = readFile(tmp / "self.sgy")
   doAssert convertFile(tmp / "self.sgy", tmp / "self.sgy").isFatal
@@ -321,7 +322,7 @@ proc tmpFiles(dir: string): seq[string] =
   for p in walkDir(dir):
     if p.path.endsWith(".tmp"): result.add p.path
 
-block r13_r4_4_temporary_outputs_are_unique_and_exclusive:
+sampleBlock r13_r4_4_temporary_outputs_are_unique_and_exclusive:
   let dir = tmp / "tmpcase"
   createDir(dir)
   let src = dir / "line.sgy.tmp"

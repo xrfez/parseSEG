@@ -34,7 +34,7 @@ proc checkTiling(l: openArray[HeaderRow]) =
       lastEnd = r.blockOffset + r.blockSize
       lastBlock = r.blockName
 
-block segd_rev2_trace_and_record:
+sampleBlock segd_rev2_trace_and_record:
   let before = readFile(s63)
   let f = openSeismic(s63)
   let e = f.traceEntry(0)
@@ -83,7 +83,7 @@ block segd_rev2_trace_and_record:
   doAssertRaises(ValueError): discard f.recordHeaders(1)
   doAssertRaises(ValueError): discard f.traceHeaders(-1)
 
-block segd_rev3_blocks:
+sampleBlock segd_rev3_blocks:
   let f = openSeismic(inova, keys = true)
   let t = f.traceHeaders(3)
   checkTiling(t)
@@ -119,7 +119,7 @@ block segd_rev3_blocks:
     doAssert c.kind == hbSegdChannelSetRev3 and c.value == toFieldValue(k) and c.blockSize == 96
   doAssert fieldNames(hbSegdPosition)[0] == "timeOfPosition" and fieldNames(hbRaw).len == 0
 
-block segy_file_and_trace:
+sampleBlock segy_file_and_trace:
   let f = openSeismic(inglewood)
   let fh = f.fileHeaders
   checkTiling(fh)
@@ -142,7 +142,7 @@ block segy_file_and_trace:
   doAssert f.recordHeaders(0).len == 0 # SEG-Y has no record headers
   doAssertRaises(ValueError): discard f.recordHeaders(1)
 
-block segy_extensions:
+sampleBlock segy_extensions:
   # Ext1 plus one proprietary 240-byte header per trace.
   var d = readSegy(inglewood)
   var file = SegyFile(text: d.file.text, binary: d.file.binary, byteOrder: boBig,
@@ -182,7 +182,7 @@ block unknown_file:
   doAssert f.fileHeaders.len == 0
   doAssertRaises(ValueError): discard f.recordHeaders(0)
 
-block header_patch_round_trip:
+sampleBlock header_patch_round_trip:
   # A viewer's edits, saved as a patch and applied by an explicit import.
   let f = openSeismic(inglewood)
   var p: seq[HeaderChange]

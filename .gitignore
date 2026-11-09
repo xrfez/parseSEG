@@ -1,7 +1,9 @@
 bin/
 htmldocs/
 nimcache/
-/SEG Spec/exampleFiles/00000151_12900_11300.sgd
+# The SEG standards and the sample data files stay local: they are not
+# redistributable (tests that need the samples skip without them).
+/SEG Spec/
 # Atlas: dependency checkouts are reproducible from atlas.lock
 deps/*
 !deps/atlas.config

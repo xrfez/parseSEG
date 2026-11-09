@@ -15,9 +15,9 @@ import ./utils/testutils
 let tmp = scratchDir("parseseg_tprogress")
 
 let
-  d63 = exampleDir / "63.sgd"
-  inova = exampleDir / "inova_rev30_5traces.sgd"
-  bo = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  d63 = sampleOr("63.sgd")
+  inova = sampleOr("inova_rev30_5traces.sgd")
+  bo = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
 
 type Calls = ref object
   done, total: seq[int64]

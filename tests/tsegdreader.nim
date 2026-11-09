@@ -41,7 +41,7 @@ proc sameRecords(a, b: SegdData) =
 
 # --------------------------------------------------------------- 63.sgd --
 
-block sample_63:
+sampleBlock sample_63:
   let path = exampleDir / "63.sgd"
   let d = readSegd(path)
   doAssert d.log.count(sevWarning) == 0 and d.log.count(sevError) == 0
@@ -217,7 +217,7 @@ block writer_refusals:
   h.records[0].record.extended.setLen 40
   doAssertRaises SegFormatError: discard h.toDisk(tmp / "ec.sgd")
 
-block damaged_input:
+sampleBlock damaged_input:
   let d = makeStream([sd8058, sd8058])
   let path = tmp / "two.sgd"
   discard d.toDisk(path)
@@ -245,7 +245,7 @@ block damaged_input:
 # ------------------------------------------- Phase 4 review regressions --
 # Numbered as in the review.
 
-block r3_corrupt_counts_are_bounded:
+sampleBlock r3_corrupt_counts_are_bounded:
   var b = readBytes(exampleDir / "63.sgd")
   b[27] = 0x99 # 99 scan types
   b[28] = 0xFF # channel sets in GH#2 ...
@@ -316,7 +316,7 @@ block r9_negative_sample_count_is_fatal:
   let e = readSegd(tmp / "negns.sgd")
   doAssert e.log.isFatal and e.records[0].traces.len == 0
 
-block r12_refused_bcd_leaves_the_buffer_untouched:
+sampleBlock r12_refused_bcd_leaves_the_buffer_untouched:
   var g1 = decodeBlock[SegdGeneralHeader1](readBytes(exampleDir / "63.sgd")[0..31])
   g1.fileNumber = 12345
   var b: array[32, byte]
@@ -365,7 +365,7 @@ block rev2_fixrec_every_gap_size:
       doAssert e.log.len == 0, "block " & $bs & ": " & $e.log[0]
       sameRecords(d, e)
 
-block layout_variants_12_3:
+sampleBlock layout_variants_12_3:
   # 12.3 C6: the record, its scan types and traces carry the Rev 0-2 layout,
   # `format` and `ext1` are Options, and the accessors resolve per layout.
   let d = readSegd(exampleDir / "63.sgd")
@@ -399,7 +399,7 @@ block layout_variants_12_3:
     doAssert w.log.len == 1 and "layout" in w.log[0].msg
   finally: sink.close()
 
-block review_12_4:
+sampleBlock review_12_4:
   let d = readSegd(exampleDir / "63.sgd")
   let t = d.records[0].traces[0]
   # A lenient write of a record without a known format logs the trace's
@@ -476,7 +476,7 @@ block review_12_4:
       doAssert r.readTrace(tr)
     finally: src.close()
 
-block channel_set_hint_matches_the_search:
+sampleBlock channel_set_hint_matches_the_search:
   # The reader tries the previous trace's channel set first (15.3-8); every
   # trace must still get the descriptor the plain search finds.
   for name in ["63.sgd", "00000151_12900_11300.sgd", "inova_rev30_5traces.sgd"]:

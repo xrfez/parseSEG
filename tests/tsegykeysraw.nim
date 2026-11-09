@@ -234,7 +234,7 @@ block random_headers_through_random_layouts:
             prop: byteBuf(t.proprietary), propLen: t.proprietary.len)
           checkTrace(f, gr, t, raw, $order & " rev " & $rev & " round " & $round)
 
-block sample_files:
+sampleBlock sample_files:
   # Every trace of the sample SEG-Y files: the reference, the public calls,
   # the walk's raw headers and the stored keys agree.
   for name in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy"]:

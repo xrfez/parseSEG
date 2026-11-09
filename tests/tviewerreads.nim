@@ -14,9 +14,9 @@ when defined(posix): import std/posix
 let tmp = scratchDir("parseseg_tviewerreads")
 
 let
-  d63 = exampleDir / "63.sgd"
-  inova = exampleDir / "inova_rev30_5traces.sgd"
-  bo = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  d63 = sampleOr("63.sgd")
+  inova = sampleOr("inova_rev30_5traces.sgd")
+  bo = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
 
 proc convert(src, name: string, o: ConvertOptions): string =
   result = tmp / name
@@ -24,7 +24,7 @@ proc convert(src, name: string, o: ConvertOptions): string =
   doAssert not log.isFatal, name & ": " & $log
 
 proc fixtures(): seq[string] =
-  for n in walkFiles(exampleDir / "*"): result.add n
+  for n in inputFiles(): result.add n
   for fmt in [st1, st2, st3, st4, st5, st6, st7, st8, st9, st10, st11, st12, st15, st16]:
     result.add convert(d63, "d63_" & $fmt & ".sgy", ConvertOptions(format: fmt))
   result.add convert(bo, "bo_le.sgy", ConvertOptions(byteOrder: boLittle, format: st2))
@@ -115,7 +115,7 @@ block window_errors:
   f.close()
   doAssertRaises(ValueError): discard f.readTracesInto(0..3, 0..9, t)
 
-block damaged_trace_in_a_window:
+sampleBlock damaged_trace_in_a_window:
   # The whole trace is checked, so a window of a trace past the end of the
   # file fails as the full read does.
   var f = openSeismic(exampleDir / "Sweep0.sgy")
@@ -151,7 +151,7 @@ block prefetch_window:
     discard newPrefetcher[float32](f, 0..3, firstSample = -1)
   f.close()
 
-block text_header_as_text:
+sampleBlock text_header_as_text:
   var f = openSeismic(bo)
   let t = f.textHeader
   let lines = t.split('\n')
@@ -250,11 +250,13 @@ block sort_traces:
   doAssertRaises(ValueError): discard f.sortTraces(keys, [0, f.len])
   doAssertRaises(ValueError): discard f.sortTraces(keys, 0 .. f.len)
   f.close()
-  # SEG-D: by receiver point, then channel
-  var d = openSeismic(exampleDir / "00000151_12900_11300.sgd")
-  let dk = ["ext1.receiverPointNumber", "trace.traceNumber"]
-  doAssert d.sortTraces(dk) == referenceOrder(dk.mapIt(d.traceFieldColumn(it, 0 ..< d.len)))
-  d.close()
+  # SEG-D: by receiver point, then channel (the local-only file)
+  let big = exampleDir / "00000151_12900_11300.sgd"
+  if fileExists(big):
+    var d = openSeismic(big)
+    let dk = ["ext1.receiverPointNumber", "trace.traceNumber"]
+    doAssert d.sortTraces(dk) == referenceOrder(dk.mapIt(d.traceFieldColumn(it, 0 ..< d.len)))
+    d.close()
 
 block cold_reads_with_readahead_advice:
   # 15.3-4: large and scattered reads advise the kernel (madvise WILLNEED)

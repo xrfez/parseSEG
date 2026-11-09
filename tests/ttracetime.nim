@@ -51,10 +51,10 @@ proc dateEdits(trace, year, basis: int): seq[(HeaderScope, int, string, int)] =
 block initial_keys_unknown:
   doAssert initTraceKeys().time.isNaN
 
-block segd_rev2_gh1:
+sampleBlock segd_rev2_gh1:
   doAssert timeOf(s63, 0) == june11 # GH#1: year 24, day 163, 17:40:02
 
-block segd_rev3_time_zero:
+sampleBlock segd_rev3_time_zero:
   let f = openSeismic(inova, keys = true)
   for i in 0 ..< f.len:
     doAssert abs(f.traceKeys(i).time - inovaUtc) < 1e-6
@@ -74,7 +74,7 @@ block segd_rev3_time_zero:
   doAssert abs(g.traceKeys(3).time - (inovaUtc + 1.25)) < 1e-6
   doAssert abs(g.traceKeys(4).time - inovaUtc) < 1e-6
 
-block segy_time_basis:
+sampleBlock segy_time_basis:
   var edits: seq[(HeaderScope, int, string, int)]
   edits.add dateEdits(0, 2024, 4)  # UTC
   edits.add dateEdits(1, 2024, 5)  # GPS
@@ -101,13 +101,13 @@ block segy_time_basis:
     @[(hsTrace, 0, "trace.dayOfYear", 400)])
   doAssert timeOf(r, 0).isNaN
 
-block segy_rev0_ignores_binary_basis:
+sampleBlock segy_rev0_ignores_binary_basis:
   # Rev 0 has no binary time basis: bytes 3511-3512 are unassigned.
   let p = edited(sweep, "rev0.sgy", dateEdits(0, 99, 0) &
     @[(hsFile, 0, "binary.timeBasisCode", 1)])
   doAssert timeOf(p, 0) == 929209202.0 # 1999-06-12 (day 163) 17:40:02 UTC
 
-block segy_ext1_nanoseconds:
+sampleBlock segy_ext1_nanoseconds:
   var d = readSegy(inglewood)
   var file = SegyFile(text: d.file.text, binary: d.file.binary, byteOrder: boBig,
     format: d.file.format, extended: initExtendedTextHeader(),

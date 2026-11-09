@@ -7,13 +7,18 @@ import ./utils/testutils
 const files = ["BO_3D-Inglewood_rev21_v7.sgy", "inova_rev30_5traces.sgd", "63.sgd",
   "00000151_12900_11300.sgd"] # the last is local only
 
+proc src(n: string): string =
+  ## The sample `n`, or without the samples its demo stand-in (`sampleOr`);
+  ## the local-only file stays missing.
+  if n.startsWith("00000151"): exampleDir / n else: sampleOr(n)
+
 proc rows(t: Tensor[float32], first, count: int): Tensor[float32] =
   t[first ..< first + count, _]
 
 block sequential_reads_match_range_reads:
   for n in files:
-    if fileExists(exampleDir / n):
-      var f = openSeismic(exampleDir / n)
+    if fileExists(src(n)):
+      var f = openSeismic(src(n))
       let all = f.readTraces(0..<f.len)
       for (chunk, depth) in [(1, 1), (7, 3), (64, 2), (100_000, 4)]:
         var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth)
@@ -29,7 +34,7 @@ block sequential_reads_match_range_reads:
       f.close()
 
 block polling_never_blocks:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 10, depth = 3)
   var c: PrefetchChunk[float32]
@@ -44,7 +49,7 @@ block polling_never_blocks:
   f.close()
 
 block taken_chunks_are_never_overwritten:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, depth = 2)
   var kept: seq[PrefetchChunk[float32]]
@@ -55,7 +60,7 @@ block taken_chunks_are_never_overwritten:
   f.close()
 
 block subrange_seek_and_float64:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len, float64)
   var p = newPrefetcher[float64](f, 20 ..< 45, chunkTraces = 10, depth = 2,
     cols = 50)
@@ -79,7 +84,7 @@ block subrange_seek_and_float64:
   f.close()
 
 block undecodable_traces_are_counted:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   f.index.entries[3].numSamples = 1_000_000_000 # points past the end of the file
   var p = newPrefetcher[float32](f, 0 ..< 5, chunkTraces = 5, cols = 10)
   var c: PrefetchChunk[float32]
@@ -89,7 +94,7 @@ block undecodable_traces_are_counted:
   f.close()
 
 block destroyed_without_close:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   for _ in 0..<20:
     var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 3, depth = 4)
     var c: PrefetchChunk[float32]
@@ -98,7 +103,7 @@ block destroyed_without_close:
 
 block random_seeks_and_polls:
   # Races between seeks and the worker would show as wrong data.
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   var rng = initRand(42)
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 9, depth = 3)
@@ -126,7 +131,7 @@ block random_seeks_and_polls:
 
 block selections:
   # A trace list (e.g. a sort order) is read ahead in list order.
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   var sel: seq[int]
   for i in countdown(199, 0, 3): sel.add i
   sel.add [5, 5, 0]                               # repeats are fine
@@ -151,7 +156,7 @@ block selections:
 block failed_rows_are_logged:
   # A trace that cannot be decoded is a zero row, counted and logged in its
   # chunk with its trace index, record and offset.
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   f.index.entries[6].numSamples = 1_000_000 # its samples now lie past the end
   var p = newPrefetcher[float32](f, @[9, 6, 2], chunkTraces = 2, depth = 2, cols = 8)
   var c: PrefetchChunk[float32]
@@ -171,7 +176,7 @@ proc mapped(path: string): bool =
 
 block close_while_prefetching:
   # R2-5: the prefetcher pins the map; the unmap waits for its close.
-  let path = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  let path = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
   var f = openSeismic(path)
   let all = f.readTraces(0..<f.len)
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 7, depth = 2)
@@ -193,7 +198,7 @@ block close_while_prefetching:
 
 block file_destroyed_before_its_prefetcher:
   # The file's entries and codecs are parked with the map, not freed.
-  let path = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  let path = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
   var p: Prefetcher[float32]
   var all: Tensor[float32]
   block:
@@ -212,7 +217,7 @@ block file_destroyed_before_its_prefetcher:
   doAssert not mapped(path)
 
 block two_prefetchers_one_map:
-  let path = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  let path = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
   var f = openSeismic(path)
   var a = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 50)
   var b = newPrefetcher[float32](f, @[3, 1, 4, 1, 5])
@@ -225,7 +230,7 @@ block two_prefetchers_one_map:
   doAssert not mapped(path)
 
 block chunks_iterator:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64)
   var n = 0
@@ -242,8 +247,8 @@ block next_into_matches_and_reuses_buffers:
   # R3-9: `nextInto` swaps the caller's previous buffer into the slot, so the
   # chunks cycle through `depth + 1` buffers and nothing else is allocated.
   for n in files:
-    if fileExists(exampleDir / n):
-      var f = openSeismic(exampleDir / n)
+    if fileExists(src(n)):
+      var f = openSeismic(src(n))
       let all = f.readTraces(0..<f.len)
       for (chunk, depth) in [(1, 1), (3, 2), (7, 3), (100_000, 4)]:
         var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = chunk, depth = depth)
@@ -263,7 +268,7 @@ block next_into_matches_and_reuses_buffers:
       f.close()
 
 block next_into_random_seeks_selections_and_partial_chunks:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   var sel: seq[int]
   for i in countdown(199, 0, 2): sel.add i
@@ -298,7 +303,7 @@ block next_into_random_seeks_selections_and_partial_chunks:
 
 block next_into_never_overwrites_shared_buffers:
   # A copy or a view the caller kept shares the storage: not reused.
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, depth = 2)
   var kept: seq[PrefetchChunk[float32]]
@@ -313,7 +318,7 @@ block next_into_never_overwrites_shared_buffers:
   f.close()
 
 block recycle_feeds_next:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   let cols = all.shape[1]
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 10, depth = 2)
@@ -348,7 +353,7 @@ block recycle_feeds_next:
   f.close()
 
 block next_into_zero_columns:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   var p = newPrefetcher[float32](f, 0 ..< 25, chunkTraces = 10, cols = 0)
   var c: PrefetchChunk[float32]
   var n = 0
@@ -364,7 +369,7 @@ proc allocs(): int =
   cast[tuple[allocs, deallocs: int]](getAllocStats()).allocs
 
 block steady_next_into_allocates_nothing:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   for into in [false, true]:
     var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 10, depth = 3)
@@ -401,8 +406,8 @@ proc sameChunks(a, b: seq[PrefetchChunk[float32]], what: string) =
 block workers_match_one_worker:
   # In order and identical, whatever the worker count, ranges and lists.
   for n in files:
-    if fileExists(exampleDir / n):
-      var f = openSeismic(exampleDir / n)
+    if fileExists(src(n)):
+      var f = openSeismic(src(n))
       var sel: seq[int]
       for i in countdown(f.len - 1, 0, 3): sel.add i
       # The large local file: chunks of 64 only (one per trace is slow).
@@ -426,7 +431,7 @@ block workers_match_one_worker:
 
 block workers_with_failed_rows:
   # Undecodable rows are zero and logged alike on every worker.
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   for t in [3, 50, 51, 199]: f.index.entries[t].numSamples = 1_000_000_000
   var one = newPrefetcher[float32](f, 0 ..< f.len, 7, 3, cols = 16)
   let a = one.drain
@@ -440,7 +445,7 @@ block workers_with_failed_rows:
   f.close()
 
 block random_seeks_with_workers_and_quick_first:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   var rng = initRand(7)
   for quick in [false, true]:
@@ -467,7 +472,7 @@ block random_seeks_with_workers_and_quick_first:
   f.close()
 
 block ring_cap:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   let chunkBytes = 64 * f.maxSamples * sizeof(float32) # 512 KB
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 16)
@@ -494,7 +499,7 @@ block ring_cap:
   f.close()
 
 block quick_first_after_seek:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let all = f.readTraces(0..<f.len)
   proc spans(p: var Prefetcher[float32]): seq[(int, int)] =
     var c: PrefetchChunk[float32]
@@ -535,7 +540,7 @@ block quick_first_after_seek:
 # Phase 6 and Phase 8 reviews.
 
 block p6_b6_prefetch_of_zero_width_chunks:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   for i in 0..<10: f.index.entries[i].numSamples = 0
   var p = newPrefetcher[float32](f, 0 ..< 10, chunkTraces = 7, depth = 2)
   var c: PrefetchChunk[float32]
@@ -548,7 +553,7 @@ block p6_b6_prefetch_of_zero_width_chunks:
   f.close()
 
 block p6_b7_prefetch_after_close:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 100_000) # slots capped at the file's 200
   var c: PrefetchChunk[float32]
   doAssert p.next(c) and c.count == 200
@@ -560,7 +565,7 @@ block p6_b7_prefetch_after_close:
   f.close()
 
 block p8_b4_selection_prefetchers_do_not_leak:
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let before = getOccupiedMem()
   for _ in 0..<20:
     var p = newPrefetcher[float32](f, newSeq[int](1_000_000), chunkTraces = 4, depth = 1, cols = 4)

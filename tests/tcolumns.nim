@@ -26,10 +26,10 @@ proc convert(src, name: string, o: ConvertOptions): string =
   doAssert not log.isFatal, name & ": " & $log
 
 proc fixtures(): seq[string] =
-  for n in walkFiles(exampleDir / "*"): result.add n
-  let inova = exampleDir / "inova_rev30_5traces.sgd"
-  let d63 = exampleDir / "63.sgd"
-  let bo = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+  for n in inputFiles(): result.add n
+  let inova = sampleOr("inova_rev30_5traces.sgd")
+  let d63 = sampleOr("63.sgd")
+  let bo = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
   result.add convert(inova, "inova.sgy", ConvertOptions()) # Ext1, PSEGD001, Layout stanza
   result.add convert(d63, "d63le.sgy", ConvertOptions(byteOrder: boLittle))
   result.add convert(bo, "bo_rev1.sgy", ConvertOptions(revision: SegyRevision(major: 1)))
@@ -116,7 +116,7 @@ block seg2_keyword_columns:
 
 block missing_blocks_are_nan:
   # BO_3D-Inglewood has no Trace Header Extension 1
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   doAssert f.traceEntry(0).headerBytes == 240
   doAssert f.traceFieldColumn("ext1.extFieldRecord", [0, 5]).allIt(it.isNaN)
   f.close()
@@ -125,7 +125,7 @@ block missing_blocks_are_nan:
   g.close()
 
 block errors:
-  var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd")
+  var f = openSeismic(sampleOr("inova_rev30_5traces.sgd"))
   doAssertRaises(ValueError): discard f.traceFieldColumn("trace.noSuchField", [0])
   doAssertRaises(ValueError): discard f.traceFieldColumn("ext1.noSuchField", [0])
   doAssertRaises(ValueError): discard f.traceFieldColumn("gh1.formatCode", [0])
@@ -144,14 +144,14 @@ block errors:
   f.close()
   doAssertRaises(ValueError): discard f.traceFieldColumn("trace.traceNumber", [0])
   doAssertRaises(ValueError): discard f.traceKeys([0])
-  var y = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var y = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   doAssertRaises(ValueError): discard y.traceFieldColumn("ext1.headerName", [0]) # text
   doAssertRaises(ValueError): discard y.traceFieldColumn("binary.formatCode", [0])
   y.close()
 
 block shared_reads_from_threads:
   # Several threads on one open file (see tsharedreads): no ref is copied.
-  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
   let want = f.traceFieldColumn("trace.sourceX", 0 ..< f.len)
   let wantKeys = f.traceKeys(0 ..< f.len)
   proc work(p: ptr SeismicFile) {.thread.} =
