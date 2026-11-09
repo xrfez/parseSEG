@@ -1,6 +1,0 @@
-{
-  // Dependencies are managed by Atlas (deps/ + nim.cfg); stop the Nim
-  // extension from running `nimble setup`, which writes nimble.paths
-  // pointing at ~/.nimble/pkgs2 and edits config.nims/.gitignore.
-  "nim.nimbleAutoSetup": false
-}

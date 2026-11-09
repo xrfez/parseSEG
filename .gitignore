@@ -10,3 +10,12 @@ deps/*
 
 # The data set of `nim bench` (bench/specs.nim), unless PARSESEG_BENCH_DIR is set.
 /bench/data/
+
+# Local development environment and agent workflow files (not published)
+/.agents/
+/.claude/
+/.devcontainer/
+/.mcp/
+/.vscode/
+/PLAN.md
+/AGENTS.md

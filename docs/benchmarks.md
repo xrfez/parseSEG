@@ -70,7 +70,7 @@ threads prefetch write`.
 ## Phase 15: full-scale re-run (2026-11-09)
 
 After the Phase 15 performance review (`docs/design/phase15_perf_audit.md`, steps 15.3-2 to
-15.3-14 in `PLAN.md`), the whole suite at full scale (53 GB), once in each build:
+step 15.3-14), the whole suite at full scale (53 GB), once in each build:
 
 - **danger:** `nim bench` (`-d:danger -d:release --opt:speed -march=native`), all sections,
   cold runs included;
@@ -169,7 +169,7 @@ worse warm (40 µs for 4 MB of resident pages). The real costs were elsewhere an
 
 #### Per step, before → after
 
-From the `PLAN.md` Log lines of each step (danger = `-d:danger -march=native`, release =
+From the development log of each step (danger = `-d:danger -march=native`, release =
 `-d:release -march=x86-64-v3` from 15.3-5 on; full-scale files unless noted).
 
 | Step | What changed | Measure | Before → after |
@@ -835,7 +835,7 @@ the [Phase 15](#phase-15-full-scale-re-run-2026-11-09) section).
    lazily per gather or column (the R2-4 bulk `traceKeysInto` / `traceFieldColumn`); store
    them as float32 or as a columnar table of the fields a viewer sorts on.
    *14.3a:* `traceKeys(f, traces)` / `traceKeysInto` (on demand, without `keys = true`) and
-   `traceFieldColumn` / `traceFieldColumnInto` are in; see the 14.3a Log line in `PLAN.md`.
+   `traceFieldColumn` / `traceFieldColumnInto` are in (step 14.3a).
    *Phase 15 (15.3-8, 15.3-9):* keys from the raw header bytes: about 220 ns per trace on
    top of the walk (10 M traces with keys: 6.8 → 3.9 s). Float32 keys were not adopted.
 5. **No sample window.** A viewer showing samples 1000..1500 of 10 000 traces decodes the

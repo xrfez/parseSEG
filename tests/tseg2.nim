@@ -733,7 +733,7 @@ block geometry_write_back_is_refused:
   doAssert not fileExists(tmp / "geo2.sg2")
   doAssert convertWithGeometry(path, tmp / "geo.sgy", initSurveyGeometry()).isFatal
 
-# --------------------- Phase 13.3 review (R<reviewer>-<n>, as in PLAN.md) --
+# --------------------- Phase 13.3 review (finding ids R<reviewer>-<n>) --
 
 let r13 = scratchDir("parseseg_tseg2_r13")
 

@@ -63,8 +63,7 @@ Conventions that hold throughout:
 Bad caller input (a trace, range or position out of range, a closed file) raises
 `ValueError` everywhere.
 
-Sorting is a selection: a sort produces a list of trace indices, and no data is moved
-(PLAN.md, "Future").
+Sorting is a selection: a sort produces a list of trace indices, and no data is moved.
 
 | Proc | What |
 |---|---|

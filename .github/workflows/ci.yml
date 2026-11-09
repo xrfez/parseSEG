@@ -2,9 +2,25 @@ name: CI
 
 on:
   push:
-    branches: [ main, master, seg-library ]
+    branches: [ main ]
+    paths:
+      - '**'
+      - '!**.md'
+      - 'docs/guide/**'   # the guides' examples are compiled and run by the tests
+      - 'docs/api.md'     # the tests check the exports against it
   pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
+    paths:
+      - '**'
+      - '!**.md'
+      - 'docs/guide/**'   # the guides' examples are compiled and run by the tests
+      - 'docs/api.md'     # the tests check the exports against it
+  workflow_dispatch:     # the "Run workflow" button
+
+# A new push cancels the run still going for the same branch or pull request.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # The test suite and the command line tool, built with Nim's default C

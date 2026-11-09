@@ -144,6 +144,27 @@ discard convertFile("survey.sgy", "survey_rev1.sgy",
 discard convertFile("shot.sgd", "shot.sg2", ConvertOptions(target: skSeg2))
 ```
 
+### Vendor header maps
+
+Vendor-specific header blocks, such as SEG-D extended and external headers and SEG-Y proprietary trace headers, are decoded by maps written in NIF. Your program chooses where the maps come from:
+
+```nim
+var reg: VendorRegistry
+var log: DiagLog
+reg.loadVendorMaps(vendorSearchPath() & @["my/vendormaps", "acme.nif"], log)  # directories or files
+# reg.addMap loadVendorMap(staticRead("acme.nif"), "acme.nif")             # or compiled in
+
+let segd = readSegd("shot.sgd", headersOnly = true)
+for r in segd.records:
+  for blk in reg.decodeVendorAreas(r.record, log): echo blk
+```
+
+`vendorSearchPath()` returns two kinds of directory:
+- **Built-in:** the repository's `vendormaps/` folder, located from parseSEG's source checkout at compile time. A program you deploy elsewhere should ship its own maps or compile them in with `staticRead`.
+- **From the environment:** the directories in `PARSESEG_VENDOR_PATH`. The CLI also searches these.
+
+A map that fails to load is skipped with a warning in `log`. `parseSEG vendormap scaffold` writes a starting map for every area that no map decodes yet.
+
 To join survey geometry, see `readSps`, `SurveyGeometry`, `applySurvey` and `writeGeometry` in the [conversion guide](docs/guide/conversion.md).
 
 ## Command line tool

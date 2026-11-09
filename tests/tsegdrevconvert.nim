@@ -605,7 +605,7 @@ block rev0_demux_task_4_6:
   let c30 = readSegd(tmp / "rev0_30.sgd").records[0].record.scanTypes[0].descriptorsRev3[0]
   doAssert c30.verticalStack == 1 and c30.arrayForming == 1
 
-# --------------------- Phase 13.3 review (R<reviewer>-<n>, as in PLAN.md) --
+# --------------------- Phase 13.3 review (finding ids R<reviewer>-<n>) --
 
 let r13 = scratchDir("parseseg_tsegdrevconvert_r13")
 
