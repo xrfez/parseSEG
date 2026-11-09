@@ -229,3 +229,20 @@ block component_group_ids_match_the_groups:
         for i in grp.traces: want[i - span.a] = g
       doAssert f.componentGroupIds(span) == want, name
     f.close()
+
+# Phase 6 review (I/O, index and gathers).
+block p6_a5_segd_gathers_are_not_assumed_to_be_shots:
+  # One receiver, the same record-level source on three traces of one
+  # sensor type: the keys cannot tell, so the gather stays unknown.
+  var ix = TraceIndex(kind: skSegd)
+  for _ in 0..2:
+    var k = initTraceKeys()
+    k.srcLine = 10
+    k.srcPoint = 5
+    k.rcvLine = 7
+    k.rcvPoint = 42
+    k.sensorType = 2
+    k.component = 2
+    ix.keys.add k
+    ix.entries.add TraceEntry(channelSet: NoChannelSet, scanType: -1)
+  doAssert ix.gathers.len == 1 and ix.gathers[0].kind == gkUnknown

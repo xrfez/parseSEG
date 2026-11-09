@@ -444,3 +444,73 @@ block editor_from_a_file_with_a_running_prefetcher:
   p.close()
   doAssert rollbackJournal(path, journal).len == 0
   doAssert readBytes(path) == orig
+
+# Phase 6 review (prefetch and edit).
+
+block p6_b1_edits_refused_on_files_that_are_not_seismic:
+  writeFile(tmp / "junk.bin", repeat('\xEE', 8000))
+  if fileExists(tmp / "junk.bin.edits.nif"): removeFile(tmp / "junk.bin.edits.nif")
+  var ed = openEditor(tmp / "junk.bin")
+  doAssert not ed.setFileField("binary.jobId", 5)
+  doAssert not ed.setTraceField(0, "trace.sourceX", 5)
+  ed.close()
+  doAssert readFile(tmp / "junk.bin") == repeat('\xEE', 8000)
+
+block p6_b2_repeated_rollback_with_overlapping_spans:
+  let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+  let original = readBytes(path)
+  var ed = openEditor(path)
+  doAssert ed.setTraceField(3, "trace.sourceX", 0x0100_0001) # 4 bytes change
+  doAssert ed.setTraceField(3, "trace.sourceX", 1)           # then only 1 byte
+  ed.close()
+  let edited = readBytes(path)
+  for _ in 1..2:
+    doAssert rollbackJournal(path, journal).len == 0
+    doAssert readBytes(path) == original
+  for _ in 1..2:
+    doAssert applyJournal(path, journal).len == 0
+    doAssert readBytes(path) == edited
+
+block p6_b3_field_edited_twice_has_no_spurious_conflicts:
+  let (path, journal) = fresh("BO_3D-Inglewood_rev21_v7.sgy")
+  let original = readBytes(path)
+  var ed = openEditor(path)
+  doAssert ed.setTraceField(5, "trace.sourceX", 111)
+  doAssert ed.setTraceField(5, "trace.sourceX", 222)
+  ed.close()
+  let edited = readBytes(path)
+  doAssert rollbackJournal(path, journal).len == 0 and rollbackJournal(path, journal).len == 0
+  doAssert readBytes(path) == original
+  doAssert applyJournal(path, journal).len == 0 and applyJournal(path, journal).len == 0
+  doAssert readBytes(path) == edited
+
+block p6_b4_hostile_journals_stay_bounded:
+  let j = tmp / "hostile.nif"
+  block:
+    var f = open(j, fmWrite)
+    for _ in 0..<8: f.write repeat('a', 1 shl 20) # 8 MB, no newline
+    f.write "\n"
+    for _ in 0..<1000: f.write "x\n"
+    f.close()
+  var log: DiagLog
+  doAssert readJournal(j, log).len == 0
+  doAssert log.count(sevError) == 5 and log.count(sevInfo) == 1 # 1001 malformed lines
+  # A conflict-ridden journal is capped too.
+  let (path, _) = fresh("Sweep0.sgy")
+  var lines = ""
+  for k in 0..<50: lines.add "(edit " & $(4000 + 4 * k) & " \"abab\" \"cdcd\" \"x\")\n"
+  writeFile(j, lines)
+  let r = rollbackJournal(path, j)
+  doAssert r.count(sevError) == 5 and r.count(sevInfo) == 1
+
+block p6_b5_huge_general_header_numbers_are_refused:
+  let (path, _) = fresh("63.sgd")
+  var ed = openEditor(path)
+  var raised = false
+  try:
+    doAssert not ed.setRecordField(0, "gh99999999999999999999.sourceSetNumber", 1)
+    doAssert not ed.setRecordField(0, "gh0003x.sourceSetNumber", 1)
+  except CatchableError:
+    raised = true
+  doAssert not raised
+  ed.close()

@@ -2,8 +2,8 @@
 ## and on synthetic records (every Rev 2 format, trailers, labels, tape),
 ## the logged losses, and records that cannot be represented.
 
-import std/[assertions, os, math]
-import parseSEG/common/diagnostics
+import std/[assertions, os, math, strutils]
+import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer, headers, samples, rev3, revconvert]
 import parseSEG/model/traceindex
@@ -603,3 +603,30 @@ block rev0_demux_task_4_6:
   doAssert not log.isFatal, $log
   let c30 = readSegd(tmp / "rev0_30.sgd").records[0].record.scanTypes[0].descriptorsRev3[0]
   doAssert c30.verticalStack == 1 and c30.arrayForming == 1
+
+# --------------------- Phase 13.3 review (R<reviewer>-<n>, as in PLAN.md) --
+
+let r13 = scratchDir("parseseg_tsegdrevconvert_r13")
+
+proc put32(s: var string, at: int, v: uint32, order: ByteOrder) =
+  for k in 0..3:
+    let sh = if order == boLittle: 8 * k else: 8 * (3 - k)
+    s[at + k] = char((v shr sh) and 0xFF)
+
+proc tmpFiles(dir: string): seq[string] =
+  for p in walkDir(dir):
+    if p.path.endsWith(".tmp"): result.add p.path
+
+block r13_r4_2_rev3_trailer_count_is_bounded:
+  # GH#2 bytes 13-16 announced 2^31 trailer blocks: Rev 3 -> Rev 3 allocated
+  # 32 x that (64 GB) before reading a trace.
+  let rev3 = r13 / "63_r3.sgd"
+  doAssert not convertSegdRevision(exampleDir / "63.sgd", rev3).isFatal
+  var s = readFile(rev3)
+  s.put32(44, 0x7FFF_FFFF'u32, boBig)
+  writeFile(rev3, s)
+  let log = convertSegdRevision(rev3, r13 / "63_r31.sgd",
+    SegdConvertOptions(revision: SegdRevision(major: 3, minor: 1)))
+  doAssert log.has("trailer blocks", sevError) or log.isFatal, $log
+  doAssert log.has("more than the file holds", sevError), $log
+  doAssert tmpFiles(r13).len == 0

@@ -318,3 +318,62 @@ block index_memory_is_reserved_from_the_file_size:
   doAssert grown < n * (24 + 144) + n * 12 + 65536, $grown
   f.close()
   removeFile(path)
+
+# Phase 6 review (I/O, index and gathers). Its copy-volume (a2) and
+# character-device (a7) findings are `headers_only_walk_copies_only_headers` and
+# `skip_guards` above.
+
+block p6_a1_channel_set_index_beyond_int16:
+  # 32768 dummy descriptors before the real one: the trace's set index is 32768.
+  var b = readBytes(exampleDir / "63.sgd")
+  b[28] = 0xFF # channel sets per scan type: see GH#2
+  b[35] = 0x80 # GH#2 bytes 4-5: 32769
+  b[36] = 0x01
+  var dummy = newSeq[byte](32)
+  dummy[0] = 0x01 # scan type 1
+  dummy[1] = 0x99 # channel set 99, 0 channels
+  var c = b[0 ..< 96]
+  for _ in 0..<32768: c.add dummy
+  c.add b[96 .. ^1]
+  writeBytes(tmp / "manysets.sgd", c)
+  var f = openSeismic(tmp / "manysets.sgd")
+  doAssert f.len == 1 and f.index.entries[0].channelSetIndex == 32768
+  doAssert f.readTraces(0..0).shape == [1, 1000]
+  f.close()
+
+block p6_a3_segd_file_number_43xx_with_format_like_bytes:
+  var b = readBytes(exampleDir / "63.sgd")
+  b[0] = 0x43
+  b[1] = 0x21
+  b[3224] = 0x00
+  b[3225] = 0x05
+  doAssert detectKind(b) == skSegd
+  writeBytes(tmp / "4321.sgd", b)
+  var f = openSeismic(tmp / "4321.sgd")
+  doAssert f.kind == skSegd and f.len == 1 and not f.log.isFatal
+  f.close()
+
+block p6_a4_segy_with_undefined_format_code_is_still_segy:
+  var b = readBytes(exampleDir / "Sweep0.sgy")
+  b[3224] = 0
+  b[3225] = 0
+  writeBytes(tmp / "fmt0.sgy", b)
+  var f = openSeismic(tmp / "fmt0.sgy")
+  doAssert f.kind == skSegy and f.index.detected
+  var formatDiag = false
+  for e in f.log.items:
+    if e.severity == sevFatal and "format code" in e.msg: formatDiag = true
+  doAssert formatDiag and f.index.segy.text.data[0] == byte(0x43)
+  f.close()
+
+block p6_a6_closed_maps_fail_cleanly:
+  let s = openMemFileSource(exampleDir / "63.sgd")
+  s.close()
+  var buf: seq[byte]
+  doAssert s.readRecord(buf) == rkEndOfData and s.memory == nil and s.size == 0
+  var f = openSeismic(exampleDir / "63.sgd")
+  var g: SeismicFile
+  doAssert not compiles(g = f) # a copy could outlive `close`
+  f.close()
+  var t = newTraceTensor[float32](1, 10)
+  doAssert f.readTracesInto(0 .. -1, t) == 0 and not f.isOpen

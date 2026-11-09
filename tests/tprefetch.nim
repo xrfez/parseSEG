@@ -531,3 +531,44 @@ block quick_first_after_seek:
     doAssert c.samples == all.rows(9, 1)
     s.close()
   f.close()
+
+# Phase 6 and Phase 8 reviews.
+
+block p6_b6_prefetch_of_zero_width_chunks:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  for i in 0..<10: f.index.entries[i].numSamples = 0
+  var p = newPrefetcher[float32](f, 0 ..< 10, chunkTraces = 7, depth = 2)
+  var c: PrefetchChunk[float32]
+  var n = 0
+  while p.next(c):
+    doAssert c.samples.shape == [c.count, 0]
+    n += c.count
+  doAssert n == 10
+  p.close()
+  f.close()
+
+block p6_b7_prefetch_after_close:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 100_000) # slots capped at the file's 200
+  var c: PrefetchChunk[float32]
+  doAssert p.next(c) and c.count == 200
+  p.close()
+  doAssert p.atEnd and not p.tryNext(c) and not p.next(c)
+  p.seek(0 ..< p.len)
+  var q: Prefetcher[float32] # never started
+  doAssert q.atEnd and not q.tryNext(c)
+  f.close()
+
+block p8_b4_selection_prefetchers_do_not_leak:
+  var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+  let before = getOccupiedMem()
+  for _ in 0..<20:
+    var p = newPrefetcher[float32](f, newSeq[int](1_000_000), chunkTraces = 4, depth = 1, cols = 4)
+    p.close()
+  for _ in 0..<5:
+    block:
+      var q = newPrefetcher[float32](f, newSeq[int](1_000_000), chunkTraces = 4, depth = 1,
+        cols = 4)
+      discard q.len # destroyed without close
+  doAssert getOccupiedMem() - before < 16 shl 20, $(getOccupiedMem() - before)
+  f.close()

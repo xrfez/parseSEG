@@ -3,6 +3,7 @@
 import std/[assertions, os, times, math, strutils]
 import parseSEG/segd/[headers, rev3, reader]
 import parseSEG/io/[records, diskio]
+import parseSEG/model/keys
 import ./utils/testutils
 
 const bigFile = exampleDir / "00000151_12900_11300.sgd" # local only, not in git
@@ -165,3 +166,18 @@ block source_description_accessors_follow_fields:
   doAssert s.size == -2 and s.depth == 0x0102
   let back = decodeBlock[SegdSourceDescription](s.encoded)
   doAssert back.phaseAngle == -90 and back.depth == 0x0102
+
+# Phase 8 review.
+block p8_b3_position_after_additional_source_info_is_the_source:
+  var rec = SegdRecord(layout: slRev3)
+  var t = SegdTrace(layout: slRev3, ext1Rev3: some(SegdTraceHeaderExt1Rev3()))
+  var src = SegdSourceDescription(sourceLineNumber: 1, sourcePointNumber: 2, blockType: 0x15)
+  var asi = newSeq[byte](32)
+  asi[31] = 0x20
+  var pos = SegdPositionBlock(position1Valid: 1, position1Quality: 1, tuple1Coord1: 500,
+    tuple1Coord2: 600, tuple1Coord3: Inf, blockType1: 0x50, blockType2: 0x51, blockType3: 0x52)
+  t.extensions.add src.encoded
+  t.extensions.add asi
+  t.extensions.add pos.encoded
+  let k = traceKeys(rec, t)
+  doAssert k.srcX == 500 and k.srcY == 600 and k.srcZ.isNaN and k.rcvX.isNaN

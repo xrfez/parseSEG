@@ -219,3 +219,72 @@ block tape_image_round_trip:
   doAssert e.file.extended.userData.len == 2 and e.file.trailer.userData.len == 4
   doAssert e.file.trailer.userData[1].mediumOffset == -1 # tape: no file offsets
   doAssert e.file.trailer.userDataBytes(e.file.trailer.userData[1]) == items[1].data
+
+# ------------------------------- review of task 3.4 (one block per finding) --
+
+proc write(d: SegyData, path: string, opts: SegyWriteOptions): DiagLog =
+  let sink = openDiskSink(path)
+  try:
+    var w = openSegyWriter(sink, d.file, opts)
+    for t in d.traces: w.writeTrace(t)
+    w.close()
+    result = w.log
+  finally:
+    sink.close()
+
+proc warned(log: DiagLog, text: string): bool =
+  for e in log:
+    if e.severity == sevWarning and text in e.msg: return true
+
+block segyreview2_f6_user_data_overrun_is_reported:
+  # Count 2: record 1 declares a 4000-byte block, record 2 is EndText.
+  var rec = toBytes("((SEG:UserData))<segydescblock><version>1</version>" &
+    "<blocksize>4000</blocksize><datalabel>Big</datalabel></segydescblock>")
+  rec.setLen 3200
+  var ext = initExtendedTextHeader()
+  ext.add rec
+  ext.addEndText()
+  let path = tmp / "overrun.sgy"
+  discard makeFile(ext, initExtendedTextHeader(), 2, 0).write(path, SegyWriteOptions(lenient: true))
+  let d = readSegy(path)
+  doAssert d.traces.len == 3
+  doAssert d.log.warned("runs into the final ((SEG:EndText))")
+  let b = d.file.extended.userData[0]
+  doAssert b.blockSize == 4000 and b.available < 4000
+  doAssertRaises ValueError: discard d.file.extended.userDataBytes(b)
+  doAssertRaises ValueError: extractUserData(path, b, tmp / "x.bin")
+
+block segyreview2_f7_corrupt_lengths_do_not_swallow_traces:
+  var ext = initExtendedTextHeader()
+  var rec = toBytes("((ACME:Blob:application/octet-stream:999999999999))")
+  rec.setLen 3200
+  ext.add rec
+  ext.addEndText()
+  let path = tmp / "hugebytes.sgy"
+  discard makeFile(ext, initExtendedTextHeader(), -1, 0).write(path, SegyWriteOptions(lenient: true))
+  let d = readSegy(path)
+  doAssert d.traces.len == 3 and d.log.warned("beyond the end of the file")
+  # An unterminated description block followed by EndText and traces.
+  var ext2 = initExtendedTextHeader()
+  var r2 = toBytes("((SEG:UserData))")
+  r2.setLen 3190
+  r2.add toBytes("<segydescb")
+  ext2.add r2
+  ext2.addEndText()
+  let path2 = tmp / "unclosed.sgy"
+  discard makeFile(ext2, initExtendedTextHeader(), -1, 0).write(path2, SegyWriteOptions(lenient: true))
+  let d2 = readSegy(path2)
+  doAssert d2.traces.len == 3 and not d2.log.isFatal
+
+block segyreview2_f10_long_first_description_block:
+  var desc = UserDataBlock(version: "1", dataFormat: "text-x", dataLabel: "Long",
+    description: repeat("a", 5000), creator: "t")
+  var tr = initExtendedTextHeader()
+  tr.addUserData(@[UserDataItem(desc: desc, data: toBytes("payload"))])
+  var ext = initExtendedTextHeader()
+  ext.addEndText()
+  let path = tmp / "longdesc.sgy"
+  discard makeFile(ext, tr, 1, -1).write(path, SegyWriteOptions())
+  let d = readSegy(path)
+  doAssert d.traces.len == 3 and d.file.trailer.userData.len == 1
+  doAssert d.file.trailer.userDataBytes(d.file.trailer.userData[0]) == toBytes("payload")

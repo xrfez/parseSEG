@@ -388,3 +388,15 @@ block encode_needs_a_revision:
   doAssert g.resolveLine("CLT4960", NaN).isNone
   g.trailingDigits = true
   doAssert g.resolveLine("CLT4960", NaN) == some(4960.0) and g.resolveLine("x", 7) == some(7.0)
+
+# Phase 8 review.
+block p8_geometry_overwrite_semantics:
+  # Filling one end keeps a signed SEG-Y header offset and a known elevation.
+  var k = initTraceKeys()
+  (k.srcX, k.srcY, k.offset, k.rcvZ) = (0.0, 0.0, -250.0, 12.0)
+  (k.rcvLine, k.rcvPoint) = (1.0, 2.0)
+  var g: GeometryTable
+  g.addReceiver(1, 2, 0, 300, 400) # no z
+  doAssert k.applyGeometry(g)
+  doAssert k.offset == -250 and k.rcvZ == 12 and k.cmpX == 150
+  doAssert k.applyGeometry(g, overwrite = true) and k.offset == 500

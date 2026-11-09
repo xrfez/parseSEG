@@ -1,6 +1,6 @@
 ## SEG-Y trace header layouts and named values (task 3.4d).
 
-import std/[assertions, os, math, sequtils]
+import std/[assertions, os, math, sequtils, strutils]
 import parseSEG/common/[diagnostics, endians]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader, writer, fields]
@@ -132,3 +132,72 @@ block malformed_layout_falls_back:
   let e = readSegy(path)
   doAssert e.log.len == 1 and e.log[0].loc.field == "extended.layout"
   doAssert e.file.layout.named("iline")[^1].bytePos == 189 # standard layout
+
+# ------------------------------- review of task 3.4 (one block per finding) --
+
+const ingle = exampleDir / "BO_3D-Inglewood_rev21_v7.sgy"
+
+proc write(d: SegyData, path: string, opts: SegyWriteOptions): DiagLog =
+  let sink = openDiskSink(path)
+  try:
+    var w = openSegyWriter(sink, d.file, opts)
+    for t in d.traces: w.writeTrace(t)
+    w.close()
+    result = w.log
+  finally:
+    sink.close()
+
+proc strict(d: SegyData): SegyWriteOptions = initSegyWriteOptions(d.file)
+
+proc makeFile(ext, trailer: ExtendedTextHeader, nExt: int16, nTrailer: int32): SegyData =
+  var f = SegyFile(byteOrder: boBig, format: some(sfInt16))
+  f.text = initTextHeader(teAscii)
+  f.binary = SegyBinaryHeader(segyMajor: 2, segyMinor: 1, formatCode: 3, sampleInterval: 500,
+    samplesPerTrace: 4, fixedLengthTraces: 1, numExtTextHeaders: nExt,
+    numTrailerRecords: nTrailer, byteOrderMarker: ByteOrderMarker)
+  f.extended = ext
+  f.trailer = trailer
+  result.file = f
+  for k in 0..<3:
+    var t = SegyTrace(index: k, numSamples: 4)
+    t.header.numSamples = 4
+    t.samples = newSeq[byte](8)
+    result.traces.add t
+
+proc warned(log: DiagLog, text: string): bool =
+  for e in log:
+    if e.severity == sevWarning and text in e.msg: return true
+
+block segyreview2_f1_hostile_layout_entities:
+  for bad in ["<segy-layout>&#99999999999;</segy-layout>",
+      "<segy-layout>&#xFFFFFFFFFF;</segy-layout>", "<segy-layout>&#12</segy-layout>"]:
+    doAssertRaises ValueError: discard parseLayout(bad)
+  doAssert parseLayout("<segy-layout><desc>&#65;&#x42;</desc></segy-layout>").desc == "AB"
+  var ext = initExtendedTextHeader()
+  ext.addText("SEG", "Layout", "<segy-layout>&#99999999999;</segy-layout>", "text/xml")
+  ext.addEndText()
+  let path = tmp / "hostile.sgy"
+  discard makeFile(ext, initExtendedTextHeader(), -1, 0).write(path, SegyWriteOptions())
+  let d = readSegy(path)
+  doAssert d.traces.len == 3 and d.log.warned("invalid character reference")
+
+block segyreview2_f8_wide_scalar_is_not_wrapped:
+  var d = readSegy(ingle)
+  let xml = """<segy-layout><entry name="co_scal" byte="181" type="int4"/>
+<entry name="sht_x" byte="73" type="coor4"/></segy-layout>"""
+  var ext = initExtendedTextHeader()
+  ext.addText("SEG", "Layout", xml, "text/xml")
+  ext.addEndText()
+  d.file.extended = ext
+  d.file.binary.numExtTextHeaders = int16(ext.recordCount)
+  d.traces[0].header.cdpX = 1_000_000 # read as an int4 scalar: out of int16 range
+  let path = tmp / "widescalar.sgy"
+  discard d.write(path, d.strict)
+  let e = readSegy(path)
+  # scalar ignored, not wrapped
+  doAssert e.file.fieldValue(e.traces[0], "sht_x") == some(float64(e.traces[0].header.sourceX))
+
+block segyreview2_f11_extension_names_ignore_case:
+  let lay = parseLayout("""<segy-layout><extension name="acme0001">
+<entry name="x" byte="1" type="int4"/></extension></segy-layout>""")
+  doAssert lay.entries[0].extension == "ACME0001"
