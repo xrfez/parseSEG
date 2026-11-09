@@ -9,8 +9,11 @@
 ## files, so the examples use the same relative paths a reader would
 ## (`"SEG Spec/exampleFiles/63.sgd"`) and write their outputs next to
 ## themselves. Blocks tagged otherwise (`sh`, `text`) are not run.
+##
+## It also checks the umbrella's allowlists against `docs/api.md`.
 
-import std/[algorithm, assertions, os, osproc, strutils]
+import std/[algorithm, assertions, os, osproc, sets, strutils]
+import ./utils/srcnames
 
 const
   root = currentSourcePath().parentDir.parentDir
@@ -75,6 +78,38 @@ proc nimPaths(): string =
     let s = line.strip
     if s.startsWith("--path:"):
       result.add " --path:" & quoteShell(root / s["--path:".len .. ^1].strip(chars = {'"'}))
+
+block umbrella_allowlists_match_api_md:
+  # `src/parseSEG.nim` re-exports these modules by name. Every name a module
+  # exports is either on its allowlist or one of its internals listed here,
+  # every allowlisted name is documented in docs/api.md, and no internal
+  # name is (except where a public overload shares it).
+  let umbrella = readFile(srcDir / "parseSEG.nim")
+  let api = toHashSet(words(readFile(root / "docs" / "api.md")))
+  const sharedWithPublic = ["flush"] # memsource and the writers' `flush`
+  const allowlisted = [
+    ("traceindex", "model/traceindex.nim", @["MapPin", "pinMap", "openSeismicRw",
+      "remapWritable", "requireOpen", "requireTrace", "requireKind", "unsafeMemory",
+      "mappedSize", "flush"]),
+    ("headerfields", "model/headerfields.nim", newSeq[string]()),
+    ("edit", "model/edit.nim", @["logVar", "writeBytes", "batching", "flushPending"]),
+    ("convert", "convert.nim", @["GeometryJoin", "convertSegdToSegyJoined", "convertJoined"])]
+  for (module, file, internal) in allowlisted:
+    let listed = allowlist(umbrella, module)
+    let exported = exportedNames(readFile(srcDir / "parseSEG" / file))
+    doAssert listed.len > 0, module & ": no allowlist in src/parseSEG.nim"
+    for n in listed:
+      doAssert n in exported, module & "." & n & " is allowlisted but not exported"
+      doAssert n in api, module & "." & n & " is exported by parseSEG but not in docs/api.md"
+      doAssert n notin internal, module & "." & n & " is both allowlisted and internal"
+    for n in exported:
+      doAssert n in listed or n in internal, module & "." & n &
+        " is neither on the umbrella's allowlist nor a listed internal"
+    for n in internal:
+      doAssert n in exported, module & "." & n & " is listed as internal but not exported"
+      doAssert n notin api or n in sharedWithPublic,
+        module & "." & n & " is internal but docs/api.md lists it"
+  echo "tdocs: umbrella allowlists ok"
 
 let tmp = getTempDir() / "parseseg_tdocs"
 createDir(tmp)

@@ -67,8 +67,9 @@ func exportStatements*(source: string): seq[string] =
     inc i
 
 func words*(text: string): seq[string] =
-  ## The identifiers in `text` (dots and commas split them).
-  for w in text.split({' ', ',', '.', '[', ']', '`', '(', ')', '/'}):
+  ## The identifiers in `text` (anything but identifier characters splits
+  ## them).
+  for w in text.split(AllChars - IdentChars):
     if w.len > 0: result.add w
 
 func allowlist*(umbrella, module: string): seq[string] =

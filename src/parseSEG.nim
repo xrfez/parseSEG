@@ -2,7 +2,11 @@
 ## SEG-2 on disk, and the SPS and SEG P1 survey files that give it geometry.
 ##
 ## This umbrella module re-exports the stable public API; `docs/api.md`
-## lists it. The low-level byte codecs (BCD, IBM float, EBCDIC, the field
+## lists it. Modules that also export internals for the library's own use
+## (`traceindex`, `headerfields`, `edit`, `convert`) are re-exported by name,
+## an allowlist that no later re-export can widen; the rest whole. The
+## library's helpers live in `parseSEG/private/`, which nothing re-exports.
+## The low-level byte codecs (BCD, IBM float, EBCDIC, the field
 ## layout pragmas) are in `parseSEG/codecs`.
 
 import parseSEG/version
@@ -32,16 +36,37 @@ import parseSEG/vendor/[maps, apply, scaffold]
 export maps, apply, scaffold
 
 import parseSEG/[convert, seg2convert]
-export convert except convertJoined, convertSegdToSegyJoined, GeometryJoin
+export convert.SegyTargetFormat, convert.ConvertOptions, convert.targetFormat,
+  convert.convertSegy, convert.convertSegdToSegy, convert.convertSeg2ToSegy, convert.convertFile
 export seg2convert
 
-import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
-  headernif, summary, headerlist, sorting, writefile]
-export traceindex except unsafeMemory, mappedSize, flush, MapPin, pinMap, openSeismicRw,
-  remapWritable, requireOpen, requireTrace, requireKind
-export headerfields
-export keys, gathers, prefetch, headernif, summary, headerlist, sorting, writefile
-export edit except writeBytes, flushPending, batching, logVar
+import parseSEG/model/[keys, indextypes, traceindex, gathers, prefetch, fieldvalues,
+  headerfields, edit, headernif, summary, headerlist, sorting, tensors, writefile]
+import parseSEG/common/[seismickind, progress]
+export seismickind, progress, keys, indextypes, tensors, fieldvalues
+# Allowlists: traceindex, edit and convert also export helpers that need
+# their private fields (for the library's own modules), so their public
+# names are listed one by one, as are headerfields'. A new public name goes
+# here and in docs/api.md (tdocs checks both).
+export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, traceindex.isOpen,
+  traceindex.path, traceindex.fromCache, traceindex.demuxPath, traceindex.len,
+  traceindex.kind, traceindex.log, traceindex.recordCount, traceindex.maxSamples,
+  traceindex.traceEntry, traceindex.hasKeys, traceindex.traceKeys, traceindex.traceKeysInto,
+  traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,
+  traceindex.copyBytes, traceindex.readTracesInto, traceindex.readTraces,
+  traceindex.detectKind, traceindex.buildIndex, traceindex.applyGeometry,
+  traceindex.saveIndex
+export headerfields.fieldNames, headerfields.fieldByName, headerfields.traceField,
+  headerfields.recordField, headerfields.fileField, headerfields.findTraceField,
+  headerfields.findRecordField, headerfields.findFileField, headerfields.blockKind,
+  headerfields.seg2Strings, headerfields.sampleIntervalUs, headerfields.traceFieldColumn,
+  headerfields.traceFieldColumnInto
+export edit.HeaderEditor, edit.openEditor, edit.close, edit.release, edit.file, edit.log,
+  edit.journalPath, edit.edits, edit.beginBatch, edit.endBatch, edit.currentTraceField,
+  edit.currentRecordField, edit.currentFileField, edit.setTraceField, edit.setRecordField,
+  edit.setFileField, edit.JournalEdit, edit.readJournal, edit.rollbackJournal,
+  edit.applyJournal
+export gathers, prefetch, headernif, summary, headerlist, sorting, writefile
 
 import parseSEG/survey/[textrec, sps, p1, join, writeback]
 export textrec, sps, p1, join, writeback

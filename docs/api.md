@@ -4,9 +4,10 @@
 task-oriented guides with tested examples (viewers, processing, editing, conversion,
 diagnostics) see [`docs/guide/`](guide/README.md). The main sections describe the
 everyday API; [Supporting types and lower-level names](#supporting-types-and-lower-level-names)
-at the end lists the rest of what the umbrella exports, one line per group. Procs whose doc
-comment starts with **Internal.** are exported for the library's own modules only and are
-not listed. Beyond the umbrella:
+at the end lists the rest of what the umbrella exports, one line per group. The library's own
+helpers are in `parseSEG/private/`, which nothing re-exports; the few procs a public module
+exports for the library's use (doc comment **Internal.**) are kept out by the umbrella's
+allowlists, which `tests/tdocs.nim` checks against this page. Beyond the umbrella:
 - `parseSEG/codecs` holds the byte codecs (BCD, IBM float, EBCDIC) and the field-layout
   pragmas;
 - the `parseSEG/<area>/<module>` paths can still be imported one by one.

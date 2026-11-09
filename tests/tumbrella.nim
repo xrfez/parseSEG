@@ -48,11 +48,11 @@ block private_modules_stay_private:
   doAssert not compiles(sf.blockStrings(BlockRef()))
   doAssert not declared(ProgressTicker) # so `finish(var ProgressTicker)` is unreachable
 
-block umbrella_except_lists_hide_what_they_name:
-  # The internals still exported by public modules (they need a type's
-  # private fields, or live in a codec module): an `except` list filters one
-  # export path only, so check each name from the umbrella. Keep this list
-  # equal to the `except` lists in src/parseSEG.nim (update both together).
+block exported_internals_stay_hidden:
+  # The internals still exported by public modules: the `*Raw` decoders
+  # (behind `except` lists in the umbrella and the readers) and the helpers
+  # that need a type's private fields (traceindex, edit, convert; left off
+  # the umbrella's allowlists, which tdocs checks). Check each name here.
   const hidden = [
     "decodeSamplesRaw", "decodeSegdSamplesRaw", "decodeSeg2SamplesRaw",
     "convertJoined", "convertSegdToSegyJoined", "GeometryJoin",
