@@ -31,6 +31,9 @@ jobs:
       - name: Run test suite
         run: nim test
 
+      - name: Threaded tests under ASan/LSan (fails on any leak)
+        run: nim asan
+
       - name: Build the command line tool
         run: |
           nim zigPortable

@@ -20,15 +20,16 @@
     counts are not atomic, and threads share files (`tests/tsharedreads.nim`).
   - **Commits:** commit as a separate command after checking the suite. A commit on the
     line after a heredoc runs even when the check before it failed.
-  - **Known leak:** ASan reports a 32 KB leak in the prefetcher tests. The cause is found;
-    see 15.1.
+  - **Worker-thread exceptions:** decode paths that run on worker or caller threads must not
+    raise. Use `tryDecodeEntry` (it returns a status, `{.raises: [].}`); `nim asan` checks
+    for leaks (15.1).
   - **Parallel agents:** they need their own worktree, `XDG_CACHE_HOME` and a short
     `TMPDIR`. Phase 14.3 ran one agent at a time on the main checkout instead.
 - **Open (from the 14.3 logs):**
   - the SEG-D writer cannot change sample counts and refuses multiplexed input;
   - the full-scale bench (`PARSESEG_BENCH_SCALE=full`) was not re-run;
   - "Open questions for the owner" below still stand.
-- **Next:** Phase 15 (owner, 2026-11-09): 15.1 leak (cause found), 15.2 docs pass, 15.3
+- **Next:** Phase 15 (owner, 2026-11-09): 15.1 leak (done), 15.2 docs pass, 15.3
   idiomatic Nim and performance review.
 
 ## Goal
@@ -1009,7 +1010,7 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 - [x] 14.4 Re-run `nim bench` (Nim only) and update `docs/benchmarks.md`, then do 13.5.
 
 ### Phase 15: Leak, usage docs, idiomatic Nim and performance review (owner, 2026-11-09)
-- [ ] 15.1 **The 32 KB leak.** It was found under ASan in `tests/tprefetch.nim`.
+- [x] 15.1 **The 32 KB leak.** It was found under ASan in `tests/tprefetch.nim`.
       - **Cause** (2026-11-09, ASan with `fast_unwind_on_malloc=0`):
         - When a trace cannot be decoded, the prefetcher worker raises and catches a `SegError`
           (`decodeChunk` → `decodeEntry`).
@@ -1662,3 +1663,9 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
 - 2026-11-09: 14.4 done. Ran `nim bench` at small scale; it passed. `docs/benchmarks.md` has a "Phase 14 re-run" section: the same per-trace index cost (218 vs 244 ns/trace), keys (648 vs 682), heap, IBM/8015 decode and single-trace latency as before, plus the 14.3 rows (sample window, header column) and the agents' cache/hook/recycling numbers. Full scale was not re-run.
 - 2026-11-09: 13.5 done. `main` was fast-forwarded to `seg-library` at the end of Phase 14; nothing is pushed. Handoff rewritten.
 - 2026-11-09: Phase 15 planned (owner: track the leak, the state of the usage docs, a review for idiomatic Nim and performance). Leak cause: exceptions destroyed on worker threads make ORC allocate a per-thread 16 KB cycle-root buffer that is never freed at thread exit (see 15.1).
+- 2026-11-09: 15.1 done; the leak is fixed and tracked.
+  - New `tryDecodeEntry` (internal, `{.raises: [].}`) returns a `DecodeStatus` (`dsOk`/`dsUndecodable`/`dsTruncated`) instead of raising. `decodeLoop` (`readTracesInto` & co) and the prefetcher worker use it, so no exception is made on worker or caller threads. `decodeEntry` stays as a raising wrapper for the conversions.
+  - Each sample decoder split into a checked public form and a non-raising `...Raw` core (`decodeSamplesRaw`, `decodeSegdSamplesRaw`, `decodeSeg2SamplesRaw`). `tryDecodeEntry` checks the byte range and the pair-swapped 24-bit case first.
+  - tprefetch under ASan: the 32 KB leak is gone.
+  - New `nim asan` task (tprefetch, tsharedreads, tcolumns, tviewerreads, tdiagnostics under ASan/LSan; any leak fails), also run in CI.
+  - Decode speed unchanged (small-scale bench, warm mapped: IEEE 25.5 GB/s, IBM 5.7, 8015 2.49, 8058 25.1).

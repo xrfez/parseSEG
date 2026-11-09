@@ -99,16 +99,12 @@ template forEachOrder(order: ByteOrder, body: untyped) =
 # unchecked pointers: no per-sample check in any build (the shipped library
 # is -d:release).
 
-proc decodeSamples*[T: SampleType](f: SampleFormat, src: openArray[byte],
-    dst: var openArray[T], order = boBig) =
-  ## Decodes `dst.len` samples of format `f` from the start of `src`.
-  ## Raises `SegTruncatedError` if `src` is too short, and `SegFormatError` for
-  ## a 3-byte format in pair-swapped order.
-  checkOrder(f, order)
+proc decodeSamplesRaw*[T: SampleType](f: SampleFormat, src: openArray[byte],
+    dst: var openArray[T], order = boBig) {.raises: [].} =
+  ## **Internal.** `decodeSamples` without its checks: `src` must hold the
+  ## samples (and, SEG-Y, the format must suit `order`). Raises nothing, so
+  ## worker threads make no exceptions (`tryDecodeEntry`).
   let n = dst.len
-  if src.len < n * sampleSize(f):
-    raiseTruncated("trace data has " & $src.len & " bytes, " & $(n * sampleSize(f)) &
-      " needed for " & $n & " samples")
   if n == 0: return
   let s = byteBuf(src)
   let d = cast[ptr UncheckedArray[T]](addr dst[0])
@@ -159,6 +155,19 @@ proc decodeSamples*[T: SampleType](f: SampleFormat, src: openArray[byte],
         for i in 0..<n: d[i] = T(loadU24(s, 3*i, o))
     of sfUInt8:
       for i in 0..<n: d[i] = T(s[i])
+
+proc decodeSamples*[T: SampleType](f: SampleFormat, src: openArray[byte],
+    dst: var openArray[T], order = boBig) =
+  ## Decodes `dst.len` samples of format `f` from the start of `src`.
+  ## Raises `SegTruncatedError` if `src` is too short, and `SegFormatError` for
+  ## a 3-byte format in pair-swapped order.
+  checkOrder(f, order)
+  let n = dst.len
+  if src.len < n * sampleSize(f):
+    raiseTruncated("trace data has " & $src.len & " bytes, " & $(n * sampleSize(f)) &
+      " needed for " & $n & " samples")
+  if n == 0: return
+  decodeSamplesRaw(f, src, dst, order)
 
 {.pop.}
 

@@ -89,16 +89,12 @@ const
 # Lengths are checked once, up front; the loops then load through unchecked
 # pointers, in every build.
 
-proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
-    dst: var openArray[T], twosComplement8015 = false) =
-  ## Decodes `dst.len` samples of format `f` from the start of `src`.
-  ## `twosComplement8015` reads 8015 fractions as two's complement, as some
-  ## field systems write them (the spec says one's complement). Raises
-  ## `SegTruncatedError` if `src` is too short.
+proc decodeSegdSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
+    dst: var openArray[T], twosComplement8015 = false) {.raises: [].} =
+  ## **Internal.** `decodeSegdSamples` without its checks: `src` must hold the
+  ## samples (and, SEG-Y, the format must suit `order`). Raises nothing, so
+  ## worker threads make no exceptions (`tryDecodeEntry`).
   let n = dst.len
-  if src.len < dataBytes(f, n):
-    raiseTruncated("trace data has " & $src.len & " bytes, " & $dataBytes(f, n) &
-      " needed for " & $n & " samples")
   if n == 0: return
   let s = byteBuf(src)
   let d = cast[ptr UncheckedArray[T]](addr dst[0])
@@ -168,6 +164,19 @@ proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[b
     when T is float64 and hostOrder == boLittle: copyMem(d, s, 8 * n)
     else:
       for i in 0..<n: d[i] = T(loadNum[float64](s, 8 * i, boLittle))
+
+proc decodeSegdSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte],
+    dst: var openArray[T], twosComplement8015 = false) =
+  ## Decodes `dst.len` samples of format `f` from the start of `src`.
+  ## `twosComplement8015` reads 8015 fractions as two's complement, as some
+  ## field systems write them (the spec says one's complement). Raises
+  ## `SegTruncatedError` if `src` is too short.
+  let n = dst.len
+  if src.len < dataBytes(f, n):
+    raiseTruncated("trace data has " & $src.len & " bytes, " & $dataBytes(f, n) &
+      " needed for " & $n & " samples")
+  if n == 0: return
+  decodeSegdSamplesRaw(f, src, dst, twosComplement8015)
 
 {.pop.}
 

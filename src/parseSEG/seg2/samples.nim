@@ -70,17 +70,12 @@ func float20Value(e, w: uint16, twosComplement: bool): float64 {.inline.} =
     else: int(w)
   float64(m * (1 shl int(e)))
 
-proc decodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
-    dst: var openArray[T], order: ByteOrder, twosComplement = false) =
-  ## Decodes `dst.len` samples of format `f`, stored in `order`, from the
-  ## start of `src`. `twosComplement` reads format-3 mantissas as two's
-  ## complement instead of the spec's one's complement. Raises
-  ## `SegTruncatedError` if `src` is shorter than `dataBytes(f, dst.len)`.
+proc decodeSeg2SamplesRaw*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
+    dst: var openArray[T], order: ByteOrder, twosComplement = false) {.raises: [].} =
+  ## **Internal.** `decodeSeg2Samples` without its checks: `src` must hold the
+  ## samples (and, SEG-Y, the format must suit `order`). Raises nothing, so
+  ## worker threads make no exceptions (`tryDecodeEntry`).
   let n = dst.len
-  let need = dataBytes(f, n)
-  if src.len < need:
-    raiseTruncated("trace data has " & $src.len & " bytes, " & $need & " needed for " & $n &
-      " samples")
   if n == 0: return
   let s = byteBuf(src)
   let d = cast[ptr UncheckedArray[T]](addr dst[0])
@@ -108,6 +103,20 @@ proc decodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
         d[i] = T(float20Value(e, loadNum[uint16](s, g + 2 + 2 * k, o), twosComplement))
     {.pop.}
   if order == boLittle: loop(boLittle) else: loop(boBig)
+
+proc decodeSeg2Samples*[T: Seg2SampleType](f: Seg2Format, src: openArray[byte],
+    dst: var openArray[T], order: ByteOrder, twosComplement = false) =
+  ## Decodes `dst.len` samples of format `f`, stored in `order`, from the
+  ## start of `src`. `twosComplement` reads format-3 mantissas as two's
+  ## complement instead of the spec's one's complement. Raises
+  ## `SegTruncatedError` if `src` is shorter than `dataBytes(f, dst.len)`.
+  let n = dst.len
+  let need = dataBytes(f, n)
+  if src.len < need:
+    raiseTruncated("trace data has " & $src.len & " bytes, " & $need & " needed for " & $n &
+      " samples")
+  if n == 0: return
+  decodeSeg2SamplesRaw(f, src, dst, order, twosComplement)
 
 proc toInt(x: float64, lo, hi: int64, i: int): int64 =
   # `x` rounded to the nearest integer; raises when it is NaN or outside lo..hi.

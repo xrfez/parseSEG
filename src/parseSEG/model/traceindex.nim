@@ -361,9 +361,10 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
 proc decodeRun[T: SampleType](c: TraceCodec, src: openArray[byte], dst: var openArray[T]) =
   # `dst.len` samples of codec `c` from the start of `src` (a known format).
   case c.kind
-  of skSegy: decodeSamples(c.segyFormat.get, src, dst, c.order)
-  of skSegd: decodeSegdSamples(c.segdFormat.get, src, dst, c.twosComplement8015)
-  of skSeg2: decodeSeg2Samples(c.seg2Format.get, src, dst, c.order, c.twosComplement8015)
+  # The unchecked forms: `tryDecodeEntry` checked the bytes and the order.
+  of skSegy: decodeSamplesRaw(c.segyFormat.get, src, dst, c.order)
+  of skSegd: decodeSegdSamplesRaw(c.segdFormat.get, src, dst, c.twosComplement8015)
+  of skSeg2: decodeSeg2SamplesRaw(c.seg2Format.get, src, dst, c.order, c.twosComplement8015)
   of skUnknown: discard
 
 func packedInFours(c: TraceCodec): bool {.inline.} =
@@ -372,23 +373,37 @@ func packedInFours(c: TraceCodec): bool {.inline.} =
   (c.kind == skSegd and c.segdFormat.get == sd8015) or
     (c.kind == skSeg2 and c.seg2Format.get == s2Float20)
 
-proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
-    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0) =
-  ## Decodes samples `first ..< first + cols` of trace `e` from the mapped
-  ## bytes `mem[0 ..< size]` into `dst[0 ..< cols]`, zero past the trace's
-  ## end. Only the window's bytes are read; a window of SEG-D 8015 or SEG-2
-  ## format 3 (4 samples in 10 bytes) that starts inside a group decodes that
-  ## whole group first. Touches no managed memory, so a worker thread may
-  ## call it. Raises `SegFormatError` for an undecodable format and
-  ## `SegTruncatedError` when the trace lies past `size` (the whole trace is
-  ## checked, whatever the window).
+type
+  DecodeStatus* = enum
+    ## **Internal.** The outcome of `tryDecodeEntry`.
+    dsOk          ## Decoded.
+    dsUndecodable ## The sample format is not decodable.
+    dsTruncated   ## The trace's samples lie past the end of the map.
+
+const decodeMessages*: array[DecodeStatus, string] = ["",
+  "the sample format is not decodable", "trace samples lie past the end of the file"]
+  ## **Internal.** The diagnostic text of each failure.
+
+proc tryDecodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
+    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0): DecodeStatus {.
+    raises: [].} =
+  ## **Internal.** Decodes samples `first ..< first + cols` of trace `e` from
+  ## the mapped bytes `mem[0 ..< size]` into `dst[0 ..< cols]`, zero past the
+  ## trace's end. Only the window's bytes are read; a window of SEG-D 8015 or
+  ## SEG-2 format 3 (4 samples in 10 bytes) that starts inside a group decodes
+  ## that whole group first. Reports an undecodable format or a trace past
+  ## `size` (the whole trace is checked, whatever the window) as a status and
+  ## leaves `dst` untouched then. Makes no managed objects, not even
+  ## exceptions, so a worker thread may call it: an exception destroyed on a
+  ## thread makes ORC allocate that thread's cycle buffer, which is never
+  ## freed (15.1).
   let n = clamp(int(e.numSamples) - first, 0, cols)
-  if not c.known:
-    raiseFormat("the sample format is not decodable", e.offset)
+  if not c.known: return dsUndecodable
+  if c.kind == skSegy and c.order == boPairSwapped and c.segyFormat.get in {sfInt24, sfUInt24}:
+    return dsUndecodable # pair-swapped order is undefined for 3-byte samples
   let nbytes = c.dataBytes(int(e.numSamples))
   let start = e.sampleOffset
-  if start < 0 or start + nbytes > size:
-    raiseTruncated("trace samples lie past the end of the file", start)
+  if start < 0 or start + nbytes > size: return dsTruncated
   if n > 0:
     let a = int(start)
     let last = a + nbytes - 1
@@ -411,6 +426,17 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: 
         let b = if lead > 0: g + 10 else: g
         c.decodeRun(mem.toOpenArray(b, last), dst.toOpenArray(head, n - 1))
   for k in n..<cols: dst[k] = T(0)
+  dsOk
+
+proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
+    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0) =
+  ## **Internal.** `tryDecodeEntry` that raises `SegFormatError` for an
+  ## undecodable format and `SegTruncatedError` for a trace past `size`. For
+  ## the caller's thread (conversions); worker threads use `tryDecodeEntry`.
+  case tryDecodeEntry(mem, size, e, c, dst, cols, first)
+  of dsOk: discard
+  of dsUndecodable: raiseFormat(decodeMessages[dsUndecodable], e.offset)
+  of dsTruncated: raiseTruncated(decodeMessages[dsTruncated], e.sampleOffset)
 
 # ---------------------------------------------------------- seismic file --
 
@@ -943,12 +969,11 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
     let i = traceAt(k)
     let e = f.index.entries[i]
     let p = rowAt(k)
-    try:
-      decodeEntry(mem, size, e, f.index.codecs[e.record], p, cols, first)
-    except SegError as err:
+    let st = tryDecodeEntry(mem, size, e, f.index.codecs[e.record], p, cols, first)
+    if st != dsOk:
       for c in 0..<cols: p[c] = T(0)
-      log.report(sevError, if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat,
-        err.msg, e.offset, Location(file: f.path,
+      log.report(sevError, if st == dsTruncated: dcTruncated else: dcUnsupportedFormat,
+        decodeMessages[st], e.offset, Location(file: f.path,
           record: if f.index.kind == skSeg2: 0 else: int(e.record), trace: i))
       inc failed
   failed

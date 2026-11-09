@@ -26,10 +26,10 @@
 ##   show(c.first, c.samples)
 ## ```
 ##
-## Ownership: the worker shares no managed memory with the consumer (the
-## only managed objects it makes are exceptions it raises and catches
-## itself). It reads the file's map and index through raw pointers, decodes
-## into slot buffers that the consumer thread allocated (`decodeEntry`), and
+## Ownership: the worker shares no managed memory with the consumer, and
+## makes no managed objects at all (decode failures are statuses). It reads
+## the file's map and index through raw pointers, decodes into slot buffers
+## that the consumer thread allocated (`tryDecodeEntry`), and
 ## notes the rows that failed in a plain array of the slot; the consumer
 ## turns those into the chunk's diagnostics. When the consumer takes a chunk,
 ## it takes the slot's tensor and gives the slot another one, so a tensor
@@ -46,7 +46,7 @@
 ## prefetcher runs, and call the consumer procs from one thread.
 
 import std/locks
-import ../common/[diagnostics, errors]
+import ../common/diagnostics
 import ../segy/samples
 import ./traceindex
 
@@ -143,18 +143,18 @@ proc traceOf[T](sh: ptr Shared[T], pos: int): int {.inline.} =
 
 proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) {.raises: [].} =
   # Runs without the lock: the slot is busy, so nobody else touches it.
-  # `decodeEntry` raises only `SegError`s (an undecodable format, samples
-  # past the end of the map).
+  # `tryDecodeEntry` reports failures as a status: no exception is made on
+  # this thread (one destroyed here would leak ORC's per-thread cycle buffer).
   s.failed = 0
   for k in 0..<s.count:
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
     let e = sh.entries[sh.traceOf(s.first + k)]
-    try:
-      decodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols, sh.firstSample)
-    except SegError as err:
+    let st = tryDecodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols,
+      sh.firstSample)
+    if st != dsOk:
       for c in 0..<sh.cols: row[c] = T(0)
       s.fails[s.failed] = FailedRow(row: k,
-        code: if err of SegTruncatedError: dcTruncated else: dcUnsupportedFormat)
+        code: if st == dsTruncated: dcTruncated else: dcUnsupportedFormat)
       inc s.failed
 
 proc worker[T](sh: ptr Shared[T]) {.thread.} =

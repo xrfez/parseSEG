@@ -34,7 +34,8 @@ export seg2convert
 
 import parseSEG/model/[keys, traceindex, gathers, prefetch, headerfields, edit,
   headernif, summary, headerlist, sorting, writefile]
-export traceindex except unsafeMemory, decodeEntry, mappedSize, flush,
+export traceindex except unsafeMemory, decodeEntry, tryDecodeEntry, DecodeStatus,
+  decodeMessages, mappedSize, flush,
   requireKeys, checkSpan, spanLen, MapPin, pinMap, openSeismicRw, remapWritable,
   ProgressTicker, initProgressTicker, tick, finish, progressPhase, reportCancelled
 export headerfields except locate, locateBlock, readField, FieldRef, FieldRead, withBlockType,
