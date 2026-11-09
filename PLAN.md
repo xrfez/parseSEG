@@ -1679,3 +1679,10 @@ Remove the FFI and simplify what was bent around it. Keep behaviour and performa
   - Fixed the RST in two doc comments (`textheader.nim` `"C 1 "`, `convert.nim` `ext*`); our modules' docs now build without errors.
   - The remaining `nim docs` failure is Arraymancer's CUDA imports under `nimdoc`; it is logged in 15.3.
 - 2026-11-09: 15.3 idiom audit written (`docs/design/phase15_idiom_audit.md`, 23 items, steps 15.3a-i). Correction to the 15.2 follow-up: the `except` clauses do NOT hide the `...Raw` decoders. `segy/reader`, `segd/reader`, `seg2/headers` and `seg2/writer` re-export `samples` whole; a probe with only `import parseSEG` sees all three (item A1). The perf audit is still running; then the owner approves.
+- 2026-11-09: 15.3 perf audit written (`docs/design/phase15_perf_audit.md`, 15 items, 10-step plan).
+  - Measured gains:
+    - branchless 8015/8024 decode: 2.5 → 4.7 and 1.9 → 7.4 GB/s;
+    - unchecked `decodeFields` in the release index walk: 429 → 246 ns/trace;
+    - `madvise(WILLNEED)` on cold gathers: 1261 → 106 ms;
+    - x86-64-v3 release build: big-endian IEEE 8.2 → 25.5 GB/s.
+  - Owner decisions needed: the build target, O(1) open for fixed-length SEG-Y, and a smaller first prefetch chunk after a seek.
