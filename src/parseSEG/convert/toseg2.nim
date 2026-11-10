@@ -225,7 +225,7 @@ proc traceStrings(c: var Seg2Conv, f: SeismicFile, i: int, t: var Seg2Trace) =
   let e = f.index.entries[i]
   case f.kind
   of skSegy:
-    put("DELAY", f.segyTimeMs(i, "trace.delayRecordingTime") / 1000)
+    put("DELAY", f.startTimeMs(i) / 1000)
     var tt = f.traceTypeOf(i, f.segyNum(i, "trace.traceIdCode"))
     t["TRACE_TYPE"] = tt
     let stack = f.segyNum(i, "trace.numVertSummed")

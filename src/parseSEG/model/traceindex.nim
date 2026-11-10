@@ -12,7 +12,7 @@
 ## `buildIndex` (`indexwalk`, re-exported here) walks any `RecordSource`
 ## (disk, tape image, tape device) with the readers' `headersOnly` mode. Each
 ## trace costs one 24-byte `TraceEntry`, so 10 million traces take 240 MB, and
-## 144 bytes of `TraceKeys` with `keys`. The index cache format (`saveIndex`)
+## 184 bytes of `TraceKeys` with `keys`. The index cache format (`saveIndex`)
 ## is in `private/indexcache`.
 ##
 ## SEG-2 is a random-access disk format (a pointer per trace), so it is
@@ -30,7 +30,7 @@
 ## a temporary demultiplexed copy (`segd/demux`) and maps and indexes that
 ## instead (`demuxPath`); the copy is deleted on `close`.
 
-import std/[os, times]
+import std/[math, os, times]
 import ../common/[errors, diagnostics, seismickind, progress, tensors]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
@@ -58,6 +58,7 @@ type
       ## The index tables of a file destroyed while pinned: the prefetchers
       ## read them through raw pointers, so they live as long as the map.
     parkedCodecs: seq[TraceCodec]
+    parkedKeys: seq[TraceKeys] ## As `parkedEntries`: prefetch chunks' `TraceRows` read them.
 
   MapRef = ref MapOwner
 
@@ -71,6 +72,7 @@ proc `=destroy`(m: MapOwner) =
   `=destroy`(m.tempPath)
   `=destroy`(m.parkedEntries)
   `=destroy`(m.parkedCodecs)
+  `=destroy`(m.parkedKeys)
 
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
 proc `=dup`(src: MapOwner): MapOwner {.error.}
@@ -112,6 +114,7 @@ proc `=destroy`(f: SeismicFile) =
     # address, so nothing is copied and the pointers stay valid.
     f.map.parkedEntries = move pf[].index.entries
     f.map.parkedCodecs = move pf[].index.codecs
+    f.map.parkedKeys = move pf[].index.keys
   `=destroy`(pf[].index)
   `=destroy`(f.path)
   `=destroy`(f.demuxPath)
@@ -297,6 +300,16 @@ proc close*(f: var SeismicFile) =
   ## Unmaps the file and deletes a demultiplexed copy (`demuxPath`). The
   ## index stays usable; range reads do not. A prefetcher still running on
   ## the file keeps the map until its own `close`. Idempotent.
+  if f.map != nil and f.map.pins > 0:
+    # Prefetchers (and their chunks' `TraceRows`) read the index tables
+    # through raw pointers: those buffers go to the map they keep alive, and
+    # the file keeps copies, so destroying it later frees nothing they read.
+    f.map.parkedEntries = move f.index.entries
+    f.map.parkedCodecs = move f.index.codecs
+    f.map.parkedKeys = move f.index.keys
+    f.index.entries = f.map.parkedEntries
+    f.index.codecs = f.map.parkedCodecs
+    f.index.keys = f.map.parkedKeys
   f.map = nil
 
 func path*(f: SeismicFile): lent string {.inline.} =
@@ -469,6 +482,29 @@ proc initKeyReader(f: SeismicFile): KeyReader =
 proc raiseOutside(trace: int) {.noinline, noreturn.} =
   raise newException(ValueError, "the headers of trace " & $trace & " lie outside the file")
 
+func mappedSegyHeaders(mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
+    h: var RawHeaders): bool =
+  # The mapped header bytes of a SEG-Y trace; false when they lie outside the map.
+  let a = int(e.offset)
+  let hb = int(e.headerBytes)
+  if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > size: return false
+  let extra = hb - 2 * TraceHeaderSize
+  h = RawHeaders(std: cast[ByteBuf](addr mem[a]),
+    ext1: if hb >= 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + TraceHeaderSize]) else: nil,
+    prop: if extra > 0: cast[ByteBuf](addr mem[a + 2 * TraceHeaderSize]) else: nil,
+    propLen: max(extra, 0))
+  true
+
+proc segyIntervalOf*(f: SeismicFile, trace: int): float64 =
+  ## **Internal** (`headerfields.sampleIntervalUs`). The interval of SEG-Y
+  ## trace `trace` from its mapped headers (as `TraceKeys.intervalUs`); NaN
+  ## when they lie outside the file. The caller checks the trace and the map.
+  let fixed = fixedIntervalUs(f.index.segy)
+  if not fixed.isNaN: return fixed
+  var h: RawHeaders
+  if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.index.entries[trace], h): NaN
+  else: segyIntervalUs(h, f.index.segy.byteOrder, NaN)
+
 proc keysOf(f: SeismicFile, r: var KeyReader, mem: ptr UncheckedArray[byte], size: int64,
     trace: int): TraceKeys =
   # The keys of `trace` from its mapped headers, as the index walk makes them.
@@ -478,13 +514,9 @@ proc keysOf(f: SeismicFile, r: var KeyReader, mem: ptr UncheckedArray[byte], siz
   let hb = int(e.headerBytes)
   case ix.kind
   of skSegy:
-    if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > size: raiseOutside(trace)
-    # Straight from the mapped bytes: nothing decoded or copied.
-    let extra = hb - 2 * TraceHeaderSize
-    segyKeys(r.gr, RawHeaders(std: cast[ByteBuf](addr mem[a]),
-      ext1: if hb >= 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + TraceHeaderSize]) else: nil,
-      prop: if extra > 0: cast[ByteBuf](addr mem[a + 2 * TraceHeaderSize]) else: nil,
-      propLen: max(extra, 0)))
+    var h: RawHeaders
+    if not mappedSegyHeaders(mem, size, e, h): raiseOutside(trace)
+    segyKeys(r.gr, h) # straight from the mapped bytes: nothing decoded or copied
   of skSegd:
     if e.offset < 0 or e.offset + hb > size or hb < SegdTraceHeaderSize: raiseOutside(trace)
     template rec: untyped = ix.segdRecords[e.record]
@@ -547,6 +579,130 @@ proc traceKeysInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[Trace
   checkSpan(traces, f.len)
   template at(k: int): int = traces.a + k
   keysLoop(f, dst, spanLen(traces), at)
+
+proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
+  ## Builds the stored keys of a file opened without them, exactly as
+  ## `openSeismic(keys = true)` would (from the mapped headers, also for an
+  ## index loaded from a cache), and bumps `keysRevision`; does nothing when
+  ## the file has them. A viewer can open a large file fast and build keys
+  ## when geometry is first needed. `progress` reports the trace header
+  ## bytes read; when it cancels, `SegCancelledError` is raised and the file
+  ## stays without keys. Raises `ValueError` for a closed file or headers
+  ## that lie outside it.
+  if f.hasKeys: return
+  f.requireOpen()
+  let n = f.len
+  let mem = f.unsafeMemory
+  let size = f.mappedSize
+  var r = initKeyReader(f)
+  var tick = initProgressTicker(progress, size)
+  var keys = newSeq[TraceKeys](n)
+  for i in 0 ..< n:
+    keys[i] = f.keysOf(r, mem, size, i)
+    if not tick.tick(f.index.entries[i].offset): raiseCancelled()
+  if not tick.finish(): raiseCancelled()
+  f.index.keys = move keys
+  inc f.index.keysRevision
+
+func keepJoined(k: var TraceKeys, old: TraceKeys, groups: set[JoinGroup]) =
+  # The values a join wrote win over the headers (Phase 16, D2).
+  if jgCoordinates in groups:
+    (k.srcX, k.srcY, k.srcZ) = (old.srcX, old.srcY, old.srcZ)
+    (k.rcvX, k.rcvY, k.rcvZ) = (old.rcvX, old.rcvY, old.rcvZ)
+    (k.offset, k.cmpX, k.cmpY) = (old.offset, old.cmpX, old.cmpY)
+  if jgStations in groups:
+    (k.srcLine, k.srcPoint, k.srcIndex) = (old.srcLine, old.srcPoint, old.srcIndex)
+    (k.rcvLine, k.rcvPoint, k.rcvIndex) = (old.rcvLine, old.rcvPoint, old.rcvIndex)
+    k.component = old.component
+
+func sameKeys(a, b: TraceKeys): bool =
+  result = true
+  for x, y in fields(a, b):
+    when x is SomeFloat:
+      if not (x == y or (x.isNaN and y.isNaN)): return false
+    else:
+      if x != y: return false
+
+proc refreshKeys*(f: var SeismicFile, traces: openArray[int]): bool =
+  ## **Internal** (`HeaderEditor`). Re-reads the stored keys of `traces`
+  ## from their mapped headers after an edit, keeping the values a join
+  ## wrote (`joinedTraces`), and bumps `keysRevision` once when any changed.
+  ## True if any changed; nothing to do for a file without stored keys.
+  ## Traces whose headers lie outside the map keep their keys.
+  result = false
+  if not f.hasKeys or traces.len == 0 or not f.isOpen: return
+  let mem = f.unsafeMemory
+  let size = f.mappedSize
+  var r = initKeyReader(f)
+  for t in traces:
+    if t < 0 or t >= f.len: continue
+    var k: TraceKeys
+    try: k = f.keysOf(r, mem, size, t)
+    except ValueError: continue
+    k.keepJoined(f.index.keys[t], f.index.joinedGroups(t))
+    if not sameKeys(k, f.index.keys[t]):
+      f.index.keys[t] = k
+      result = true
+  if result: inc f.index.keysRevision
+
+proc refreshSegyInterval*(f: var SeismicFile) =
+  ## **Internal** (`HeaderEditor`). `index.segyIntervalUs` after an edit of
+  ## an interval field: the binary header's for a fixed-length file, else the
+  ## one every stored key agrees on (NaN when they differ); kept as it was
+  ## for a file without stored keys whose traces give their own.
+  if f.index.kind != skSegy: return
+  let fixed = fixedIntervalUs(f.index.segy)
+  if not fixed.isNaN:
+    f.index.segyIntervalUs = fixed
+  elif f.hasKeys and f.len > 0:
+    let dt = f.index.keys[0].intervalUs
+    var same = true
+    for k in f.index.keys:
+      if k.intervalUs != dt: same = false
+    f.index.segyIntervalUs = if same: dt else: NaN
+
+func keysRevision*(f: SeismicFile): int {.inline.} =
+  ## 0 as opened; goes up whenever the stored keys change (`ensureKeys`,
+  ## `applyGeometry`, `applySurvey`, `HeaderEditor` writes). Tag data
+  ## derived from keys (moveout overlays, binning) with it and rebuild it
+  ## when the revision changes.
+  f.index.keysRevision
+
+template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt: untyped) =
+  if dst.len != count:
+    raise newException(ValueError, "need " & $count & " values, got " & $dst.len)
+  if f.hasKeys:
+    for k in 0 ..< count: dst[k] = f.index.keys[traceAt(k)].t0Ms
+  elif count > 0:
+    f.requireOpen()
+    let mem = f.unsafeMemory
+    let size = f.mappedSize
+    var r = initKeyReader(f)
+    for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k)).t0Ms
+
+proc startTimeMsInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[float64]) =
+  ## The time of sample 0 (`TraceKeys.t0Ms`, ms) of each trace of `traces`
+  ## into `dst` (`dst.len == traces.len`); for a file opened without keys,
+  ## read from the headers as `traceKeysInto` does. Raises like
+  ## `traceKeysInto`.
+  for t in traces: f.requireTrace(t)
+  template at(k: int): int = traces[k]
+  t0Loop(f, dst, traces.len, at)
+
+proc startTimeMsInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[float64]) =
+  ## `startTimeMsInto` for a range of traces (an empty range must start in
+  ## `0 .. len`).
+  checkSpan(traces, f.len)
+  template at(k: int): int = traces.a + k
+  t0Loop(f, dst, spanLen(traces), at)
+
+proc startTimeMs*(f: SeismicFile, trace: int): float64 =
+  ## The time of sample 0 of trace `trace` in ms (`TraceKeys.t0Ms`), also for
+  ## a file opened without keys. Raises `ValueError` for a trace out of range
+  ## or a closed file.
+  var v: array[1, float64]
+  f.startTimeMsInto([trace], v)
+  v[0]
 
 proc traceKeys*(f: SeismicFile, traces: openArray[int]): seq[TraceKeys] =
   ## The keys of each trace of `traces` (see `traceKeysInto`); works on a file
@@ -817,8 +973,11 @@ proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): in
   ## without `keys = true`.
   ix.requireKeys()
   ix.joined = true
-  for k in ix.keys.mitems:
-    if k.applyGeometry(g, overwrite): inc result
+  for i, k in ix.keys.mpairs:
+    if k.applyGeometry(g, overwrite):
+      inc result
+      ix.markJoined(i, {jgCoordinates})
+  if result > 0: inc ix.keysRevision
 
 # ------------------------------------------------------------ index cache --
 # The file format is `private/indexcache`.
@@ -839,7 +998,7 @@ proc saveIndex*(f: SeismicFile, path: string) =
   ## viewer's second open of a large file is then about as fast as reading
   ## the cache. The cache holds everything the walk found (entries, codecs,
   ## file and record headers, the walk's diagnostics, keys when the file
-  ## was opened with them), about 24 bytes per trace (plus 144 with keys),
+  ## was opened with them), about 24 bytes per trace (plus 184 with keys),
   ## and stamps of the file (see `openSeismic`). Written through a new
   ## temporary file next to `path` and renamed when complete.
   ##

@@ -4,7 +4,7 @@
 ## `headersOnly` mode to index every trace: sample bytes are skipped, by
 ## seeking where the source can. Each trace costs one 24-byte `TraceEntry`
 ## (room for the entries is reserved from the file size after the first
-## trace), and 144 bytes of `TraceKeys` with `keys`. Header objects are kept
+## trace), and 184 bytes of `TraceKeys` with `keys`. Header objects are kept
 ## per file (SEG-Y, SEG-2) or per record (SEG-D), never per trace.
 ## `openSeismic` (`traceindex`) runs it on the file it maps.
 

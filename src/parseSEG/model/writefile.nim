@@ -25,6 +25,10 @@
 ##   for all traces. The Rev 2 trace count (binary bytes 3513-3520), when the
 ##   input declares one, becomes the number written.
 ##
+## `overrides` (`HeaderOverride`) change named header fields of the written
+## trace, so the input trace serves as a template: a stacked trace with a
+## source trace's headers and its own CDP, fold, offset and coordinates.
+##
 ## SEG-D rule: records are written whole, and each record's traces in input
 ## order. A record starts with its first trace and ends when a trace of
 ## another record arrives, or on `close`; it must then have all its traces
@@ -52,11 +56,21 @@ import ../segy/[reader as segyreader, writer as segywriter, binheader, tracehead
 import ../segd/[reader as segdreader, writer as segdwriter]
 import ../seg2/[reader as seg2reader, writer as seg2writer]
 import ../convert
-import ./traceindex
+import std/strutils
+import ./[traceindex, fieldvalues]
 import ../common/tensors
-import ../private/tensorrows
+import ../private/[tensorrows, fieldaccess]
 
 type
+  HeaderOverride* = object
+    ## A header field to change in a trace written from a template trace
+    ## (`writeTrace`'s `overrides`).
+    name*: string
+      ## `trace.<field>` or `ext1.<field>`, with the field names of the
+      ## header types (as `HeaderEditor.setTraceField`); SEG-2:
+      ## `trace.<KEYWORD>`, a trace string.
+    value*: FieldValue ## The value as stored (SEG-Y: before its scalar).
+
   NullSink = ref object of RecordSink
     ## Discards what it is given: `openSeismicWriter` validates the SEG-Y
     ## file headers with it before the first trace fixes the sample count.
@@ -90,6 +104,29 @@ type
     ## Writes traces "like" an input file; create with `openSeismicWriter`,
     ## finish with `close`. Not copyable.
     s: WriterState
+
+proc refuse(msg: string) {.noinline, noreturn.} =
+  raise newException(ValueError, msg)
+
+func headerOverride*(name: string, value: FieldValue): HeaderOverride {.inline.} =
+  ## A `HeaderOverride` of field `name`.
+  HeaderOverride(name: name, value: value)
+
+func headerOverride*(name: string, value: SomeNumber | string): HeaderOverride {.inline.} =
+  ## A `HeaderOverride` of field `name` with a plain number or text.
+  HeaderOverride(name: name, value: toFieldValue(value))
+
+proc splitName(o: HeaderOverride): (string, string) =
+  let dot = o.name.find('.')
+  if dot <= 0 or dot == o.name.len - 1:
+    refuse(o.name & ": expected <block>.<field>")
+  (o.name[0 ..< dot], o.name[dot + 1 .. ^1])
+
+proc setOverride[H](h: var H, kind: HeaderBlock, field: string, o: HeaderOverride) =
+  if field in structural(kind):
+    refuse(o.name & ": changes the file's structure (sizes or counts); it cannot be overridden")
+  var err = ""
+  if not setByName(h, field, o.value, err): refuse(o.name & ": " & err)
 
 method writeRecordImpl(s: NullSink; data: openArray[byte]) {.raises: [].} =
   s.offset += data.len
@@ -146,9 +183,6 @@ func definedIn(f: SegdSampleFormat, r: SegdRevision): bool =
   if f.isLittleEndian: SegdRevision(major: 3, minor: 1) <= r
   elif f == sd8080: r.major >= 3
   else: true
-
-proc refuse(msg: string) {.noinline, noreturn.} =
-  raise newException(ValueError, msg)
 
 proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat) =
   var f = like.index.segy
@@ -262,11 +296,22 @@ proc startSegy(s: var WriterState) =
   s.segy = openSegyWriter(s.sink, s.segyFile, initSegyWriteOptions(s.segyFile))
   s.segyStarted = true
 
+proc overrideSegy(t: var SegyTrace, overrides: openArray[HeaderOverride]) =
+  for o in overrides:
+    let (blk, field) = splitName(o)
+    case blk
+    of "trace": t.header.setOverride(hbSegyTrace, field, o)
+    of "ext1":
+      if not t.hasExt1: refuse(o.name & ": the trace has no Trace Header Extension 1")
+      t.ext1.setOverride(hbSegyExt1, field, o)
+    else: refuse(o.name & ": SEG-Y trace blocks are trace and ext1")
+
 proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
-    samples: openArray[T]) =
+    samples: openArray[T], overrides: openArray[HeaderOverride]) =
   let n = samples.len
   template t: untyped = s.segyTrace
   loadSegyTrace(src, trace, t)
+  t.overrideSegy(overrides)
   if n != t.numSamples: t.setTraceCount(n)
   if s.segyFixed:
     if not s.segyStarted: s.segyFile.binary.setFileCount(n)
@@ -382,8 +427,27 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace: int) =
   s.nextTrace = trace
   s.recFormat = fOut
 
+proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
+  for o in overrides:
+    let (blk, field) = splitName(o)
+    case blk
+    of "trace": t.header.setOverride(hbSegdTrace, field, o)
+    of "ext1":
+      case t.layout
+      of slRev2:
+        if t.ext1.isNone: refuse(o.name & ": the trace has no Trace Header Extension #1")
+        var x = t.ext1.get
+        x.setOverride(hbSegdExt1, field, o)
+        t.ext1 = some(x)
+      of slRev3:
+        if t.ext1Rev3.isNone: refuse(o.name & ": the trace has no Trace Header Extension #1")
+        var x = t.ext1Rev3.get
+        x.setOverride(hbSegdExt1Rev3, field, o)
+        t.ext1Rev3 = some(x)
+    else: refuse(o.name & ": SEG-D trace blocks are trace and ext1")
+
 proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
-    samples: openArray[T]) =
+    samples: openArray[T], overrides: openArray[HeaderOverride]) =
   if src.demuxPath.len > 0:
     refuse(src.path & " holds multiplexed SEG-D; convert it to a demultiplexed file first")
   let e = src.index.entries[trace]
@@ -391,13 +455,16 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     refuse("a SEG-D trace keeps its sample count (the channel set descriptors hold it): " &
       "trace " & $trace & " has " & $e.numSamples & ", " & $samples.len & " were given")
   let r = int(e.record)
+  # The overrides are checked before the record's headers can be written.
+  var t = loadSegdTrace(src, trace, src.index.segdRecords[r], trace)
+  t.overrideSegd(overrides)
   if s.inRecord and s.recPath == src.path and s.recIndex == r:
     if trace != s.nextTrace:
       refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
         " (a record's traces are written in input order)")
   else:
     s.startRecord(src, trace)
-  var t = loadSegdTrace(src, trace, src.index.segdRecords[r], s.recFirst)
+  t.index = trace - s.recFirst
   t.samples = newSeq[byte](dataBytes(s.recFormat, samples.len))
   encodeSamples(s.recFormat, samples, t.samples)
   s.segd.writeTrace(t)
@@ -413,8 +480,12 @@ proc closeSegd(s: var WriterState, log: var DiagLog) =
 # ----------------------------------------------------------------- SEG-2 --
 
 proc writeSeg2[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
-    samples: openArray[T]) =
+    samples: openArray[T], overrides: openArray[HeaderOverride]) =
   var t = src.seg2Trace(trace)
+  for o in overrides:
+    let (blk, field) = splitName(o)
+    if blk != "trace": refuse(o.name & ": the SEG-2 trace block is trace (trace.<KEYWORD>)")
+    t[field.toUpperAscii] = if o.value.kind == fvText: o.value.text else: $o.value
   if s.seg2Format.isSome: t.formatCode = uint8(ord(s.seg2Format.get))
   let twos = src.index.codecs[src.index.entries[trace].record].twosComplement8015
   s.seg2.writeTrace(t, samples, twos)
@@ -422,7 +493,7 @@ proc writeSeg2[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
 # ------------------------------------------------------------ public API --
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
-    samples: openArray[T]) =
+    samples: openArray[T], overrides: openArray[HeaderOverride] = []) =
   ## Writes trace `trace` of `src` with its headers and `samples`, encoded
   ## in the output's format (see the module doc for what changes and the
   ## SEG-D rule). `src` is a file of the output's standard, normally
@@ -431,20 +502,27 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   ## output cannot take or a broken SEG-D rule (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold or output the
   ## writer refuses; `IOError` on a write failure.
+  ##
+  ## `overrides` change header fields of the written trace (trace `trace`
+  ## is then a template): e.g. a stacked trace written with a source trace's
+  ## headers and its own CDP, fold, offset and coordinates. Fields that size
+  ## the file (sample counts, channel set references, ...) cannot be
+  ## overridden; an unknown field, a value that does not fit it or a missing
+  ## block raises `ValueError` and nothing is written.
   if not w.s.open: refuse("the writer is closed")
   if src.kind != w.s.kind:
     refuse("the output is " & $w.s.kind & ", " & src.path & " is " & $src.kind)
   if not src.isOpen: refuse("the file " & src.path & " is closed")
   discard src.traceEntry(trace) # ValueError out of range
   case w.s.kind
-  of skSegy: w.s.writeSegy(src, trace, samples)
-  of skSegd: w.s.writeSegd(src, trace, samples)
-  of skSeg2: w.s.writeSeg2(src, trace, samples)
+  of skSegy: w.s.writeSegy(src, trace, samples, overrides)
+  of skSegd: w.s.writeSegd(src, trace, samples, overrides)
+  of skSeg2: w.s.writeSeg2(src, trace, samples, overrides)
   of skUnknown: discard
   inc w.s.written
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
-    x: Tensor[T], row: int, samples = -1) =
+    x: Tensor[T], row: int, samples = -1, overrides: openArray[HeaderOverride] = []) =
   ## `writeTrace` with the first `samples` values of row `row` of a
   ## row-major `[traces, samples]` tensor (e.g. from `readTraces`); -1
   ## takes as many as the input trace has. Raises `ValueError` also for
@@ -456,7 +534,7 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   if n > x.shape[1]:
     refuse($n & " samples were asked for, the tensor rows hold " & $x.shape[1])
   let p = rowPtr(x, row)
-  w.writeTrace(src, trace, p.toOpenArray(0, n - 1))
+  w.writeTrace(src, trace, p.toOpenArray(0, n - 1), overrides)
 
 proc close*(w: var SeismicWriter): DiagLog =
   ## Finishes the output: ends the SEG-D record in progress, writes the

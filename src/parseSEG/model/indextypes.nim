@@ -59,6 +59,11 @@ type
     twosComplement8015*: bool
       ## SEG-D 8015 (and SEG-2 format 3) mantissas read as two's complement.
 
+  JoinGroup* = enum
+    ## Groups of `TraceKeys` fields that a join can change.
+    jgCoordinates ## Source and receiver X/Y/Z, the offset and the midpoint.
+    jgStations    ## Source and receiver line, point and point index, and the component.
+
   TraceIndex* = object
     ## Every trace's location plus the file-level headers.
     kind*: SeismicKind
@@ -81,7 +86,7 @@ type
     detected*: bool           ## The stream was identified as `kind` and walked.
     keys*: seq[TraceKeys]
       ## Per-trace geometry, parallel to `entries`; empty unless the index was
-      ## built with `keys = true` (144 bytes per trace).
+      ## built with `keys = true` (184 bytes per trace).
     segyIntervalUs*: float64
       ## SEG-Y: the effective sample interval every trace shares (µs for time
       ## data), NaN when traces differ or there are none; 0 for SEG-D (see
@@ -89,12 +94,32 @@ type
     joined*: bool
       ## `keys` were changed by `applyGeometry` or `applySurvey`, so they are
       ## no longer the file's own (`saveIndex` refuses such an index).
+    joinedTraces*: seq[set[JoinGroup]]
+      ## Per trace, the groups of keys a join (`applyGeometry`, `applySurvey`)
+      ## changed; empty until a join changes one. A `HeaderEditor` keeps these
+      ## values when it refreshes a trace's keys from its edited headers.
+    keysRevision*: int
+      ## 0 as opened; goes up whenever `keys` change (`ensureKeys`,
+      ## `applyGeometry`, `applySurvey`, `HeaderEditor` writes). Data derived
+      ## from the keys can be tagged with it and rebuilt when it changes.
 
 const NoChannelSet* = 0xFFFF'u16
   ## `TraceEntry.channelSet` of a trace without a known channel set. The
   ## reader allows at most 65535 sets per scan type, so index 65535 is free.
 
 static: doAssert sizeof(TraceEntry) == 24
+
+proc markJoined*(ix: var TraceIndex, trace: int, groups: set[JoinGroup]) =
+  ## Records that a join changed the `groups` of trace `trace`'s keys
+  ## (`joinedTraces`), for code that joins geometry itself. It does not bump
+  ## `keysRevision`: the joining code does, once per join that changed keys.
+  if groups == {}: return
+  if ix.joinedTraces.len != ix.keys.len: ix.joinedTraces.setLen ix.keys.len
+  ix.joinedTraces[trace].incl groups
+
+func joinedGroups*(ix: TraceIndex, trace: int): set[JoinGroup] {.inline.} =
+  ## The groups of trace `trace`'s keys a join changed (none before a join).
+  if trace < ix.joinedTraces.len: ix.joinedTraces[trace] else: {}
 
 func channelSetIndex*(e: TraceEntry): int {.inline.} =
   ## The 0-based channel set index, -1 if unknown.

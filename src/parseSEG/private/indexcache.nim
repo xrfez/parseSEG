@@ -5,7 +5,7 @@
 ##   (.nif27)
 ##   (.vendor "parseSEG")
 ##   (indexcache
-##    (version 1) (library "0.6.1") (schema "<hex>") (endian littleEndian)
+##    (version 2) (library "0.7.0") (schema "<hex>") (endian littleEndian)
 ##    (path "<absolute path>") (size <bytes>) (mtime <s> <ns>)
 ##    (head "<hex>") (tail "<hex>") (twosComplement8015 0) (keys 1))
 ##   NUL, zero bytes to an 8-byte boundary,
@@ -41,7 +41,7 @@ type
     twos*: bool  ## `twosComplement8015`.
 
 const
-  IndexCacheVersion = 1
+  IndexCacheVersion = 2
   StampSpan = 64 shl 10 ## Bytes hashed at each end of the file.
   HeaderLimit = 64 shl 10 ## Longest cache header read.
 

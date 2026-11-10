@@ -92,9 +92,12 @@ func knownReceiver(k: TraceKeys): bool =
   not (k.rcvLine.isNaN and k.rcvPoint.isNaN and k.rcvX.isNaN and k.rcvY.isNaN)
 
 func isSeismic*(ix: TraceIndex, i: int): bool =
-  ## False for SEG-D auxiliary traces (channel type other than seismic or
-  ## EM) and SEG-2 TEST_DATA and UPHOLE traces; true for SEG-Y and for traces
-  ## of unknown channel sets.
+  ## False for auxiliary traces. With keys, `TraceKeys.isSeismic` (status
+  ## not `tsAuxiliary`: SEG-Y auxiliary trace codes included). Without keys,
+  ## from the index entry alone: false for SEG-D channel types other than
+  ## seismic or EM and SEG-2 TEST_DATA and UPHOLE traces; true for SEG-Y and
+  ## for traces of unknown channel sets.
+  if ix.keys.len == ix.entries.len: return ix.keys[i].isSeismic
   let e = ix.entries[i]
   if ix.kind == skSeg2:
     e.channelType notin {uint8(ord(ttTestData) + 1), uint8(ord(ttUphole) + 1)}

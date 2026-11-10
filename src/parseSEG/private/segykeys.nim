@@ -55,6 +55,8 @@ type
     plans: array[GeometryField, seq[Resolved]]
     scalars: Scalars
     timeBasis: int16 ## Binary 3511-3512 (Rev 2 and later; else 0).
+    fixedUs: float64 ## The binary header's interval of a fixed-length file (Rev 1+), else NaN.
+    major: int ## The revision whose rules apply.
 
   FieldPlan* = object
     ## One name's entries (`fieldValue`).
@@ -93,6 +95,13 @@ func resolveEntries(lay: TraceLayout, name: string): seq[Resolved] =
   for e in lay.entriesFor(name):
     result.add Resolved(entry: rawEntry(e), scalar: scalarOf(e.kind))
 
+func fixedIntervalUs*(f: SegyFile): float64 =
+  ## The sample interval every trace of a fixed-length file (Rev 1 and
+  ## later, binary bytes 3503-3504 = 1) has: the binary header's. NaN for
+  ## other files, whose traces give their own.
+  if f.revision.major >= 1 and f.binary.fixedLengthTraces == 1: f.binary.effectiveSampleInterval
+  else: NaN
+
 func initGeometryPlan*(f: SegyFile): GeometryPlan =
   ## Resolves the file's layout (`initGeometryReader`).
   let lay = f.layoutOf
@@ -101,6 +110,8 @@ func initGeometryPlan*(f: SegyFile): GeometryPlan =
     result.plans[g] = resolveEntries(lay, $g)
   result.scalars = resolveScalars(lay)
   if f.revision.major >= 2: result.timeBasis = f.binary.timeBasisCode
+  result.fixedUs = fixedIntervalUs(f)
+  result.major = int(f.revision.major)
 
 func planTimeBasis*(p: GeometryPlan): int16 {.inline.} =
   ## The file's time basis code (`fields.timeBasis`).
@@ -258,6 +269,45 @@ proc segyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder): float64 =
     else: timestampToUnix(int64(round((s - float64(GpsEpochUnix)) * 1e6))) + ns
   else: NaN
 
+proc intervalIn(h: RawHeaders, o: static ByteOrder, fixedUs: float64): float64 {.inline.} =
+  if not fixedUs.isNaN: return fixedUs
+  if h.ext1 != nil:
+    let x = loadNum[float64](h.ext1, 144, o) # Ext1 bytes 145-152
+    if x != 0 and not x.isNaN: return x
+  float64(loadNum[uint16](h.std, 116, o)) # bytes 117-118
+
+proc segyIntervalUs*(h: RawHeaders, order: ByteOrder, fixedUs: float64): float64 =
+  ## The sample interval of the SEG-Y trace with headers `h`, in µs:
+  ## `fixedUs` when it is not NaN (`fixedIntervalUs`), else Ext1 bytes
+  ## 145-152 when non-zero, else trace bytes 117-118. `sampleIntervalUs`
+  ## and `TraceKeys.intervalUs` both use it.
+  eachOrder(order, o):
+    result = intervalIn(h, o, fixedUs)
+
+proc t0In(h: RawHeaders, o: static ByteOrder, major: int): float64 {.inline.} =
+  # Delay recording time (bytes 109-110) in ms; the time scalar (215-216)
+  # applies from Rev 1 on, Rev 0 left those bytes unassigned.
+  let delay = loadNum[int16](h.std, 108, o)
+  if major >= 1: applyScalar(delay, loadNum[int16](h.std, 214, o)) else: float64(delay)
+
+proc segyStartTimeMs*(h: RawHeaders, order: ByteOrder, major: int): float64 =
+  ## The time of sample 0 of the SEG-Y trace with headers `h`, in ms
+  ## (`TraceKeys.t0Ms`), for a file of revision `major`.
+  eachOrder(order, o):
+    result = t0In(h, o, major)
+
+func segyStatus*(code: int16, major: int): TraceStatus =
+  ## The status a SEG-Y trace identification code gives (`TraceStatus`).
+  ## Rev 0 defines codes 1-8, Rev 1 codes 1-22 (23 and up are optional
+  ## use), Rev 2 codes 1-41 and adds 16384 to interpolated traces.
+  let base = if code >= 0 and major >= 2: int(code) and 0x3FFF else: int(code)
+  let last = if major == 0: 8 elif major == 1: 22 else: 41
+  if base < 1 or base > last: return tsUnknown
+  case base
+  of 1, 11..17, 25, 27..41: tsLive # seismic, sensors, depth-domain seismic, EM, rotational
+  of 2, 3: tsDead
+  else: tsAuxiliary # time break ... water break, gun signatures, vibrator, pairs, gravity
+
 proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder): TraceKeys =
   let g = valuesIn(p, h, o)
   result = initTraceKeys()
@@ -282,10 +332,16 @@ proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder): TraceKeys =
   result.deriveGeometry()
   let channel = loadNum[int32](h.std, 12, o) # traceNumberInField
   if channel > 0: result.channel = float64(channel)
-  let code = int(loadNum[int16](h.std, 28, o)) # traceIdCode
-  let base = if code >= 0: code and 0x3FFF else: code
+  let code = loadNum[int16](h.std, 28, o) # traceIdCode
+  let base = if code >= 0: int(code) and 0x3FFF else: int(code)
   if isComponentCode(base): result.component = uint8(base)
+  result.traceCode = code
+  result.status = segyStatus(code, p.major)
   result.time = segyTime(p, h, o)
+  result.t0Ms = t0In(h, o, p.major)
+  result.intervalUs = intervalIn(h, o, p.fixedUs)
+  if not unset(g[gfIline]): result.inline = g[gfIline]
+  if not unset(g[gfXline]): result.crossline = g[gfXline]
 
 proc segyKeys*(p: GeometryPlan, h: RawHeaders): TraceKeys =
   ## The keys of the SEG-Y trace with headers `h` (`keys.traceKeys`).

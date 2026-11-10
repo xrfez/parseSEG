@@ -1,0 +1,194 @@
+## Prefetch chunks carry their rows (Phase 16.5): `rows` agrees with
+## `traceAt` in range and selection mode, failed rows are public, uniform
+## chunks never mix channel sets or intervals, and a transform runs once per
+## chunk on a worker.
+
+import std/[assertions, math, os, atomics]
+import parseSEG
+import ./utils/testutils
+
+let tmp = scratchDir("parseseg_tprefetchrows")
+
+func sameKeys(a, b: TraceKeys): bool =
+  result = true
+  for x, y in fields(a, b):
+    when x is SomeFloat:
+      if not (x == y or (x.isNaN and y.isNaN)): return false
+    else:
+      if x != y: return false
+
+proc checkRows(f: SeismicFile, p: var Prefetcher[float32]) =
+  var seen = 0
+  for c in p.chunks:
+    doAssert c.rows.len == c.count
+    for row in 0 ..< c.count:
+      let t = p.traceAt(c.first + row)
+      doAssert c.rows.traceOf(row) == t
+      doAssert c.rows.numSamples(row) == int(f.traceEntry(t).numSamples)
+      if f.hasKeys: doAssert sameKeys(c.rows.traceKeys(row), f.traceKeys(t))
+    seen += c.count
+  doAssert seen == p.len
+
+block rows_agree_with_trace_at:
+  for keys in [true, false]:
+    var f = openSeismic(demoDir() / "survey.sgy", keys = keys)
+    var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 30, cols = 8)
+    checkRows(f, p)
+    p.close()
+    var sel: seq[int]
+    for t in countdown(f.len - 1, 0, 3): sel.add t
+    var q = newPrefetcher[float32](f, sel, chunkTraces = 7, cols = 8, workers = 2)
+    checkRows(f, q)
+    # After a seek too.
+    q.seek(10 ..< 20)
+    var c: PrefetchChunk[float32]
+    doAssert q.next(c) and c.rows.traceOf(0) == sel[10]
+    doAssert c.rows.hasKeys == keys
+    q.close()
+    f.close()
+
+block failed_rows_are_public:
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  for t in [3, 4, 9]: f.index.entries[t].numSamples = 1_000_000_000 # past the end
+  var p = newPrefetcher[float32](f, 0 ..< 12, chunkTraces = 6, cols = 8)
+  var c: PrefetchChunk[float32]
+  doAssert p.next(c) and c.failed == 2 and c.failedRows == @[3, 4]
+  doAssert p.next(c) and c.failed == 1 and c.failedRows == @[3] and c.rows.traceOf(3) == 9
+  p.close()
+  var q = newPrefetcher[float32](f, @[9, 0, 4], chunkTraces = 3, cols = 8)
+  doAssert q.next(c) and c.failedRows == @[0, 2]
+  q.close()
+  f.close()
+
+proc twoIntervals(path: string) =
+  ## shot.sgd with its auxiliary channel sets 2 and 3 at 2 ms (the rest at
+  ## 1 ms). Trace order: CS1, CS3, CS2, CS4, CS4.
+  var d = readSegd(demoDir() / "shot.sgd")
+  for c in d.records[0].record.scanTypes[0].descriptorsRev3.mitems:
+    if c.channelSetNumber in [2'u16, 3]:
+      c.samplingInterval = 2000
+      c.endTime = int32(2000 * (int(c.numSamples) - 1))
+  let sink = openDiskSink(path)
+  try: doAssert not writeSegd(sink, d).isFatal
+  finally: sink.close()
+
+block uniform_chunks:
+  let p = tmp / "two.sgd"
+  twoIntervals(p)
+  var f = openSeismic(p, keys = true)
+  doAssert f.traceKeys(1).intervalUs == 2000 and f.traceKeys(0).intervalUs == 1000
+  # Without `uniform`, one chunk mixes them.
+  var mixed = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, cols = 4)
+  var c: PrefetchChunk[float32]
+  doAssert mixed.next(c) and c.count == 5 and mixed.atEnd
+  mixed.close()
+  for quick in [false, true]:
+    var u = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, cols = 4, uniform = true,
+      quickFirst = quick)
+    var starts: seq[int]
+    for c in u.chunks:
+      starts.add c.first
+      for row in 1 ..< c.count:
+        doAssert c.rows.traceKeys(row).intervalUs == c.rows.traceKeys(0).intervalUs
+        doAssert c.rows.channelSetIndex(row) == c.rows.channelSetIndex(0)
+    doAssert starts == @[0, 1, 2, 3], $starts
+    u.seek(2 ..< 5)
+    starts.setLen 0
+    for c in u.chunks: starts.add c.first
+    doAssert starts == @[2, 3]
+    u.close()
+  # A selection: positions 0, 1 are CS4, CS4; then CS1.
+  var s = newPrefetcher[float32](f, @[3, 4, 0], chunkTraces = 8, cols = 4, uniform = true)
+  doAssert s.next(c) and c.count == 2 and s.next(c) and c.count == 1 and c.rows.traceOf(0) == 0
+  s.close()
+  f.close()
+  var n = openSeismic(p)
+  doAssertRaises(ValueError):
+    var bad = newPrefetcher[float32](n, 0 ..< n.len, uniform = true)
+    bad.close()
+  n.close()
+
+type Tally = object
+  calls: Atomic[int]
+  rows: Atomic[int]
+  failed: Atomic[int]
+  byWorker: array[4, Atomic[int]]
+
+proc negate(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
+    traces: TraceRows, failed: openArray[int], user: pointer) {.nimcall, gcsafe, raises: [].} =
+  let t = cast[ptr Tally](user)
+  discard t.calls.fetchAdd(1)
+  discard t.rows.fetchAdd(traces.len)
+  discard t.failed.fetchAdd(failed.len)
+  discard t.byWorker[worker].fetchAdd(1)
+  for i in 0 ..< rows * cols: samples[i] = -samples[i]
+
+block transform_runs_once_per_chunk_on_a_worker:
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  f.index.entries[50].numSamples = 1_000_000_000
+  let plain = f.readTraces(0 ..< 49, 0 ..< 16)
+  var tally: Tally
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, cols = 16, workers = 4,
+    transform = negate, user = addr tally)
+  var chunks = 0
+  for c in p.chunks:
+    inc chunks
+    if c.first == 0:
+      for i in 0 ..< 16:
+        for j in 0 ..< 16: doAssert c.samples[i, j] == -plain[i, j]
+  p.close()
+  doAssert tally.calls.load == chunks and chunks == 13
+  doAssert tally.rows.load == f.len and tally.failed.load == 1
+  var sum = 0
+  for w in 0..3: sum += tally.byWorker[w].load
+  doAssert sum == chunks
+  f.close()
+
+echo "tprefetchrows: ok"
+
+# ------------------------------------------------- uniformRuns (16.6) --
+
+block uniform_runs:
+  let p = tmp / "runs.sgd"
+  twoIntervals(p)
+  for keys in [true, false]:
+    var f = openSeismic(p, keys = keys)
+    var runs: seq[Slice[int]]
+    for r in f.uniformRuns(0 ..< f.len): runs.add r
+    doAssert runs == @[0..0, 1..1, 2..2, 3..4], $runs
+    runs.setLen 0
+    for r in f.uniformRuns(2 ..< 5): runs.add r
+    doAssert runs == @[2..2, 3..4]
+    runs.setLen 0
+    for r in f.uniformRuns(5 ..< 5): runs.add r
+    doAssert runs.len == 0
+    runs.setLen 0
+    for r in f.uniformRuns([3, 4, 0, 3]): runs.add r
+    doAssert runs == @[0..1, 2..2, 3..3], $runs
+    doAssertRaises(ValueError):
+      for r in f.uniformRuns(0 .. 5): discard
+    f.close()
+  var y = openSeismic(demoDir() / "survey.sgy")
+  var one: seq[Slice[int]]
+  for r in y.uniformRuns(0 ..< y.len): one.add r
+  doAssert one == @[0..199]
+  y.close()
+
+echo "uniform runs: ok"
+
+# Review: a file closed, then destroyed, while its prefetcher still runs.
+proc startOnTemporary(): Prefetcher[float32] =
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  result = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, cols = 8, workers = 2)
+  f.close() # then destroyed on return
+
+block close_then_destroy_while_prefetching:
+  var p = startOnTemporary()
+  var n = 0
+  for c in p.chunks:
+    doAssert c.rows.traceKeys(c.count - 1).inline == 1001
+    n += c.count
+  doAssert n == 200
+  p.close()
+
+echo "close then destroy: ok"

@@ -43,7 +43,7 @@ export tosegy.SegyTargetFormat, tosegy.ConvertOptions, tosegy.targetFormat, tose
 export tosegd, toseg2
 
 import parseSEG/model/[keys, keytypes, indextypes, indexwalk, traceindex, gathers, prefetch,
-  fieldvalues, headerfields, edit, headernif, summary, headerlist, sorting, writefile]
+  fieldvalues, headerfields, edit, headernif, summary, headerlist, sorting, writefile, tracerows, statics]
 import parseSEG/common/[seismickind, progress, tensors]
 export seismickind, progress, keys, keytypes, indextypes, indexwalk, tensors, fieldvalues
 # Allowlists: traceindex, edit, convert and tosegy also export helpers that need
@@ -54,6 +54,8 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.path, traceindex.fromCache, traceindex.demuxPath, traceindex.len,
   traceindex.kind, traceindex.log, traceindex.recordCount, traceindex.maxSamples,
   traceindex.traceEntry, traceindex.hasKeys, traceindex.traceKeys, traceindex.traceKeysInto,
+  traceindex.startTimeMs, traceindex.startTimeMsInto, traceindex.ensureKeys,
+  traceindex.keysRevision,
   traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,
   traceindex.copyBytes, traceindex.readTracesInto, traceindex.readTraces,
   traceindex.applyGeometry, traceindex.saveIndex
@@ -67,7 +69,8 @@ export edit.HeaderEditor, edit.openEditor, edit.close, edit.release, edit.file, 
   edit.currentRecordField, edit.currentFileField, edit.setTraceField, edit.setRecordField,
   edit.setFileField, edit.JournalEdit, edit.readJournal, edit.rollbackJournal,
   edit.applyJournal
-export gathers, prefetch, headernif, summary, headerlist, sorting, writefile
+export gathers, prefetch, headernif, summary, headerlist, sorting, writefile, tracerows,
+  statics
 
 import parseSEG/survey/[textrec, sps, p1, join, writeback]
 export textrec, sps, p1, join, writeback

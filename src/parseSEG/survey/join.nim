@@ -264,13 +264,32 @@ proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, overwrite = false): bool 
       result = true
   if k.applyGeometry(g.table, overwrite): result = true
 
+func coordinatesDiffer(a, b: TraceKeys): bool =
+  func same(x, y: float64): bool = x == y or (x.isNaN and y.isNaN)
+  not (same(a.srcX, b.srcX) and same(a.srcY, b.srcY) and same(a.srcZ, b.srcZ) and
+    same(a.rcvX, b.rcvX) and same(a.rcvY, b.rcvY) and same(a.rcvZ, b.rcvZ) and
+    same(a.offset, b.offset) and same(a.cmpX, b.cmpX) and same(a.cmpY, b.cmpY))
+
+func stationsDiffer(a, b: TraceKeys): bool =
+  func same(x, y: float64): bool = x == y or (x.isNaN and y.isNaN)
+  not (same(a.srcLine, b.srcLine) and same(a.srcPoint, b.srcPoint) and
+    same(a.rcvLine, b.rcvLine) and same(a.rcvPoint, b.rcvPoint) and
+    a.srcIndex == b.srcIndex and a.rcvIndex == b.rcvIndex and a.component == b.component)
+
 proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, overwrite = false): int =
   ## `applySurvey` on every trace; returns the traces changed. Raises
   ## `ValueError` for an index built without `keys = true`.
   ix.requireKeys()
   ix.joined = true
-  for k in ix.keys.mitems:
-    if k.applySurvey(g, overwrite): inc result
+  for i, k in ix.keys.mpairs:
+    let before = k
+    if k.applySurvey(g, overwrite):
+      inc result
+      var groups: set[JoinGroup]
+      if coordinatesDiffer(before, k): groups.incl jgCoordinates
+      if stationsDiffer(before, k): groups.incl jgStations
+      ix.markJoined(i, groups)
+  if result > 0: inc ix.keysRevision
 
 proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, overwrite = false): int =
   ## Fills the trace keys from the survey, in memory only: the file does not

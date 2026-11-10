@@ -78,6 +78,28 @@ f.close()
 doAssert rollbackJournal("view.sgy", "view.sgy.edits.nif").len == 0
 ```
 
+### Keys follow the edits
+
+When the file has stored keys, they follow the edits: a trace, record or keyed binary field
+edit refreshes the affected traces' keys once the bytes are on the map (a batch's at
+`endBatch`), and `keysRevision` goes up. Coordinates or stations that a survey join wrote
+stay as joined; the trace's other keys follow its headers. On the open editor,
+`rollbackJournal(ed)` and `applyJournal(ed)` undo and redo the session's journal and refresh
+the cached headers and keys too.
+
+```nim
+import std/os
+import parseSEG
+
+copyFile("survey.sgy", "keys.sgy")
+var ed = openEditor(openSeismic("keys.sgy", keys = true))
+doAssert ed.setTraceField(4, "trace.delayRecordingTime", 120)
+doAssert ed.file.traceKeys(4).t0Ms == 120 and ed.file.keysRevision == 1
+discard ed.rollbackJournal()                # undo on the open file
+doAssert ed.file.traceKeys(4).t0Ms == 0 and ed.file.keysRevision == 2
+ed.close()
+```
+
 ## Many edits: batches
 
 Each edit is journaled and synced to disk before the file changes. For thousands of edits,

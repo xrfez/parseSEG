@@ -18,6 +18,13 @@
 ##   component is THE#1 byte 9 (group index), else the sensor type.
 ## - SEG-2: the trace strings (see `traceKeys(Seg2File, Seg2Trace)`).
 ##
+## Timing and status (`t0Ms`, `intervalUs`, `traceCode`, `status`): SEG-Y
+## from the delay, time scalar, interval and trace identification code
+## fields (`segyStatus`); SEG-D from the trace's channel set (start time,
+## interval, channel type) and its trace edit code (`segdStatus`); SEG-2 from
+## DELAY, SAMPLE_INTERVAL and TRACE_TYPE. `inline` and `crossline` are SEG-Y
+## only (the layout's `iline` and `xline`).
+##
 ## The trace time (`time`, UTC POSIX seconds, task 6.9):
 ## - SEG-Y: trace bytes 157-166 (year, day of year, hour, minute, second;
 ##   Ext1 bytes 141-144 add nanoseconds) in the time basis of bytes 167-168,
@@ -107,11 +114,38 @@ proc segdTime(rec: SegdRecord, t: SegdTrace): float64 =
     if rec.gh3.timeZero != 0: return timestampToUnix(rec.gh3.timeZero)
   if rec.gh1.year < 0: NaN else: generalHeaderUtc(rec.gh1, fullYear(rec.gh1.year) - rec.gh1.year)
 
+func knownSet(rec: SegdRecord, t: SegdTrace): bool =
+  # The trace's channel set is one of the record's descriptors.
+  if t.channelSet < 0 or t.scanType < 0 or t.scanType >= rec.scanTypes.len: return false
+  template s: untyped = rec.scanTypes[t.scanType]
+  case s.layout
+  of slRev2: t.channelSet < s.descriptors.len
+  of slRev3: t.channelSet < s.descriptorsRev3.len
+
+func segdStatus*(rec: SegdRecord, t: SegdTrace): TraceStatus =
+  ## Auxiliary for a channel set that is not seismic (Rev 1/2 channel type
+  ## 1, Rev 3 0x10 seismic and 0x11 electromagnetic), also when zeroed; else
+  ## dead for trace edit codes 1 and 2 (header byte 12: zeroed), unknown for
+  ## an unknown channel set, else live.
+  let known = knownSet(rec, t)
+  if known:
+    let ct = rec.channelType(t.scanType, t.channelSet)
+    if not (if rec.isRev3: ct in [0x10, 0x11] else: ct == 1): return tsAuxiliary
+  if t.header.traceEdit in {1'u8, 2'u8}: tsDead
+  elif known: tsLive
+  else: tsUnknown
+
 proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
   ## The keys of a SEG-D trace in record `rec`.
   result = initTraceKeys()
   result.record = float64(rec.fileNumber)
   result.time = segdTime(rec, t)
+  if knownSet(rec, t):
+    result.t0Ms = rec.startTimeMs(t)
+    result.intervalUs = rec.sampleIntervalUs(t)
+  elif t.channelSet < 0:
+    result.intervalUs = rec.baseScanIntervalUs # as `sampleIntervalUs` without a set
+  result.status = segdStatus(rec, t)
   if t.header.traceNumber != BcdAllF: result.channel = float64(t.header.traceNumber)
   if rec.isRev3:
     if not sourceFrom(t.extensions, result): discard sourceFrom(rec.generalBlocks, result)
@@ -155,8 +189,20 @@ proc traceKeys*(f: Seg2File, t: Seg2Trace): TraceKeys =
   ##   VERTICAL_GEOPHONE 12 (vertical), SH_HORIZONTAL_GEOPHONE 13
   ##   (crossline), SV_HORIZONTAL_GEOPHONE 14 (inline), else 0;
   ## - `time`: the file's ACQUISITION_DATE/TIME (`acquisitionTime`);
+  ## - `t0Ms`: DELAY × 1000 (0 without one); `intervalUs`: SAMPLE_INTERVAL;
+  ## - `status`: from TRACE_TYPE (`tsUnknown` without one);
   ## - `offset` and the midpoint: derived from the locations.
   result = initTraceKeys()
+  let delay = t.delay
+  result.t0Ms = if delay.isSome: delay.get * 1000 else: 0.0
+  let si = t.sampleInterval
+  if si.isSome: result.intervalUs = si.get * 1e6
+  let tt = t.traceType
+  if tt.isSome:
+    result.status = case tt.get
+      of ttSeismicData, ttRadarData: tsLive
+      of ttDead: tsDead
+      of ttTestData, ttUphole: tsAuxiliary
   let at = f.acquisitionTime
   if at.isSome: result.time = at.get
   template num(key: string): Option[float64] =

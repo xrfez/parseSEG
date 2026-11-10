@@ -82,7 +82,8 @@ var f = openSeismic("survey.sgy", keys = true)      # keys: per-trace geometry
 echo f.traceField(3, "trace.sourceX")             # any field by name -> FieldValue
 echo f.fileField("binary.sampleInterval")         # SEG-D: recordField(f, r, "gh1.year")
 let offsets = f.traceFieldColumn("trace.offset", 0 ..< f.len)   # seq[float64]
-let k = f.traceKeys(3)                            # TraceKeys: lines, points, x/y, offset, time
+let k = f.traceKeys(3)                            # TraceKeys: geometry, t0, dt, status, inline
+let rows = f.rowsOf(0 ..< 48)                     # TraceRows: rows -> traces and keys, no copy
 for g in f.gathers: echo g.kind, " ", g.traces    # shot / receiver / CMP / ...: derived, not assumed
 let order = f.sortTraces(["trace.ensembleNumber", "trace.offset"])  # a permutation
 let gather = f.readTraces(order[0 ..< 48])
@@ -101,6 +102,7 @@ var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 256, depth = 4, col
                                workers = 4)       # decodes on 4 threads, chunks arrive in order
 for c in p.chunks:
   discard c.samples      # Tensor [c.count, cols] for traces c.first ..< c.first + c.count
+  discard c.rows         # TraceRows: each row's trace, keys, sample count (uniform = true: one dt)
 p.close()
 ```
 
@@ -217,7 +219,8 @@ To use parseSEG well from generated code:
   - Open with `keys = true` only when you need geometry or gathers.
   - Read in large chunks into reused tensors (`readTracesInto`).
   - Use `newPrefetcher(..., workers = N)` for streaming, and `traceFieldColumn` rather than looping over `traceField`.
-- **Ownership:** a `SeismicFile`, `Prefetcher`, `SeismicWriter` or `HeaderEditor` can't be copied, only moved (`move f`). Values returned by reads are owned copies and stay valid after `close`.
+- **Ownership:** a `SeismicFile`, `Prefetcher`, `SeismicWriter` or `HeaderEditor` can't be copied, only moved (`move f`). Values returned by reads are owned copies and stay valid after `close`. A `TraceRows` view is the exception: it reads the index in place, so it lives only as long as the file (or prefetcher) it came from.
+- **Keys change:** `keysRevision` goes up when stored keys change (`ensureKeys`, `applySurvey`, header edits); tag data derived from keys with it.
 
 ## Development
 

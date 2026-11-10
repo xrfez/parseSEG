@@ -52,8 +52,16 @@
 ## (edit 3816 "0007d000" "0007d0f0" "trace 0 trace.sourceX")
 ## ```
 ##
+## Stored keys (`openSeismic(keys = true)`) follow the edits: a trace,
+## record or keyed binary field edit refreshes the keys of the traces it
+## touches once its bytes are on the map (a batch's at `endBatch`) and bumps
+## `keysRevision` when they changed. Keys a join wrote (`applyGeometry`,
+## `applySurvey`: `TraceIndex.joinedTraces`) keep their joined values; the
+## trace's other keys follow its headers.
+##
 ## `rollbackJournal` undoes a journal (newest first), `applyJournal` replays
-## it (oldest first). Both check each location first: bytes that already
+## it (oldest first); their editor forms do it on the open file and refresh
+## its cached headers and keys. Both check each location first: bytes that already
 ## hold the target are skipped, and bytes that hold neither the original
 ## nor the edited value are a conflict, logged and left alone.
 
@@ -82,6 +90,8 @@ type
     unsynced: string     ## Journal lines not yet written and synced.
     journalDead: bool    ## The journal could not be cut back after a failed write.
     edits: int
+    stale: seq[int] ## Traces edited in the batch: their keys are refreshed when it is written.
+    intervalStale: bool ## A batched interval edit: `segyIntervalUs` is refreshed with the keys.
     batch: bool          ## Inside `beginBatch` / `endBatch`.
     pending: seq[PendingWrite] ## Batched writes, journaled but not yet on the map.
     pendingPages: Table[int64, seq[int32]]
@@ -104,18 +114,6 @@ const
   MaxJournalLine = 1 shl 16 ## Longer journal lines are malformed.
   MaxRepeats = 5 ## Journal diagnostics of one kind logged per call; the rest are counted.
 
-  segyBinaryStructural = ["samplesPerTrace", "formatCode", "extSamplesPerTrace",
-    "byteOrderMarker", "segyMajor", "segyMinor", "fixedLengthTraces", "numExtTextHeaders",
-    "maxAddlTraceHeaders", "numTraces", "firstTraceOffset", "numTrailerRecords"]
-  segyTraceStructural = ["numSamples"]
-  segyExt1Structural = ["numAddlTraceHeaders", "extNumSamples", "lastTraceFlag", "headerName"]
-  segdTraceStructural = ["scanTypeNumber", "channelSetNumber", "extChannelSetNumber",
-    "traceHeaderExtensions"]
-  segdExt1Structural = ["samplesPerTrace", "numSamples", "blockType"]
-  segdGh1Structural = ["formatCode", "additionalGhBlocks", "baseScanInterval16", "recordLength",
-    "scanTypesPerRecord", "channelSetsPerScanType", "skewBlocks", "extendedHeaderBlocks",
-    "externalHeaderBlocks"]
-  segdGhNStructural = ["blockNumber"]
 
 # ---------------------------------------------------------------- journal --
 
@@ -191,6 +189,24 @@ proc dropPending(ed: var HeaderEditor) =
   ed.edits -= ed.pending.len
   ed.pending.setLen 0
   ed.pendingPages.clear()
+  ed.stale.setLen 0
+
+proc refreshStale(ed: var HeaderEditor) =
+  # The keys of the traces edited since the last refresh, from the map.
+  if ed.stale.len == 0: return
+  ed.stale.sort()
+  var u = newSeqOfCap[int](ed.stale.len)
+  for t in ed.stale:
+    if u.len == 0 or u[^1] != t: u.add t
+  ed.stale.setLen 0
+  discard ed.file.refreshKeys(u)
+
+proc keysChanged(ed: var HeaderEditor, trace: int) =
+  # Trace `trace`'s headers changed: refresh its keys now, or when the batch
+  # reaches the map.
+  if trace < 0 or not ed.file.hasKeys: return
+  ed.stale.add trace
+  if not ed.batch: ed.refreshStale()
 
 proc flushBatch(ed: var HeaderEditor): bool =
   # One sync for every journaled edit of the batch, then the map writes.
@@ -206,6 +222,10 @@ proc flushBatch(ed: var HeaderEditor): bool =
     copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
   ed.pending.setLen 0
   ed.pendingPages.clear()
+  ed.refreshStale()
+  if ed.intervalStale:
+    ed.intervalStale = false
+    ed.file.refreshSegyInterval()
 
 const PageShift = 12
 
@@ -372,22 +392,20 @@ type
     original, final: byte
     label: string # of the last edit touching the byte (for diagnostics)
 
-proc replay(path, journalPath: string, undo: bool): DiagLog =
+type
+  ReadSpan = proc (at: int64, buf: var seq[byte]): bool {.closure.}
+  WriteSpan = proc (at: int64, buf: seq[byte]): bool {.closure.}
+
+proc replayOn(path, journalPath: string, size: int64, undo: bool, readAt: ReadSpan,
+    writeAt: WriteSpan, log: var DiagLog) =
   # Merges the journal per byte (original = the first edit's old byte, final
   # = the last edit's new byte) and moves each contiguous run of touched
   # bytes as a whole: from final to original (undo) or back (apply). A run
   # already at the target is skipped and any other run is a conflict, so
   # both operations can be repeated, also when a location was edited twice.
-  var log: DiagLog
   var edits: seq[JournalEdit]
   if not log.tryRecord(Location(file: journalPath), (edits = readJournal(journalPath, log))):
-    return log
-  var f: File
-  if not open(f, path, fmReadWriteExisting):
-    log.report(sevFatal, dcIo, "cannot open for writing", loc = Location(file: path))
-    return log
-  defer: f.close()
-  let size = f.getFileSize
+    return
   var bytes: Table[int64, ByteState]
   var pastEnd = 0
   for e in edits:
@@ -413,10 +431,9 @@ proc replay(path, journalPath: string, undo: bool): DiagLog =
     while j < offsets.len and offsets[j] == offsets[j - 1] + 1: inc j
     let at = offsets[i]
     var cur = newSeq[byte](j - i)
-    f.setFilePos(at)
-    if f.readBytes(cur, 0, cur.len) != cur.len:
+    if not readAt(at, cur):
       log.report(sevFatal, dcIo, "short read", at, Location(file: path))
-      return log
+      return
     var target = newSeq[byte](cur.len)
     var atTarget, atSource = true
     for k in 0..<cur.len:
@@ -428,17 +445,30 @@ proc replay(path, journalPath: string, undo: bool): DiagLog =
     if atTarget:
       discard "already done"
     elif atSource:
-      f.setFilePos(at)
-      if f.writeBytes(target, 0, target.len) != target.len:
+      if not writeAt(at, target):
         log.report(sevFatal, dcIo, "write failed", at, Location(file: path))
-        return log
+        return
     else:
       capped(log, conflicts, sevError, dcInconsistent, "the file holds " & hexOf(cur) &
         ", neither the original nor the edited bytes; left alone", at,
         Location(file: path, field: bytes[at].label))
     i = j
   summarize(log, conflicts, "conflicts", Location(file: path))
-  log
+
+proc replay(path, journalPath: string, undo: bool): DiagLog =
+  # `replayOn` the file at `path`, read and written through a `File`.
+  var f: File
+  if not open(f, path, fmReadWriteExisting):
+    result.report(sevFatal, dcIo, "cannot open for writing", loc = Location(file: path))
+    return
+  defer: f.close()
+  let readAt = proc (at: int64, buf: var seq[byte]): bool =
+    f.setFilePos(at)
+    f.readBytes(buf, 0, buf.len) == buf.len
+  let writeAt = proc (at: int64, buf: seq[byte]): bool =
+    f.setFilePos(at)
+    f.writeBytes(buf, 0, buf.len) == buf.len
+  replayOn(path, journalPath, f.getFileSize, undo, readAt, writeAt, result)
 
 proc rollbackJournal*(path, journalPath: string): DiagLog =
   ## Undoes the journal's edits on `path`, newest first. Locations already
@@ -547,77 +577,6 @@ func edits*(ed: HeaderEditor): int {.inline.} =
   ## Edits written in this session (no-op edits excluded).
   ed.edits
 
-proc assign[F](f: var F, v: FieldValue, err: var string): bool =
-  when F is SomeInteger:
-    var i: int64
-    case v.kind
-    of fvInt: i = v.intVal
-    of fvFloat:
-      if not (v.floatVal == trunc(v.floatVal) and abs(v.floatVal) < 9.2e18):
-        err = $v & " is not an integer"
-        return false
-      i = int64(v.floatVal)
-    of fvText:
-      err = "expects a number"
-      return false
-    when F is uint64:
-      if i < 0:
-        err = $v & " is out of range for uint64"
-        return false
-    else:
-      if i < int64(low(F)) or uint64(max(i, 0)) > uint64(high(F)):
-        err = $v & " is out of range for " & $F
-        return false
-    f = F(i)
-    true
-  elif F is SomeFloat:
-    var x: float64
-    case v.kind
-    of fvInt: x = float64(v.intVal)
-    of fvFloat: x = v.floatVal
-    of fvText:
-      err = "expects a number"
-      return false
-    when F is float32:
-      # NaN and infinities pass (+Inf means "not set" in SEG-D Rev 3).
-      if abs(x) != Inf and abs(x) > float64(high(float32)):
-        err = $v & " is out of range for float32"
-        return false
-    f = F(x)
-    true
-  elif F is array and typeof(f[0]) is char:
-    if v.kind != fvText or v.text.len > f.len:
-      err = "expects text of at most " & $f.len & " characters"
-      return false
-    for k in 0..<f.len: f[k] = (if k < v.text.len: v.text[k] else: ' ')
-    true
-  else:
-    err = "raw bytes cannot be edited as a field"
-    false
-
-proc setByName[T](h: var T, name: string, v: FieldValue, err: var string): bool =
-  var found = false
-  for n, f in fieldPairs(h):
-    when isLayoutField(f):
-      if n == name:
-        found = true
-        result = assign(f, v, err)
-  if not found:
-    err = "is not an editable field"
-    result = false
-
-func structural(k: HeaderBlock): seq[string] =
-  case k
-  of hbSegyBinary: @segyBinaryStructural
-  of hbSegyTrace: @segyTraceStructural
-  of hbSegyExt1: @segyExt1Structural
-  of hbSegdTrace: @segdTraceStructural
-  of hbSegdExt1, hbSegdExt1Rev3: @segdExt1Structural
-  of hbSegdGh1: @segdGh1Structural
-  of hbSegdGhN: @segdGhNStructural
-  of hbSeg2File, hbSeg2Trace: @[] # every SEG-2 edit is refused (`editBlock`)
-  else: @[] # not reachable by name (listings only)
-
 proc commitSpan(ed: var HeaderEditor, at: int64, cur, buf: openArray[byte],
     label: string): string =
   # Journals and writes the bytes of `buf` (meant for `at ..< at + buf.len`,
@@ -697,7 +656,8 @@ proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label:
   ## **Internal.** Journals and writes the bytes of `bytes` (for the file's
   ## bytes `at ..< at + bytes.len`) that differ from the file, as one span:
   ## for edits that named fields do not cover, such as geometry written
-  ## through a SEG-Y Layout stanza (`survey/writeback`). The caller encodes
+  ## through a SEG-Y Layout stanza (`survey/writeback`). Only the stored keys
+  ## of `loc.trace` are refreshed (the span is one trace's headers). The caller encodes
   ## and checks the values and keeps clear of structural fields. A no-op
   ## writes nothing. False, with an error in `log` labelled `label`, when
   ## refused.
@@ -712,6 +672,7 @@ proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label:
   if at < 0 or at + bytes.len > ed.file.mappedSize: refuse "the bytes lie outside the file"
   let failure = ed.commitSpan(at, ed.currentBytes(at, bytes.len), bytes, label)
   if failure.len > 0: refuse failure
+  ed.keysChanged(loc.trace)
   true
 
 func batching*(ed: HeaderEditor): bool {.inline.} =
@@ -771,7 +732,21 @@ proc setTraceField*(ed: var HeaderEditor, trace: int, name: string, value: Field
   var loc = Location(file: ed.file.path, trace: trace)
   if trace in 0 ..< ed.file.len: loc.record = int(ed.file.index.entries[trace].record)
   var b: BlockRef
-  ed.setLocated(hsTrace, trace, name, value, loc, b)
+  result = ed.setLocated(hsTrace, trace, name, value, loc, b)
+  if result:
+    ed.keysChanged(trace)
+    if name in ["trace.sampleInterval", "ext1.extSampleInterval"]:
+      if ed.batch: ed.intervalStale = true # once the batch is on the map
+      else: ed.file.refreshSegyInterval()
+
+const keyedBinaryFields = ["binary.sampleInterval", "binary.extSampleInterval",
+  "binary.timeBasisCode"] ## Binary header fields the keys depend on.
+
+proc refreshAllKeys(ed: var HeaderEditor) =
+  if not ed.file.hasKeys: return
+  var all = newSeq[int](ed.file.len)
+  for i in 0 ..< all.len: all[i] = i
+  discard ed.file.refreshKeys(all)
 
 proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool =
   ## Sets a SEG-Y binary header field (`binary.<field>`); the index's copy of
@@ -783,6 +758,9 @@ proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool 
   if result:
     ed.file.index.segy.binary = decodeBinaryHeader(ed.file.unsafeMemory.toOpenArray(int(b.offset),
       int(b.offset) + b.size - 1), b.order)
+    if name in keyedBinaryFields:
+      ed.refreshAllKeys()
+      ed.file.refreshSegyInterval()
 
 proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     value: FieldValue): bool =
@@ -801,6 +779,11 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     else:
       ed.file.index.segdRecords[record].sourceHeaders[b.sourceIndex] =
         decodeBlock[SegdGeneralHeaderN](ed.file.unsafeMemory.toOpenArray(a, z))
+    if ed.file.hasKeys:
+      var traces: seq[int]
+      for i, e in ed.file.index.entries:
+        if int(e.record) == record: traces.add i
+      discard ed.file.refreshKeys(traces)
 
 proc setTraceField*(ed: var HeaderEditor, trace: int, name: string,
     value: SomeNumber | string): bool {.inline.} =
@@ -816,3 +799,69 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     value: SomeNumber | string): bool {.inline.} =
   ## `setRecordField` with a plain number or text.
   ed.setRecordField(record, name, toFieldValue(value))
+
+# ------------------------------------------------ journal on an open editor --
+
+proc reloadHeaders(ed: var HeaderEditor) =
+  # The index's copies of the headers a journal can touch (the SEG-Y binary
+  # header, SEG-D GH#1 and Rev 1/2 source headers) and the stored keys,
+  # re-read from the map after a replay.
+  template ix: untyped = ed.file.index
+  let mem = ed.file.unsafeMemory
+  let size = ed.file.mappedSize
+  case ix.kind
+  of skSegy:
+    let b = ix.locateBlock(hsFile, 0, "binary").blk
+    if b.offset >= 0 and b.offset + b.size <= size:
+      ix.segy.binary = decodeBinaryHeader(mem.toOpenArray(int(b.offset),
+        int(b.offset) + b.size - 1), b.order)
+  of skSegd:
+    for rec in ix.segdRecords.mitems:
+      let a = int(rec.offset)
+      if a < 0 or a + SegdBlockSize > size: continue
+      rec.gh1 = decodeBlock[SegdGeneralHeader1](mem.toOpenArray(a, a + SegdBlockSize - 1))
+      if not rec.isRev3 and rec.gh2.isSome:
+        for n in 0 ..< rec.sourceHeaders.len:
+          let at = a + SegdBlockSize * (n + 2) # block gh<n + 3>
+          if at + SegdBlockSize <= size:
+            rec.sourceHeaders[n] = decodeBlock[SegdGeneralHeaderN](mem.toOpenArray(at,
+              at + SegdBlockSize - 1))
+  else: discard
+  ed.refreshAllKeys()
+  ed.file.refreshSegyInterval()
+
+proc replayHere(ed: var HeaderEditor, undo: bool): DiagLog =
+  # `replay` on the editor's own map, then the cached headers and keys.
+  let loc = Location(file: ed.file.path)
+  if not ed.file.isOpen:
+    result.report(sevFatal, dcValidation, "the file is closed", loc = loc)
+    return
+  if not ed.flushBatch():
+    result.report(sevFatal, dcIo, "the batch's journal entries cannot be synced; nothing " &
+      "was replayed", loc = loc)
+    return
+  let mem = ed.file.unsafeMemory
+  let readAt = proc (at: int64, buf: var seq[byte]): bool =
+    if buf.len > 0: copyMem(addr buf[0], addr mem[at], buf.len)
+    true
+  let writeAt = proc (at: int64, buf: seq[byte]): bool =
+    if buf.len > 0: copyMem(addr mem[at], unsafeAddr buf[0], buf.len)
+    true
+  replayOn(ed.file.path, ed.journalPath, ed.file.mappedSize, undo, readAt, writeAt, result)
+  ed.reloadHeaders()
+
+proc rollbackJournal*(ed: var HeaderEditor): DiagLog =
+  ## Undoes the editor's journal on its open file, as
+  ## `rollbackJournal(path, journalPath)` does on disk, then re-reads the
+  ## index's copies of the edited headers and refreshes the stored keys
+  ## (bumping `keysRevision` when they change), so a viewer holding the
+  ## editor sees the file as it was. A batch is written first; when its
+  ## journal entries cannot be synced, nothing is undone (a fatal
+  ## diagnostic). The journal keeps its entries: `applyJournal(ed)` redoes
+  ## them. The undo itself is not journaled.
+  ed.replayHere(undo = true)
+
+proc applyJournal*(ed: var HeaderEditor): DiagLog =
+  ## Replays the editor's journal on its open file (redo after
+  ## `rollbackJournal(ed)`), refreshing headers and keys as that does.
+  ed.replayHere(undo = false)

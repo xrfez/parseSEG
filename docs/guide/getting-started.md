@@ -87,10 +87,14 @@ record-level headers, already decoded. It is built once at open and stays in mem
 
 **Keys.** `openSeismic(path, keys = true)` also collects each trace's geometry as
 `TraceKeys`: source and receiver line, point, index and coordinates, elevations, midpoint,
-offset, channel, component and the trace's UTC time. Values the headers do not give are NaN
-(numbers) or 0 (codes). Keys cost 144 bytes per trace and are needed by `gathers`,
+offset, channel, component and the trace's UTC time; and its timing and kind: the time of
+sample 0 (`t0Ms`), the sample interval (`intervalUs`), SEG-Y inline and crossline, the SEG-Y
+trace code and a `status` (live, dead, auxiliary or unknown). Values the headers do not give
+are NaN (numbers) or 0 (codes). Keys cost 184 bytes per trace and are needed by `gathers`,
 `componentGroupIds`, `applySurvey` and the geometry write-back. Without `keys = true`,
-`traceKeys(traces)` makes the keys of a few traces on demand.
+`traceKeys(traces)` makes the keys of a few traces on demand, and `ensureKeys` builds them
+all later. The stored keys are the one copy of per-trace metadata: a `TraceRows` view
+(`rowsOf`) reads them in place for the rows of a sample block.
 
 **Gathers.** `f.gathers` splits the file into runs of traces and *derives* each run's kind
 (shot, receiver, CMP, offset, other, unknown) from the keys. Nothing assumes shot gathers:

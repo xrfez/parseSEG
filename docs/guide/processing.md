@@ -7,7 +7,7 @@ on as many cores as it has, and then a way to write its results. This page shows
 Two facts shape everything here:
 
 - **Nothing loads a whole file.** `openSeismic` maps the file and indexes it (24 bytes per
-  trace, plus 144 with `keys`); samples are decoded only for the traces you ask for,
+  trace, plus 184 with `keys`); samples are decoded only for the traces you ask for,
   straight from the mapped bytes into your tensor. Files larger than RAM work: the OS pages
   them in and out. (`readSegy`/`readSegd` do load everything; they are for small files and
   tests.)
@@ -88,6 +88,49 @@ for k, i in seismic:
     " samples, rms ", sqrt(mean(data[k, _] *. data[k, _]))
 doAssert seismic == @[3, 4] and data.shape == [2, 4001]
 ```
+
+### Per-trace metadata in place: `TraceRows`
+
+The stored keys (`keys = true`) are the one copy of per-trace metadata: offset, start time
+(`t0Ms`), interval (`intervalUs`), status (live, dead or auxiliary), inline and crossline,
+next to the geometry. A `TraceRows` view says which trace each row of a sample block is and
+reads those keys in place, with no copy; it holds raw pointers only, so it can be handed to
+worker threads. A prefetch chunk carries one (`c.rows`), and with `uniform = true` no chunk
+mixes channel sets or sample intervals, so each has one `dt`.
+
+```nim
+import parseSEG
+
+var f = openSeismic("shot.sgd", keys = true)
+var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, uniform = true)
+var live = 0
+for c in p.chunks:
+  for row in 0 ..< c.count:
+    let k = c.rows.traceKeys(row)          # in place: nothing is copied
+    if k.status == tsLive:
+      inc live
+      echo "trace ", c.rows.traceOf(row), ": offset ", k.offset, " m, t0 ", k.t0Ms,
+        " ms, dt ", k.intervalUs, " us, ", c.rows.numSamples(row), " samples"
+p.close()
+doAssert live == 2
+
+# Without a prefetcher: runs of traces that share a channel set, interval and length.
+for run in f.uniformRuns(0 ..< f.len):
+  let x = f.readTraces(run)               # one dt, no padding
+  doAssert x.shape[1] == int(f.traceEntry(run.a).numSamples)
+
+# Synthetic data needs no file: a view over the caller's own arrays.
+var keys = @[initTraceKeys(), initTraceKeys()]
+keys[1].offset = 25
+let rows = rowsOf(keys, [100, 100])
+doAssert rows.len == 2 and rows.traceKeys(1).offset == 25
+```
+
+A `transform` hook (`ChunkTransform`, a `{.nimcall.}` proc with a `user` pointer) processes
+each chunk on its worker thread right after decoding, while the samples are still in the CPU
+cache. Files opened without keys can build them later with `ensureKeys`; `keysRevision` goes
+up whenever keys change (a survey join, a header edit), so derived data can be tagged with it.
+SEG-Y datum and statics fields come per trace from `traceStatics(f, traces)`.
 
 ## Read in parallel
 
@@ -289,6 +332,25 @@ doAssert b.summary.formatCode == 5 and b.readTraces(0 ..< b.len) == a.readTraces
 `encodeSamples` raises `SegFormatError` when a value does not fit an integer format (and
 for NaN in one).
 
+### Derived traces from a template trace
+
+`writeTrace` takes header `overrides`: a stacked or otherwise derived trace is written with
+a source trace's headers and its own CDP, fold, offset or coordinates (field names as the
+editor uses them, values as stored).
+
+```nim
+import parseSEG
+
+var f = openSeismic("survey.sgy")
+let stack = f.readTraces(0 ..< 1)          # stands in for a computed stack trace
+var w = openSeismicWriter("stack.sgy", like = f)
+w.writeTrace(f, 0, stack, 0, overrides = [headerOverride("trace.ensembleNumber", 9001),
+  headerOverride("trace.numHorzStacked", 48), headerOverride("trace.offset", 0)])
+discard w.close()
+var g = openSeismic("stack.sgy", keys = true)
+doAssert g.len == 1 and g.traceKeys(0).ensemble == 9001
+```
+
 ### Results that belong in the headers
 
 Picks, statics, or computed coordinates that fit existing header fields can be written in
@@ -350,7 +412,7 @@ the keys as usual. `gathers` and `componentGroupIds` group the traces by what th
 ## Sizes and limits
 
 - All offsets are 64-bit; files over 4 GB are tested (sparse synthetic files).
-- Index memory: 24 B per trace, plus 144 B with keys (10 M traces: 240 MB, or 1.7 GB with keys).
+- Index memory: 24 B per trace, plus 184 B with keys (10 M traces: 240 MB, or 2.1 GB with keys).
 - A tensor holds only what you asked for; size your chunks to your cache and core count.
 - Tape: `buildIndex` and the streaming readers work on tape images and devices, but range
   reads and the prefetcher need a plain disk file (`ValueError` otherwise).

@@ -139,6 +139,25 @@ proc refKeys(f: SegyFile, t: SegyTrace): TraceKeys =
         if s.isNaN: NaN
         else: timestampToUnix(int64(round((s - float64(GpsEpochUnix)) * 1e6))) + ns
       else: NaN
+  # Phase 16: timing, trace code and status.
+  result.traceCode = h.traceIdCode
+  let rev = int(f.revision.major)
+  let sb = if rev >= 2: base else: code
+  let defined = if rev == 0: 1..8 elif rev == 1: 1..22 else: 1..41
+  result.status =
+    if sb notin defined: tsUnknown
+    elif sb == 1 or sb in 11..17 or sb == 25 or sb in 27..41: tsLive
+    elif sb in [2, 3]: tsDead
+    else: tsAuxiliary
+  result.t0Ms = if rev >= 1: applyScalar(h.delayRecordingTime, h.timeScalar)
+                else: float64(h.delayRecordingTime)
+  result.intervalUs =
+    if rev >= 1 and f.binary.fixedLengthTraces == 1: f.binary.effectiveSampleInterval
+    elif t.hasExt1 and t.ext1.extSampleInterval != 0 and not t.ext1.extSampleInterval.isNaN:
+      t.ext1.extSampleInterval
+    else: float64(h.sampleInterval)
+  if not unset(g("iline")): result.inline = g("iline")
+  if not unset(g("xline")): result.crossline = g("xline")
 
 # ------------------------------------------------------------- checks --
 

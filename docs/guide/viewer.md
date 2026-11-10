@@ -235,7 +235,7 @@ f.close()
 
 ## Header columns and keys on demand
 
-Stored keys (`keys = true`) cost about 144 bytes and 220 ns per trace at open (SEG-Y; 290 ns
+Stored keys (`keys = true`) cost about 184 bytes and 220 ns per trace at open (SEG-Y; 290 ns
 in the release build). A viewer that
 shows geometry only for the traces on screen can open without them and ask for what it
 shows: `traceKeys(traces)` (or `traceKeysInto`, into a reused buffer) makes the keys on
@@ -259,6 +259,23 @@ f.close()
 
 Keys made on demand are the file's own geometry: geometry joined with `applySurvey` or
 `applyGeometry` lives only in stored keys.
+
+When the user first asks for geometry of the whole file, `ensureKeys` builds the stored keys
+(as `keys = true` would, with progress and cancel). `keysRevision` goes up whenever stored
+keys change (`ensureKeys`, a survey join, a header edit through a `HeaderEditor`): tag what
+is drawn from keys (moveout overlays, binning, a map) with it and rebuild when it changes.
+
+```nim
+import parseSEG
+
+var f = openSeismic("record.sgd")          # fast: no keys yet
+f.ensureKeys()                             # the user opened the map view
+let drawn = f.keysRevision
+var g: GeometryTable
+g.addReceiver(10, 104, 0, 506000, 6008000)
+discard f.index.applyGeometry(g)            # a survey join changes the keys...
+doAssert f.keysRevision != drawn            # ...so the map is redrawn
+```
 
 ## Read ahead without blocking the UI
 

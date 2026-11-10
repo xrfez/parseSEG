@@ -23,6 +23,13 @@
 ## p.close()
 ## ```
 ##
+## Each chunk says which trace each row is (`rows`, a `TraceRows`: trace,
+## keys, sample count, channel set) and which rows failed (`failedRows`).
+## With `uniform`, chunks are cut short where the channel set or the sample
+## interval changes, so each has one interval. A `transform` hook
+## (`ChunkTransform`) processes each chunk on its worker thread right after
+## it is decoded, while it is still in the CPU cache.
+##
 ## A consumer that is done with each chunk before it takes the next can hand
 ## its buffer back, so a steady scroll allocates nothing: `nextInto` /
 ## `tryNextInto` swap the caller's previous `samples` into the slot, and
@@ -57,8 +64,21 @@
 import std/locks
 import ../common/diagnostics
 import ../segy/samples
-import ./traceindex
+import ./[traceindex, tracerows]
 import ../private/[checks, decodeentry]
+
+type
+  ChunkTransform*[T] = proc (worker: int, samples: ptr UncheckedArray[T], rows, cols: int,
+      traces: TraceRows, failed: openArray[int], user: pointer) {.nimcall, gcsafe, raises: [].}
+    ## A per-chunk hook (`newPrefetcher`'s `transform`), run on the worker
+    ## thread right after the chunk is decoded, while it is still in the CPU
+    ## cache: `worker` is the worker's index (`0 ..< workers`, e.g. for
+    ## per-worker scratch), `samples` the `rows × cols` row-major chunk (it may
+    ## change them in place), `traces` the chunk's rows, `failed` the rows
+    ## that could not be decoded (left zero), `user` the pointer given to
+    ## `newPrefetcher`. It must not raise, and may reach only memory that
+    ## outlives the prefetcher through raw pointers (no closures: it may
+    ## capture nothing ref-counted).
 
 type
   SlotState = enum ssFree, ssBusy, ssReady
@@ -75,6 +95,7 @@ type
     aheadLo, aheadHi: int # positions to advise read-ahead for (`adviseTraces`)
     failed: int  # rows that could not be decoded: `fails[0 ..< failed]`
     fails: ptr UncheckedArray[FailedRow] # `chunkTraces` entries
+    failRows: ptr UncheckedArray[int] # the same rows, for `transform`
     data: ptr UncheckedArray[T]
 
   Shared[T] = object
@@ -100,7 +121,13 @@ type
     advised: int     # positions before this one were advised read-ahead (this range)
     aheadTraces: int # advice is issued for at least this many positions at a time
     workers: int
-    threads: ptr UncheckedArray[Thread[ptr Shared[T]]]
+    threads: ptr UncheckedArray[Thread[(ptr Shared[T], int)]]
+    view: TraceRows  # every position: row `pos` is position `pos`
+    uniform: bool    # chunk bounds come from `bounds`
+    bounds: ptr UncheckedArray[int] # uniform: chunk n is positions bounds[n] ..< bounds[n + 1]
+    nBounds: int
+    transform: ChunkTransform[T]
+    user: pointer
 
   Prefetcher*[T: SampleType] = object
     ## Read-ahead state; not copyable. Call `close` when done.
@@ -113,6 +140,7 @@ type
     path: string            # the file's, for diagnostics
     untaken: int            # chunks of the range not yet taken: `sh.chunkCount - sh.takeChunk`,
                             # kept by the consumer so `atEnd` needs no lock
+    bounds: seq[int]        # uniform: the current range's chunk bounds (`sh.bounds`)
 
   PrefetchChunk*[T: SampleType] = object
     first*: int
@@ -121,9 +149,14 @@ type
     count*: int         ## Traces in the chunk.
     samples*: Tensor[T] ## `[count, cols]`; shorter traces are zero-padded.
     failed*: int        ## Traces that could not be decoded (left zero).
+    failedRows*: seq[int] ## Those traces' rows (0-based in the chunk), ascending.
     log*: DiagLog
       ## One error per trace that could not be decoded: its trace index
       ## (`loc.trace`), record, byte offset and the reason.
+    rows*: TraceRows
+      ## Which trace each row is, with its keys (when the file has stored
+      ## keys), sample count and channel set, in place in the index: no
+      ## `traceAt` needed. Valid until the prefetcher's `close`.
 
 proc shutdown[T](sh: ptr Shared[T]) =
   # Stops and joins the workers, then frees the shared state.
@@ -136,7 +169,9 @@ proc shutdown[T](sh: ptr Shared[T]) =
   deinitCond(sh.work)
   deinitCond(sh.ready)
   deinitLock(sh.lock)
-  for i in 0..<sh.depth: freeShared(sh.slots[i].fails)
+  for i in 0..<sh.depth:
+    freeShared(sh.slots[i].fails)
+    freeShared(sh.slots[i].failRows)
   freeShared(sh.slots)
   freeShared(sh)
 
@@ -149,19 +184,31 @@ proc `=destroy`[T](p: Prefetcher[T]) =
   `=destroy`(p.spare)
   `=destroy`(p.selection) # after the shutdown: the workers read it
   `=destroy`(p.path)
+  `=destroy`(p.bounds) # after the shutdown: the workers read it
 
 proc `=copy`[T](dst: var Prefetcher[T], src: Prefetcher[T]) {.error.}
 proc `=dup`[T](src: Prefetcher[T]): Prefetcher[T] {.error.}
 
 func chunkCount[T](sh: ptr Shared[T]): int {.inline.} =
-  # Chunk 0 holds `head` rows, the others `chunkTraces`.
+  # Chunk 0 holds `head` rows, the others `chunkTraces` (uniform: `bounds`).
+  if sh.uniform: return max(sh.nBounds - 1, 0)
   let n = sh.stop - sh.start
   if n <= 0: 0
   elif n <= sh.head: 1
   else: 1 + (n - sh.head + sh.chunkTraces - 1) div sh.chunkTraces
 
 func chunkFirst[T](sh: ptr Shared[T], n: int): int {.inline.} =
-  sh.start + (if n == 0: 0 else: sh.head + (n - 1) * sh.chunkTraces)
+  if sh.uniform: sh.bounds[n]
+  else: sh.start + (if n == 0: 0 else: sh.head + (n - 1) * sh.chunkTraces)
+
+func chunkRows[T](sh: ptr Shared[T], n, first: int): int {.inline.} =
+  if sh.uniform: sh.bounds[n + 1] - first
+  else: min(if n == 0: sh.head else: sh.chunkTraces, sh.stop - first)
+
+proc chunkView(v: TraceRows, first, count: int): TraceRows {.raises: [].} =
+  # The rows of positions `first ..< first + count` (always inside `v`).
+  try: v.sub(first ..< first + count)
+  except ValueError: TraceRows()
 
 func headRows[T](sh: ptr Shared[T]): int {.inline.} =
   if sh.quick: max(1, sh.chunkTraces div 4) else: sh.chunkTraces
@@ -169,7 +216,7 @@ func headRows[T](sh: ptr Shared[T]): int {.inline.} =
 proc traceOf[T](sh: ptr Shared[T], pos: int): int {.inline.} =
   if sh.sel != nil: sh.sel[pos] else: pos
 
-proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) {.raises: [].} =
+proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int) {.raises: [].} =
   # Runs without the lock: the slot is busy, so nobody else touches it.
   # `tryDecodeEntry` reports failures as a status: no exception is made on
   # this thread (one destroyed here would leak ORC's per-thread cycle buffer).
@@ -185,9 +232,14 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T]) {.raises: [].} =
       for c in 0..<sh.cols: row[c] = T(0)
       s.fails[s.failed] = FailedRow(row: k,
         code: if st == dsTruncated: dcTruncated else: dcUnsupportedFormat)
+      s.failRows[s.failed] = k
       inc s.failed
+  if sh.transform != nil:
+    sh.transform(worker, s.data, s.count, sh.cols, chunkView(sh.view, s.first, s.count),
+      s.failRows.toOpenArray(0, s.failed - 1), sh.user)
 
-proc worker[T](sh: ptr Shared[T]) {.thread.} =
+proc worker[T](arg: (ptr Shared[T], int)) {.thread.} =
+  let (sh, index) = arg
   acquire(sh.lock)
   while not sh.quit:
     let n = sh.nextChunk
@@ -197,7 +249,7 @@ proc worker[T](sh: ptr Shared[T]) {.thread.} =
       s.gen = sh.gen
       s.chunk = n
       s.first = sh.chunkFirst(n)
-      s.count = min(if n == 0: sh.head else: sh.chunkTraces, sh.stop - s.first)
+      s.count = sh.chunkRows(n, s.first)
       # Ask the OS for the pages ahead while this chunk decodes, about
       # `AdviseAheadBytes` at a time (one residency probe per span, not per
       # chunk: two `mincore` calls per 64-trace chunk cost 16 % of a warm
@@ -217,7 +269,7 @@ proc worker[T](sh: ptr Shared[T]) {.thread.} =
       inc sh.nextChunk
       release(sh.lock)
       {.cast(gcsafe).}:
-        decodeChunk(sh, s)
+        decodeChunk(sh, s, index)
       acquire(sh.lock)
       if s.gen == sh.gen:
         s.state = ssReady
@@ -244,9 +296,38 @@ const DefaultRingBytes* = 4 shl 20
   ## chunks stay in the CPU cache until taken (16 MB rings fell to about 60 %
   ## of the throughput).
 
+func sameClass(v: TraceRows, a, b: int): bool {.inline.} =
+  # Positions `a` and `b` share a channel set and a sample interval.
+  let x = v.traceKeys(a).intervalUs
+  let y = v.traceKeys(b).intervalUs
+  v.channelSetIndex(a) == v.channelSetIndex(b) and (x == y or (x.isNaN and y.isNaN))
+
+func uniformBounds(v: TraceRows, start, stop, chunkTraces, head: int): seq[int] =
+  # Chunk bounds over positions `start ..< stop`: at most `head` rows in the
+  # first chunk and `chunkTraces` in the others, cut short where the channel
+  # set or the sample interval changes.
+  result = @[start]
+  var cur = start
+  while cur < stop:
+    let limit = if result.len == 1: head else: chunkTraces
+    var e = cur + 1
+    while e < stop and e - cur < limit and sameClass(v, cur, e): inc e
+    result.add e
+    cur = e
+
+proc setBounds[T](p: var Prefetcher[T], bounds: sink seq[int]) =
+  # Under the lock (or before the workers start): the uniform chunk bounds
+  # of the current range, computed outside it. The old ones go now: workers
+  # read them only under the lock.
+  let sh = p.sh
+  p.bounds = bounds
+  sh.bounds = cast[ptr UncheckedArray[int]](addr p.bounds[0])
+  sh.nBounds = p.bounds.len
+
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTraces = 256,
     depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
-    maxRingBytes = DefaultRingBytes): Prefetcher[T] =
+    maxRingBytes = DefaultRingBytes, uniform = false, transform: ChunkTransform[T] = nil,
+    user: pointer = nil): Prefetcher[T] =
   ## Starts decoding `traces` on `workers` threads, `chunkTraces` at a time,
   ## at most `depth` chunks ahead. The ring holds at most `maxRingBytes` of
   ## chunks (`chunkTraces * cols * sizeof(T)` each), but at least `workers +
@@ -261,6 +342,14 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   ## the file (an empty range must still start in `0 .. f.len`), a closed or
   ## tape file, a non-positive chunk size, depth or worker count, or a
   ## negative `firstSample`.
+  ##
+  ## Each chunk's `rows` says which trace each row is (Phase 16). With
+  ## `uniform`, a chunk never spans two channel sets or sample intervals
+  ## (`TraceKeys.intervalUs`): it is cut short at the boundary, so every
+  ## chunk has one interval; it needs stored keys (`ValueError` otherwise).
+  ## `transform` runs on the worker after each chunk is decoded (see
+  ## `ChunkTransform`), with `user` passed through.
+  if uniform and not f.hasKeys: raiseArg("uniform chunks need stored keys (keys = true)")
   if f.len > 0: f.requireOpen()
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
   if chunkTraces <= 0 or depth <= 0 or cols < -1 or firstSample < 0 or workers <= 0:
@@ -293,23 +382,30 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   if f.len > 0:
     sh.entries = cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0])
     sh.codecs = cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0])
+  sh.view = f.rowsOf(0 ..< f.len)
+  sh.uniform = uniform
+  sh.transform = transform
+  sh.user = user
   initLock(sh.lock)
   initCond(sh.work)
   initCond(sh.ready)
-  result = Prefetcher[T](sh: sh, pin: f.pinMap, last: f.len, untaken: sh.chunkCount,
-    path: f.path)
+  result = Prefetcher[T](sh: sh, pin: f.pinMap, last: f.len, path: f.path)
+  if uniform: result.setBounds(uniformBounds(sh.view, sh.start, sh.stop, rows, sh.head))
+  result.untaken = sh.chunkCount
   for i in 0..<depth:
     result.tensors.add newTensorUninit[T](rows, width)
     sh.slots[i].data = rawData(result.tensors[i])
     sh.slots[i].fails = cast[ptr UncheckedArray[FailedRow]](createShared(FailedRow, rows))
+    sh.slots[i].failRows = cast[ptr UncheckedArray[int]](createShared(int, rows))
   sh.workers = workers
-  sh.threads = cast[ptr UncheckedArray[Thread[ptr Shared[T]]]](
-    createShared(Thread[ptr Shared[T]], workers))
-  for i in 0..<workers: createThread(sh.threads[i], worker[T], sh)
+  sh.threads = cast[ptr UncheckedArray[Thread[(ptr Shared[T], int)]]](
+    createShared(Thread[(ptr Shared[T], int)], workers))
+  for i in 0..<workers: createThread(sh.threads[i], worker[T], (sh, i))
 
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
     depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
-    maxRingBytes = DefaultRingBytes): Prefetcher[T] =
+    maxRingBytes = DefaultRingBytes, uniform = false, transform: ChunkTransform[T] = nil,
+    user: pointer = nil): Prefetcher[T] =
   ## Read-ahead over a list of trace indices (a gather, a component group, a
   ## sort order), decoded in list order. Positions (`seek`) index the list;
   ## `traceAt` maps them to traces. The list is fixed for the prefetcher's
@@ -320,14 +416,17 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkT
   # Build in range mode over positions, then switch the workers to the list
   # before they can run: the lock orders the hand-over.
   result = newPrefetcher[T](f, 0 .. -1, chunkTraces, depth, width, firstSample, workers,
-    quickFirst, maxRingBytes)
+    quickFirst, maxRingBytes, uniform, transform, user)
   result.selection = traces
   result.last = result.selection.len
   let sh = result.sh
   acquire(sh.lock)
   if result.selection.len > 0:
     sh.sel = cast[ptr UncheckedArray[int]](addr result.selection[0])
+  sh.view = f.rowsOf(result.selection)
   sh.stop = result.selection.len
+  if uniform:
+    result.setBounds(uniformBounds(sh.view, 0, sh.stop, sh.chunkTraces, sh.head))
   result.untaken = sh.chunkCount
   broadcast(sh.work)
   release(sh.lock)
@@ -380,6 +479,9 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool) =
   c.first = s.first
   c.count = s.count
   c.failed = s.failed
+  c.failedRows.setLen s.failed
+  for k in 0..<s.failed: c.failedRows[k] = s.failRows[k]
+  c.rows = chunkView(sh.view, s.first, s.count)
   c.log = DiagLog()
   for k in 0..<s.failed:
     let fr = s.fails[k]
@@ -478,6 +580,10 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   let first = span.a
   let stop = if span.b >= first: span.b + 1 else: first
   let sh = p.sh
+  # The view and the chunk sizes never change: the bounds are cut before the
+  # workers are stopped.
+  var bounds: seq[int]
+  if sh.uniform: bounds = uniformBounds(sh.view, first, stop, sh.chunkTraces, sh.headRows)
   acquire(sh.lock)
   inc sh.gen
   sh.start = first
@@ -486,6 +592,7 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   sh.takeChunk = 0
   sh.head = sh.headRows
   sh.advised = first
+  if sh.uniform: p.setBounds(move bounds)
   p.untaken = sh.chunkCount
   for i in 0..<sh.depth:
     if sh.slots[i].state == ssReady: sh.slots[i].state = ssFree
@@ -501,3 +608,4 @@ proc close*[T](p: var Prefetcher[T]) =
     p.tensors.setLen 0
     p.spare.setLen 0
     p.selection.setLen 0
+    p.bounds.setLen 0

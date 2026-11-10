@@ -314,8 +314,8 @@ block index_memory_is_reserved_from_the_file_size:
   var f = openSeismic(path, keys = true)
   let grown = getOccupiedMem() - before
   doAssert f.len == n and f.index.log.count(sevError) == 0
-  doAssert sizeof(TraceEntry) == 24 and sizeof(TraceKeys) == 144
-  doAssert grown < n * (24 + 144) + n * 12 + 65536, $grown
+  doAssert sizeof(TraceEntry) == 24 and sizeof(TraceKeys) == 184
+  doAssert grown < n * (24 + 184) + n * 12 + 65536, $grown
   f.close()
   removeFile(path)
 

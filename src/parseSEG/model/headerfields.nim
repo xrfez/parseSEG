@@ -139,15 +139,7 @@ proc sampleIntervalUs*(f: SeismicFile, trace = 0): float64 =
   of skSeg2:
     let si = f.seg2Trace(trace).sampleInterval
     if si.isSome: si.get * 1e6 else: NaN
-  of skSegy:
-    template b: untyped = ix.segy.binary
-    if ix.segy.revision.major >= 1 and b.fixedLengthTraces == 1:
-      return b.effectiveSampleInterval
-    if int(e.headerBytes) >= 2 * TraceHeaderSize:
-      let x = f.findTraceField(trace, "ext1.extSampleInterval")
-      if x.isSome and x.get.toFloat != 0: return x.get.toFloat
-    let v = f.findTraceField(trace, "trace.sampleInterval")
-    if v.isSome: v.get.toFloat else: NaN
+  of skSegy: f.segyIntervalOf(trace) # the same code as `TraceKeys.intervalUs`
   of skSegd, skUnknown: # an unknown file has no traces: checked above
     let cs = if int(e.scanType) >= 0: e.channelSetIndex else: -1
     ix.segdRecords[e.record].sampleIntervalUs(int(e.scanType), cs)

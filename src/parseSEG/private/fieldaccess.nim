@@ -4,7 +4,7 @@
 ## (`withBlockType`), and reading fields from the mapped bytes (`readField`,
 ## `readFields`). Library modules import it; nothing re-exports it.
 
-import std/[macros, options, strutils]
+import std/[macros, math, options, strutils]
 import ../common/[endians, fieldlayout]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
@@ -330,3 +330,95 @@ proc readFields*(f: SeismicFile, b: BlockRef, values: var seq[Option[FieldValue]
       decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
       for x in fields(h):
         when isNamedField(x): values.add fieldValueOf(x)
+
+# ---------------------------------------------------------------- setting --
+
+const
+  segyBinaryStructural = ["samplesPerTrace", "formatCode", "extSamplesPerTrace",
+    "byteOrderMarker", "segyMajor", "segyMinor", "fixedLengthTraces", "numExtTextHeaders",
+    "maxAddlTraceHeaders", "numTraces", "firstTraceOffset", "numTrailerRecords"]
+  segyTraceStructural = ["numSamples"]
+  segyExt1Structural = ["numAddlTraceHeaders", "extNumSamples", "lastTraceFlag", "headerName"]
+  segdTraceStructural = ["scanTypeNumber", "channelSetNumber", "extChannelSetNumber",
+    "traceHeaderExtensions"]
+  segdExt1Structural = ["samplesPerTrace", "numSamples", "blockType"]
+  segdGh1Structural = ["formatCode", "additionalGhBlocks", "baseScanInterval16", "recordLength",
+    "scanTypesPerRecord", "channelSetsPerScanType", "skewBlocks", "extendedHeaderBlocks",
+    "externalHeaderBlocks"]
+  segdGhNStructural = ["blockNumber"]
+
+proc assign[F](f: var F, v: FieldValue, err: var string): bool =
+  when F is SomeInteger:
+    var i: int64
+    case v.kind
+    of fvInt: i = v.intVal
+    of fvFloat:
+      if not (v.floatVal == trunc(v.floatVal) and abs(v.floatVal) < 9.2e18):
+        err = $v & " is not an integer"
+        return false
+      i = int64(v.floatVal)
+    of fvText:
+      err = "expects a number"
+      return false
+    when F is uint64:
+      if i < 0:
+        err = $v & " is out of range for uint64"
+        return false
+    else:
+      if i < int64(low(F)) or uint64(max(i, 0)) > uint64(high(F)):
+        err = $v & " is out of range for " & $F
+        return false
+    f = F(i)
+    true
+  elif F is SomeFloat:
+    var x: float64
+    case v.kind
+    of fvInt: x = float64(v.intVal)
+    of fvFloat: x = v.floatVal
+    of fvText:
+      err = "expects a number"
+      return false
+    when F is float32:
+      # NaN and infinities pass (+Inf means "not set" in SEG-D Rev 3).
+      if abs(x) != Inf and abs(x) > float64(high(float32)):
+        err = $v & " is out of range for float32"
+        return false
+    f = F(x)
+    true
+  elif F is array and typeof(f[0]) is char:
+    if v.kind != fvText or v.text.len > f.len:
+      err = "expects text of at most " & $f.len & " characters"
+      return false
+    for k in 0..<f.len: f[k] = (if k < v.text.len: v.text[k] else: ' ')
+    true
+  else:
+    err = "raw bytes cannot be edited as a field"
+    false
+
+proc setByName*[T](h: var T, name: string, v: FieldValue, err: var string): bool =
+  ## Sets layout field `name` of the decoded header `h` to `v`, checked
+  ## against the field's type; false with `err` set when it cannot.
+  var found = false
+  for n, f in fieldPairs(h):
+    when isLayoutField(f):
+      if n == name:
+        found = true
+        result = assign(f, v, err)
+  if not found:
+    err = "is not an editable field"
+    result = false
+
+func structural*(k: HeaderBlock): seq[string] =
+  ## The fields of block kind `k` that size the file's structure: an edit or
+  ## an override of them is refused.
+  case k
+  of hbSegyBinary: @segyBinaryStructural
+  of hbSegyTrace: @segyTraceStructural
+  of hbSegyExt1: @segyExt1Structural
+  of hbSegdTrace: @segdTraceStructural
+  of hbSegdExt1, hbSegdExt1Rev3: @segdExt1Structural
+  of hbSegdGh1: @segdGh1Structural
+  of hbSegdGhN: @segdGhNStructural
+  of hbSeg2File, hbSeg2Trace: @[] # every SEG-2 edit is refused (`editBlock`)
+  else: @[] # not reachable by name (listings only)
+
