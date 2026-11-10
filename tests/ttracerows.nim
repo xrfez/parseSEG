@@ -218,7 +218,8 @@ block keys_at_without_keys_is_a_defect:
   doAssert not nk.hasKeys
   when compileOption("boundChecks"):
     doAssertRaises(AssertionDefect): discard nk.keysAt(0)
-    doAssertRaises(AssertionDefect): discard n.rowsOf([1]).keysAt(0)
+    let one = @[1]                         # a selection keeps a pointer to its list
+    doAssertRaises(AssertionDefect): discard n.rowsOf(one).keysAt(0)
     var f = openSeismic(demoDir() / "survey.sgy", keys = true)
     doAssertRaises(IndexDefect): discard f.rowsOf(0..1).keysAt(2)
     doAssertRaises(IndexDefect): discard f.rowsOf(0..1).keysAt(-1)
