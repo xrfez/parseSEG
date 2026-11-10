@@ -128,7 +128,9 @@ doAssert rows.len == 2 and rows.traceKeys(1).offset == 25
 
 A `transform` hook (`ChunkTransform`, a `{.nimcall.}` proc with a `user` pointer) processes
 each chunk on its worker thread right after decoding, while the samples are still in the CPU
-cache. Files opened without keys can build them later with `ensureKeys`; `keysRevision` goes
+cache. A transform must not raise, so it reads keys with `keysAt(row)`, the non-raising
+form of `traceKeys` for code that has checked `hasKeys` once (a view without keys is then a
+programming error, an `AssertionDefect` with bound checks on). Files opened without keys can build them later with `ensureKeys`; `keysRevision` goes
 up whenever keys change (a survey join, a header edit), so derived data can be tagged with it.
 SEG-Y datum and statics fields come per trace from `traceStatics(f, traces)`.
 

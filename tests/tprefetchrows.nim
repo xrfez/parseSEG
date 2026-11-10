@@ -1,7 +1,7 @@
 ## Prefetch chunks carry their rows (Phase 16.5): `rows` agrees with
 ## `traceAt` in range and selection mode, failed rows are public, uniform
 ## chunks never mix channel sets or intervals, and a transform runs once per
-## chunk on a worker.
+## chunk on a worker and reads keys there with `keysAt` (processSEG F1).
 
 import std/[assertions, math, os, atomics]
 import parseSEG
@@ -123,6 +123,20 @@ proc negate(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
   discard t.byWorker[worker].fetchAdd(1)
   for i in 0 ..< rows * cols: samples[i] = -samples[i]
 
+type KeySum = object
+  sum: Atomic[float64]
+  rows: Atomic[int]
+
+proc sumCmpX(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
+    traces: TraceRows, failed: openArray[int], user: pointer) {.nimcall, gcsafe, raises: [].} =
+  # A transform reads keys on the worker: `keysAt` is the non-raising form.
+  let t = cast[ptr KeySum](user)
+  var s = 0.0
+  for row in 0 ..< traces.len: s += abs(traces.keysAt(row).cmpX)
+  var old = t.sum.load
+  while not t.sum.compareExchange(old, old + s): discard
+  discard t.rows.fetchAdd(traces.len)
+
 block transform_runs_once_per_chunk_on_a_worker:
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
   f.index.entries[50].numSamples = 1_000_000_000
@@ -142,6 +156,20 @@ block transform_runs_once_per_chunk_on_a_worker:
   var sum = 0
   for w in 0..3: sum += tally.byWorker[w].load
   doAssert sum == chunks
+  f.close()
+
+block transform_reads_keys_with_keys_at:
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  var want = 0.0
+  for t in 0 ..< f.len: want += abs(f.traceKeys(t).cmpX)
+  doAssert want > 0
+  var acc: KeySum
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, cols = 8, workers = 4,
+    transform = sumCmpX, user = addr acc)
+  for c in p.chunks: discard c.count
+  p.close()
+  doAssert acc.rows.load == f.len
+  doAssert abs(acc.sum.load - want) <= 1e-9 * want
   f.close()
 
 echo "tprefetchrows: ok"

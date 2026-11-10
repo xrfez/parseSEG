@@ -2,7 +2,8 @@
 ## range, selection and synthetic views give the stored keys; `sub` at its
 ## edges; views read from 4 threads; no allocation; keys built on demand
 ## equal the keys of `openSeismic(keys = true)`, also through an index cache;
-## every key-changing path bumps the revision.
+## every key-changing path bumps the revision. `keysAt` (processSEG F1)
+## reads the same keys without raising, from a `{.raises: [].}` proc.
 
 import std/[assertions, math, os, typedthreads]
 import parseSEG
@@ -182,5 +183,47 @@ block joins_bump_the_revision_and_record_groups:
   doAssert s.applySurvey(sg) == 1
   doAssert s.keysRevision == 1 and s.index.joinedGroups(0) == {jgCoordinates}
   s.close()
+
+# ------------------------------------------------ keysAt (processSEG F1) --
+
+func farthestOffset(r: TraceRows): float64 {.raises: [].} =
+  # Compiles only because `keysAt` cannot raise (`traceKeys` raises ValueError).
+  result = 0.0
+  for row in 0 ..< r.len:
+    result = max(result, abs(r.keysAt(row).offset))
+
+block keys_at_matches_trace_keys_without_raising:
+  for p in files:
+    var f = openSeismic(p, keys = true)
+    let all = f.rowsOf(0 ..< f.len)
+    let sel = @[f.len - 1, 0, f.len div 2]
+    let s = f.rowsOf(sel)
+    for row in 0 ..< all.len:
+      doAssert sameKeys(all.keysAt(row), all.traceKeys(row)), p & " " & $row
+    for row in 0 ..< s.len:
+      doAssert sameKeys(s.keysAt(row), f.traceKeys(sel[row])), p & " " & $row
+    if f.len >= 3: doAssert sameKeys(all.sub(1 .. 2).keysAt(1), f.traceKeys(2))
+    doAssert addr(all.keysAt(0)) == addr(all.traceKeys(0)), "in place, no copy"
+    f.close()
+  var keys = @[initTraceKeys(), initTraceKeys(), initTraceKeys()]
+  keys[0].offset = -300
+  keys[2].offset = 200
+  let syn = rowsOf(keys, [10, 10, 10])
+  doAssert syn.farthestOffset == 300
+  doAssert syn.keysAt(2).offset == 200
+
+block keys_at_without_keys_is_a_defect:
+  var n = openSeismic(demoDir() / "survey.sgy")
+  let nk = n.rowsOf(0..1)
+  doAssert not nk.hasKeys
+  when compileOption("boundChecks"):
+    doAssertRaises(AssertionDefect): discard nk.keysAt(0)
+    doAssertRaises(AssertionDefect): discard n.rowsOf([1]).keysAt(0)
+    var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+    doAssertRaises(IndexDefect): discard f.rowsOf(0..1).keysAt(2)
+    doAssertRaises(IndexDefect): discard f.rowsOf(0..1).keysAt(-1)
+    doAssertRaises(IndexDefect): discard n.rowsOf(0 ..< 0).keysAt(0)
+    f.close()
+  n.close()
 
 echo "ttracerows: ok"

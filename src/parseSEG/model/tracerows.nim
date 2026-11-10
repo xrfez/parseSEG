@@ -17,6 +17,8 @@
 ##
 ## A view of a file without stored keys still gives each row's trace,
 ## sample count and channel set; its `traceKeys` raises (`hasKeys`).
+## `keysAt` is the non-raising form, for code that checked `hasKeys` once
+## and must not raise (a `{.raises: [].}` kernel, a `ChunkTransform`).
 ##
 ## **Lifetime.** A view holds raw pointers into the index (or into the
 ## arrays it was made from) and is valid while they stay alive and keep
@@ -55,6 +57,10 @@ proc noKeys() {.noinline, noreturn.} =
   raise newException(ValueError, "the view has no keys: open the file with keys = true " &
     "(or call ensureKeys) before making the view")
 
+proc keysMissing() {.noinline, noreturn.} =
+  raise newException(AssertionDefect, "keysAt on a view without keys: check hasKeys " &
+    "first (open the file with keys = true, or call ensureKeys, before making the view)")
+
 func len*(r: TraceRows): int {.inline.} =
   ## The number of rows.
   r.count
@@ -75,6 +81,25 @@ func traceKeys*(r: TraceRows, row: int): lent TraceKeys {.inline.} =
   ## The keys of row `row`'s trace, in place (no copy). Raises `ValueError`
   ## for a view without keys (`hasKeys`).
   if r.keys == nil: noKeys()
+  r.keys[r.traceOf(row)]
+
+func keysAt*(r: TraceRows, row: int): lent TraceKeys {.inline, raises: [].} =
+  ## The keys of row `row`'s trace, in place, like `traceKeys` but without
+  ## raising: for callers that checked `hasKeys` once, such as a
+  ## `{.raises: [].}` kernel or a `ChunkTransform`. A view without keys is a
+  ## precondition violation: an `AssertionDefect` with bound checks on,
+  ## undefined behaviour without (`-d:danger`). A row outside `0 ..< len` is an
+  ## `IndexDefect` with bound checks on, as for `traceOf`.
+  runnableExamples:
+    var keys = @[initTraceKeys(), initTraceKeys()]
+    keys[1].offset = 25
+    let rows = rowsOf(keys, [100, 100])
+    if rows.hasKeys:                       # checked once, before the loop
+      var far = 0.0
+      for row in 0 ..< rows.len: far = max(far, abs(rows.keysAt(row).offset))
+      doAssert far == 25
+  when compileOption("boundChecks"):
+    if r.keys == nil and r.count > 0: keysMissing()
   r.keys[r.traceOf(row)]
 
 func numSamples*(r: TraceRows, row: int): int {.inline.} =
