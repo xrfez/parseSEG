@@ -719,10 +719,13 @@ proc traceKeys*(f: SeismicFile, traces: Slice[int]): seq[TraceKeys] =
 # ---------------------------------------------------------------- reading --
 
 template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, first: int,
-    log: var DiagLog, T: typedesc): int =
+    log: var DiagLog, T: typedesc, failedRows: untyped = nil): int =
   # Decodes `count` traces: samples `first ..< first + cols` of trace
-  # `traceAt(k)` into row pointer `rowAt(k)`.
+  # `traceAt(k)` into row pointer `rowAt(k)`. With `failedRows` (a `ptr
+  # seq[int]`), the list is cleared (its capacity kept) and gets the `k` of
+  # each trace left zero, instead of a report in `log`.
   var failed = 0
+  when failedRows isnot typeof(nil): failedRows[].setLen 0
   let mem = f.unsafeMemory
   let size = f.mappedSize
   for k in 0..<count:
@@ -732,9 +735,12 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
     let st = tryDecodeEntry(mem, size, e, f.index.codecs[e.record], p, cols, first)
     if st != dsOk:
       for c in 0..<cols: p[c] = T(0)
-      log.report(sevError, if st == dsTruncated: dcTruncated else: dcUnsupportedFormat,
-        decodeMessages[st], e.offset, Location(file: f.path,
-          record: if f.index.kind == skSeg2: 0 else: int(e.record), trace: i))
+      when failedRows isnot typeof(nil):
+        failedRows[].add k
+      else:
+        log.report(sevError, if st == dsTruncated: dcTruncated else: dcUnsupportedFormat,
+          decodeMessages[st], e.offset, Location(file: f.path,
+            record: if f.index.kind == skSeg2: 0 else: int(e.record), trace: i))
       inc failed
   failed
 
@@ -875,6 +881,67 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   ## decoded (left zero).
   var log: DiagLog
   f.readTracesInto(traces, samples, dst, row, log)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
+    failedRows: var seq[int], row = 0): int =
+  ## As the form with a log, but reports which traces could not be decoded
+  ## in `failedRows` instead: it is cleared, then gets each such trace's
+  ## position in `traces` (0-based, so row `row + k` of `dst`), ascending, as
+  ## `PrefetchChunk.failedRows` does. Nothing is logged and the list keeps
+  ## its capacity, so a caller that reuses it does not allocate, even when
+  ## traces fail. Returns `failedRows.len`.
+  var log: DiagLog
+  let count = traces.spanLen
+  f.checkReadable(count)
+  f.checkSelection(traces)
+  dst.checkRows(row, count)
+  f.advise(traces, dst.shape[1], 0)
+  template trace(k: int): int = traces.a + k
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, count, trace, rowOf, dst.shape[1], 0, log, T, addr failedRows)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
+    dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
+  ## The selected traces, in list order, with their failed positions in
+  ## `failedRows`; see the `Slice` form.
+  var log: DiagLog
+  f.checkReadable(traces.len)
+  f.checkSelection(traces)
+  dst.checkRows(row, traces.len)
+  f.advise(traces, dst.shape[1], 0)
+  template trace(k: int): int = traces[k]
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], 0, log, T, addr failedRows)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples: Slice[int],
+    dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
+  ## The sample window `samples` of `traces` (see the windowed form with a
+  ## log), with the failed positions in `failedRows` (see the `failedRows`
+  ## form without a window).
+  var log: DiagLog
+  let count = traces.spanLen
+  dst.checkWindow(samples)
+  f.checkReadable(count)
+  f.checkSelection(traces)
+  dst.checkRows(row, count)
+  f.advise(traces, dst.shape[1], samples.a)
+  template trace(k: int): int = traces.a + k
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, count, trace, rowOf, dst.shape[1], samples.a, log, T, addr failedRows)
+
+proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
+    samples: Slice[int], dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
+  ## The sample window of the selected traces, in list order, with the failed
+  ## positions in `failedRows`; see the `Slice` form.
+  var log: DiagLog
+  dst.checkWindow(samples)
+  f.checkReadable(traces.len)
+  f.checkSelection(traces)
+  dst.checkRows(row, traces.len)
+  f.advise(traces, dst.shape[1], samples.a)
+  template trace(k: int): int = traces[k]
+  template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
+  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], samples.a, log, T, addr failedRows)
 
 func maxSamples*(f: SeismicFile, traces: Slice[int]): int =
   ## Largest sample count in the trace range (0 when empty). Raises

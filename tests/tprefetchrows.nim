@@ -2,6 +2,8 @@
 ## `traceAt` in range and selection mode, failed rows are public, uniform
 ## chunks never mix channel sets or intervals, and a transform runs once per
 ## chunk on a worker and reads keys there with `keysAt` (processSEG F1).
+## `readTracesInto` fills a failed-row list as the prefetcher does (F2), and
+## a chunk records its window origin, `firstSample` (F4).
 
 import std/[assertions, math, os, atomics]
 import parseSEG
@@ -57,6 +59,44 @@ block failed_rows_are_public:
   p.close()
   var q = newPrefetcher[float32](f, @[9, 0, 4], chunkTraces = 3, cols = 8)
   doAssert q.next(c) and c.failedRows == @[0, 2]
+  q.close()
+  f.close()
+
+block read_into_fills_failed_rows:
+  # processSEG F2: `readTracesInto` reports the failed rows as the
+  # prefetcher does, into a caller's list that is cleared and reused.
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  for t in [3, 4, 9]: f.index.entries[t].numSamples = 1_000_000_000 # past the end
+  var dst = newTensor[float32](12, 8)
+  var failed = @[99, 98, 97, 96, 95, 94, 93, 92]
+  doAssert f.readTracesInto(0 ..< 12, dst, failed) == 3 and failed == @[3, 4, 9]
+  var c: PrefetchChunk[float32]
+  var p = newPrefetcher[float32](f, 0 ..< 12, chunkTraces = 12, cols = 8)
+  doAssert p.next(c) and c.failedRows == failed, "the same rows as the prefetcher"
+  p.close()
+  let selection = @[9, 0, 4]
+  doAssert f.readTracesInto(selection, dst, failed, row = 2) == 2 and failed == @[0, 2],
+    "positions in the selection, not rows of dst"
+  var narrow = newTensor[float32](3, 4)
+  doAssert f.readTracesInto(selection, 2 .. 5, narrow, failed) == 2
+  doAssert failed == @[0, 2]
+  var window = newTensor[float32](4, 4)
+  doAssert f.readTracesInto(2 .. 5, 2 .. 5, window, failed) == 2 and failed == @[1, 2]
+  let cap = failed.capacity
+  doAssert f.readTracesInto(5 .. 8, dst, failed) == 0 and failed.len == 0
+  doAssert failed.capacity == cap, "the list keeps its capacity"
+  f.close()
+
+block chunks_carry_their_window_origin:
+  # processSEG F4: a chunk records the prefetcher's `firstSample`.
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  var c: PrefetchChunk[float32]
+  var p = newPrefetcher[float32](f, 0 ..< 6, chunkTraces = 3, cols = 4, firstSample = 5)
+  doAssert p.next(c) and c.firstSample == 5
+  doAssert c.samples[1, 0] == f.readTraces(1 .. 1, 5 .. 5)[0, 0]
+  p.close()
+  var q = newPrefetcher[float32](f, 0 ..< 6, chunkTraces = 3, cols = 4)
+  doAssert q.next(c) and c.firstSample == 0
   q.close()
   f.close()
 

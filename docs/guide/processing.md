@@ -43,7 +43,10 @@ doAssert log.len == 0 and energy > 0
 `readTracesInto` returns how many traces it left as zero rows because they could not be
 decoded, and logs each one (trace index, byte offset, reason) in `log`. Without a `log`
 argument it only counts them; `readTraces` without a log raises `SegFormatError` instead.
-Pick the form that matches your policy for damaged data.
+To skip the damaged rows while processing, pass a `var seq[int]` instead of the log: it is
+cleared and gets the position of each trace left zero (0-based in `traces`, ascending, as
+`PrefetchChunk.failedRows`), and a list reused across chunks does not allocate. Pick the
+form that matches your policy for damaged data.
 
 ### Overlap decoding with computing
 
