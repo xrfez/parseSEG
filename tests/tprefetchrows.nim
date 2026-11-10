@@ -82,6 +82,10 @@ block read_into_fills_failed_rows:
   doAssert failed == @[0, 2]
   var window = newTensor[float32](4, 4)
   doAssert f.readTracesInto(2 .. 5, 2 .. 5, window, failed) == 2 and failed == @[1, 2]
+  doAssertRaises ValueError:
+    discard f.readTracesInto(0 ..< f.len + 1, dst, failed)
+  doAssert failed.len == 0, "a rejected read leaves no stale rows"
+  doAssert f.readTracesInto(2 .. 5, 2 .. 5, window, failed) == 2
   let cap = failed.capacity
   doAssert f.readTracesInto(5 .. 8, dst, failed) == 0 and failed.len == 0
   doAssert failed.capacity == cap, "the list keeps its capacity"

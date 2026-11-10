@@ -885,11 +885,13 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
     failedRows: var seq[int], row = 0): int =
   ## As the form with a log, but reports which traces could not be decoded
-  ## in `failedRows` instead: it is cleared, then gets each such trace's
+  ## in `failedRows` instead: it is cleared first (also when the arguments
+  ## are rejected), then gets each such trace's
   ## position in `traces` (0-based, so row `row + k` of `dst`), ascending, as
   ## `PrefetchChunk.failedRows` does. Nothing is logged and the list keeps
   ## its capacity, so a caller that reuses it does not allocate, even when
   ## traces fail. Returns `failedRows.len`.
+  failedRows.setLen 0 # cleared even when the arguments are rejected
   var log: DiagLog
   let count = traces.spanLen
   f.checkReadable(count)
@@ -904,6 +906,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
   ## The selected traces, in list order, with their failed positions in
   ## `failedRows`; see the `Slice` form.
+  failedRows.setLen 0 # cleared even when the arguments are rejected
   var log: DiagLog
   f.checkReadable(traces.len)
   f.checkSelection(traces)
@@ -918,6 +921,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   ## The sample window `samples` of `traces` (see the windowed form with a
   ## log), with the failed positions in `failedRows` (see the `failedRows`
   ## form without a window).
+  failedRows.setLen 0 # cleared even when the arguments are rejected
   var log: DiagLog
   let count = traces.spanLen
   dst.checkWindow(samples)
@@ -933,6 +937,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     samples: Slice[int], dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
   ## The sample window of the selected traces, in list order, with the failed
   ## positions in `failedRows`; see the `Slice` form.
+  failedRows.setLen 0 # cleared even when the arguments are rejected
   var log: DiagLog
   dst.checkWindow(samples)
   f.checkReadable(traces.len)
