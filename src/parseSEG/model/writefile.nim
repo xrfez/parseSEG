@@ -65,7 +65,7 @@ import ../convert
 import std/strutils
 import ./[traceindex, fieldvalues, keytypes]
 import ../common/tensors
-import ../private/[tensorrows, fieldaccess, segyencode]
+import ../private/[tensorrows, fieldaccess, segyencode, segykeys]
 import ../version
 
 type
@@ -453,7 +453,9 @@ proc keysTrace(t: var SegyTrace, k: TraceKeys, n: int, seqNo: int, rev: SegyRevi
   if not k.channel.isNaN: h.traceNumberInField = clampI32(k.channel)
   if not k.ensemble.isNaN: h.ensembleNumber = clampI32(k.ensemble)
   h.traceIdCode =
-    if k.traceCode != 0: k.traceCode
+    # The stored code when it says what the status says (a status changed
+    # in the keys, e.g. a trace killed, wins over the input's code).
+    if k.traceCode != 0 and segyStatus(k.traceCode, int(rev.major)) == k.status: k.traceCode
     elif k.status in {tsLive, tsUnknown} and
         (int(k.component) in 11..17 or int(k.component) in 27..41): int16(k.component)
     else:
@@ -759,7 +761,9 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   offset, record, ensemble, a fractional interval and the time's
   ##   nanoseconds); `t0Ms` gets the finest time scalar that holds it
   ##   (Rev 0: whole ms);
-  ## - the trace identification code is `traceCode` when non-zero, else the
+  ## - the trace identification code is `traceCode` when non-zero and its
+  ##   status in the output's revision is `status` (so a status changed in
+  ##   the keys wins), else the
   ##   SEG-Y `component` code (11-17, 27-41) of a live or unknown trace
   ##   (read back live), else 1 (live), 2 (dead) or 0 (unknown; also
   ##   auxiliary, which SEG-Y has no general code for);

@@ -161,6 +161,24 @@ block refused:
     d.writeTrace(k, [1'f32])
   doAssert not fileExists(tmp / "dropped.sgy")
 
+block status_wins_over_a_stale_code:
+  # Keys read from SEG-Y (traceCode 1), then the trace killed: written dead.
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  var k = f.traceKeys(0)
+  doAssert k.traceCode == 1 and k.status == tsLive
+  k.status = tsDead
+  let dst = tmp / "killed.sgy"
+  var w = openSeismicWriter(dst, SegyOutputOptions(revision: SegyRevision(major: 1)))
+  w.writeTrace(k, [1'f32, 2])
+  k.status = tsLive
+  w.writeTrace(k, [1'f32, 2]) # agrees: the code is kept
+  discard w.close()
+  var g = openSeismic(dst, keys = true)
+  doAssert g.traceKeys(0).status == tsDead and g.traceKeys(0).traceCode == 2
+  doAssert g.traceKeys(1).status == tsLive and g.traceKeys(1).traceCode == 1
+  g.close()
+  f.close()
+
 block like_segy_input:
   # Keys traces into a writer `like` a SEG-Y file (no Layout stanza).
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
