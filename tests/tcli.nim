@@ -262,12 +262,13 @@ sampleBlock vendormaps:
 # ------------------------------------------- Phase 7 review regressions --
 
 sampleBlock survey:
+  # 63.sgd's header stations: source 13/99.5, receiver 13/104.
   let sps = tmp / "t.sps"
   writeFile(sps, [
     "H00 SPS format version number   SPS 2.1;",
-    "R     10.00    101.00  1G1                     500100.0 6000000.0  12.5 18213250",
-    "S     20.00    205.00  1V6                     500000.0 6000400.0  10.0 19001150",
-    "XT1          6311     20.00    205.001    1    11     10.00    101.00    101.001",
+    "R     13.00    104.00  1G1                     500100.0 6000000.0  12.5 18213250",
+    "S     13.00     99.50  1V6                     500000.0 6000400.0  10.0 19001150",
+    "XT1          6311     13.00     99.501    1    11     13.00    104.00    104.001",
   ].join("\r\n") & "\r\n")
   let s = ok("survey", sps)
   doAssert "SPS 2.1 (H00)" in s and "CR LF" in s and "1 H, 1 S, 1 R, 1 X, 0 C" in s
@@ -277,11 +278,13 @@ sampleBlock survey:
   doAssert readFile(tmp / "t21.sps") == readFile(sps), "1.0 -> 2.1 restores the file"
   discard fails(2, "survey", sps, "-o", sps)
   discard fails(2, "survey", sps, "--rev=3")
-  let k0 = ok("keys", s63, "--sps=" & sps)
-  doAssert "1 relation runs; 0 traces updated" in k0, "the headers' stations are kept"
-  let k = ok("keys", s63, "--sps=" & sps, "--overwrite")
-  doAssert "1 traces updated" in k and "\t63\t1\t20\t205\t500000\t6000400\t10\t101\t500100" in k
-  doAssert "412.31" in k
+  for extra in ["", "--overwrite"]:
+    let k = if extra.len == 0: ok("keys", s63, "--sps=" & sps)
+            else: ok("keys", s63, "--sps=" & sps, extra)
+    doAssert "1 X + 0 O relation runs" in k, k
+    doAssert "joined:      1 traces, 1 changed; by stations 1" in k, k
+    doAssert "\t63\t1\t13\t99.50\t500000\t6000400\t13\t104\t500100" in k, k
+    doAssert "412.31" in k
   doAssert "relation runs" in ok("info", s63, "--sps", sps)
   discard fails(2, "keys", s63, "--p1=" & sps, "--decimals=9,1")
   discard fails(2, "keys", s63, "--line-map=oops")
@@ -291,24 +294,31 @@ sampleBlock survey:
   discard fails(2, "keys", s63, "--overwrite")        # needs --sps or --p1
 
 sampleBlock survey_apply:
-  let sps = tmp / "t.sps" # from the survey block: record 63 -> stations 20/205, 10/101
-  let path = fresh(s63)
+  # 63.sgd converted to SEG-Y: its keys have no stations (the layout's fields
+  # are not read into them), so the join fills them by record and channel,
+  # and SEG-Y has fields for the coordinates.
+  let sps = tmp / "t.sps" # from the survey block: record 63 -> stations 13/99.5, 13/104
+  let path = tmp / "63cli.sgy"
+  discard ok("convert", s63, path)
   let original = readFile(path)
-  let dry = ok("survey-apply", path, "--sps=" & sps, "--overwrite")
-  doAssert "would change" in dry and "rcv station: 1 traces" in dry, dry
-  doAssert "receiver X/Y: SEG-D Rev 1/2 trace headers have no coordinate fields" in dry
+  let dry = ok("survey-apply", path, "--sps=" & sps)
+  doAssert "would change" in dry and "by record number 1" in dry, dry
+  doAssert "receiver X/Y:1 traces" in dry and "rcv station: 0 traces" in dry, dry # 13/104 already
   doAssert readFile(path) == original, "a dry run writes nothing"
-  let inPlace = ok("survey-apply", path, "--sps=" & sps, "--overwrite", "--in-place")
+  let inPlace = ok("survey-apply", path, "--sps=" & sps, "--in-place")
   doAssert "changed in place" in inPlace and "journal:" in inPlace
-  doAssert "\t10\t101\t" in ok("keys", path)
+  doAssert "\t500000\t6000400\t-\t-\t500100\t6000000\t412" in ok("keys", path) # stations: layout
   discard ok("journal", "rollback", path, path & ".edits.nif")
   doAssert readFile(path) == original
-  let copy = tmp / "63geo.sgd"
-  doAssert "changed in " & copy in ok("survey-apply", s63, "--sps=" & sps, "--overwrite",
-    "-o", copy, "--values=stations")
-  doAssert "\t10\t101\t" in ok("keys", copy)
+  let copy = tmp / "63geo.sgy"
+  let c = ok("survey-apply", path, "--sps=" & sps, "-o", copy, "--values=stations")
+  doAssert "changed in " & copy in c and "src station: 1 traces" in c, c
+  doAssert "500100" notin ok("keys", copy), "stations only"
+  # SEG-D 2.0 headers already carry the stations and have no coordinate fields.
+  let segd = ok("survey-apply", s63, "--sps=" & sps)
+  doAssert "rcv station: 0 traces" in segd, segd
   discard fails(2, "survey-apply", s63)                       # needs --sps
-  discard fails(2, "survey-apply", s63, "--sps=" & sps, "-o", copy, "--in-place")
+  discard fails(2, "survey-apply", s63, "--sps=" & sps, "-o", tmp / "x.sgd", "--in-place")
   discard fails(2, "survey-apply", s63, "--sps=" & sps, "--journal=j")
   discard fails(2, "survey-apply", s63, "--sps=" & sps, "--values=nope")
   discard fails(2, "survey-apply", s63, "--sps=" & sps, "-o", s63)

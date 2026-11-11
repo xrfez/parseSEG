@@ -3,8 +3,8 @@
 ##
 ## An SPS survey is a set of files that share one block of header (H)
 ## records: receiver points (R), source points (S), relations (X: field
-## record and channel → source and receiver stations) and, optionally,
-## comments (C). `readSps` reads any of them (or a file mixing them) into one
+## record and channel → source and receiver stations; O: the same layout in
+## the receiver domain, see `SpsRelation`) and, optionally, comments (C). `readSps` reads any of them (or a file mixing them) into one
 ## `SpsFile`; `writeSps` writes the records back, column-exact.
 ##
 ## Reading never stops on a bad record: each problem is a diagnostic in
@@ -70,6 +70,14 @@ type
     ## `channelIncrement`) of field record `fieldRecord` were recorded from
     ## receivers `fromReceiver..toReceiver` on `rcvLine`, shot at
     ## (`srcLine`, `srcPoint`, `srcIndex`).
+    ##
+    ## An O record (receiver domain, `recordType` `'O'`) has the same layout
+    ## with the roles swapped: traces `fromChannel..toChannel` of gather
+    ## `fieldRecord` were recorded at the receiver in the source fields, from
+    ## the sources `fromReceiver..toReceiver` on `rcvLine` (see
+    ## `survey/join`). Files named `.ops` often hold O relations as `X`
+    ## records.
+    recordType*: char = 'X' ## `X`, or `O` for a receiver-domain record.
     fieldTape*: string
     fieldRecord*: int64
     recordIncrement*: int
@@ -130,7 +138,7 @@ func initSpsPoint*(kind = pkSource): SpsPoint =
 
 func initSpsRelation*(): SpsRelation =
   ## A relation with every value missing (increments and indices 1).
-  SpsRelation(fieldRecord: MissingInt, recordIncrement: 1, instrumentCode: '1', srcLine: NaN,
+  SpsRelation(recordType: 'X', fieldRecord: MissingInt, recordIncrement: 1, instrumentCode: '1', srcLine: NaN,
     srcPoint: NaN, srcIndex: 1, fromChannel: MissingInt, toChannel: MissingInt,
     channelIncrement: 1, rcvLine: NaN, fromReceiver: NaN, toReceiver: NaN, rcvIndex: 1)
 
@@ -251,6 +259,7 @@ proc parsePoint(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsPo
 proc parseRelation(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsRelation =
   let cols = relCols[rev]
   result = initSpsRelation()
+  result.recordType = line[0]
   result.fieldTape = line.c(cols.tape).strip
   result.fieldRecord = x.intField(log, line.c(cols.rec), "X.fieldRecord", MissingInt)
   result.recordIncrement = x.smallField(log, line.c(cols.recInc), "X.recordIncrement", 1)
@@ -316,7 +325,7 @@ func layoutScore(line: string): int =
         not line.col(12, 21).isBlank:
       inc result
     else: dec result
-  of 'X':
+  of 'X', 'O':
     if parseFortranFloat(line.col(18, 27)).isSome and parseFortranFloat(line.col(28, 37)).isSome:
       inc result
     else: dec result
@@ -341,7 +350,7 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
             rev = rv
             result.revisionDeclared = true
             break
-        elif r.text[0] in {'R', 'S', 'X'}:
+        elif r.text[0] in {'R', 'S', 'X', 'O'}:
           score += layoutScore(r.text)
           inc seen
           if seen >= 50: break
@@ -374,7 +383,7 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
         of 'R', 'S':
           result.order.add SpsEntry(kind: sePoint, at: result.points.len)
           result.points.add x.parsePoint(result.log, line, rev)
-        of 'X':
+        of 'X', 'O':
           result.order.add SpsEntry(kind: seRelation, at: result.relations.len)
           result.relations.add x.parseRelation(result.log, line, rev)
         of 'C':
@@ -408,7 +417,7 @@ proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
         let (e, n) = (parseFortranFloat(t.col(47, 55), 1), parseFortranFloat(t.col(56, 65), 1))
         if e.isSome and n.isSome and not (e.get.isNaN or n.get.isNaN):
           inc sps
-      of 'X':
+      of 'X', 'O':
         if t.col(39, 48).strip.len > 0 and t.col(39, 48).strip.allCharsInSet(Digits + {' '}):
           inc sps
       of ' ':
@@ -516,8 +525,10 @@ proc encodeSps*(r: SpsRelation, rev: SpsRevision): string =
   ## when a value does not fit its field, `ValueError` for `spsAuto`.
   checkTarget(rev)
   let cols = relCols[rev]
+  if r.recordType notin {'X', 'O'}:
+    raiseFormat("X.recordType: '" & $r.recordType & "' is not X or O")
   result = repeat(' ', 80)
-  result[0] = 'X'
+  result[0] = r.recordType
   result.putCol(cols.tape.a, alignLeft(fit(r.fieldTape & (if r.fieldTape.len == 0: " " else: ""),
     cols.tape.len, "X.fieldTape"), cols.tape.len))
   result.putCol(cols.rec.a, fit(formatInt(r.fieldRecord, cols.rec.len), cols.rec.len,
@@ -564,7 +575,7 @@ proc pointLine(p: SpsPoint, rev, fileRev: SpsRevision, strict: bool): string =
   encodeSps(p, rev)
 
 proc relationLine(r: SpsRelation, rev, fileRev: SpsRevision, strict: bool): string =
-  if r.raw.len > 0 and rev == fileRev and r.raw[0] == 'X':
+  if r.raw.len > 0 and rev == fileRev and r.raw[0] in {'X', 'O'}:
     var scratch: DiagLog
     if sameValues(quietCtx(strict).parseRelation(scratch, r.raw, rev), r): return r.raw
   encodeSps(r, rev)

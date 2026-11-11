@@ -543,6 +543,23 @@ Not verifiable from the examples: the exact columns of 1.0 static/depth/datum/up
 5. **Units and CRS** (H12-H259, H20/H201) have no slot in `GeometryTable`. Keep them on the SPS header model.
 6. **Elevation vs depth.** SPS gives the surface `elevation`, `pointDepth` (below surface) and `waterDepth`. `Coordinates.z` gets the surface elevation. A source depth is `pointDepth`, which the caller applies.
 
+### 10.1b Join order (as implemented)
+
+Field record numbers and channel numbers in the data often differ from the X file's: a
+recorder numbers its traces its own way (all live channels, not the X file's patch), and a
+reshoot or renumbered post-plot moves records. Seen on a 3D land survey: a SEG-D file whose
+FFID was another shot's X record, and whose trace numbers matched the X channels for 23 of
+1127 traces, while its header stations matched the R/S/X stations exactly. So
+`survey/join` matches **by stations**: header stations are never replaced; a missing
+receiver comes from the X records of the header's source station, a missing source from the
+O gathers of the header's receiver station, and only a trace with no station uses
+(record, channel). See the module documentation.
+
+**O records** (receiver domain): not in either SPS revision, but in use (`.ops` files): the X
+layout with the source and receiver fields swapped, one gather per receiver station, its
+traces numbered across the sources that recorded it. Read with record letter `O`, or `X` in
+an `.ops` file; `receiverRelations` builds them from X.
+
 ### 10.2 Reader/writer guidance
 
 - Parse each line with a per-revision column table (`[(first, last, fmt)]`). Pad short lines to 80. Lines longer than 80: keep the extra in a `tail` field and warn.

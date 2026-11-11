@@ -89,21 +89,38 @@ tape devices included.
 SEG-D 2.x headers usually carry station numbers but no coordinates, and some files not even
 station numbers per channel. SPS files (Rev 1.0, 2.1) give the coordinates of every source
 (S records) and receiver (R records), and X records say which stations each channel of each
-field record was recorded from. SEG P1 files give shotpoint coordinates.
+field record was recorded from. O records (often in `.ops` files) are the same relations in
+the receiver domain: the X layout with source and receiver swapped, one gather per receiver.
+SEG P1 files give shotpoint coordinates.
 
 A `SurveyGeometry` collects them; `applySurvey` joins them to a file's keys **in memory**
-(the file does not change): stations from the relations (matched on `TraceKeys.record` and
-`.channel`), then coordinates from the stations, then offset and midpoint.
+(the file does not change). **Traces are matched by their stations** (line, point, index),
+not by record number: field record and channel numbers often differ from the relation
+file's. Stations a header has are never replaced; the relations only fill the ones it lacks:
+
+- source and receiver station in the header: coordinates by station, nothing else;
+- source station only: the X records **of that source station** give the receiver of the
+  trace's channel (the one with the trace's record number when there are several repeats,
+  else they must agree);
+- receiver station only: the O gathers of that receiver give the source likewise (without
+  O records, the X relation of the trace's record and channel, if its receiver is the
+  header's);
+- no station: the trace's record and channel, the fallback.
+
+Then coordinates come from the stations, then offset and midpoint. `overwrite` replaces
+coordinates already known, never stations. Auxiliary traces are left alone. A `JoinStats`
+says how the traces matched.
 
 ```nim
 import std/math
 import parseSEG
 
-# A small SPS 2.1 file: one receiver, one source, and the relation of record 63, channel 1.
+# A small SPS 2.1 file: record.sgd's receiver and source, and the relation of
+# record 63, channel 1.
 writeFile("line.sps", """H00 SPS format version number   SPS 2.1;
-R     10.00    101.00  1G1                     500100.0 6000000.0  12.5 18213250
-S     20.00    205.00  1V6                     500000.0 6000400.0  10.0 19001150
-XT1          6311     20.00    205.001    1    11     10.00    101.00    101.001
+R     10.00    104.00  1G1                     500100.0 6000000.0  12.5 18213250
+S     20.00     99.50  1V6                     500000.0 6000400.0  10.0 19001150
+XT1          6311     20.00     99.501    1    11     10.00    104.00    104.001
 """)
 
 var g = initSurveyGeometry()
@@ -114,13 +131,29 @@ echo g.sourceCount, " source(s), ", g.receiverCount, " receiver(s), ",
 
 var f = openSeismic("record.sgd", keys = true)
 doAssert f.traceKeys(0).rcvX.isNaN        # the SEG-D 2.0 headers have no coordinates
-let changed = f.applySurvey(g, overwrite = true)
+var stats: JoinStats
+let changed = f.applySurvey(g, stats)
+echo stats                                # 1 traces, 1 changed; by stations 1
 let k = f.traceKeys(0)
 echo changed, " trace(s) joined: receiver ", k.rcvLine, "/", k.rcvPoint, " at (", k.rcvX,
   ", ", k.rcvY, "), offset ", round(k.offset, 1)
-doAssert changed == 1 and k.rcvX == 500100 and k.srcPoint == 205
+doAssert changed == 1 and k.rcvX == 500100 and k.srcPoint == 99.5
+doAssert stats.matches[jmStations] == 1   # the header's own stations were the key
+
+# The receiver domain: O records built from the X relations, written as an
+# .ops file and read back.
+let ops = SpsFile(revision: sps21, headers: readSps("line.sps").headers,
+  relations: g.receiverRelations())
+doAssert not writeSps(ops, "line.ops").hasErrors
+var go = initSurveyGeometry()
+go.addSps("line.ops")                     # O records are receiver gathers
+doAssert go.relationCount(rdReceiver) == 1
+doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
 ```
 
+- `records(g)`, `relations(g, record)`, `expectedChannels`, `recordsAt(g, station)` (the
+  records of a source station, or the gathers of a receiver) and `channelOf` enumerate and
+  look up the relations, in either domain (`rdSource`, `rdReceiver`).
 - Line names that are not numbers (SPS 1.0, P1) are mapped with `g.mapLine(name, number)`,
   or by their trailing digits with `g.trailingDigits = true`.
 - `g.multiComponent` makes X records with a channel increment cover consecutive component
@@ -142,37 +175,34 @@ import std/os
 import parseSEG
 
 writeFile("line.sps", """H00 SPS format version number   SPS 2.1;
-R     10.00    101.00  1G1                     500100.0 6000000.0  12.5 18213250
-S     20.00    205.00  1V6                     500000.0 6000400.0  10.0 19001150
-XT1          6311     20.00    205.001    1    11     10.00    101.00    101.001
+R     10.00    104.00  1G1                     500100.0 6000000.0  12.5 18213250
+S     20.00     99.50  1V6                     500000.0 6000400.0  10.0 19001150
+XT1          6311     20.00     99.501    1    11     10.00    104.00    104.001
 """)
 var g = initSurveyGeometry()
 g.addSps("line.sps")
 
-# 1. In place, journaled and undoable: same-size header fields only.
+# 1. In place, journaled and undoable: same-size header fields only. record.sgd's
+#    SEG-D 2.0 headers already hold its stations, and have no coordinate fields.
 copyFile("record.sgd", "field.sgd")
 var f = openSeismic("field.sgd", keys = true)
-discard f.applySurvey(g, overwrite = true)
+discard f.applySurvey(g)
 var report: DiagLog
 let plan = f.geometryChanges(GeometryFields(), report)   # a dry run: nothing is written
 echo "would change ", plan                # traces per kind, values with no slot
 for d in report: echo "  ", d.msg
+doAssert plan.traces == 0 and plan.unwritable > 0
 var ed = openEditor(move f)               # takes over the open file and its joined keys
 let done = ed.writeGeometry()
 ed.close()
-doAssert done.receiverStations == 1
-var check = openSeismic("field.sgd", keys = true)
-doAssert check.traceKeys(0).rcvPoint == 101
-doAssert rollbackJournal("field.sgd", "field.sgd.edits.nif").len == 0   # undo, if wanted
+doAssert done == plan                     # rollbackJournal undoes a write, if wanted
 
 # 2. Into a copy in the same standard.
-let copied = copyWithGeometry("record.sgd", "record_geo.sgd", g,
-  overwrite = true)
-doAssert not copied.log.hasErrors and copied.changes.receiverStations == 1
+let copied = copyWithGeometry("record.sgd", "record_geo.sgd", g)
+doAssert not copied.log.hasErrors and copied.changes.traces == 0
 
 # 3. Converted to SEG-Y, which has coordinate fields for everything.
-let convLog = convertWithGeometry("record.sgd", "record_geo.sgy", g,
-  overwrite = true)
+let convLog = convertWithGeometry("record.sgd", "record_geo.sgy", g)
 doAssert not convLog.isFatal
 var y = openSeismic("record_geo.sgy", keys = true)
 doAssert y.traceKeys(0).rcvX == 500100

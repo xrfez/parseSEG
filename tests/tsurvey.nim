@@ -3,11 +3,11 @@
 ## (`docs/spec/sps.md` §5.3, `docs/spec/p1_p2_p3.md` §3.4); the extracted
 ## spec text collapses blanks, so its lines cannot be used verbatim.
 
-import std/[assertions, options, streams, strutils, math, os, tables]
+import std/[assertions, options, streams, strutils, math, os, tables, algorithm]
 import parseSEG
 import parseSEG/common/ebcdic
 import parseSEG/survey/cards # column helpers (internal)
-import ./utils/testutils
+import ../tools/demofiles
 
 proc rec(first: char, fields: openArray[(int, string)]): string =
   ## An 80-column record with `fields` placed at their 1-based columns.
@@ -271,25 +271,235 @@ block join_line_names:
   doAssert stationKey(4960, 12340, 3) in g4.table.sources
   doAssert g4.table.sources[stationKey(4960, 12340, 3)].z == 857
 
-sampleBlock join_to_a_real_file:
-  # 63.sgd (SEG-D 2.0): file 63, one trace (channel 1), stations in THE#1.
+block join_to_a_real_file:
+  # The demo record.sgd (SEG-D 2.0): file 63, one trace (channel 1), stations
+  # in THE#1: source 20/99.5, receiver 10/104. The X record of file 63 names
+  # other stations (as when field record numbers differ from the relation
+  # file's): it is never used, since the header has both stations.
   let dir = getTempDir() / "tsurvey2"
   createDir(dir)
-  let x = x21("T1", 63, "20.00", "205.00", '1', 1, 1, '1', "10.00", "101.00", "101.00", '1')
-  let r = r21('R', "10.00", "101.00", '1', "G1", "500100.0", "6000000.0", "12.5")
-  let s = r21('S', "20.00", "205.00", '1', "V6", "500000.0", "6000400.0", "10.0", " 19001150")
-  writeFile(dir / "t.sps", [H00, r, s, x].join("\n"))
-  var f = openSeismic("SEG Spec/exampleFiles/63.sgd", keys = true)
-  doAssert f.index.keys[0].record == 63 and f.index.keys[0].channel == 1
+  writeRecordSegd(dir / "record.sgd")
+  let x = x21("T1", 63, "30.00", "205.00", '1', 1, 1, '1', "40.00", "101.00", "101.00", '1')
+  let r = r21('R', "10.00", "104.00", '1', "G1", "500100.0", "6000000.0", "12.5")
+  let r2 = r21('R', "40.00", "101.00", '1', "G1", "700100.0", "6000000.0", "12.5")
+  let s = r21('S', "20.00", "99.50", '1', "V6", "500000.0", "6000400.0", "10.0", " 19001150")
+  let s2 = r21('S', "30.00", "205.00", '1', "V6", "700000.0", "6000400.0", "10.0", " 19001150")
+  writeFile(dir / "t.sps", [H00, r, r2, s, s2, x].join("\n"))
   var g: SurveyGeometry
   g.addSps(readSps(dir / "t.sps"))
-  doAssert f.index.applySurvey(g) == 0, "the headers' own stations are kept"
-  doAssert f.index.applySurvey(g, overwrite = true) == 1
-  let k = f.index.keys[0]
-  doAssert k.srcPoint == 205 and k.rcvPoint == 101 and k.rcvX == 500100
-  doAssert abs(k.offset - hypot(100.0, 400.0)) < 1e-9
-  f.close()
+  for overwrite in [false, true]:
+    var f = openSeismic(dir / "record.sgd", keys = true)
+    doAssert f.index.keys[0].record == 63 and f.index.keys[0].channel == 1
+    var stats: JoinStats
+    doAssert f.applySurvey(g, stats, overwrite) == 1
+    let k = f.index.keys[0]
+    doAssert k.srcLine == 20 and k.srcPoint == 99.5 and k.rcvLine == 10 and k.rcvPoint == 104,
+      "header stations are never replaced"
+    doAssert k.rcvX == 500100 and k.srcX == 500000
+    doAssert abs(k.offset - hypot(100.0, 400.0)) < 1e-9
+    doAssert stats.traces == 1 and stats.changed == 1 and stats.matches[jmStations] == 1
+    doAssert stats.noSourceXy == 0 and stats.noReceiverXy == 0
+    doAssert $stats == "1 traces, 1 changed; by stations 1", $stats
+    f.close()
   removeDir(dir)
+
+# ------------------------------------------------------ station-first join ---
+
+# Two shots on one receiver line 100 (101..104). Shot 129/113 is record 77
+# (channels 1-4 → 101..104) and repeated as record 78; shot 511/117 is
+# record 151 (channels 1-4 → 104..101). A field file numbered 151 that holds
+# shot 129/113 must still join to record 77's stations.
+let joinSurvey = [H00,
+  r21('S', "129.00", "113.00", '1', "E1", "1000.0", "5000.0", "10.0", " 19001150"),
+  r21('S', "511.00", "117.00", '1', "V1", "2000.0", "5000.0", "10.0", " 19001150"),
+  r21('R', "100.00", "101.00", '1', "G1", "1100.0", "6000.0", "1.0"),
+  r21('R', "100.00", "102.00", '1', "G1", "1200.0", "6000.0", "2.0"),
+  r21('R', "100.00", "103.00", '1', "G1", "1300.0", "6000.0", "3.0"),
+  r21('R', "100.00", "104.00", '1', "G1", "1400.0", "6000.0", "4.0"),
+  x21("T1", 77, "129.00", "113.00", '1', 1, 4, '1', "100.00", "101.00", "104.00", '1'),
+  x21("T1", 78, "129.00", "113.00", '1', 1, 4, '1', "100.00", "101.00", "104.00", '1'),
+  x21("T1", 151, "511.00", "117.00", '1', 1, 4, '1', "100.00", "104.00", "101.00", '1')]
+
+proc traceAt(record, channel: float64, src, rcv: (float64, float64), srcIndex = 0'i16):
+    TraceKeys =
+  result = initTraceKeys()
+  result.status = tsLive
+  (result.record, result.channel) = (record, channel)
+  (result.srcLine, result.srcPoint, result.srcIndex) = (src[0], src[1], srcIndex)
+  (result.rcvLine, result.rcvPoint) = rcv
+
+block join_station_first:
+  var g: SurveyGeometry
+  g.addSps(parseSps(joinSurvey.join("\n")))
+  const none = (NaN, NaN)
+  # Both stations in the header: the record number (151 = another shot) is
+  # not used, with or without overwrite; coordinates come by station.
+  for overwrite in [false, true]:
+    var k = traceAt(151, 2, (129.0, 113.0), (100.0, 102.0))
+    doAssert k.applySurvey(g, overwrite)
+    doAssert k.srcPoint == 113 and k.rcvPoint == 102 and k.srcX == 1000 and k.rcvX == 1200
+    doAssert k.srcIndex == 0, "the header's index stays; 0 matches the survey's 1"
+  var k = traceAt(151, 2, (129.0, 113.0), (100.0, 102.0))
+  doAssert k.joinStations(g) == jmStations
+  # Source only: the receiver comes from the source's records (77 and 78
+  # agree), not from record 151 (which would give 103).
+  k = traceAt(151, 2, (129.0, 113.0), none)
+  doAssert k.joinStations(g) == jmSource and k.rcvLine == 100 and k.rcvPoint == 102
+  k = traceAt(151, 2, (129.0, 113.0), none)
+  doAssert k.applySurvey(g) and k.rcvX == 1200
+  # Receiver only: no O records, so record and channel, checked by the receiver.
+  k = traceAt(151, 2, none, (100.0, 103.0))
+  doAssert k.joinStations(g) == jmRecord and k.srcLine == 511 and k.srcPoint == 117
+  k = traceAt(151, 2, none, (100.0, 102.0))
+  doAssert k.joinStations(g) == jmConflict and k.srcLine.isNaN, "record 151 ch 2 is 100/103"
+  # No station: the record number is the only key.
+  k = traceAt(151, 2, none, none)
+  doAssert k.joinStations(g) == jmRecord and k.srcPoint == 117 and k.rcvPoint == 103
+  k = traceAt(152, 2, none, none)
+  doAssert k.joinStations(g) == jmUnmatched and k.srcLine.isNaN
+  k = traceAt(77, NaN, none, none)
+  doAssert k.joinStations(g) == jmUnmatched
+  # A source not in the relations, or a channel its records lack.
+  k = traceAt(77, 2, (130.0, 113.0), none)
+  doAssert k.joinStations(g) == jmUnmatched and k.rcvLine.isNaN
+  k = traceAt(77, 9, (129.0, 113.0), none)
+  doAssert k.joinStations(g) == jmUnmatched
+  # Auxiliary traces are left alone.
+  k = traceAt(151, 2, none, none)
+  k.status = tsAuxiliary
+  doAssert k.joinStations(g) == jmAuxiliary and not k.applySurvey(g) and k.srcLine.isNaN
+  # Repeats that disagree: ambiguous, unless the record number picks one.
+  var g2: SurveyGeometry
+  g2.addSps(parseSps((joinSurvey[0 .. ^4] & @[
+    x21("T1", 77, "129.00", "113.00", '1', 1, 4, '1', "100.00", "101.00", "104.00", '1'),
+    x21("T1", 78, "129.00", "113.00", '1', 1, 4, '1', "100.00", "104.00", "101.00", '1')]).join("\n")))
+  k = traceAt(151, 2, (129.0, 113.0), none)
+  doAssert k.joinStations(g2) == jmAmbiguous and k.rcvLine.isNaN
+  k = traceAt(78, 2, (129.0, 113.0), none)
+  doAssert k.joinStations(g2) == jmSource and k.rcvPoint == 103
+  # A point index that does not match is another station.
+  k = traceAt(151, 2, (129.0, 113.0), none, srcIndex = 2)
+  doAssert k.joinStations(g) == jmUnmatched
+  doAssert sameStation(stationKey(1, 2, 0), stationKey(1, 2.000001, 1))
+  doAssert not sameStation(stationKey(1, 2, 2), stationKey(1, 2, 1))
+
+block join_enumeration_and_lookups:
+  var g: SurveyGeometry
+  g.addSps(parseSps(joinSurvey.join("\n")))
+  var recs: seq[int64]
+  for r in g.records: recs.add r
+  doAssert recs == @[77'i64, 78, 151]
+  var n = 0
+  for (c, rel) in g.relations(151):
+    inc n
+    doAssert g.relation(151, c).get == rel
+    doAssert rel.receiver.point == 105 - float64(c) and rel.source.point == 117
+  doAssert n == 4 and g.expectedChannels(151) == 4 and g.expectedChannels(5) == 0
+  doAssert g.recordsAt(stationKey(129, 113, 0)) == @[77'i64, 78]
+  doAssert g.recordsAt(stationKey(129, 113, 1)) == @[77'i64, 78]
+  doAssert g.recordsAt(stationKey(129, 113, 2)).len == 0
+  doAssert g.recordsAt(stationKey(100, 101, 1), rdReceiver).len == 0
+  doAssert g.channelOf(77, stationKey(100, 103, 0)) == some(3'i64)
+  doAssert g.channelOf(151, stationKey(100, 103, 1)) == some(2'i64)
+  doAssert g.channelOf(151, stationKey(100, 105, 1)).isNone
+  doAssert g.channelOf(151, stationKey(101, 103, 1)).isNone
+  # Overlapping runs: a channel is yielded once, for the earlier run.
+  var g3: SurveyGeometry
+  g3.addSps(parseSps([H00,
+    x21("T1", 5, "1.00", "1.00", '1', 1, 4, '1', "100.00", "101.00", "104.00", '1'),
+    x21("T1", 5, "1.00", "1.00", '1', 3, 6, '1', "200.00", "101.00", "104.00", '1')].join("\n")))
+  var lines: seq[float64]
+  for (c, rel) in g3.relations(5): lines.add rel.receiver.line
+  doAssert lines == @[100.0, 100, 100, 100, 200, 200] and g3.log.count(sevWarning) == 1
+  doAssert g3.channelOf(5, stationKey(200, 101, 1)).isNone, "channel 3 belongs to line 100"
+  # Multi-component: k channels per station.
+  var g4 = SurveyGeometry(multiComponent: true)
+  g4.addSps(parseSps([H00, x21("T1", 7, "1.00", "1.00", '1', 1, 7, '3', "100.00", "101.00",
+    "103.00", '1')].join("\n")))
+  var comps: seq[int]
+  for (c, rel) in g4.relations(7): comps.add rel.component
+  doAssert comps == @[1, 2, 3, 1, 2, 3, 1, 2, 3]
+  doAssert g4.channelOf(7, stationKey(100, 102, 1)) == some(4'i64)
+
+# --------------------------------------------------------- receiver domain ---
+
+proc pairs(g: SurveyGeometry, domain: RelationDomain): seq[(float64, float64, float64, float64)] =
+  for r in g.records(domain):
+    for (_, rel) in g.relations(r, domain):
+      result.add (rel.source.line, rel.source.point, rel.receiver.line, rel.receiver.point)
+  result.sort
+
+block receiver_domain_o_records:
+  # Read: an O record is a receiver's gather; the X layout with the roles swapped.
+  let o = rec('O', [(2, "T1"), (8, align("12", 8)), (16, "1"), (17, "1"),
+    (18, "100.00".align(10)), (28, "102.00".align(10)), (38, "1"), (39, align("1", 5)),
+    (44, align("3", 5)), (49, "1"), (50, "129.00".align(10)), (60, "113.00".align(10)),
+    (70, "115.00".align(10)), (80, "1")])
+  let f = parseSps([H00, o].join("\n") & "\n")
+  doAssert f.log.len == 0 and f.relations.len == 1 and f.relations[0].recordType == 'O'
+  doAssert spsText(f).text == [H00, o].join("\n") & "\n"
+  var edited = f
+  edited.relations[0].raw = ""
+  doAssert spsText(edited).text == [H00, o].join("\n") & "\n", "encoded with its letter"
+  var g: SurveyGeometry
+  g.addSps(f)
+  doAssert g.relationCount(rdReceiver) == 1 and g.relationCount == 0
+  let rel = g.relation(12, 2, rdReceiver).get
+  doAssert rel.receiver == stationKey(100, 102, 1) and rel.source == stationKey(129, 114, 1)
+  doAssert g.recordsAt(stationKey(100, 102, 0), rdReceiver) == @[12'i64]
+  # A receiver gather trace with only its receiver station joins via the O gathers,
+  # whatever its record number.
+  var k = traceAt(NaN, 3, (NaN, NaN), (100.0, 102.0))
+  doAssert k.joinStations(g) == jmReceiver and k.srcLine == 129 and k.srcPoint == 115
+  k = traceAt(NaN, 4, (NaN, NaN), (100.0, 102.0))
+  doAssert k.joinStations(g) == jmUnmatched
+  # `.ops` files may hold O relations as X records.
+  doAssert relationDomainOf("a/b.OPS") == rdReceiver and relationDomainOf("b.xps") == rdSource
+  var g2: SurveyGeometry
+  g2.addSps(parseSps([H00, "X" & o[1 .. ^1]].join("\n")), xDomain = rdReceiver)
+  doAssert g2.relation(12, 2, rdReceiver) == some(rel)
+  var bad = f.relations[0]
+  bad.recordType = 'Y'
+  doAssertRaises(SegFormatError): discard encodeSps(bad, sps21)
+
+block receiver_domain_from_x:
+  # Sources 20/201..203 record receivers 10/101..105; 21/201 records 10/103..107
+  # (descending); a repeat of 20/202 (record 4) records 10/101..102; line 11 too.
+  let x = [H00,
+    x21("T1", 1, "20.00", "201.00", '1', 1, 5, '1', "10.00", "101.00", "105.00", '1'),
+    x21("T1", 2, "20.00", "202.00", '1', 1, 5, '1', "10.00", "101.00", "105.00", '1'),
+    x21("T1", 3, "20.00", "203.00", '1', 1, 5, '1', "10.00", "101.00", "105.00", '1'),
+    x21("T1", 3, "20.00", "203.00", '1', 6, 7, '1', "11.00", "101.00", "102.00", '1'),
+    x21("T1", 4, "20.00", "202.00", '1', 1, 2, '1', "10.00", "101.00", "102.00", '1'),
+    x21("T1", 5, "21.00", "201.00", '1', 1, 5, '1', "10.00", "107.00", "103.00", '1')]
+  var g: SurveyGeometry
+  g.addSps(parseSps(x.join("\n")))
+  let rels = g.receiverRelations()
+  doAssert rels.len > 0 and rels[0].fieldRecord == 1 and rels[0].recordType == 'O'
+  # Gather 1 is receiver 10/101: sources 20/201..203 as one run, then the
+  # repeat of 20/202 as a run of its own.
+  doAssert rels[0].srcLine == 10 and rels[0].srcPoint == 101
+  doAssert rels[0].rcvLine == 20 and rels[0].fromReceiver == 201 and rels[0].toReceiver == 203
+  doAssert rels[0].fromChannel == 1 and rels[0].toChannel == 3
+  let o = SpsFile(revision: sps21, headers: parseSps(H00).headers, relations: rels)
+  let text = spsText(o)
+  doAssert not text.log.hasErrors
+  let back = parseSps(text.text)
+  doAssert back.log.len == 0 and spsText(back).text == text.text, "reads back byte-identical"
+  var go: SurveyGeometry
+  go.addSps(back)                         # O records: receiver domain
+  doAssert go.pairs(rdReceiver) == g.pairs(rdSource), "X → O → pairs equals X's pairs"
+  var gathers: seq[int64]
+  for r in go.records(rdReceiver): gathers.add r
+  doAssert gathers == @[1'i64, 2, 3, 4, 5, 6, 7, 8, 9], $gathers # 10/101..107, 11/101..102
+  doAssert go.recordsAt(stationKey(11, 102, 1), rdReceiver) == @[9'i64]
+  let oo = g.receiverRelations(firstGather = 100, recordType = 'X')
+  doAssert oo[0].recordType == 'X' and oo[0].fieldRecord == 100
+  var gx: SurveyGeometry
+  gx.addSps(SpsFile(revision: sps21, relations: oo), xDomain = rdReceiver)
+  doAssert gx.pairs(rdReceiver) == g.pairs(rdSource), "X-lettered O records, read as O"
+
+  doAssertRaises(ValueError): discard g.receiverRelations(recordType = 'Z')
 
 # --------------------------------------------------------- review (10.4) ---
 

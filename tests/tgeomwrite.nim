@@ -46,7 +46,7 @@ proc copySample(name: string): string =
   result = tmp / name
   copyFile(exampleDir / name, result)
 
-proc segyFile(path: string, rev = 1, traces = 4) =
+proc segyFile(path: string, rev = 1, traces = 4, espnum = 0'i32) =
   ## A small SEG-Y file: field record 10, channels 1..n, no coordinates.
   var f = SegyFile(text: initTextHeader(teEbcdic), byteOrder: boBig, format: some(sfFloat32),
     revision: SegyRevision(major: uint8(rev)), extended: initExtendedTextHeader(),
@@ -58,7 +58,7 @@ proc segyFile(path: string, rev = 1, traces = 4) =
   for i in 0..<traces:
     var t = SegyTrace(numSamples: 10, sampleInterval: 1000, samples: newSeq[byte](40))
     t.header = SegyTraceHeader(fieldRecord: 10, traceNumberInField: int32(i + 1),
-      numSamples: 10, sampleInterval: 1000)
+      numSamples: 10, sampleInterval: 1000, energySourcePoint: espnum)
     w.writeTrace(t)
   w.close()
   sink.close()
@@ -145,13 +145,16 @@ block segy_scalar_choice_overflow_and_precision:
 
 sampleBlock segy_rev2_station_header_via_layout:
   # SEG-D 63.sgd converted to SEG-Y Rev 2.1 carries line/point in the
-  # PSEGD001 header its Layout stanza describes.
+  # PSEGD001 header its Layout stanza describes. Its keys have no stations
+  # (the layout's fields are not read into them), so the join fills them by
+  # record number and channel.
   let segy = tmp / "63.sgy"
   doAssert not convertFile(exampleDir / "63.sgd", segy).isFatal
   let g = sps("c.sps", r21('R', "13", "104", '1', "500100.0", "6000000.0", "12.5"),
     x21(63, "13", "99.5", 1, 1, "14", "105", "105"))
   var f = openSeismic(segy, keys = true)
-  doAssert f.applySurvey(g, overwrite = true) == 1
+  var stats: JoinStats
+  doAssert f.applySurvey(g, stats, overwrite = true) == 1 and stats.matches[jmRecord] == 1
   let dst = tmp / "63geo.sgy"
   let r = copyWithGeometry(segy, dst, g, overwrite = true)
   doAssert not r.log.hasErrors, $r.log.len
@@ -162,11 +165,14 @@ sampleBlock segy_rev2_station_header_via_layout:
   f.close()
 
 sampleBlock segd_rev2_the1_in_place:
+  # As above: a header without its receiver station (cleared in the keys)
+  # gets the one the X record gives via the source station.
   let path = copySample("63.sgd")
   let original = bytesOf(path)
   let g = sps("d.sps", r21('R', "14", "105.5", '1', "500100.0", "6000000.0", "12.5"),
     x21(63, "13", "99.5", 1, 1, "14", "105.5", "105.5"))
   var f = openSeismic(path, keys = true)
+  (f.index.keys[0].rcvLine, f.index.keys[0].rcvPoint) = (NaN, NaN)
   doAssert f.applySurvey(g, overwrite = true) == 1
   var ed = openEditor(path)
   let w = ed.writeGeometry(f.index)
@@ -192,7 +198,7 @@ sampleBlock segd_rev3_position_blocks:
   g.addReceiver(100, 102, 1, 1826100.5, 446000.25, 1001.0)
   g.addSource(129, 113, 0, 1834000.0, 445000.0)
   var f = openSeismic(path, keys = true)
-  doAssert f.applySurvey(g, overwrite = true) == 5
+  doAssert f.applySurvey(g, overwrite = true) == 2, "the 3 auxiliary traces are left alone"
   let c = f.geometryChanges()
   doAssert c.receiverXy == 2 and c.receiverZ == 2, $c
   doAssert c.sourceXy == 0 and c.unwritable > 0
@@ -239,6 +245,25 @@ block convert_with_geometry_from_segy:
   doAssert k.traceKeys(3).rcvX == 500175 and k.traceKeys(3).srcX == 500000.5
   k.close()
   doAssert not fileExists(dst & ".tmp") and not fileExists(dst & ".tmp.geometry.nif")
+
+block values_that_round_to_the_bytes_there_are_no_change:
+  # Shotpoint 99.5 into a 4-byte espnum that already holds 100: the planned
+  # bytes equal the file's, so nothing changes (it used to count as a write
+  # the journal had dropped, a fatal error).
+  let path = tmp / "r.sgy"
+  segyFile(path, rev = 0, traces = 1, espnum = 100) # Rev 0: no scaled shotpoint field
+  let g = sps("r.sps", r21('S', "20", "99.5", '1', "500000.0", "6000400.0", "10.0"),
+    r21('R', "10", "101", '1', "500100.0", "6000000.0", "12.5"),
+    x21(10, "20", "99.5", 1, 1, "10", "101", "101"))
+  let r = copyWithGeometry(path, tmp / "r2.sgy", g, GeometryFields(sourceXy: false,
+    receiverXy: false, elevations: false, midpoints: false, offsets: false))
+  doAssert not r.log.isFatal and not r.log.hasErrors, $r.log.len
+  doAssert r.changes.traces == 0 and r.changes.sourceStations == 0, $r.changes
+  var f = openSeismic(path, keys = true)
+  doAssert f.applySurvey(g) == 1
+  doAssert f.geometryChanges(GeometryFields(sourceXy: false, receiverXy: false,
+    elevations: false, midpoints: false, offsets: false)).traces == 0
+  f.close()
 
 block refusals:
   let path = tmp / "g.sgy"
