@@ -141,12 +141,12 @@ doAssert changed == 1 and k.rcvX == 500100 and k.srcPoint == 99.5
 doAssert stats.matches[jmStations] == 1   # the header's own stations were the key
 
 # The receiver domain: O records built from the X relations, written as an
-# .ops file (X records, as such files hold them) and read back.
+# .ops file and read back.
 let ops = SpsFile(revision: sps21, headers: readSps("line.sps").headers,
   relations: g.receiverRelations())
 doAssert not writeSps(ops, "line.ops").hasErrors
 var go = initSurveyGeometry()
-go.addSps("line.ops")                     # `.ops`: its X records are receiver gathers
+go.addSps("line.ops")                     # O records are receiver gathers
 doAssert go.relationCount(rdReceiver) == 1
 doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
 ```

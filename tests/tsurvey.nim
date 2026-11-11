@@ -475,7 +475,7 @@ block receiver_domain_from_x:
   var g: SurveyGeometry
   g.addSps(parseSps(x.join("\n")))
   let rels = g.receiverRelations()
-  doAssert rels.len > 0 and rels[0].fieldRecord == 1 and rels[0].recordType == 'X'
+  doAssert rels.len > 0 and rels[0].fieldRecord == 1 and rels[0].recordType == 'O'
   # Gather 1 is receiver 10/101: sources 20/201..203 as one run, then the
   # repeat of 20/202 as a run of its own.
   doAssert rels[0].srcLine == 10 and rels[0].srcPoint == 101
@@ -487,14 +487,18 @@ block receiver_domain_from_x:
   let back = parseSps(text.text)
   doAssert back.log.len == 0 and spsText(back).text == text.text, "reads back byte-identical"
   var go: SurveyGeometry
-  go.addSps(back, xDomain = rdReceiver)
+  go.addSps(back)                         # O records: receiver domain
   doAssert go.pairs(rdReceiver) == g.pairs(rdSource), "X → O → pairs equals X's pairs"
   var gathers: seq[int64]
   for r in go.records(rdReceiver): gathers.add r
   doAssert gathers == @[1'i64, 2, 3, 4, 5, 6, 7, 8, 9], $gathers # 10/101..107, 11/101..102
   doAssert go.recordsAt(stationKey(11, 102, 1), rdReceiver) == @[9'i64]
-  let oo = g.receiverRelations(firstGather = 100, recordType = 'O')
-  doAssert oo[0].recordType == 'O' and oo[0].fieldRecord == 100
+  let oo = g.receiverRelations(firstGather = 100, recordType = 'X')
+  doAssert oo[0].recordType == 'X' and oo[0].fieldRecord == 100
+  var gx: SurveyGeometry
+  gx.addSps(SpsFile(revision: sps21, relations: oo), xDomain = rdReceiver)
+  doAssert gx.pairs(rdReceiver) == g.pairs(rdSource), "X-lettered O records, read as O"
+
   doAssertRaises(ValueError): discard g.receiverRelations(recordType = 'Z')
 
 # --------------------------------------------------------- review (10.4) ---

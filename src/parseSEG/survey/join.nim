@@ -597,7 +597,7 @@ func stationLess(a, b: StationKey): int =
   else: cmp(a.index, b.index)
 
 proc receiverRelations*(g: SurveyGeometry, firstGather = 1'i64,
-    recordType = 'X'): seq[SpsRelation] =
+    recordType = 'O'): seq[SpsRelation] =
   ## The receiver-domain (O) records of the X relations: one gather per
   ## receiver station, numbered from `firstGather` in receiver line, point
   ## order; its traces 1..n are the sources that recorded it, by source
@@ -605,8 +605,9 @@ proc receiverRelations*(g: SurveyGeometry, firstGather = 1'i64,
   ## (one X record per repeat) is one more trace, after the first ones, so
   ## each X pair appears once. Components are not
   ## represented (one trace per source and receiver station). Write them with
-  ## `writeSps` (records start with `recordType`, `X` as in `.ops` files, or
-  ## `O`); `addSps(..., xDomain = rdReceiver)` reads them back. Works one
+  ## `writeSps` (records start with `recordType`: `O`, or `X` for software
+  ## that expects X records in `.ops` files; `addSps(..., xDomain =
+  ## rdReceiver)` reads those back). Works one
   ## receiver line at a time, so memory follows the largest line, not the
   ## survey. Raises `ValueError` for a `recordType` other than `X` or `O`.
   if recordType notin {'X', 'O'}:
