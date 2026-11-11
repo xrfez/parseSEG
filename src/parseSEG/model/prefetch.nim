@@ -150,6 +150,9 @@ type
     samples*: Tensor[T] ## `[count, cols]`; shorter traces are zero-padded.
     failed*: int        ## Traces that could not be decoded (left zero).
     failedRows*: seq[int] ## Those traces' rows (0-based in the chunk), ascending.
+    firstSample*: int
+      ## The trace sample in column 0: the prefetcher's `firstSample` (0
+      ## unless it decodes a sample window).
     log*: DiagLog
       ## One error per trace that could not be decoded: its trace index
       ## (`loc.trace`), record, byte offset and the reason.
@@ -478,6 +481,7 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool) =
   let s = addr sh.slots[i]
   c.first = s.first
   c.count = s.count
+  c.firstSample = sh.firstSample
   c.failed = s.failed
   c.failedRows.setLen s.failed
   for k in 0..<s.failed: c.failedRows[k] = s.failRows[k]

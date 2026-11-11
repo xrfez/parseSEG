@@ -43,7 +43,10 @@ doAssert log.len == 0 and energy > 0
 `readTracesInto` returns how many traces it left as zero rows because they could not be
 decoded, and logs each one (trace index, byte offset, reason) in `log`. Without a `log`
 argument it only counts them; `readTraces` without a log raises `SegFormatError` instead.
-Pick the form that matches your policy for damaged data.
+To skip the damaged rows while processing, pass a `var seq[int]` instead of the log: it is
+cleared and gets the position of each trace left zero (0-based in `traces`, ascending, as
+`PrefetchChunk.failedRows`), and a list reused across chunks does not allocate. Pick the
+form that matches your policy for damaged data.
 
 ### Overlap decoding with computing
 
@@ -128,7 +131,9 @@ doAssert rows.len == 2 and rows.traceKeys(1).offset == 25
 
 A `transform` hook (`ChunkTransform`, a `{.nimcall.}` proc with a `user` pointer) processes
 each chunk on its worker thread right after decoding, while the samples are still in the CPU
-cache. Files opened without keys can build them later with `ensureKeys`; `keysRevision` goes
+cache. A transform must not raise, so it reads keys with `keysAt(row)`, the non-raising
+form of `traceKeys` for code that has checked `hasKeys` once (a view without keys is then a
+programming error, an `AssertionDefect` with bound checks on). Files opened without keys can build them later with `ensureKeys`; `keysRevision` goes
 up whenever keys change (a survey join, a header edit), so derived data can be tagged with it.
 SEG-Y datum and statics fields come per trace from `traceStatics(f, traces)`.
 
@@ -349,6 +354,36 @@ w.writeTrace(f, 0, stack, 0, overrides = [headerOverride("trace.ensembleNumber",
 discard w.close()
 var g = openSeismic("stack.sgy", keys = true)
 doAssert g.len == 1 and g.traceKeys(0).ensemble == 9001
+```
+
+### Traces from keys, without a template
+
+A stack of SEG-D or SEG-2 data has no SEG-Y trace to serve as a template. A writer opened
+with `SegyOutputOptions` (revision, byte order, sample format, textual header lines, the
+binary header's trace sorting and measurement system) takes traces built from `TraceKeys`:
+`writeTrace(w, keys, samples, overrides)` fills the standard layout's fields from the keys
+(record, channel, CDP, offset, source point, coordinates, elevations, midpoint, start time
+with a time scalar, interval, recording time, inline and crossline), which `openSeismic`
+reads back as the same keys; overrides then set the rest (the fold, say). The first trace
+sets the binary header's interval and count.
+
+```nim
+import parseSEG
+
+var f = openSeismic("shot.sgd", keys = true)
+let x = f.readTraces(3 .. 3)            # stands in for a computed stack trace
+var k = f.traceKeys(3)                  # its geometry, as the template
+k.ensemble = 1201
+k.offset = 0
+var w = openSeismicWriter("shot_stack.sgy", SegyOutputOptions(text: @["BRUTE STACK"],
+  traceSorting: 4))
+var row = newSeq[float32](int(f.traceEntry(3).numSamples))
+for j in 0 ..< row.len: row[j] = x[0, j]
+w.writeTrace(k, row, overrides = [headerOverride("trace.numHorzStacked", 12)])
+discard w.close()
+var g = openSeismic("shot_stack.sgy", keys = true)
+doAssert g.kind == skSegy and g.traceKeys(0).ensemble == 1201
+doAssert g.traceKeys(0).cmpX == k.cmpX and g.traceKeys(0).intervalUs == k.intervalUs
 ```
 
 ### Results that belong in the headers

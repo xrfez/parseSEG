@@ -1,7 +1,9 @@
 ## Prefetch chunks carry their rows (Phase 16.5): `rows` agrees with
 ## `traceAt` in range and selection mode, failed rows are public, uniform
 ## chunks never mix channel sets or intervals, and a transform runs once per
-## chunk on a worker.
+## chunk on a worker and reads keys there with `keysAt`.
+## `readTracesInto` fills a failed-row list as the prefetcher does, and a
+## chunk records its window origin, `firstSample`.
 
 import std/[assertions, math, os, atomics]
 import parseSEG
@@ -57,6 +59,48 @@ block failed_rows_are_public:
   p.close()
   var q = newPrefetcher[float32](f, @[9, 0, 4], chunkTraces = 3, cols = 8)
   doAssert q.next(c) and c.failedRows == @[0, 2]
+  q.close()
+  f.close()
+
+block read_into_fills_failed_rows:
+  # `readTracesInto` reports the failed rows as the
+  # prefetcher does, into a caller's list that is cleared and reused.
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  for t in [3, 4, 9]: f.index.entries[t].numSamples = 1_000_000_000 # past the end
+  var dst = newTensor[float32](12, 8)
+  var failed = @[99, 98, 97, 96, 95, 94, 93, 92]
+  doAssert f.readTracesInto(0 ..< 12, dst, failed) == 3 and failed == @[3, 4, 9]
+  var c: PrefetchChunk[float32]
+  var p = newPrefetcher[float32](f, 0 ..< 12, chunkTraces = 12, cols = 8)
+  doAssert p.next(c) and c.failedRows == failed, "the same rows as the prefetcher"
+  p.close()
+  let selection = @[9, 0, 4]
+  doAssert f.readTracesInto(selection, dst, failed, row = 2) == 2 and failed == @[0, 2],
+    "positions in the selection, not rows of dst"
+  var narrow = newTensor[float32](3, 4)
+  doAssert f.readTracesInto(selection, 2 .. 5, narrow, failed) == 2
+  doAssert failed == @[0, 2]
+  var window = newTensor[float32](4, 4)
+  doAssert f.readTracesInto(2 .. 5, 2 .. 5, window, failed) == 2 and failed == @[1, 2]
+  doAssertRaises ValueError:
+    discard f.readTracesInto(0 ..< f.len + 1, dst, failed)
+  doAssert failed.len == 0, "a rejected read leaves no stale rows"
+  doAssert f.readTracesInto(2 .. 5, 2 .. 5, window, failed) == 2
+  let cap = failed.capacity
+  doAssert f.readTracesInto(5 .. 8, dst, failed) == 0 and failed.len == 0
+  doAssert failed.capacity == cap, "the list keeps its capacity"
+  f.close()
+
+block chunks_carry_their_window_origin:
+  # A chunk records the prefetcher's `firstSample`.
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  var c: PrefetchChunk[float32]
+  var p = newPrefetcher[float32](f, 0 ..< 6, chunkTraces = 3, cols = 4, firstSample = 5)
+  doAssert p.next(c) and c.firstSample == 5
+  doAssert c.samples[1, 0] == f.readTraces(1 .. 1, 5 .. 5)[0, 0]
+  p.close()
+  var q = newPrefetcher[float32](f, 0 ..< 6, chunkTraces = 3, cols = 4)
+  doAssert q.next(c) and c.firstSample == 0
   q.close()
   f.close()
 
@@ -123,6 +167,20 @@ proc negate(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
   discard t.byWorker[worker].fetchAdd(1)
   for i in 0 ..< rows * cols: samples[i] = -samples[i]
 
+type KeySum = object
+  sum: Atomic[float64]
+  rows: Atomic[int]
+
+proc sumCmpX(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
+    traces: TraceRows, failed: openArray[int], user: pointer) {.nimcall, gcsafe, raises: [].} =
+  # A transform reads keys on the worker: `keysAt` is the non-raising form.
+  let t = cast[ptr KeySum](user)
+  var s = 0.0
+  for row in 0 ..< traces.len: s += abs(traces.keysAt(row).cmpX)
+  var old = t.sum.load
+  while not t.sum.compareExchange(old, old + s): discard
+  discard t.rows.fetchAdd(traces.len)
+
 block transform_runs_once_per_chunk_on_a_worker:
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
   f.index.entries[50].numSamples = 1_000_000_000
@@ -142,6 +200,20 @@ block transform_runs_once_per_chunk_on_a_worker:
   var sum = 0
   for w in 0..3: sum += tally.byWorker[w].load
   doAssert sum == chunks
+  f.close()
+
+block transform_reads_keys_with_keys_at:
+  var f = openSeismic(demoDir() / "survey.sgy", keys = true)
+  var want = 0.0
+  for t in 0 ..< f.len: want += abs(f.traceKeys(t).cmpX)
+  doAssert want > 0
+  var acc: KeySum
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, cols = 8, workers = 4,
+    transform = sumCmpX, user = addr acc)
+  for c in p.chunks: discard c.count
+  p.close()
+  doAssert acc.rows.load == f.len
+  doAssert abs(acc.sum.load - want) <= 1e-9 * want
   f.close()
 
 echo "tprefetchrows: ok"
