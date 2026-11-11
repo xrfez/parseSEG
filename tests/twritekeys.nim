@@ -30,12 +30,9 @@ proc checkKeys(a, k: TraceKeys, major: int) =
   doAssert k.offset.isNaN or a.offset == (if major >= 2: k.offset else: round(k.offset))
   doAssert a.t0Ms == k.t0Ms and a.intervalUs == k.intervalUs
   doAssert same(a.time, k.time) or abs(a.time - k.time) < 1e-6
-  # Auxiliary has no general SEG-Y code; a component code reads back live.
-  let comp = int(k.component) in 11..17 or int(k.component) in 27..41
-  doAssert a.status == (if k.status == tsAuxiliary: tsUnknown
-                        elif k.status == tsUnknown and comp: tsLive
-                        else: k.status)
-  if comp and k.status != tsAuxiliary: doAssert a.component == k.component
+  # Auxiliary has no general SEG-Y code (it reads back unknown); `component`
+  # is not written as a code (outside SEG-Y it is a group index).
+  doAssert a.status == (if k.status == tsAuxiliary: tsUnknown else: k.status)
   if major >= 1:
     doAssert same(a.inline, k.inline) and same(a.crossline, k.crossline)
 
@@ -123,6 +120,19 @@ block time_scalars:
   for i, t0 in t0s: doAssert g.traceKeys(i).t0Ms == t0
   doAssert g.traceKeys(0).status == tsUnknown
   g.close()
+  # Float noise on a whole delay keeps the scalar 1 (readers that ignore
+  # bytes 215-216 then read 4, not 4000).
+  var w2 = openSeismicWriter(dst, SegyOutputOptions(revision: SegyRevision(major: 1)))
+  var k2 = initTraceKeys()
+  k2.t0Ms = 4.0000000001
+  k2.intervalUs = 2000
+  w2.writeTrace(k2, [1'f32])
+  discard w2.close()
+  var g2 = openSeismic(dst, keys = true)
+  doAssert g2.traceField(0, "trace.timeScalar").toFloat == 1
+  doAssert g2.traceField(0, "trace.delayRecordingTime").toFloat == 4
+  doAssert g2.traceKeys(0).t0Ms == 4
+  g2.close()
 
 block refused:
   var k = initTraceKeys()
@@ -144,6 +154,8 @@ block refused:
   doAssertRaises(ValueError): w.writeTrace(bad, [1'f32])
   bad.intervalUs = 0.5
   doAssertRaises(ValueError): w.writeTrace(bad, [1'f32]) # fractional before Rev 2
+  bad.intervalUs = 70_000
+  doAssertRaises(ValueError): w.writeTrace(bad, [1'f32]) # over 65535 µs before Rev 2
   doAssertRaises(ValueError): w.writeTrace(k, newSeq[float32](70_000)) # needs Ext1
   doAssertRaises(ValueError): w.writeTrace(k, [1'f32], [headerOverride("trace.nope", 1)])
   doAssert w.len == 0
@@ -155,6 +167,14 @@ block refused:
   var v = openSeismicWriter(tmp / "r.sgd", like = f)
   doAssertRaises(ValueError): v.writeTrace(k, [1'f32])
   f.close()
+  # Template traces into a writer from SegyOutputOptions: its binary header
+  # is made for traces from keys (the interval would stay a placeholder).
+  var sg = openSeismic(demoDir() / "survey.sgy")
+  var fresh = openSeismicWriter(tmp / "t.sgy", SegyOutputOptions())
+  doAssertRaises(ValueError): fresh.writeTrace(sg, 0, [1'f32])
+  fresh.writeTrace(k, [1'f32])
+  discard fresh.close()
+  sg.close()
   # A writer dropped without close leaves no file.
   block:
     var d = openSeismicWriter(tmp / "dropped.sgy", SegyOutputOptions())

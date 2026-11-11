@@ -387,6 +387,11 @@ proc overrideSegy(t: var SegyTrace, overrides: openArray[HeaderOverride]) =
 
 proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride]) =
+  if s.segyFresh:
+    # Its binary header (interval, Ext1 count) is made for traces from keys;
+    # a template trace's headers would disagree with it.
+    refuse("a writer opened from SegyOutputOptions takes traces from keys " &
+      "(writeTrace(w, keys, samples)), not template traces")
   let n = samples.len
   template t: untyped = s.segyTrace
   loadSegyTrace(src, trace, t)
@@ -433,9 +438,10 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
 
 func timeScalarFor(ms: float64): int16 =
   # The time scalar (bytes 215-216) that holds `ms` in the int16 delay most
-  # exactly: whole ms as 1, else the finest of -10, -100, -1000 that fits;
-  # 10, 100, 1000 for delays past 32767 ms.
-  if ms == round(ms) and abs(ms) <= 32767: return 1
+  # exactly: whole ms (to 1 ns: float noise such as 4.0000000001 is whole)
+  # as 1, so readers that ignore the scalar still read it; else the finest
+  # of -10, -100, -1000 that fits; 10, 100, 1000 for delays past 32767 ms.
+  if abs(ms - round(ms)) < 1e-6 and abs(round(ms)) <= 32767: return 1
   for s in [-1000'i16, -100, -10]:
     if abs(round(ms * float64(-s))) <= 32767: return s
   if abs(ms) <= 32767: return 1
@@ -455,9 +461,10 @@ proc keysTrace(t: var SegyTrace, k: TraceKeys, n: int, seqNo: int, rev: SegyRevi
   h.traceIdCode =
     # The stored code when it says what the status says (a status changed
     # in the keys, e.g. a trace killed, wins over the input's code).
+    # `component` is not used: for SEG-D, SEG-2 and survey keys it is a
+    # group index or sensor type, not a SEG-Y code (a SEG-Y input's code is
+    # in `traceCode`).
     if k.traceCode != 0 and segyStatus(k.traceCode, int(rev.major)) == k.status: k.traceCode
-    elif k.status in {tsLive, tsUnknown} and
-        (int(k.component) in 11..17 or int(k.component) in 27..41): int16(k.component)
     else:
       case k.status
       of tsLive: 1
@@ -532,6 +539,8 @@ proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   let rev = s.segyFile.revision
   if rev.major < 2 and dt != round(dt):
     refuse("SEG-Y Rev " & $rev & " holds whole-microsecond intervals, not " & $dt)
+  if rev.major < 2 and dt > 65535:
+    refuse("SEG-Y Rev " & $rev & " holds intervals up to 65535 µs, not " & $dt)
   template b: untyped = s.segyFile.binary
   let ext1 = rev.major >= 2 and b.maxAddlTraceHeaders > 0
   template t: untyped = s.segyTrace
@@ -705,7 +714,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   ## SEG-D rule). `src` is a file of the output's standard, normally
   ## `like`, and must be open. Raises `ValueError` for a closed writer or
   ## file, another standard, a trace out of range, a sample count the
-  ## output cannot take or a broken SEG-D rule (nothing is written then);
+  ## output cannot take, a broken SEG-D rule, or a SEG-Y writer opened from
+  ## `SegyOutputOptions` (it takes traces from keys) (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold or output the
   ## writer refuses; `IOError` on a write failure.
   ##
@@ -763,16 +773,16 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   (Rev 0: whole ms);
   ## - the trace identification code is `traceCode` when non-zero and its
   ##   status in the output's revision is `status` (so a status changed in
-  ##   the keys wins), else the
-  ##   SEG-Y `component` code (11-17, 27-41) of a live or unknown trace
-  ##   (read back live), else 1 (live), 2 (dead) or 0 (unknown; also
-  ##   auxiliary, which SEG-Y has no general code for);
+  ##   the keys wins), else 1 (live), 2 (dead) or 0 (unknown; also
+  ##   auxiliary, which SEG-Y has no general code for). `component` is not
+  ##   written as a code: outside SEG-Y it is a group index or sensor type;
   ## - `time` is written in UTC (time basis 4).
   ##
   ## A file `like` an input whose Layout stanza moves these fields reads
   ## them elsewhere: write from keys into `SegyOutputOptions` files. Raises
   ## `ValueError` for a closed or non-SEG-Y writer, keys without a positive
-  ## interval (`intervalUs`), a fractional interval before Rev 2, a count
+  ## interval (`intervalUs`), a fractional interval or one over 65535 µs
+  ## before Rev 2, a count
   ## the output cannot take, or a bad override (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold; `IOError` on a
   ## write failure.
