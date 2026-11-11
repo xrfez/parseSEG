@@ -1,9 +1,9 @@
 ## Prefetch chunks carry their rows (Phase 16.5): `rows` agrees with
 ## `traceAt` in range and selection mode, failed rows are public, uniform
 ## chunks never mix channel sets or intervals, and a transform runs once per
-## chunk on a worker and reads keys there with `keysAt` (processSEG F1).
-## `readTracesInto` fills a failed-row list as the prefetcher does (F2), and
-## a chunk records its window origin, `firstSample` (F4).
+## chunk on a worker and reads keys there with `keysAt`.
+## `readTracesInto` fills a failed-row list as the prefetcher does, and a
+## chunk records its window origin, `firstSample`.
 
 import std/[assertions, math, os, atomics]
 import parseSEG
@@ -63,7 +63,7 @@ block failed_rows_are_public:
   f.close()
 
 block read_into_fills_failed_rows:
-  # processSEG F2: `readTracesInto` reports the failed rows as the
+  # `readTracesInto` reports the failed rows as the
   # prefetcher does, into a caller's list that is cleared and reused.
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
   for t in [3, 4, 9]: f.index.entries[t].numSamples = 1_000_000_000 # past the end
@@ -92,7 +92,7 @@ block read_into_fills_failed_rows:
   f.close()
 
 block chunks_carry_their_window_origin:
-  # processSEG F4: a chunk records the prefetcher's `firstSample`.
+  # A chunk records the prefetcher's `firstSample`.
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
   var c: PrefetchChunk[float32]
   var p = newPrefetcher[float32](f, 0 ..< 6, chunkTraces = 3, cols = 4, firstSample = 5)

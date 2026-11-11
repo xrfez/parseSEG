@@ -1,5 +1,5 @@
-## Writing SEG-Y traces built from `TraceKeys`, with no template trace
-## (processSEG F3): SEG-D and SEG-2 traces, and stacked traces, round-trip
+## Writing SEG-Y traces built from `TraceKeys`, with no template trace:
+## SEG-D and SEG-2 traces, and stacked traces, round-trip
 ## through `openSeismic` with their keys and samples.
 
 import std/[assertions, math, os, strutils]

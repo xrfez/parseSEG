@@ -2,7 +2,7 @@
 ## range, selection and synthetic views give the stored keys; `sub` at its
 ## edges; views read from 4 threads; no allocation; keys built on demand
 ## equal the keys of `openSeismic(keys = true)`, also through an index cache;
-## every key-changing path bumps the revision. `keysAt` (processSEG F1)
+## every key-changing path bumps the revision. `keysAt`
 ## reads the same keys without raising, from a `{.raises: [].}` proc.
 
 import std/[assertions, math, os, typedthreads]
@@ -184,7 +184,7 @@ block joins_bump_the_revision_and_record_groups:
   doAssert s.keysRevision == 1 and s.index.joinedGroups(0) == {jgCoordinates}
   s.close()
 
-# ------------------------------------------------ keysAt (processSEG F1) --
+# ------------------------------------------------------------------ keysAt --
 
 func farthestOffset(r: TraceRows): float64 {.raises: [].} =
   # Compiles only because `keysAt` cannot raise (`traceKeys` raises ValueError).
