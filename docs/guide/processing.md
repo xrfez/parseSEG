@@ -356,6 +356,36 @@ var g = openSeismic("stack.sgy", keys = true)
 doAssert g.len == 1 and g.traceKeys(0).ensemble == 9001
 ```
 
+### Traces from keys, without a template
+
+A stack of SEG-D or SEG-2 data has no SEG-Y trace to serve as a template. A writer opened
+with `SegyOutputOptions` (revision, byte order, sample format, textual header lines, the
+binary header's trace sorting and measurement system) takes traces built from `TraceKeys`:
+`writeTrace(w, keys, samples, overrides)` fills the standard layout's fields from the keys
+(record, channel, CDP, offset, source point, coordinates, elevations, midpoint, start time
+with a time scalar, interval, recording time, inline and crossline), which `openSeismic`
+reads back as the same keys; overrides then set the rest (the fold, say). The first trace
+sets the binary header's interval and count.
+
+```nim
+import parseSEG
+
+var f = openSeismic("shot.sgd", keys = true)
+let x = f.readTraces(3 .. 3)            # stands in for a computed stack trace
+var k = f.traceKeys(3)                  # its geometry, as the template
+k.ensemble = 1201
+k.offset = 0
+var w = openSeismicWriter("shot_stack.sgy", SegyOutputOptions(text: @["BRUTE STACK"],
+  traceSorting: 4))
+var row = newSeq[float32](int(f.traceEntry(3).numSamples))
+for j in 0 ..< row.len: row[j] = x[0, j]
+w.writeTrace(k, row, overrides = [headerOverride("trace.numHorzStacked", 12)])
+discard w.close()
+var g = openSeismic("shot_stack.sgy", keys = true)
+doAssert g.kind == skSegy and g.traceKeys(0).ensemble == 1201
+doAssert g.traceKeys(0).cmpX == k.cmpX and g.traceKeys(0).intervalUs == k.intervalUs
+```
+
 ### Results that belong in the headers
 
 Picks, statics, or computed coordinates that fit existing header fields can be written in
