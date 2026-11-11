@@ -657,7 +657,9 @@ template eachChange(f: SeismicFile, keys: openArray[TraceKeys], fields: Geometry
     if e.offset >= 0 and e.offset + n <= f.mappedSize and n > 0:
       buf.setLen n
       copyMem(addr buf[0], addr mem[e.offset], n)
-      let changed = p.planTrace(f.index, i, keys[i], buf)
+      var changed = p.planTrace(f.index, i, keys[i], buf)
+      if changed.card > 0 and equalMem(addr buf[0], addr mem[e.offset], n):
+        changed = {} # the values round to the bytes already there (e.g. 99.5 → 100)
       p.count(changed)
       if changed.card > 0:
         body

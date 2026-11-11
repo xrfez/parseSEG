@@ -44,7 +44,8 @@ Survey files (SPS 1.0/2.1, SEG P1 1983; docs/spec/sps.md, p1_p2_p3.md)
     --line-map=NAME=N[,...]     text line names -> line numbers
     --trailing-digits           unmapped names use their trailing digits
     --multi-component           SPS channel increment k: k components/station
-    --overwrite                 replace stations and coordinates already known
+    --overwrite                 replace coordinates already known (header
+                                stations are never replaced)
   survey-apply <file> SURVEY [-o out | --in-place [--journal=J]] [--values=LIST]
                                 write the joined geometry into the headers:
                                 into a copy (-o; multiplexed SEG-D is written
@@ -264,9 +265,11 @@ proc joinSurvey(a: Args, f: var SeismicFile): DiagLog =
   ## Joins the SURVEY options' geometry to `f` (opened with keys) and prints
   ## what was joined.
   let g = loadSurvey(a, result)
-  let n = f.index.applySurvey(g, a.has("overwrite"))
+  var stats: JoinStats
+  discard f.index.applySurvey(g, stats, a.has("overwrite"))
   echo "survey:      ", g.table.sources.len, " sources, ", g.table.receivers.len,
-    " receivers, ", g.relationCount, " relation runs; ", n, " traces updated"
+    " receivers, ", g.relationCount, " X + ", g.relationCount(rdReceiver), " O relation runs"
+  echo "joined:      ", stats
 
 proc info(a: Args): int =
   a.onlyOptions(@["keys"] & @SurveyOptions)
@@ -922,9 +925,11 @@ proc surveyApply(a: Args): int =
   var log: DiagLog
   let g = loadSurvey(a, log)
   let overwrite = a.has("overwrite")
-  let n = f.index.applySurvey(g, overwrite)
+  var stats: JoinStats
+  discard f.index.applySurvey(g, stats, overwrite)
   echo "survey:      ", g.sourceCount, " sources, ", g.receiverCount, " receivers, ",
-    g.relationCount, " relation runs; ", n, " traces joined"
+    g.relationCount, " X + ", g.relationCount(rdReceiver), " O relation runs"
+  echo "joined:      ", stats
   var c: GeometryChanges
   if output.len > 0:
     f.close()
