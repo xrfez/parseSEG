@@ -337,12 +337,9 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
 
 proc setTraceCount(t: var SegyTrace, n: int) =
   # The trace headers' sample count.
-  if t.hasExt1 and (t.ext1.extNumSamples != 0 or n > int(high(uint16))):
-    t.ext1.extNumSamples = uint32(n)
-  elif n > int(high(uint16)):
+  if not t.setSampleCount(n):
     refuse("a trace of " & $n & " samples needs Trace Header Extension 1 (SEG-Y Rev 2), " &
       "which this trace lacks")
-  t.header.numSamples = if n > int(high(uint16)): 0'u16 else: uint16(n)
 
 proc setFileCount(b: var SegyBinaryHeader, n: int) =
   # The binary header's samples per trace.
@@ -397,7 +394,9 @@ proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   template t: untyped = s.segyTrace
   loadSegyTrace(src, trace, t)
   t.overrideSegy(overrides)
-  if n != t.numSamples: t.setTraceCount(n)
+  # Also when the headers do not say what the reader took: a Rev 0 trace
+  # may give 0 samples and leave the count to the binary header.
+  if n != t.numSamples or (not s.segyFixed and declaredSamples(t) != n): t.setTraceCount(n)
   if s.segyFixed:
     if not s.segyStarted: s.segyFile.binary.setFileCount(n)
     elif n != s.segyCount:

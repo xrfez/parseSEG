@@ -241,3 +241,31 @@ block variable_length_traces_too_long_are_skipped:
   var g = openSeismic(dst)
   doAssert g.len == 0
   g.close()
+
+block rev0_traces_that_leave_their_count_to_the_binary_header:
+  # Some Rev 0 writers left trace bytes 115-116 at 0 (and some 117-118
+  # too); the reader then takes the binary header's values.
+  for last in [116, 118]:
+    let src = keysFile("r0_zero" & $last & ".sgy", rev(0), baseKeys())
+    var b = readFile(src)
+    for t in 0 ..< 3:
+      for i in 114 ..< last: b[3600 + t * (240 + 400) + i] = '\0'
+    writeFile(src, b)
+    var want = keysOf(src)
+    doAssert want.len == 3
+    for r in [rev(0), rev(1), rev(2, 0), rev(2, 1)]:
+      let (dst, log) = convertTo(src, r)
+      doAssert not log.isFatal and log.count(sevError) == 0, $r & ": " & $log
+      var g = openSeismic(dst, keys = true)
+      doAssert not g.log.isFatal and g.len == 3 and g.maxSamples == 100, $r & ": " & $g.len &
+        " traces of " & $g.maxSamples & " samples"
+      # The output's traces say it themselves.
+      doAssert not g.log.has("the trace header gives 0 samples", sevWarning), $r
+      for i in 0 ..< 3:
+        doAssert g.traceField(i, "trace.numSamples").toFloat == 100
+        doAssert g.traceField(i, "trace.sampleInterval").toFloat == 2000
+        want[i].intervalUs = 2000 # the keys of the input give the header's 0
+        doAssert differences(want[i], g.traceKeys(i)).len == 0,
+          differences(want[i], g.traceKeys(i))
+      g.close()
+      doAssert sameSamples(src, dst)

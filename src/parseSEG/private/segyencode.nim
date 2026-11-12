@@ -3,7 +3,7 @@
 ## and the writer of traces built from `TraceKeys` (`model/writefile`).
 
 import std/math
-import ../segy/traceheader
+import ../segy/[traceheader, reader]
 import ../model/keytypes
 
 func scalarFor*(values: openArray[float64]): int16 =
@@ -45,3 +45,21 @@ proc setGeometry*(h: var SegyTraceHeader, k: TraceKeys, datum = NaN) =
   h.receiverDatumElevation = scaled(datum, h.elevationScalar)
   h.sourceDatumElevation = scaled(datum, h.elevationScalar)
   if not k.offset.isNaN: h.offset = clampI32(k.offset)
+
+func declaredSamples*(t: SegyTrace): int =
+  ## The sample count the trace's own headers give: Trace Header Extension 1
+  ## bytes 137-140 when non-zero, else trace bytes 115-116.
+  if t.hasExt1 and t.ext1.extNumSamples != 0: int(t.ext1.extNumSamples)
+  else: int(t.header.numSamples)
+
+func setSampleCount*(t: var SegyTrace, n: int): bool =
+  ## Sets the sample count in the trace's headers: in Trace Header Extension
+  ## 1 when that holds the count or `n` exceeds 65535, and in bytes 115-116
+  ## (0 when it does not fit). False, with nothing changed, when `n` needs an
+  ## Extension 1 the trace lacks.
+  if t.hasExt1 and (t.ext1.extNumSamples != 0 or n > int(high(uint16))):
+    t.ext1.extNumSamples = uint32(n)
+  elif n > int(high(uint16)):
+    return false
+  t.header.numSamples = if n > int(high(uint16)): 0'u16 else: uint16(n)
+  true

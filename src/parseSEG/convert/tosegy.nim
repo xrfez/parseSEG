@@ -508,6 +508,17 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
           result.note(seen, lnIntervalRounding, "Rev 1 holds sample intervals as whole units; " &
             "extended intervals were rounded", loc)
         t.header.sampleInterval = uint16(round(dt))
+    elif f.binary.fixedLengthTraces != 1:
+      # Each trace gives its own count and interval. A Rev 0 trace may leave
+      # them to the binary header (the reader says so): write them out.
+      if declaredSamples(t) != t.numSamples and not t.setSampleCount(t.numSamples):
+        result.report(sevError, dcValidation, "the trace has " & $t.numSamples &
+          " samples, which need a Trace Header Extension 1 it lacks; skipped", t.offset, tl)
+        ok = false
+      let dt = t.sampleInterval
+      if t.header.sampleInterval == 0 and dt >= 1 and dt <= 65535 and dt == round(dt) and
+          not (t.hasExt1 and t.ext1.extSampleInterval != 0):
+        t.header.sampleInterval = uint16(dt)
     if ok and t.proprietary.len > 0 and opts.byteOrder != f.byteOrder:
       if reorderProprietary(f.layoutOf, t.proprietary, f.byteOrder, opts.byteOrder):
         layoutReordered.add t.index

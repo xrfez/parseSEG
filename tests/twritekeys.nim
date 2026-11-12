@@ -215,3 +215,31 @@ block like_segy_input:
   doAssert g.len == 1 and int(g.traceEntry(0).numSamples) == n
   g.close()
   f.close()
+
+block like_a_rev0_input_whose_traces_leave_their_count_to_the_binary_header:
+  # The reader takes the binary header's count for a Rev 0 trace that gives
+  # 0 samples; written like it, each trace must say its own.
+  let src = tmp / "rev0_ns0.sgy"
+  block:
+    var w = openSeismicWriter(src, SegyOutputOptions(revision: SegyRevision(major: 0, minor: 0)))
+    var k = initTraceKeys()
+    k.intervalUs = 2000
+    var x = newSeq[float32](100)
+    for i in 0 ..< 100: x[i] = float32(i)
+    for t in 0 ..< 3: w.writeTrace(k, x)
+    discard w.close()
+  var b = readFile(src)
+  for t in 0 ..< 3: (b[3600 + t * 640 + 114], b[3600 + t * 640 + 115]) = ('\0', '\0')
+  writeFile(src, b)
+  var f = openSeismic(src)
+  doAssert f.len == 3 and f.maxSamples == 100
+  let x = f.readTraces(0 ..< f.len)
+  let dst = tmp / "rev0_ns0_like.sgy"
+  var w = openSeismicWriter(dst, like = f)
+  for i in 0 ..< f.len: w.writeTrace(f, i, x, i)
+  discard w.close()
+  var g = openSeismic(dst)
+  doAssert g.len == 3 and g.maxSamples == 100 and g.readTraces(0 ..< g.len) == x
+  doAssert g.traceField(2, "trace.numSamples").toFloat == 100
+  g.close()
+  f.close()
