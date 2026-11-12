@@ -70,6 +70,36 @@ block encode_refuses_bad_values:
   encodeSamples(sfInt64, [float64(high(int64))], b) # = 2^63 as a float64: clamps
   doAssert beI64(b, 0) == high(int64)
 
+block ibm_float_refuses_what_it_cannot_hold:
+  # Format 1 has no NaN and no infinity, and ends at about 7.237e75. (NaN
+  # was written as 0 and anything a float32 cannot hold, 1e39 included, as
+  # the largest IBM value.)
+  var b = newSeq[byte](12)
+  doAssertRaises SegFormatError: encodeSamples(sfIbm32, [NaN], b)
+  doAssertRaises SegFormatError: encodeSamples(sfIbm32, [Inf], b)
+  doAssertRaises SegFormatError: encodeSamples(sfIbm32, [NegInf], b)
+  doAssertRaises SegFormatError: encodeSamples(sfIbm32, [float32(NaN)], b)
+  doAssertRaises SegFormatError: encodeSamples(sfIbm32, [float32(Inf)], b)
+  doAssertRaises SegFormatError: encodeSamples(sfIbm32, [1e76], b)
+  doAssertRaises SegFormatError: encodeSamples(sfIbm32, [-7.2370056e75], b)
+  # A double beyond float32's range is within IBM's.
+  let wide = [1e39, -1e60, 7.237005e75]
+  encodeSamples(sfIbm32, wide, b)
+  var back = newSeq[float64](3)
+  decodeSamples(sfIbm32, b, back)
+  for i in 0..2: doAssert abs(back[i] - wide[i]) <= abs(wide[i]) * 1e-6, $back[i]
+  doAssert beU32(b, 8) == 0x7FFF_FFFF'u32 # the largest
+  # Every float32 fits, the largest and the smallest too.
+  encodeSamples(sfIbm32, [3.4028235e38'f32, -1e-45'f32, 0'f32], b)
+  decodeSamples(sfIbm32, b, back)
+  doAssert abs(back[0] - 3.4028235e38) < 1e32 and back[1] < 0 and back[2] == 0
+
+block a_short_destination_is_a_caller_error:
+  var b = newSeq[byte](7)
+  doAssertRaises ValueError: encodeSamples(sfFloat32, [1.0, 2.0], b)
+  doAssertRaises ValueError: encodeSamples(sfInt24, [1'f32, 2, 3], b)
+  encodeSamples(sfInt24, [1'f32, 2], b)
+
 sampleBlock detect_byte_order:
   let sweep = readBytes(exampleDir / "Sweep0.sgy")
   let d = detectByteOrder(sweep.toOpenArray(3200, 3599))

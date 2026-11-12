@@ -59,6 +59,34 @@ func float32ToIbm*(x: float32): uint32 =
       inc e16
     result = sign or (uint32(e16 + 64) shl 24) or frac
 
+func float64ToIbm*(x: float64, bits: var uint32, fractionBits = 24): bool =
+  ## Converts an IEEE double of any magnitude to IBM float bits in `bits`,
+  ## the fraction rounded to nearest at `fractionBits` bits (24; 23 leaves
+  ## the last fraction bit 0, as SEG-D format 8048 has it). False, with
+  ## `bits` unchanged, for NaN, an infinity and a magnitude beyond the
+  ## largest the format holds (about 7.237e75); a magnitude below the
+  ## smallest gives 0. The sample encoders use it for the doubles beyond
+  ## float32's range: within it they write `float32ToIbm(float32(x))`.
+  case classify(x)
+  of fcNan, fcInf, fcNegInf:
+    result = false
+  of fcZero, fcNegZero:
+    bits = 0
+    result = true
+  of fcNormal, fcSubnormal:
+    # As `float32ToIbm`, on the double itself.
+    let (m, e) = frexp(abs(x))
+    var e16 = (e + 3 + 4096) div 4 - 1024 # ceil(e / 4)
+    var frac = uint32(round(ldexp(m, cint(fractionBits - (4 * e16 - e))))) shl
+      (24 - fractionBits)
+    if frac == 0x0100_0000'u32: # rounding carried out
+      frac = frac shr 4
+      inc e16
+    result = e16 <= 63
+    if e16 < -64: bits = 0
+    elif result:
+      bits = (if x < 0: 0x8000_0000'u32 else: 0'u32) or (uint32(e16 + 64) shl 24) or frac
+
 func ibmF32*(b: openArray[byte], pos: int): float32 {.inline.} =
   ## Reads an IBM float at byte offset `pos`.
   ibmToFloat32(beU32(b, pos))

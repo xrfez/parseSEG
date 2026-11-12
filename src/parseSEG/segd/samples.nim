@@ -213,18 +213,40 @@ proc decodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[byte]
 
 {.pop.}
 
-proc expFraction(x: float64, base: float64, maxExp, fracBits: int, i: int):
-    tuple[e: int, mag: uint32] =
+proc expFraction(x: float64, base: float64, maxExp, fracBits: int, i: int, f: SegdSampleFormat,
+    top: uint32): tuple[e: int, mag: uint32] =
   # The smallest exponent whose fraction fits `fracBits` bits (most
-  # precision); clamps at the largest exponent.
-  if x.isNaN:
-    raiseFormat("sample " & $i & " is NaN, which this format cannot hold")
+  # precision). At the largest exponent the fraction may reach `top`: a
+  # value beyond that (or NaN, or an infinity) is out of the format's range.
   let full = float64(1 shl fracBits)
   let a = abs(x)
   for e in 0..maxExp:
     let m = round(a / pow(base, float64(e)) * full)
-    if m < full or e == maxExp:
-      return (e, uint32(min(m, full - 1)))
+    if (e < maxExp and m < full) or (e == maxExp and m <= float64(top)):
+      return (e, uint32(m))
+  raiseFormat("sample " & $i & " = " & $x & " does not fit format " & $ord(f) &
+    " (finite, up to " & $(float64(top) / full * pow(base, float64(maxExp))) & ")")
+
+proc hexWord[T: SegdSampleType](x: T, i: int): uint32 {.inline.} =
+  # Format 8048: an IBM float with a 23-bit fraction (its last bit 0),
+  # through float32, as ever; a double beyond float32's range directly.
+  let f = float32(x)
+  if f - f == 0: # finite as a float32
+    result = float32ToIbm(f)
+    if (result and 1) != 0:
+      # Round the 24-bit fraction to 23 bits; a carry renormalizes (the
+      # exponent has room: a float32 ends far below the largest).
+      var frac = (result and 0xFF_FFFF'u32) + 1
+      var expo = (result shr 24) and 0x7F
+      if frac == 0x100_0000'u32:
+        frac = 0x10_0000'u32
+        inc expo
+      result = (result and 0x8000_0000'u32) or (expo shl 24) or frac
+  else:
+    when T is float64:
+      if float64ToIbm(x, result, fractionBits = 23): return
+    raiseFormat("sample " & $i & " = " & $x & " does not fit format 8048 (finite, up to " &
+      "7.237e75)")
 
 proc toInt(x: float64, lo, hi: int64, i: int): int64 =
   let r = round(x)
@@ -234,14 +256,21 @@ proc toInt(x: float64, lo, hi: int64, i: int): int64 =
 
 proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
     dst: var openArray[byte], twosComplement8015 = false) =
-  ## Encodes `src` as format `f` into the start of `dst`. Exponent formats
-  ## quantize (rounding to nearest) and clamp at full scale; integer formats
-  ## round and refuse values out of range; NaN is refused by every format
-  ## except the IEEE ones. Raises `SegFormatError`. `twosComplement8015`
-  ## writes 8015 fractions as two's complement, the inverse of the
-  ## decoders' option (the spec says one's complement).
+  ## Encodes `src` as format `f` into the start of `dst` (at least
+  ## `dataBytes(f, src.len)` bytes). The exponent formats and 8048 quantize
+  ## (rounding to nearest), the integer formats round. Raises
+  ## `SegFormatError` for a value the format cannot hold, NaN and the
+  ## infinities included (only the IEEE formats hold those): beyond ±32767
+  ## in 8015, ±15360 in 8022, ±16380 in 8024, 3968 and -3840 in 8042, 4095.5
+  ## and -4095 in 8044 (all ones is not a code), about ±7.237e75 in 8048,
+  ## and the integer range in 8036 and 8038. Raises `ValueError` when `dst`
+  ## is too short. `twosComplement8015` writes 8015 fractions as two's
+  ## complement, the inverse of the decoders' option (the spec says one's
+  ## complement); it reaches -32768.
   let n = src.len
-  doAssert dst.len >= dataBytes(f, n), "destination too short"
+  if dst.len < dataBytes(f, n):
+    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " &
+      $dataBytes(f, n) & " needed for " & $n & " samples")
   case f
   of sd8015:
     for g in 0..<(n + 3) div 4:
@@ -253,7 +282,8 @@ proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
         var e = 0
         if i < n:
           let x = float64(src[i])
-          let (ee, mag) = expFraction(x, 2.0, 15, 15, i)
+          let (ee, mag) = expFraction(x, 2.0, 15, 15, i, f,
+            if twosComplement8015 and x < 0: 0x8000 else: 0x7FFF)
           e = ee
           w = if x >= 0 or mag == 0: uint16(mag)
               elif twosComplement8015: uint16(0x1_0000'u32 - mag)
@@ -265,8 +295,8 @@ proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
     let bits = if f == sd8022: 4 else: 12
     for i in 0..<n:
       let x = float64(src[i])
-      let (e, mag) = expFraction(x, 4.0, 7, bits, i)
       let mask = (1'u32 shl bits) - 1
+      let (e, mag) = expFraction(x, 4.0, 7, bits, i, f, mask)
       let neg = x < 0 and mag != 0
       let q = if neg: (not mag) and mask else: mag
       let s = if neg: 1'u32 else: 0'u32
@@ -276,29 +306,15 @@ proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
     let bits = if f == sd8042: 5 else: 13
     for i in 0..<n:
       let x = float64(src[i])
-      var (e, mag) = expFraction(x, 16.0, 3, bits, i)
+      # All ones (negative full scale) is not a code: the negative range
+      # ends one step earlier.
+      let (e, mag) = expFraction(x, 16.0, 3, bits, i, f,
+        (1'u32 shl bits) - (if x < 0: 2 else: 1))
       let s = if x < 0 and mag != 0: 1'u32 else: 0'u32
-      # All ones (negative full scale) is an invalid code: clamp one step in.
-      if s == 1 and e == 3 and mag == (1'u32 shl bits) - 1: dec mag
       if f == sd8042: dst[i] = byte((s shl 7) or (uint32(e) shl 5) or mag)
       else: putBeU16(dst, 2 * i, uint16((s shl 15) or (uint32(e) shl 13) or mag))
   of sd8048:
-    for i in 0..<n:
-      if float64(src[i]).isNaN:
-        raiseFormat("sample " & $i & " is NaN, which format 8048 cannot hold")
-      var w = float32ToIbm(float32(src[i]))
-      if (w and 1) != 0:
-        # Round the 24-bit fraction to 23 bits; a carry renormalizes.
-        var frac = (w and 0xFF_FFFF'u32) + 1
-        var expo = (w shr 24) and 0x7F
-        if frac == 0x100_0000'u32:
-          if expo == 0x7F:
-            frac = 0xFF_FFFE'u32 # already the largest exponent: clamp at full scale
-          else:
-            frac = 0x10_0000'u32
-            inc expo
-        w = (w and 0x8000_0000'u32) or (expo shl 24) or frac
-      putBeU32(dst, 4 * i, w and not 1'u32)
+    for i in 0..<n: putBeU32(dst, 4 * i, hexWord(src[i], i) and not 1'u32)
   of sd8036:
     for i in 0..<n: putBeI24(dst, 3 * i, int32(toInt(float64(src[i]), -0x80_0000, 0x7F_FFFF, i)))
   of sd8038:

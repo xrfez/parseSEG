@@ -7,7 +7,8 @@
 ## `encodeChecked` gives the same bytes, verdict and raises in one pass: each
 ## sample's encoded word is decoded on the spot (float64 targets need no
 ## check, float32 one compare, integers a rounding compare; a value an
-## integer format cannot hold sends the trace to `encodeExact` for its error).
+## integer format or IBM float cannot hold sends the trace to `encodeExact`
+## for its error).
 ## `copyFloatWords` moves IEEE float samples between byte orders without the
 ## float64 round trip, with the same bytes as that round trip.
 
@@ -113,7 +114,11 @@ proc encodeChecked*(fmt: SampleFormat, vals: openArray[float64], dst: var seq[by
         lost = lost or (ord(float64(f) != v[i]) and ord(v[i] == v[i])) # NaN stays NaN
     of sfIbm32:
       for i in 0..<n:
-        let w = float32ToIbm(float32(v[i]))
+        let f = float32(v[i])
+        # NaN, an infinity or a double beyond float32: `encodeExact` raises
+        # or encodes the double itself, as `encodeSamples` does.
+        outside = outside or ord(f - f != 0)
+        let w = float32ToIbm(f)
         storeNum(d, 4*i, w, o)
         lost = lost or differs(ibmToFloat64(w), v[i])
     of sfInt32:

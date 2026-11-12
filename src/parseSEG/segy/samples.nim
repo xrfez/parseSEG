@@ -3,8 +3,9 @@
 ##
 ## Decoders convert stored samples to `float32` or `float64` in a
 ## caller-provided buffer (e.g. a Tensor row), with no intermediate `seq`.
-## Encoders convert back and refuse values that do not fit the format. This
-## module has no Arraymancer dependency; `model/tensors` builds on it.
+## Encoders convert back and refuse values that do not fit the format
+## (`SegFormatError`: nothing is clamped). This module has no Arraymancer
+## dependency; `model/tensors` builds on it.
 ##
 ## In a non-big-endian file each sample is reordered like any header field.
 ## Pair-swapping is undefined for 3-byte samples (formats 7 and 15), which are
@@ -196,19 +197,40 @@ proc fixedGainWord(x: float64, i: int): uint32 =
   let m = clamp(round(x * pow(2.0, float64(g))), -32768.0, 32767.0)
   (uint32(g) shl 16) or uint32(cast[uint16](int16(m)))
 
+proc ibmWord[T: SampleType](x: T, i: int): uint32 {.inline.} =
+  # Format 1: the IBM float nearest to the float32 nearest to `x`, as ever;
+  # a double beyond float32's range directly. NaN, the infinities and
+  # magnitudes beyond the IBM range (about 7.237e75) have no IBM float.
+  let f = float32(x)
+  if f - f == 0: # finite as a float32
+    result = float32ToIbm(f)
+  else:
+    when T is float64:
+      if float64ToIbm(x, result): return
+    raiseFormat("sample " & $i & " = " & $x & " does not fit format 1 (IBM float: finite, " &
+      "up to 7.237e75)")
+
 proc encodeSamples*[T: SampleType](f: SampleFormat, src: openArray[T],
     dst: var openArray[byte], order = boBig) =
-  ## Encodes `src` as format `f` into the start of `dst`. Integer formats
-  ## round to nearest. Raises `SegFormatError` for a value that does not fit
-  ## (including NaN in an integer format or format 4) and for a 3-byte format
-  ## in pair-swapped order. Format 4 picks the largest gain per sample.
+  ## Encodes `src` as format `f` into the start of `dst` (at least
+  ## `src.len * sampleSize(f)` bytes). Integer formats round to nearest.
+  ## Raises `SegFormatError` for a value the format cannot hold (NaN or out
+  ## of range in an integer format or format 4; NaN, an infinity or a
+  ## magnitude beyond about 7.237e75 in format 1, IBM float) and for a
+  ## 3-byte format in pair-swapped order; `ValueError` when `dst` is too
+  ## short. Format 1 goes through float32, except for doubles beyond its
+  ## range; format 4 picks the largest gain per sample; the IEEE formats
+  ## hold every value (a double beyond float32 becomes an infinity in
+  ## format 5).
   checkOrder(f, order)
   let n = src.len
-  doAssert dst.len >= n * sampleSize(f), "destination too short"
+  if dst.len < n * sampleSize(f):
+    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " &
+      $(n * sampleSize(f)) & " needed for " & $n & " samples")
   forEachOrder(order):
     case f
     of sfIbm32:
-      for i in 0..<n: putNum(dst, 4*i, float32ToIbm(float32(src[i])), o)
+      for i in 0..<n: putNum(dst, 4*i, ibmWord(src[i], i), o)
     of sfInt32:
       for i in 0..<n: putNum(dst, 4*i, toInt[int32](float64(src[i]), i), o)
     of sfInt16:

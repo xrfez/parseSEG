@@ -230,6 +230,14 @@ proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat) =
   s.segyFile = f
   s.sink = openDiskSink(s.tmp)
 
+proc checkGroups(src: SeismicFile, first, last: int) =
+  # 8015 packs 4 samples into 10 bytes, and a SEG-D trace keeps its count:
+  # a trace of another length cannot go into that format.
+  for i in first..last:
+    if src.index.entries[i].numSamples mod 4 != 0:
+      refuse("SEG-D format 8015 holds samples in groups of 4; trace " & $i & " of " & src.path &
+        " has " & $src.index.entries[i].numSamples)
+
 proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
   if format != tfKeep:
     let fmt = segdSampleFormats[ord(format) - 1]
@@ -237,6 +245,7 @@ proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
       if not fmt.definedIn(rec.revision):
         refuse("SEG-D format " & $format & " is not defined in Rev " & $rec.revision &
           " (record " & $rec.index & ")")
+    if fmt == sd8015: checkGroups(like, 0, like.len - 1)
     s.segdFormat = some(fmt)
   s.sink = openDiskSink(s.tmp)
   s.segd = openSegdWriter(s.sink, SegdWriteOptions(), like.index.segdLabel)
@@ -249,7 +258,8 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## `seg2Format` (for `like`'s standard only) names one. Only `like`'s
   ## index is used, so it may be closed. Raises `ValueError` for an unrecognized or
   ## multiplexed SEG-D `like`, a format for another standard or one the
-  ## revision lacks, or `path` being `like`'s file; `SegFormatError` for
+  ## revision lacks, SEG-D 8015 for traces whose sample count is not a
+  ## multiple of 4, or `path` being `like`'s file; `SegFormatError` for
   ## file headers the writer refuses; `IOError` when the output cannot be
   ## created.
   let kind = like.kind
@@ -533,6 +543,8 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace: int) =
       " (record " & $r & ")")
   var last = trace
   while last + 1 < entries.len and int(entries[last + 1].record) == r: inc last
+  # A chosen 8015 (the input's own is written as it is): `src` need not be `like`.
+  if fOut == sd8015 and rec.format.get != sd8015: checkGroups(src, trace, last)
   if s.inRecord: s.finishRecord()
   if fOut != rec.format.get:
     rec.gh1.formatCode = ord(fOut)

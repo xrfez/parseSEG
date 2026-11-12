@@ -56,6 +56,28 @@ block a_failed_rename_leaves_no_temporary_file:
   noTempFiles()
   removeDir(dst)
 
+block segd_writer_calls_out_of_order_are_value_errors:
+  let src = openDiskSource(demoDir() / "record.sgd")
+  var r = openSegd(src)
+  doAssert r.nextRecord()
+  var t: SegdTrace
+  doAssert r.readTrace(t)
+  let sink = openDiskSink(tmp / "order.sgd")
+  var w = openSegdWriter(sink)
+  doAssertRaises(ValueError): w.writeTrace(t)        # no record in progress
+  doAssertRaises(ValueError): w.endRecord()
+  doAssertRaises(ValueError): w.setRev3Trailer(@[])
+  w.writeRecordHeaders(r.record)
+  doAssertRaises(ValueError): w.writeRecordHeaders(r.record) # a record inside a record
+  doAssertRaises(ValueError): w.setRev3Trailer(@[])   # a Rev 2 record
+  doAssertRaises(ValueError): w.close()
+  w.writeTrace(t)
+  w.endRecord()
+  w.close()
+  sink.close()
+  src.close()
+  doAssert readFile(tmp / "order.sgd") == readFile(demoDir() / "record.sgd")
+
 when defined(posix):
   import std/posix
 
