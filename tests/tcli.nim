@@ -311,8 +311,12 @@ sampleBlock survey_apply:
   discard ok("journal", "rollback", path, path & ".edits.nif")
   doAssert readFile(path) == original
   let copy = tmp / "63geo.sgy"
+  # The join refines the header's source point (espnum 100) to the survey's
+  # 99.5, which the file already holds: sp 9950 with sp_scal -100, and 13 /
+  # 99.5 in the layout's station fields. No byte changes, so nothing counts.
   let c = ok("survey-apply", path, "--sps=" & sps, "-o", copy, "--values=stations")
-  doAssert "changed in " & copy in c and "src station: 1 traces" in c, c
+  doAssert "changed in " & copy in c and "src station: 0 traces" in c, c
+  doAssert readFile(copy) == original, "the stations were there already"
   doAssert "500100" notin ok("keys", copy), "stations only"
   # SEG-D 2.0 headers already carry the stations and have no coordinate fields.
   let segd = ok("survey-apply", s63, "--sps=" & sps)
