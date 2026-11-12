@@ -98,6 +98,28 @@ block an_abandoned_seg2_writer_writes_no_pointers:
   doAssert b[6] == '\0' and b[7] == '\0' # the trace count was never written
   removeFile(path)
 
+block disk_sink_collects_records:
+  # Records go out in 1 MiB writes: the file holds them all, in order, once
+  # the sink is closed.
+  let path = tmp / "sink.bin"
+  let sink = openDiskSink(path)
+  var want = ""
+  var seed = 1'u32
+  for n in [0, 1, 239, 240, 8240, SinkBufferSize - 9000, 5, SinkBufferSize, SinkBufferSize + 7,
+      3, 2 * SinkBufferSize, 70000]:
+    var rec = newSeq[byte](n)
+    for b in rec.mitems:
+      seed = seed * 1664525'u32 + 1013904223'u32
+      b = byte(seed shr 24)
+    sink.writeRecord(rec)
+    for b in rec: want.add char(b)
+    doAssert sink.offset == want.len
+  sink.writeTapeMark() # not stored
+  doAssert getFileSize(path) < want.len # the tail is still in the buffer
+  sink.close()
+  sink.close() # closed: nothing to do
+  doAssert readFile(path) == want
+
 when defined(posix):
   import std/posix
 
@@ -214,5 +236,23 @@ when defined(posix):
       doAssertRaises(ValueError): discard w.close()
       doAssert not fileExists(dst)
       noTempFiles()
+  block a_disk_sink_that_failed_stays_failed:
+    let path = tmp / "sink_full.bin"
+    let sink = openDiskSink(path)
+    let rec = newSeq[byte](300_000)
+    var failedAt = -1
+    limitFileSize(3 shl 19)
+    try:
+      for i in 0 ..< 12:
+        if failedAt < 0:
+          try: sink.writeRecord(rec)
+          except IOError: failedAt = i
+    finally:
+      limitFileSize(-1)
+    doAssert failedAt > 0, "3.6 MB were written under a limit of 1.5 MiB"
+    # With room again, the missing bytes are still missing.
+    doAssertRaises(IOError): sink.writeRecord(rec)
+    doAssertRaises(IOError): sink.close()
+    removeFile(path)
 else:
   echo "twritefail: the disk-full blocks need POSIX (RLIMIT_FSIZE); skipped"
