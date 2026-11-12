@@ -66,9 +66,14 @@
 ## entries, codecs and stored keys) stay alive until the prefetcher's
 ## `close`. From then on the prefetcher reads its own copy of those tables:
 ## its chunks' `rows` show the keys as they were when the file was closed
-## or handed over, not later edits. What remains a rule: do not change the
-## file's index (`applySurvey`, `applyGeometry`, assigning to `f.index`)
-## while a prefetcher runs.
+## or handed over, not later edits, until the prefetcher is made again.
+## What remains a rule: do not change the file's index (`applySurvey`,
+## `applyGeometry`, assigning to `f.index`) while a prefetcher runs, and
+## stop every reader that was made after `openEditor` before the editor
+## writes: an edit refreshes the stored keys in place, under a transform
+## that may be reading them. `ensureKeys` is the one change a running
+## prefetcher survives, but it does not see the new keys (see
+## `newPrefetcher`).
 ##
 ## Threads: a prefetcher belongs to one thread: call its consumer procs,
 ## `close` included, from the thread that made it. Several threads may each
@@ -99,6 +104,16 @@ type
     ## `newPrefetcher`. It must not raise, and may reach only memory that
     ## outlives the prefetcher through raw pointers (no closures: it may
     ## capture nothing ref-counted).
+    ##
+    ## A `Defect` raised in the hook ends the process: it is raised on a
+    ## worker thread, where nothing can catch it (an index out of bounds, an
+    ## overflow in a checked build, a failed `doAssert`, `keysAt` on rows
+    ## without keys). Every kernel reached from the hook must therefore be
+    ## free of Defects for any samples and keys: check sizes and `hasKeys`
+    ## before the prefetcher is made, and treat bad data as data.
+    ##
+    ## A chunk that a `seek` or a `close` dropped while it was decoded is
+    ## not transformed, so the hook cannot be used to count chunks decoded.
 
 type
   SlotState = enum ssFree, ssBusy, ssReady
@@ -396,7 +411,10 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   ## tape file, a non-positive chunk size, depth or worker count, a
   ## negative `firstSample`, or a window or chunk size beyond the `int` range.
   ##
-  ## Each chunk's `rows` says which trace each row is (Phase 16). With
+  ## Each chunk's `rows` says which trace each row is (Phase 16), with the
+  ## trace's keys when `f` has stored keys now: a prefetcher made before
+  ## `ensureKeys` never gets them (its chunks' `rows.hasKeys` stays false),
+  ## so close it and make a new one after `ensureKeys`. With
   ## `uniform`, a chunk never spans two channel sets or sample intervals
   ## (`TraceKeys.intervalUs`): it is cut short at the boundary, so every
   ## chunk has one interval; it needs stored keys (`ValueError` otherwise).

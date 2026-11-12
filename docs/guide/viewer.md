@@ -265,6 +265,12 @@ When the user first asks for geometry of the whole file, `ensureKeys` builds the
 keys change (`ensureKeys`, a survey join, a header edit through a `HeaderEditor`): tag what
 is drawn from keys (moveout overlays, binning, a map) with it and rebuild when it changes.
 
+A `TraceRows` view and a `Prefetcher` take their pointers to the keys when they are made.
+Those made while the file had stored keys see every later change in place. Those made
+before `ensureKeys` have no keys and never get them (`rows.hasKeys` stays false, `traceKeys`
+raises `ValueError`): after `ensureKeys`, call `rowsOf` again, and close the session's
+prefetcher and make a new one.
+
 ```nim
 import parseSEG
 
@@ -332,6 +338,13 @@ f.close()
 - Call a prefetcher's procs from the thread that made it. It keeps the file's map alive
   until its own `close`, so that thread may close the file and the prefetcher in either
   order. The file's index must not change while it runs (`applySurvey`, `applyGeometry`).
+- A prefetcher made before the file is closed or handed to an editor (`openEditor(f)`)
+  goes on with the index as it was then: its chunks' `rows` show the keys of that moment,
+  not later edits, until you make it again. Stop the readers made after `openEditor` before
+  the editor writes: an edit refreshes the stored keys in place.
+- A `transform` hook runs on a worker thread, where nothing can catch a `Defect`: an index
+  out of bounds or a failed assertion in the hook ends the process. Check sizes and
+  `hasKeys` before you make the prefetcher. A chunk dropped by a `seek` is not transformed.
 - Several threads may each make, use and close their own prefetchers on one open file at
   the same time: a background job (a stack, an export) beside the UI's read-ahead. While
   another thread reads the file or has a prefetcher on it, do not change its index

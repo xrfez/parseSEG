@@ -617,6 +617,14 @@ proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
   ## bytes read; when it cancels, `SegCancelledError` is raised and the file
   ## stays without keys. Raises `ValueError` for a closed file or headers
   ## that lie outside it.
+  ##
+  ## Whatever was made from the file before this call still has no keys: a
+  ## `TraceRows` view (`rowsOf`; its `hasKeys` stays false and `traceKeys`
+  ## raises) and a `Prefetcher` (its chunks' `rows` likewise). They hold
+  ## pointers taken when they were made, so make them again: `rowsOf` once
+  ## more, and `close` the prefetcher and call `newPrefetcher`. A
+  ## prefetcher of this thread may keep running during the call; no other
+  ## thread may use the file meanwhile.
   if f.hasKeys: return
   f.requireOpen()
   let n = f.len
@@ -693,7 +701,10 @@ func keysRevision*(f: SeismicFile): int {.inline.} =
   ## 0 as opened; goes up whenever the stored keys change (`ensureKeys`,
   ## `applyGeometry`, `applySurvey`, `HeaderEditor` writes). Tag data
   ## derived from keys (moveout overlays, binning) with it and rebuild it
-  ## when the revision changes.
+  ## when the revision changes. Views and prefetchers made while the file
+  ## had stored keys read them in place and so see every later change; those
+  ## made before `ensureKeys` have no keys and must be made again (see
+  ## `ensureKeys`).
   f.index.keysRevision
 
 template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt: untyped) =

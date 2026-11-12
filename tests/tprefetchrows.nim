@@ -265,6 +265,28 @@ block close_then_destroy_while_prefetching:
 
 echo "close then destroy: ok"
 
+# Views and prefetchers take their pointers to the keys when they are made:
+# those made before `ensureKeys` stay without keys (and keep working), those
+# made after it have them.
+block made_before_ensure_keys_stays_without_keys:
+  var f = openSeismic(demoDir() / "survey.sgy")
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, cols = 8)
+  let view = f.rowsOf(0 ..< f.len)
+  var c: PrefetchChunk[float32]
+  doAssert p.next(c) and not c.rows.hasKeys
+  f.ensureKeys() # the prefetcher of this thread keeps running
+  doAssert f.hasKeys and f.keysRevision == 1 and not view.hasKeys
+  doAssertRaises(ValueError): discard view.traceKeys(0)
+  p.seek(0 ..< f.len)
+  doAssert p.next(c) and c.count == 16 and not c.rows.hasKeys
+  p.close()
+  var q = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, cols = 8)
+  doAssert q.next(c) and c.rows.hasKeys
+  doAssert sameKeys(c.rows.traceKeys(3), f.traceKeys(3))
+  doAssert sameKeys(f.rowsOf(0 ..< f.len).traceKeys(3), f.traceKeys(3))
+  q.close()
+  f.close()
+
 # A prefetcher made before `openEditor(f)`: the keys its chunks' rows and its
 # transform read are parked with the old map, as the entries and codecs are
 # (they were freed with the file; `nim asan` runs this file under ASan).
