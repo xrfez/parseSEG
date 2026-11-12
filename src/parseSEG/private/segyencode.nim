@@ -129,6 +129,9 @@ proc keysToHeaders*(t: var SegyTrace, k: TraceKeys, n, seqNo: int, rev: SegyRevi
       h.shotpointNumber = scaled(k.srcPoint, h.shotpointScalar)
   h.setGeometry(k, datum)
   if rev.major == 0:
+    # Bytes 181-240 are unassigned in Rev 0: the midpoint has no field.
+    h.cdpX = 0
+    h.cdpY = 0
     h.delayRecordingTime = clampI16(k.t0Ms)
   elif timeScalar != 0 or not k.t0Ms.isNaN:
     h.timeScalar = if timeScalar != 0: timeScalar else: timeScalarFor([k.t0Ms])

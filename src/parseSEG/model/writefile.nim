@@ -20,10 +20,11 @@
 ##   `seg2Format`; "keep" by default);
 ## - SEG-Y and SEG-2: the sample count, which may differ from the input's.
 ##   SEG-Y updates the trace header (Trace Header Extension 1 when it holds
-##   the count or the count exceeds 65535) and, when every trace written has
-##   the same count, the binary header's; a fixed-length file needs one count
-##   for all traces. The Rev 2 trace count (binary bytes 3513-3520), when the
-##   input declares one, becomes the number written.
+##   the count or the count exceeds 65535) and the binary header, which gets
+##   the count of the traces written (the largest when they differ); a
+##   fixed-length file needs one count for all traces. The Rev 2 trace
+##   count (binary bytes 3513-3520), when the input declares one, becomes
+##   the number written.
 ##
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
@@ -111,6 +112,7 @@ type
     segyStarted: bool     ## `segy` is open on `sink` (from the first trace).
     segyFixed: bool       ## Fixed-length traces (Rev 1+, binary 3503 = 1).
     segyCount: int        ## The sample count of every trace so far; -1 none, -2 mixed.
+    segyMax: int          ## The largest sample count so far.
     segyNumTraces: uint64 ## The input's declared Rev 2 trace count.
     segyTrace: SegyTrace  ## Reused.
     segyFresh: bool       ## Opened from `SegyOutputOptions`: the first trace sets the interval.
@@ -298,9 +300,9 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
   ## A writer of a new SEG-Y file at `path`, with file headers from `opts`
   ## rather than an input file, for traces built from `TraceKeys`
   ## (`writeTrace(w, keys, samples)`): e.g. a stack of SEG-D or SEG-2 data.
-  ## The binary header's sample interval and count are the first trace's
-  ## (the count is rewritten by `close` when every trace has the same
-  ## other count); traces are variable-length. Rev 2 traces carry Trace
+  ## The binary header's sample interval is the first trace's and its count
+  ## the largest of the traces written (set by `close`); traces are
+  ## variable-length. Rev 2 traces carry Trace
   ## Header Extension 1. Raises `ValueError` for a format the revision lacks
   ## (8-byte and 3-byte formats need Rev 2), a 3-byte format pair-swapped,
   ## a byte order other than big-endian before Rev 2, or a revision other
@@ -379,6 +381,11 @@ proc loadSegyTrace(src: SeismicFile, trace: int, t: var SegyTrace) =
   t.numSamples = int(e.numSamples)
   t.offset = e.offset
 
+proc noteCount(s: var WriterState, n: int) =
+  # A trace of `n` samples was written.
+  s.segyCount = if s.segyCount == -1 or s.segyCount == n: n else: -2
+  s.segyMax = max(s.segyMax, n)
+
 proc startSegy(s: var WriterState) =
   s.segy = openSegyWriter(s.sink, s.segyFile, initSegyWriteOptions(s.segyFile))
   s.segyStarted = true
@@ -419,7 +426,7 @@ proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   t.index = s.written
   if not s.segyStarted: s.startSegy()
   s.segy.writeTrace(t)
-  s.segyCount = if s.segyCount == -1 or s.segyCount == n: n else: -2
+  s.noteCount(n)
 
 proc closeSegy(s: var WriterState, log: var DiagLog) =
   if not s.segyStarted: s.startSegy()
@@ -427,10 +434,11 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
   log.add s.segy.log
   s.sink.close()
   s.sink = nil
-  # The binary header's counts, now known.
+  # The binary header's counts, now known: the samples of every trace
+  # written, the largest when they differ.
   var b = s.segyFile.binary
-  if s.segyCount >= 0 and uint32(s.segyCount) != b.effectiveSamplesPerTrace:
-    b.setFileCount(s.segyCount)
+  if s.segyCount != -1 and uint32(s.segyMax) != b.effectiveSamplesPerTrace:
+    b.setFileCount(s.segyMax)
   if s.segyNumTraces != 0: b.numTraces = uint64(s.written)
   if b != s.segyFile.binary:
     var bytes = newSeq[byte](BinaryHeaderSize)
@@ -459,6 +467,9 @@ proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
     refuse("SEG-Y Rev " & $rev & " holds whole-microsecond intervals, not " & $dt)
   if rev.major < 2 and dt > 65535:
     refuse("SEG-Y Rev " & $rev & " holds intervals up to 65535 µs, not " & $dt)
+  if rev.major == 0 and abs(round(k.t0Ms)) > 32767:
+    refuse("SEG-Y Rev 0 holds start times of up to ±32767 ms (it has no time scalar), not " &
+      $k.t0Ms)
   template b: untyped = s.segyFile.binary
   let ext1 = rev.major >= 2 and b.maxAddlTraceHeaders > 0
   if n > int(high(uint16)) and not ext1:
@@ -483,7 +494,7 @@ proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   t.index = s.written
   if not s.segyStarted: s.startSegy()
   s.segy.writeTrace(t)
-  s.segyCount = if s.segyCount == -1 or s.segyCount == n: n else: -2
+  s.noteCount(n)
 
 # ----------------------------------------------------------------- SEG-D --
 
@@ -696,10 +707,14 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   points and channels, as 0 for elevations, the record, the ensemble
   ##   and the offset; a point at exactly (0, 0) reads back NaN); values
   ##   are rounded where the field is an integer, coordinates and
-  ##   elevations get the finest scalar that fits (Rev 2: also unscaled in Trace Header Extension 1, with the
-  ##   offset, record, ensemble, a fractional interval and the time's
-  ##   nanoseconds); `t0Ms` gets the finest time scalar that holds it
-  ##   (Rev 0: whole ms);
+  ##   elevations get the finest scalar that fits (Rev 2: also unscaled in
+  ##   Trace Header Extension 1, with the offset, record, ensemble, a
+  ##   fractional interval and the time's nanoseconds); `t0Ms` gets the
+  ##   finest time scalar that holds it;
+  ## - Rev 0 has fewer fields: `t0Ms` is a whole ms (rounded) in an int16, a
+  ##   fractional source point is rounded, and the midpoint, `inline` and
+  ##   `crossline` are not written (bytes 181-240 are unassigned there; the
+  ##   midpoint reads back as halfway between source and receiver);
   ## - the trace identification code is `traceCode` when non-zero and its
   ##   status in the output's revision is `status` (so a status changed in
   ##   the keys wins), else 1 (live), 2 (dead) or 0 (unknown; also
@@ -713,7 +728,7 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## them elsewhere: write from keys into `SegyOutputOptions` files. Raises
   ## `ValueError` for a closed or non-SEG-Y writer, keys without a positive
   ## interval (`intervalUs`), a fractional interval or one over 65535 µs
-  ## before Rev 2, a count
+  ## before Rev 2, a `t0Ms` beyond ±32767 ms in Rev 0, a count
   ## the output cannot take, or a bad override (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold; `IOError` on a
   ## write failure, which discards the output and closes the writer.

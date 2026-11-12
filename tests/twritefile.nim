@@ -197,9 +197,10 @@ block changed_sample_counts_segy:
     for i in 0 ..< g.len: doAssert g.traceField(i, "trace.numSamples").intVal == n
     if f.index.segy.binary.extSamplesPerTrace != 0:
       doAssert g.fileField("binary.extSamplesPerTrace").intVal == n
-  block mixed_counts_keep_the_binary_count:
+  block mixed_counts_write_the_largest_in_the_binary_header:
+    # (The binary header kept the input's count, whatever was written.)
     var f = openSeismic(boVar)
-    let n = f.maxSamples
+    let n = f.maxSamples div 2
     let dst = tmp / "mixed.sgy"
     var w = openSeismicWriter(dst, f)
     let x = f.readTraces(0 ..< f.len)
@@ -207,6 +208,7 @@ block changed_sample_counts_segy:
     discard w.close()
     var g = openSeismic(dst)
     doAssert g.fileField("binary.samplesPerTrace").intVal == n
+    doAssert g.maxSamples == n
     doAssert g.traceField(1, "trace.numSamples").intVal == n - 1
     doAssert g.readTraces(1..1)[0, 0 ..< n - 1] == x[1, 0 ..< n - 1]
   block fixed_length_needs_one_count:

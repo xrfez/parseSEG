@@ -157,6 +157,30 @@ block refused:
   bad.intervalUs = 70_000
   doAssertRaises(ValueError): w.writeTrace(bad, [1'f32]) # over 65535 µs before Rev 2
   doAssertRaises(ValueError): w.writeTrace(k, newSeq[float32](70_000)) # needs Ext1
+  block rev0_delay:
+    # Rev 0 has no time scalar: its delay is a whole ms in an int16. A start
+    # time beyond that is refused, as an interval the revision cannot hold
+    # is (it was written as 32767).
+    var w0 = openSeismicWriter(tmp / "r0.sgy", SegyOutputOptions(revision: SegyRevision()))
+    var late = k
+    late.t0Ms = 40_000
+    doAssertRaises(ValueError): w0.writeTrace(late, [1'f32])
+    late.t0Ms = -32768.4
+    doAssertRaises(ValueError): w0.writeTrace(late, [1'f32])
+    late.t0Ms = 32767.4 # rounds into the field
+    w0.writeTrace(late, [1'f32])
+    # The midpoint has no Rev 0 field: bytes 181-188 stay unassigned, and
+    # readers derive it from the source and receiver again.
+    var mid = k
+    (mid.srcX, mid.srcY, mid.rcvX, mid.rcvY) = (100.0, 200.0, 300.0, 400.0)
+    (mid.cmpX, mid.cmpY) = (1234.0, 5678.0)
+    w0.writeTrace(mid, [1'f32])
+    discard w0.close()
+    var g0 = openSeismic(tmp / "r0.sgy", keys = true)
+    doAssert g0.traceKeys(0).t0Ms == 32767
+    doAssert g0.traceKeys(1).cmpX == 200 and g0.traceKeys(1).cmpY == 300
+    doAssert g0.traceField(1, "trace.cdpX").toFloat == 0
+    g0.close()
   doAssertRaises(ValueError): w.writeTrace(k, [1'f32], [headerOverride("trace.nope", 1)])
   doAssert w.len == 0
   w.writeTrace(k, [1'f32])
