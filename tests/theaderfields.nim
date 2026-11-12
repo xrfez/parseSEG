@@ -68,6 +68,27 @@ sampleBlock segd_every_field_of_every_trace:
         inc i
     f.close()
 
+block field_names_are_one_table:
+  # `fieldNames` built a new seq on every call; the lists are constants now
+  # and a call lends one: the same storage every time, nothing allocated.
+  for kind in HeaderBlock:
+    doAssert fieldNames(kind).len == fieldNames(kind).len
+    if fieldNames(kind).len > 0:
+      doAssert addr(fieldNames(kind)[0]) == addr(fieldNames(kind)[0]), $kind
+  doAssert fieldNames(hbRaw).len == 0
+  doAssert fieldNames(hbSegyTrace).len == 91 and fieldNames(hbSegyTrace)[0] == "traceSeqLine"
+  doAssert fieldNames(hbSegyBinary)[0] == "jobId" and fieldNames(hbSegdGh1)[0] == "fileNumber"
+  doAssert fieldNames(hbSeg2Trace)[0] == "blockId"
+  # A caller's copy is its own.
+  var mine = fieldNames(hbSegdGh1)
+  mine.add "extra"
+  doAssert "extra" notin fieldNames(hbSegdGh1) and mine.len == fieldNames(hbSegdGh1).len + 1
+  let before = getOccupiedMem()
+  var total = 0
+  for i in 0 ..< 1000:
+    for kind in HeaderBlock: total += fieldNames(kind).len
+  doAssert getOccupiedMem() == before and total > 0
+
 sampleBlock names_errors_and_edits:
   doAssert "sourceX" in fieldNames(hbSegyTrace) and "raw" notin fieldNames(hbSegdTrace)
   doAssert "unassigned1" notin fieldNames(hbSegyBinary) # raw bytes
