@@ -60,6 +60,13 @@ fixed-length SEG-Y file (Rev 1 or later, binary header bytes 3503-3504 = 1) is n
 its index is computed from the file size and checked against 64 sampled trace headers, so it
 opens in milliseconds whatever its size ([viewer.md](viewer.md#open-a-file-progress-cancel-and-an-index-cache)).
 
+The standard is detected from the file's first bytes, never from its name. A SEG-Y file
+whose textual header is not the usual `C` card text (blank, zero-filled, free text) is
+recognized by its binary header, and the log has an `info` entry saying so. When a file is
+not recognized (`f.kind == skUnknown` and a fatal entry) but you know what it is, name the
+standard: `openSeismic(path, opts = OpenOptions(kind: skSegy))` reads it as SEG-Y, and the
+log then holds what that reader found.
+
 ## The model in ten concepts
 
 **Trace number.** Every trace has one number: its 0-based position in the file, in file

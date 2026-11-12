@@ -309,3 +309,16 @@ func detectByteOrder*(b: openArray[byte]): ByteOrderDetection =
         result.order = order
   let h = decodeBinaryHeader(b, result.order)
   result.plausible = bytesPerSample(h.formatCode, SegyRevision(major: 2, minor: 1)) != 0
+
+func looksLikeBinaryHeader*(b: openArray[byte]): bool {.raises: [].} =
+  ## True when the first 400 bytes of `b` are a plausible binary header in
+  ## some byte order (`detectByteOrder`): a defined format code, and a sample
+  ## interval and a sample count above 0. It is what tells a SEG-Y file
+  ## whose textual header is not `C` card text (blank, zero-filled, free
+  ## text) from other data. False for fewer than 400 bytes.
+  if b.len >= BinaryHeaderSize:
+    {.cast(raises: []).}: # decoding raises only for fewer than 400 bytes
+      let det = detectByteOrder(b)
+      if det.plausible:
+        let h = decodeBinaryHeader(b, det.order)
+        result = h.effectiveSampleInterval > 0 and h.effectiveSamplesPerTrace > 0

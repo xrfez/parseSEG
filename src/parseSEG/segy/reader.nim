@@ -129,6 +129,7 @@ func looksLikeTapeLabel(b: openArray[byte]): bool =
   b[0] in {0x20'u8, 0x30'u8..0x39'u8} and b[4] == 0x53 and b[5] == 0x59
 
 func startsWithC(b: openArray[byte]): bool {.inline.} = b[0] == 0xC3 or b[0] == 0x43
+  # The first card of a textual header: `C` in EBCDIC or ASCII.
 
 func loc(r: SegyReader, trace = -1, field = ""): Location {.inline.} =
   Location(file: r.name, record: 0, trace: trace, field: field)
@@ -194,6 +195,21 @@ proc reportIssues(r: var SegyReader, h: ExtendedTextHeader, start: int64, field:
       "retention limit; stanzas and User Data are indexed but not held in memory",
       start, r.loc(field = field))
 
+proc labelBeforePlainText(r: var SegyReader, text: openArray[byte]): bool =
+  # After 128 bytes that look like a tape label and 3200 that are not card
+  # text: a label all the same when a binary header follows them and none
+  # sits at stream offset 3200, where it would be had the textual header
+  # started at byte 0. So a label is kept before a textual header that is
+  # blank, zero-filled or free text.
+  var bin = newSeq[byte](BinaryHeaderSize)
+  let got = r.readAvail(bin)
+  r.unread(bin.toOpenArray(0, got - 1))
+  if got == BinaryHeaderSize and looksLikeBinaryHeader(bin):
+    var unlabelled = newSeqOfCap[byte](BinaryHeaderSize)
+    unlabelled.add text.toOpenArray(TextHeaderSize - TapeLabelSize, TextHeaderSize - 1)
+    unlabelled.add bin.toOpenArray(0, BinaryHeaderSize - TapeLabelSize - 1)
+    result = not looksLikeBinaryHeader(unlabelled)
+
 proc readFileHeaders(r: var SegyReader) =
   # Fills r.file as it goes, so whatever was read survives a later failure.
   template f: untyped = r.file
@@ -201,7 +217,7 @@ proc readFileHeaders(r: var SegyReader) =
   var textBytes: seq[byte]
   if looksLikeTapeLabel(head):
     textBytes = r.readBlock(TextHeaderSize)
-    if startsWithC(textBytes):
+    if startsWithC(textBytes) or r.labelBeforePlainText(textBytes):
       f.tapeLabel = head
     else:
       # Not a label after all: the textual header started at byte 0.
@@ -213,6 +229,12 @@ proc readFileHeaders(r: var SegyReader) =
     textBytes.add r.readBlock(TextHeaderSize - TapeLabelSize)
   let labelLen = f.tapeLabel.len
   f.text = decodeTextHeader(textBytes)
+  if not startsWithC(textBytes):
+    # Blank, zero-filled or free text: common enough, and read all the same,
+    # but only the binary header then says that this is SEG-Y.
+    r.log.report(sevInfo, dcBadValue, "the textual header is not card text (it does not " &
+      "start with C); the file is read by its binary header",
+      if r.byteStream: int64(labelLen) else: -1, r.loc(field = "text"))
 
   let binOffset = r.offset
   let bin = r.readBlock(BinaryHeaderSize)
