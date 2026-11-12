@@ -477,46 +477,47 @@ proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
   if rel.component > 0 and k.component == 0:
     k.component = uint8(min(rel.component, 255))
 
-func stationsDiffer(a, b: TraceKeys): bool =
-  func same(x, y: float64): bool = x == y or (x.isNaN and y.isNaN)
-  not (same(a.srcLine, b.srcLine) and same(a.srcPoint, b.srcPoint) and
-    same(a.rcvLine, b.rcvLine) and same(a.rcvPoint, b.rcvPoint) and
-    a.srcIndex == b.srcIndex and a.rcvIndex == b.rcvIndex and a.component == b.component)
-
-proc join(k: var TraceKeys, g: SurveyGeometry, overwrite: bool, match: var JoinMatch): bool =
+proc join(k: var TraceKeys, g: SurveyGeometry, overwrite: bool,
+    match: var JoinMatch): set[JoinGroup] =
+  # `applySurvey` on one trace: how it matched, and the groups of values
+  # that are not what they were (none for a trace that already holds the
+  # survey's values, also with `overwrite`).
   let before = k
   match = k.joinStations(g)
-  result = stationsDiffer(before, k)
-  if match != jmAuxiliary and k.applyGeometry(g.table, overwrite): result = true
+  if match != jmAuxiliary: discard k.applyGeometry(g.table, overwrite)
+  changedGroups(before, k)
 
 proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, overwrite = false): bool =
   ## Fills `k` from the survey: the stations its header lacks
   ## (`joinStations`), then coordinates by station, offset and midpoint.
   ## `overwrite` replaces known coordinates, offset and midpoint; header
-  ## stations are never replaced. True if anything changed.
+  ## stations are never replaced. True if a value changed (false for a trace
+  ## that already holds the survey's values).
   var match: JoinMatch
-  k.join(g, overwrite, match)
+  k.join(g, overwrite, match) != {}
 
 proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, stats: var JoinStats,
     overwrite = false): int =
   ## `applySurvey` on every trace; returns the traces changed, and how they
-  ## matched in `stats`. Raises `ValueError` for an index built without
-  ## `keys = true`.
+  ## matched in `stats`. A join that changes no trace leaves the index as it
+  ## was (`keysRevision`, `joined`). Raises `ValueError` for an index built
+  ## without `keys = true`.
   ix.requireKeys()
-  ix.joined = true
   stats = JoinStats(traces: ix.keys.len)
   for i, k in ix.keys.mpairs:
-    let before = k
     var match: JoinMatch
-    if k.join(g, overwrite, match):
+    let groups = k.join(g, overwrite, match)
+    if groups != {}:
       inc result
-      ix.markJoined(i, changedGroups(before, k))
+      ix.markJoined(i, groups)
     inc stats.matches[match]
     if match != jmAuxiliary:
       if not k.hasSourceXY: inc stats.noSourceXy
       if not k.hasReceiverXY: inc stats.noReceiverXy
   stats.changed = result
-  if result > 0: inc ix.keysRevision
+  if result > 0:
+    ix.joined = true # only now: an index no join changed is still the file's own
+    inc ix.keysRevision
 
 proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, overwrite = false): int =
   ## `applySurvey` on every trace; returns the traces changed. Raises
@@ -561,15 +562,7 @@ proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, fields: GeometryFields,
     (k.srcLine, k.srcPoint, k.srcIndex) = (j.srcLine, j.srcPoint, j.srcIndex)
     (k.rcvLine, k.rcvPoint, k.rcvIndex) = (j.rcvLine, j.rcvPoint, j.rcvIndex)
     k.component = j.component
-  func same(a, b: float64): bool = a == b or (a.isNaN and b.isNaN)
-  not (same(k.srcX, before.srcX) and same(k.srcY, before.srcY) and
-    same(k.rcvX, before.rcvX) and same(k.rcvY, before.rcvY) and
-    same(k.srcZ, before.srcZ) and same(k.rcvZ, before.rcvZ) and
-    same(k.cmpX, before.cmpX) and same(k.cmpY, before.cmpY) and
-    same(k.offset, before.offset) and same(k.srcLine, before.srcLine) and
-    same(k.srcPoint, before.srcPoint) and same(k.rcvLine, before.rcvLine) and
-    same(k.rcvPoint, before.rcvPoint) and k.srcIndex == before.srcIndex and
-    k.rcvIndex == before.rcvIndex and k.component == before.component)
+  changedGroups(before, k) != {}
 
 # ------------------------------------------------------- receiver domain ---
 

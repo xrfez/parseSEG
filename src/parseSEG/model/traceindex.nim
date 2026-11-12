@@ -1066,13 +1066,14 @@ proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): in
   ## the number of traces changed. Raises `ValueError` for an index built
   ## without `keys = true`.
   ix.requireKeys()
-  ix.joined = true
   for i, k in ix.keys.mpairs:
     let before = k
     if k.applyGeometry(g, overwrite):
       inc result
       ix.markJoined(i, changedGroups(before, k))
-  if result > 0: inc ix.keysRevision
+  if result > 0:
+    ix.joined = true # only now: an index no join changed is still the file's own
+    inc ix.keysRevision
 
 # ------------------------------------------------------------ index cache --
 # The file format is `private/indexcache`.

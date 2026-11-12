@@ -309,21 +309,30 @@ proc lookup(t: Table[StationKey, Coordinates], line, point: float64, index: int1
 
 proc applyGeometry*(k: var TraceKeys, g: GeometryTable, overwrite = false): bool =
   ## Fills the trace's source and receiver coordinates from `g` (only where
-  ## unknown, unless `overwrite`), then its offset and midpoint. True if
-  ## anything changed.
+  ## unknown, unless `overwrite`), then its offset and midpoint. True if a
+  ## value changed: a trace that already holds the table's values is not
+  ## changed, with or without `overwrite`.
   ## A table z of NaN keeps a known elevation. With `overwrite`, the offset
   ## and midpoint are recomputed from the new coordinates; otherwise only
   ## unknown ones are filled (a signed SEG-Y header offset stays).
+  func values(k: TraceKeys): array[9, float64] {.inline.} =
+    [k.srcX, k.srcY, k.srcZ, k.rcvX, k.rcvY, k.rcvZ, k.offset, k.cmpX, k.cmpY]
+  let before = values(k)
   var c: Coordinates
-  result = false
+  var found = false
   if (overwrite or not k.hasSourceXY) and
       g.sources.lookup(k.srcLine, k.srcPoint, k.srcIndex, c):
     (k.srcX, k.srcY) = (c.x, c.y)
     if not c.z.isNaN: k.srcZ = c.z
-    result = true
+    found = true
   if (overwrite or not k.hasReceiverXY) and
       g.receivers.lookup(k.rcvLine, k.rcvPoint, k.rcvIndex, c):
     (k.rcvX, k.rcvY) = (c.x, c.y)
     if not c.z.isNaN: k.rcvZ = c.z
-    result = true
-  if result: k.deriveGeometry(overwrite)
+    found = true
+  result = false
+  if found:
+    k.deriveGeometry(overwrite)
+    let after = values(k)
+    for i in 0 ..< before.len:
+      if not (before[i] == after[i] or (before[i].isNaN and after[i].isNaN)): return true

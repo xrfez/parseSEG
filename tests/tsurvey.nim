@@ -611,3 +611,39 @@ block p8_geometry_overwrite_semantics:
   doAssert k.applyGeometry(g)
   doAssert k.offset == -250 and k.rcvZ == 12 and k.cmpX == 150
   doAssert k.applyGeometry(g, overwrite = true) and k.offset == 500
+
+block a_join_that_changes_nothing_is_no_change:
+  # With `overwrite` a trace that already holds the survey's values is not
+  # changed: no count, no new `keysRevision`, and the index is not "joined"
+  # (so `saveIndex` still takes it).
+  var t: GeometryTable
+  t.addReceiver(10, 101, 1, 5, 6, 7)
+  var k = initTraceKeys()
+  (k.rcvLine, k.rcvPoint) = (10.0, 101.0)
+  doAssert k.applyGeometry(t, overwrite = true) and k.rcvX == 5 and k.rcvZ == 7
+  doAssert not k.applyGeometry(t, overwrite = true) and not k.applyGeometry(t)
+  k.rcvZ = 8
+  doAssert k.applyGeometry(t, overwrite = true) and k.rcvZ == 7, "only the elevation differed"
+  let dir = getTempDir() / "tsurvey_nochange"
+  createDir(dir)
+  writeRecordSegd(dir / "record.sgd") # file 63, channel 1: source 20/99.5, receiver 10/104
+  var g: SurveyGeometry
+  g.addSps(parseSps([H00,
+    r21('R', "10.00", "104.00", '1', "G1", "500100.0", "6000000.0", "12.5"),
+    r21('S', "20.00", "99.50", '1', "V6", "500000.0", "6000400.0", "10.0", " 19001150")].join("\n")))
+  var f = openSeismic(dir / "record.sgd", keys = true)
+  var stats: JoinStats
+  doAssert f.applySurvey(initSurveyGeometry(), stats) == 0 and stats.changed == 0
+  doAssert f.index.applyGeometry(GeometryTable()) == 0
+  doAssert f.keysRevision == 0 and not f.index.joined
+  f.saveIndex(dir / "record.idx") # an index no join changed is the file's own
+  doAssert f.applySurvey(g, stats, overwrite = true) == 1 and stats.changed == 1
+  doAssert f.keysRevision == 1 and f.index.joined
+  let joined = f.index.joinedGroups(0)
+  for _ in 1 .. 2:
+    doAssert f.applySurvey(g, stats, overwrite = true) == 0 and stats.changed == 0, $stats
+    doAssert stats.matches[jmStations] == 1 and f.index.applyGeometry(g.table, true) == 0
+    doAssert f.keysRevision == 1 and f.index.joinedGroups(0) == joined
+  doAssertRaises(ValueError): f.saveIndex(dir / "record.idx")
+  f.close()
+  removeDir(dir)

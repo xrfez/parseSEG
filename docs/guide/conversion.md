@@ -109,7 +109,9 @@ file's. Stations a header has are never replaced; the relations only fill the on
 
 Then coordinates come from the stations, then offset and midpoint. `overwrite` replaces
 coordinates already known, never stations. Auxiliary traces are left alone. A `JoinStats`
-says how the traces matched.
+says how the traces matched and how many changed: a trace that already holds the survey's
+values is not a change, so joining the same survey again changes nothing (`keysRevision`
+stays, and an index no join changed can still be saved with `saveIndex`).
 
 ```nim
 import std/math
