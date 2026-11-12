@@ -88,8 +88,9 @@ doAssert log.len == 0 and data.shape == [199, 2001]
 
 `isFatal` on an index log means "the walk stopped early", not "the file is unusable": decide
 from `f.len` and the entry's location whether what was indexed is enough. It holds the other
-way round too: a walk or a streaming read that stops before the end of the data always
-leaves a `fatal` entry, whatever stopped it, so a log without one covers the whole file.
+way round too: whatever makes a walk or a streaming read stop where it cannot go on (a
+failed read, a damaged tape image, a record it cannot locate) leaves a `fatal` entry, so
+without one the reader came to the end it was looking for.
 
 ### Traces that cannot be decoded
 
