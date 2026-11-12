@@ -18,8 +18,9 @@
 ## - Rev 1.0 line and point names are text; `line`/`point` hold their numeric
 ##   value when the name is a number, else NaN (see `survey/join` for line
 ##   name maps).
-## - The revision comes from H00 (`SPS 2.1` / `SPS001`), else from the
-##   column layout of the first data records, unless the caller sets it.
+## - The revision comes from H00 (`SPS 2.1` / `SPS001`, also `SPS V1.0`,
+##   `SPS REV 2.1`), else from the column layout of the first data records
+##   (a warning says which was taken), unless the caller sets it.
 
 import std/[options, streams, strutils, math]
 import ../common/[diagnostics, errors, outputfile]
@@ -301,35 +302,92 @@ proc parseHeader(line: string): SpsHeader =
   result.raw = line
 
 func revisionFromH00(data: string): (bool, SpsRevision) =
-  ## `SPS001,<date>` (1.0) or `SPS 2.1;` (2.1); blanks are ignored. 1.0 dates
-  ## such as `12.10.90` contain "2.1", so the marker is matched with its
+  ## The revision an H00 record declares: `SPS001,<date>` (1.0) or `SPS 2.1;`
+  ## (2.1), and the spellings in use (`SPS 1.0`, `SPS V1.0`, `SPS REV 2.1`,
+  ## `SPS Revision 2.1`); blanks and case are ignored. 1.0 dates such as
+  ## `12.10.90` contain "2.1", so the number is matched right after its
   ## `SPS` prefix.
   var d = ""
   for c in data:
     if c != ' ': d.add c.toUpperAscii
-  if d.startsWith("SPS001") or d.startsWith("SPS1.") or d.startsWith("SPS1,") or
-      d.startsWith("SPS1;"):
-    (true, sps10)
-  elif d.startsWith("SPS2.1") or d.startsWith("SPSV2.1") or d.startsWith("SPSREV2.1"):
-    (true, sps21)
+  if not d.startsWith("SPS"): return (false, sps21)
+  var i = 3
+  for word in ["REVISION", "VERSION", "REV", "VER", "V"]:
+    if i == 3 and d.continuesWith(word, i): i += word.len
+  if i > 3 and i < d.len and d[i] == '.': inc i # "REV. 1.0"
+  let next = if i + 1 < d.len: d[i + 1] else: ';'
+  if d.continuesWith("001", i): (true, sps10)
+  elif d.continuesWith("2.1", i) and (i + 3 >= d.len or d[i + 3] notin Digits): (true, sps21)
+  elif d.continuesWith("1", i) and next notin Digits: (true, sps10) # "1.0", "1,", "1;"
   else: (false, sps21)
 
+func rightInt(line: string, first, last: int): bool =
+  # An `Iw` field in columns `first..last`: digits ending in the last
+  # column, with at most a sign and blanks before them.
+  if line.colChar(last) notin Digits: return false
+  var i = last
+  while i >= first and line.colChar(i) in Digits: dec i
+  if i >= first and line.colChar(i) in {'-', '+'}: dec i
+  while i >= first:
+    if line.colChar(i) != ' ': return false
+    dec i
+  true
+
 func layoutScore(line: string): int =
-  ## > 0 votes for 2.1, < 0 for 1.0, from a data record's columns.
-  result = 0
+  ## 1 when a data record's columns fit the Rev 2.1 layout better, -1 for
+  ## Rev 1.0, 0 when they fit both alike. Each layout has structural rules
+  ## (where its fields end, which columns are blank, digits or letters), and
+  ## the record votes for the layout whose rules it satisfies more of.
+  ## Counting numeric fields instead read 1.0 files with numeric line names,
+  ## five-digit points or relation records as 2.1.
+  var s21, s10 = 0
+  template rule(v: var int, cond: bool) =
+    if cond: inc v
+  const digitOrBlank = Digits + {' '}
   case line[0]
   of 'R', 'S':
-    if line.col(22, 23).isBlank and line.colChar(24) in Digits: inc result
-    if line.colChar(26) in Digits and line.colChar(24) notin Digits: dec result
-    if parseFortranFloat(line.col(2, 11)).isSome and parseFortranFloat(line.col(12, 21)).isSome and
-        not line.col(12, 21).isBlank:
-      inc result
-    else: dec result
+    # 2.1: F10.2 line and point right-justified in 2-11 and 12-21, 22-23
+    # blank, index 24, code 25-26, static I4 27-30.
+    let line21 = parseFortranFloat(line.col(2, 11)).get(NaN)
+    rule s21, line.colChar(11) != ' '
+    rule s21, line.colChar(21) != ' '
+    rule s21, line.col(22, 23).isBlank
+    rule s21, line.colChar(24) in digitOrBlank
+    rule s21, line.colChar(25) in Letters
+    rule s21, line.colChar(27) notin Letters
+    rule s21, line21.classify == fcNormal or line.col(2, 11).strip == "0"
+    # 1.0: line name left-justified from 2, point right-justified in 18-25,
+    # index 26, code 27-28.
+    rule s10, line.colChar(2) != ' '
+    rule s10, line.colChar(25) != ' ' or line.colChar(18) != ' '
+    rule s10, line.colChar(26) in digitOrBlank
+    rule s10, line.colChar(27) in Letters
+    rule s10, line.colChar(28) != ' '
+    rule s10, line.col(12, 17).isBlank or line.colChar(11) != ' ' # a name has no inner gap
+    rule s10, line.colChar(25) notin Letters or line.colChar(24) in Letters
   of 'X', 'O':
-    if parseFortranFloat(line.col(18, 27)).isSome and parseFortranFloat(line.col(28, 37)).isSome:
-      inc result
-    else: dec result
+    # 2.1: record I8 in 8-15, increment 16, line F10.2 ending in 27,
+    # channels I5 in 39-43 and 44-48, increment 49, receivers ending in 59, 69.
+    rule s21, rightInt(line, 8, 15)
+    rule s21, line.colChar(16) in digitOrBlank
+    rule s21, line.colChar(27) != ' '
+    rule s21, rightInt(line, 39, 43)
+    rule s21, rightInt(line, 44, 48)
+    rule s21, line.colChar(49) in digitOrBlank
+    rule s21, line.colChar(59) != ' '
+    rule s21, line.colChar(69) != ' '
+    # 1.0: record I4 in 8-11, increment 12, line name from 14, channels I4
+    # in 39-42 and 43-46, increment 47, receiver line name from 48.
+    rule s10, rightInt(line, 8, 11)
+    rule s10, line.colChar(12) in digitOrBlank
+    rule s10, line.colChar(14) != ' '
+    rule s10, rightInt(line, 39, 42)
+    rule s10, rightInt(line, 43, 46)
+    rule s10, line.colChar(47) in digitOrBlank
+    rule s10, line.colChar(48) != ' '
+    rule s10, line.colChar(71) != ' '
   else: discard
+  cmp(s21, s10)
 
 proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
   ## Reads SPS records from `s`. Problems are in `result.log`; only an I/O
@@ -356,8 +414,11 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
           if seen >= 50: break
     if rev == spsAuto:
       rev = if score >= 0: sps21 else: sps10
-      result.log.report(sevInfo, dcUnsupportedRevision, "no SPS revision in H00; read as " &
-        $rev & " from the column layout", loc = Location(file: name))
+      # A guess the caller should see: the two layouts share few columns,
+      # so a wrong one reads every line, point and channel from other bytes.
+      result.log.report(sevWarning, dcUnsupportedRevision, "no SPS revision in H00; read as " &
+        $rev & " from the column layout (set SpsOptions.revision to choose)",
+        loc = Location(file: name))
     s.setPosition(start)
   result.revision = rev
   result.options = opts

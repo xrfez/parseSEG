@@ -436,14 +436,19 @@ In 1.0, the R sort on alphanumeric line names is a string sort. The 2.1 R sort i
 | H00 data (cols 33-80) | `SPS001,...` (any non-"2.1") | `SPS 2.1` [2.1 p.15] | primary, if present |
 | H023 present | never | optional | proves 2.1 |
 | H31 | meaningful | "Obsolete" | weak |
-| R/S cols 22-23 | part of the point number (often digits) | **blank** | strong |
+| R/S cols 22-23 | part of the point number (blank for points of up to 3 digits) | **blank** | medium |
 | R/S col 24 / col 26 | col 26 = index digit | col 24 = index digit, cols 25-26 = code | strong |
-| R/S cols 2-11, 12-21 | free text | both parse as F10.2 (often with `.` at col 9 and col 19) | strong |
+| R/S cols 2-11, 12-21 | free text | both parse as F10.2 (often with `.` at col 9 and col 19) | weak: a numeric 1.0 line name and a 5-digit point parse too |
 | X col 49 / col 47 | 47 = channel increment | 49 = channel increment, cols 44-48 to-channel | medium |
 
-Proposed algorithm: if H00 contains `2.1`, use 2.1. If it contains `SPS001` (or another 1.x
-marker), use 1.0. Otherwise score the first ~50 data records with the column heuristics, and let
-a caller override win.
+Algorithm: if H00 declares `SPS 2.1` (also `SPS V2.1`, `SPS REV 2.1`), use 2.1. If it declares
+`SPS001` or `SPS 1.0` (`SPS V1.0`, `SPS REV 1.0`), use 1.0. Otherwise each of the first 50 data
+records votes for the layout whose structural rules it satisfies more of (where the fields
+end, which columns are blank, digits or letters: R/S cols 11, 21, 22-28; X the right-justified
+`Iw` fields at 8-15, 39-43, 44-48 against 8-11, 39-42, 43-46), ties count for 2.1, and the reader
+warns that the revision was not declared. A caller's choice wins. Whether the fields parse as
+numbers does not separate the layouts: 1.0 files with numeric line names, five-digit points
+or relation records pass as 2.1 on that test.
 
 > **AMBIGUITY:** There is no mandated machine-readable version token. 2.1 says only the version
 > "should be in this format. Example: SPS 2.1;" [2.1 p.15].

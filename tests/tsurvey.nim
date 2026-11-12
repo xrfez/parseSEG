@@ -8,6 +8,7 @@ import parseSEG
 import parseSEG/common/ebcdic
 import parseSEG/survey/cards # column helpers (internal)
 import ../tools/demofiles
+from ./utils/testutils import has
 
 proc rec(first: char, fields: openArray[(int, string)]): string =
   ## An 80-column record with `fields` placed at their 1-based columns.
@@ -83,7 +84,7 @@ block sps_edit_reencodes:
 block sps_revision_from_columns:
   let f = parseSps([rcv1, x1].join("\n"))
   doAssert f.revision == sps21 and not f.revisionDeclared
-  doAssert f.log.count(sevInfo) == 1
+  doAssert f.log.count(sevWarning) == 1 and f.log.len == 1 # a guess: the caller should know
   # A 1.0 record: 16-column line name, point right-adjusted in 18-25.
   let r10 = rec('R', [(2, "91LW1124"), (18, "225".align(8)), (26, "1G1"),
     (47, "238570.0".align(9)), (56, "3058380.0".align(10)), (66, "106.8".align(6)),
@@ -682,3 +683,64 @@ block a_station_part_in_the_header_checks_the_relation:
   # A point index the header has is a part too.
   k = traceAt(63, 1, (NaN, 100.0), none, srcIndex = 2)
   doAssert k.joinStations(g) == jmConflict and k.srcIndex == 2
+
+block sps10_without_h00_is_read_as_10:
+  # Records the library's own 1.0 encoder writes, read back without an H00
+  # record: the columns decide, also for numeric line names, five-digit
+  # points and relation records (they used to be read with the 2.1 columns).
+  proc point10(line, point: string): string =
+    var p = initSpsPoint(pkReceiver)
+    (p.lineName, p.line) = (line, parseFortranFloat(line).get(NaN))
+    (p.pointName, p.point) = (point, parseFortranFloat(point).get(NaN))
+    (p.code, p.easting, p.northing, p.elevation) = ("G1", 500000.0, 6000000.0, 100.0)
+    encodeSps(p, sps10)
+  proc relation10(record: int, srcLine, srcPoint, rcvLine, fromR, toR: string,
+      toCh: int): string =
+    var r = initSpsRelation()
+    (r.fieldTape, r.fieldRecord, r.fromChannel, r.toChannel) = ("T1", int64(record), 1'i64,
+      int64(toCh))
+    (r.srcLineName, r.srcLine) = (srcLine, parseFortranFloat(srcLine).get(NaN))
+    (r.srcPointName, r.srcPoint) = (srcPoint, parseFortranFloat(srcPoint).get(NaN))
+    (r.rcvLineName, r.rcvLine) = (rcvLine, parseFortranFloat(rcvLine).get(NaN))
+    (r.fromReceiverName, r.fromReceiver) = (fromR, parseFortranFloat(fromR).get(NaN))
+    (r.toReceiverName, r.toReceiver) = (toR, parseFortranFloat(toR).get(NaN))
+    encodeSps(r, sps10)
+  var text = ""
+  for i in 0 ..< 60: text.add point10("1001", $(10001 + i)) & "\r\n"
+  var f = parseSps(text)
+  doAssert f.revision == sps10 and not f.revisionDeclared
+  doAssert f.log.count(sevWarning) == 1 and f.log.has("no SPS revision in H00", sevWarning)
+  doAssert f.points[0].line == 1001 and f.points[0].point == 10001 and f.points[0].index == 1
+  doAssert f.points[0].code == "G1" and f.points[59].point == 10060
+  for (lineName, point, last) in [("91LW1124", "225", 261), ("1228.339", "7", 99)]:
+    f = parseSps(point10(lineName, point) & "\n")
+    doAssert f.revision == sps10 and f.points[0].lineName == lineName, lineName
+    doAssert f.points[0].point == parseFloat(point) and f.points[0].code == "G1"
+  # The spec's own 1.0 X example shape (alphanumeric lines), and numeric lines.
+  f = parseSps(relation10(1, "91LW1117", "225", "91LW1124", "225", "261", 37) & "\n")
+  doAssert f.revision == sps10 and f.log.count(sevWarning) == 1, $f.log
+  var r = f.relations[0]
+  doAssert r.fieldRecord == 1 and r.srcLineName == "91LW1117" and r.srcPoint == 225
+  doAssert r.fromChannel == 1 and r.toChannel == 37 and r.channelIncrement == 1
+  doAssert r.rcvLineName == "91LW1124" and r.fromReceiver == 225 and r.toReceiver == 261
+  f = parseSps(relation10(7, "1001", "10225", "2001", "10101", "10220", 120) & "\n")
+  doAssert f.revision == sps10
+  r = f.relations[0]
+  doAssert r.fieldRecord == 7 and r.srcLine == 1001 and r.srcPoint == 10225 and r.toChannel == 120
+  doAssert r.rcvLine == 2001 and r.fromReceiver == 10101 and r.toReceiver == 10220
+  # The 2.1 records of the same values still read as 2.1.
+  f = parseSps([rcv1, rcv2, src1, x1].join("\n"))
+  doAssert f.revision == sps21 and f.points[0].point == 534550 and f.relations[0].toChannel == 320
+  # A caller's revision is no guess: nothing to warn about.
+  doAssert parseSps(rcv1, opts = SpsOptions(revision: sps21)).log.len == 0
+
+block sps_h00_spellings_of_the_revision:
+  for (data, rev) in [("SPS001,01.10.90;", sps10), ("SPS V1.0", sps10), ("SPS REV 1.0", sps10),
+      ("SPS 1.0;", sps10), ("sps rev. 1.0", sps10), ("SPS 2.1;", sps21), ("SPS V2.1", sps21),
+      ("SPS REV 2.1", sps21), ("SPS Revision 2.1", sps21), ("SPS Version 1.0", sps10)]:
+    let f = parseSps("H00 SPS format version num.     " & data & "\n")
+    doAssert f.revisionDeclared and f.revision == rev, data
+  # Not a revision: the columns decide (no data records: 2.1), with a warning.
+  for data in ["SEG-P1", "SPS", "SPS 12.10.90", "SPS 3.0", "12.10.90 SPS 2.1"]:
+    let f = parseSps("H00 SPS format version num.     " & data & "\n")
+    doAssert not f.revisionDeclared and f.log.count(sevWarning) == 1, data

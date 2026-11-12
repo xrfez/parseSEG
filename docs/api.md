@@ -107,7 +107,7 @@ in the receiver domain. Traces are joined by their stations; record numbers are 
 
 | Proc | What |
 |---|---|
-| `readSps(path or stream, SpsOptions)`, `parseSps(text)` → `SpsFile` | H, R/S (`points`, `kind` `pkReceiver`/`pkSource`), X and O (`relations`, `recordType`) and C records; revision from H00 or the columns. Every record keeps its raw text. Blank integers are `MissingInt`, blank reals NaN. |
+| `readSps(path or stream, SpsOptions)`, `parseSps(text)` → `SpsFile` | H, R/S (`points`, `kind` `pkReceiver`/`pkSource`), X and O (`relations`, `recordType`) and C records; revision from H00, else from the column layout of the first data records with a warning (`SpsOptions.revision` chooses). Every record keeps its raw text. Blank integers are `MissingInt`, blank reals NaN. |
 | `writeSps(f, path or stream, SpsWriteOptions(revision, lineEnding, lenient))`, `spsText(f)` (a `SurveyText`: `text`, `log`), `encodeSps(record, rev)` | Column-exact; unchanged records byte for byte; 1.0 ↔ 2.1. A value that does not fit is an error and nothing is written (unless `lenient`). |
 | `readP1(path or stream, P1Options(gridDecimals, depthDecimals, angleUnit))`, `parseP1` → `P1File` | Logical files (`files`), each with its header text and records; P1 decoded, P2-P4 kept raw. |
 | `writeP1(f, path or stream, P1WriteOptions)`, `p1Text(f)` (a `SurveyText`), `encodeP1(record, opts)` | Header blocks padded to 20 records; unchanged records byte for byte. |
