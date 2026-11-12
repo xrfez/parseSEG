@@ -370,7 +370,8 @@ proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
       result.mediumSize = getFileSize(src.name)
     except CatchableError:
       discard # not a plain file (e.g. a pipe): no size limit
-  if not result.log.tryRecord(result.loc(), result.readFileHeaders()):
+  # A failure here, and in `readTrace`, ends the read: always a fatal entry.
+  if not result.log.tryRecordFatal(result.loc(), result.readFileHeaders()):
     result.done = true
   if result.log.isFatal: result.done = true
 
@@ -544,7 +545,7 @@ proc readTrace*(r: var SegyReader, t: var SegyTrace): bool =
   if r.done:
     return false
   var more = false
-  let ok = r.log.tryRecord(r.loc(r.tracesRead)):
+  let ok = r.log.tryRecordFatal(r.loc(r.tracesRead)):
     more = r.nextTrace(t)
   if ok and more:
     result = true

@@ -119,10 +119,12 @@ func isFatal*(log: DiagLog): bool {.inline.} =
 
 # ---------------------------------------------------------------- boundary --
 
-proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError) =
+proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError;
+    fatal = false) =
   ## Converts a caught exception into a diagnostic. Truncation, unlocatable
   ## data and I/O failures are fatal; format violations are errors; anything
-  ## else is an internal error.
+  ## else is an internal error. With `fatal`, for a failure that ends the
+  ## operation, the entry is fatal whatever was raised.
   let offset = if e of SegError: (ref SegError)(e).offset else: -1'i64
   let (severity, code) =
     if e of SegTruncatedError: (sevFatal, dcTruncated)
@@ -131,7 +133,7 @@ proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError) =
     elif e of SegFormatError: (sevError, dcBadValue)
     elif e of IOError or e of OSError: (sevFatal, dcIo)
     else: (sevError, dcInternal)
-  log.report(severity, code, e.msg, offset, loc)
+  log.report(if fatal: sevFatal else: severity, code, e.msg, offset, loc)
 
 proc raiseUnlocatable*(code: DiagCode, msg: string, offset: int64 = -1) {.noinline, noreturn.} =
   ## Raises `SegUnlocatableError`: the reader cannot locate the rest of the
@@ -142,7 +144,8 @@ template tryRecord*(log: var DiagLog; loc: Location; body: untyped): bool =
   ## Runs `body`; if it raises a `CatchableError`, records it in `log` (see
   ## `recordException`) and evaluates to false. Evaluates to true on success.
   ## Use at the record/trace boundary so one bad part never aborts the read;
-  ## stop reading when `log.isFatal`.
+  ## stop reading when `log.isFatal`. Where any failure ends the read, use
+  ## `tryRecordFatal`.
   block:
     var ok = false
     try:
@@ -150,6 +153,20 @@ template tryRecord*(log: var DiagLog; loc: Location; body: untyped): bool =
       ok = true
     except CatchableError as e:
       recordException(log, loc, e)
+    ok
+
+template tryRecordFatal*(log: var DiagLog; loc: Location; body: untyped): bool =
+  ## `tryRecord` for a boundary where a failure ends the read: whatever
+  ## `body` raises is recorded as `fatal` (`recordException` with `fatal`),
+  ## so a read that stopped early always has `isFatal`. Stop reading when it
+  ## evaluates to false.
+  block:
+    var ok = false
+    try:
+      body
+      ok = true
+    except CatchableError as e:
+      recordException(log, loc, e, fatal = true)
     ok
 
 # --------------------------------------------------------------------- NIF --

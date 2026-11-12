@@ -87,7 +87,9 @@ doAssert log.len == 0 and data.shape == [199, 2001]
 ```
 
 `isFatal` on an index log means "the walk stopped early", not "the file is unusable": decide
-from `f.len` and the entry's location whether what was indexed is enough.
+from `f.len` and the entry's location whether what was indexed is enough. It holds the other
+way round too: a walk or a streaming read that stops before the end of the data always
+leaves a `fatal` entry, whatever stopped it, so a log without one covers the whole file.
 
 ### Traces that cannot be decoded
 
@@ -121,7 +123,7 @@ The table gives each code's stable name (as `$` and NIF print it); the `DiagCode
 | `unknownBlock` | A header block type the standard does not define | Kept raw (listed as `hbRaw`); nothing is lost |
 | `vendorBlock` | A vendor block with no registered decoder | Kept raw; add a vendor map (`docs/design/vendor_maps.md`) to decode it |
 | `vendorMap` | A vendor map is malformed or does not fit | Fix the map; the block stays raw |
-| `tapeLayout` | Tape marks, labels or block sizes off the spec | Usually harmless on disk copies of tapes |
+| `tapeLayout` | Tape marks, labels or block sizes off the spec; a tape image (`.tap`) with a record it cannot frame (a bad record class, a trailer word that differs from its header) | `warning`: usually harmless on disk copies of tapes. `fatal`: the image is damaged there, and the read has what came before |
 | `validation` | A writer or converter found something the target cannot hold or forbids; also conversion loss notes (`info`) | `error`: nothing was written unless `lenient`. `info`: read the note, it says what was dropped |
 | `multiplexed` | The file holds multiplexed SEG-D, demultiplexed into a temporary copy | `warning`: reads and keys use the copy (`f.demuxPath`); edits need a demultiplexed file |
 | `cancelled` | A `Progress` hook returned false during a conversion (`dcCancelled`; opening and exporting raise `SegCancelledError` instead) | `fatal`: nothing was written; run it again to finish |

@@ -147,16 +147,24 @@ block tape_image_corruption:
   except SegTruncatedError as e:
     doAssert e.offset == 4
   src.close
-  writeFile path, "\x02\x00\x00\x00ab\x03\x00\x00\x00"
-  src = openTapeImageSource(path)
-  doAssertRaises SegFormatError:
-    discard src.readRecord(buf)
-  src.close
-  writeFile path, "\x02\x00\x00\x80ab\x02\x00\x00\x80"
-  src = openTapeImageSource(path)
-  doAssertRaises SegFormatError:
-    discard src.readRecord(buf)
-  src.close
+  # A trailer word that differs from the header word, and a record class
+  # other than 0: where the next record starts is unknown, so both are
+  # unlocatable (fatal at a reader's boundary) with the tape layout code.
+  for (image, offset) in [("\x02\x00\x00\x00ab\x03\x00\x00\x00", 6),
+      ("\x02\x00\x00\x80ab\x02\x00\x00\x80", 0)]:
+    writeFile path, image
+    src = openTapeImageSource(path)
+    try:
+      discard src.readRecord(buf)
+      doAssert false, "a damaged record must raise"
+    except SegUnlocatableError as e:
+      doAssert e.diagCode == dcTapeLayout and e.offset == offset
+    src.close
+    var log = DiagLog()
+    src = openTapeImageSource(path)
+    doAssert not log.tryRecord(Location(file: path), (discard src.readRecord(buf)))
+    doAssert log.isFatal and log[0].code == dcTapeLayout
+    src.close
   let sink = openTapeImageSink(path)
   doAssertRaises SegFormatError:
     sink.writeRecord newSeq[byte]()

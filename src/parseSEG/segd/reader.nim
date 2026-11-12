@@ -498,7 +498,10 @@ proc openSegd*(src: RecordSource, twosComplement8015 = false,
     maxHeaderBytes: DefaultMaxHeaderBytes, maxTraceBytes: DefaultMaxTraceBytes,
     headersOnly: headersOnly)
   if headersOnly: result.input.cursor.preferSmallReads()
-  if not result.log.tryRecord(Location(file: src.name, field: "label"), result.readLabel()):
+  # A failure here, and wherever the reader stops on one (`nextRecord`,
+  # `readTrace`), ends the read: always a fatal entry.
+  if not result.log.tryRecordFatal(Location(file: src.name, field: "label"),
+      result.readLabel()):
     result.done = true
 
 # ---------------------------------------------------------------- headers --
@@ -1045,10 +1048,10 @@ proc readTrace*(r: var SegdReader, t: var SegdTrace): bool =
     return false
   if r.tracesRead >= r.record.traceCount:
     r.inRecord = false
-    discard r.log.tryRecord(r.loc(field = "trailer"), r.readRecordTrailer())
-    if r.log.isFatal: r.stop()
+    # A trailer that cannot be read leaves the next record unlocated.
+    if not r.log.tryRecordFatal(r.loc(field = "trailer"), r.readRecordTrailer()): r.stop()
     return false
-  let ok = r.log.tryRecord(r.loc(r.tracesRead)):
+  let ok = r.log.tryRecordFatal(r.loc(r.tracesRead)):
     if r.record.multiplexed: r.readMuxTrace(t) else: r.readTraceBody(t)
   if ok:
     result = true
@@ -1089,7 +1092,7 @@ proc nextRecord*(r: var SegdReader): bool =
   var toc = true
   while toc:
     var more = false
-    let ok = r.log.tryRecord(Location(file: r.name, record: r.records)):
+    let ok = r.log.tryRecordFatal(Location(file: r.name, record: r.records)):
       while r.input.stoppedAt == rkTapeMark: r.input.skipTapeMark()
       more = r.input.atData
       if more:
@@ -1098,7 +1101,7 @@ proc nextRecord*(r: var SegdReader): bool =
         r.input.unread(peek.toOpenArray(0, got - 1))
         toc = isTocFile(peek.toOpenArray(0, got - 1))
     if not ok or not more or
-        (toc and not r.log.tryRecord(Location(file: r.name, field: "toc"), r.readToc())):
+        (toc and not r.log.tryRecordFatal(Location(file: r.name, field: "toc"), r.readToc())):
       r.stop()
       return false
   let index = r.records
@@ -1108,7 +1111,7 @@ proc nextRecord*(r: var SegdReader): bool =
   r.lastChannelSet = SegdChannelSetRef(scanType: -1, channelSet: -1)
   r.mux = MuxBody()
   r.record = SegdRecord(index: index) # not the previous record if GH#1 cannot be read
-  if r.log.tryRecord(r.loc(), r.readRecordHeaders(index)):
+  if r.log.tryRecordFatal(r.loc(), r.readRecordHeaders(index)):
     r.inRecord = true
     result = true
   else:

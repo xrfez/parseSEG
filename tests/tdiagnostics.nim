@@ -63,6 +63,32 @@ block boundary_maps_exceptions:
   doAssert log[2].severity == sevFatal and log[2].code == dcIo and log[2].offset == -1
   doAssert log[3].severity == sevError and log[3].code == dcInternal
 
+block stop_boundary_always_records_fatal:
+  # Where a failure ends the read, the entry is fatal whatever was raised,
+  # so `isFatal` tells every read that stopped early.
+  var log = DiagLog()
+  let loc = Location(record: 1)
+  let ok = log.tryRecordFatal(loc):
+    discard 1
+  doAssert ok and log.len == 0
+  for i in 0..4:
+    let passed = log.tryRecordFatal(loc):
+      case i
+      of 0: raiseFormat("bad", offset = 99)
+      of 1: raiseTruncated("short", offset = 120)
+      of 2: raise newException(IOError, "disk")
+      of 3: raiseUnlocatable(dcTapeLayout, "class", offset = 7)
+      else: raise newException(KeyError, "oops")
+    doAssert not passed and log.isFatal
+  doAssert log.len == 5 and log.count(sevFatal) == 5
+  doAssert log[0].code == dcBadValue and log[0].offset == 99 and log[0].msg == "bad"
+  doAssert log[1].code == dcTruncated and log[2].code == dcIo
+  doAssert log[3].code == dcTapeLayout and log[3].offset == 7
+  doAssert log[4].code == dcInternal and log[4].loc.record == 1
+  doAssertRaises AssertionDefect:
+    discard log.tryRecordFatal(Location()):
+      doAssert false
+
 block boundary_lets_defects_through:
   var log = DiagLog()
   doAssertRaises AssertionDefect:

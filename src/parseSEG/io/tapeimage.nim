@@ -6,10 +6,13 @@
 ## `0xFFFEFFFF` is an erase gap (skipped). In the standard SIMH format odd
 ## records are padded with one zero byte (not counted in `len`); E11 images
 ## are not padded (`padOdd = false`). The top 4 bits of `len` are a record
-## class; class 0 is good data, anything else is reported as an error.
+## class; class 0 is good data. Any other class, and a trailer word that
+## differs from its header word, raise `SegUnlocatableError` (`dcTapeLayout`):
+## where the next record starts is then unknown, so readers stop there with a
+## fatal entry.
 
 from std/strutils import toHex
-import ../common/errors
+import ../common/[errors, diagnostics]
 import records
 
 const
@@ -67,7 +70,9 @@ method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): Rec
     elif word == TapMark:
       result = rkTapeMark
     elif (word and TapClassMask) != 0:
-      raiseFormat("tape image record class 0x" & toHex(word shr 28, 1) &
+      # The length of such a record is not known to be one, so the next
+      # record cannot be located: readers stop (a fatal `tapeLayout` entry).
+      raiseUnlocatable(dcTapeLayout, "tape image record class 0x" & toHex(word shr 28, 1) &
         " (bad or private record) is not supported", start)
     else:
       let n = int(word)
@@ -84,8 +89,8 @@ method readRecordImpl*(s: TapeImageSource; buf: var seq[byte]; maxLen: int): Rec
       var trailer = 0'u32
       discard s.readWord("a record trailer", atEofOk = false, trailer)
       if trailer != word:
-        raiseFormat("tape image record trailer " & $trailer & " does not match header " &
-          $word, s.offset - 4)
+        raiseUnlocatable(dcTapeLayout, "tape image record trailer " & $trailer &
+          " does not match header " & $word, s.offset - 4)
       result = rkData
 
 method close*(s: TapeImageSource) {.raises: [CatchableError].} =

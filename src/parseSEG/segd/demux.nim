@@ -64,7 +64,8 @@ proc demultiplexSegd*(src: RecordSource, sink: RecordSink,
   ## demultiplexed records are copied unchanged. A multiplexed record is held
   ## in memory while it is copied. Returns the reader's diagnostics, then the
   ## copy's: a record the writer refuses (as it would refuse to write it from
-  ## memory) ends the copy with an error entry.
+  ## memory) ends the copy with a fatal entry, and the copy lacks every
+  ## record from there on.
   ## `twosComplement8015` reads 0015 words as two's complement (the copy then
   ## needs the same option for 8015).
   var r = openSegd(src, twosComplement8015)
@@ -79,13 +80,13 @@ proc demultiplexSegd*(src: RecordSource, sink: RecordSink,
       while r.readTrace(t): traces.add t
       var rec = demultiplexedRecord(r.record)
       fitTraceLengths(rec, traces, copyLog, loc)
-      let ok = copyLog.tryRecord(loc):
+      let ok = copyLog.tryRecordFatal(loc):
         w.writeRecordHeaders(rec)
         for x in traces: w.writeTrace(x)
         w.endRecord(rec.trailer)
       broken = not ok
     else:
-      let ok = copyLog.tryRecord(loc):
+      let ok = copyLog.tryRecordFatal(loc):
         w.writeRecordHeaders(r.record)
         while r.readTrace(t): w.writeTrace(t)
         if r.record.isRev3:

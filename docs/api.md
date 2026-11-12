@@ -264,8 +264,10 @@ fatal diagnostic.
 ## Diagnostics
 `DiagLog` (`len`, `[]`, `items`, `pairs`, `add`, `report`, `count(severity)`, `hasErrors`, `isFatal`, `toNif`, `writeNif`), `Diagnostic`,
 `Severity`, `DiagCode`, `Location`, and `readDiagnostics` / `parseDiagnostics` for NIF round
-trips. `recordException(log, loc, e)` turns a caught exception into a diagnostic, and
-`tryRecord(log, loc): body` runs `body` and records what it raises (false then).
+trips. `recordException(log, loc, e, fatal = false)` turns a caught exception into a
+diagnostic, and `tryRecord(log, loc): body` runs `body` and records what it raises (false
+then). `tryRecordFatal(log, loc): body` is the same where a failure ends the read: the entry
+is `fatal` whatever was raised, which is how every reader that stops early has `isFatal`.
 
 Exceptions: `SegError` (base) → `SegFormatError` → `SegTruncatedError` (data ran out) and
 `SegUnlocatableError` (the rest of the data cannot be located; readers stop);
