@@ -243,7 +243,10 @@ func integer*(h: Seg2Header, key: string): Option[int64] =
   ## The first number of keyword `key`'s value when it is integral; none
   ## otherwise. Large values (station numbers past 32767) are accepted.
   let n = h.number(key)
-  if n.isSome and n.get == float64(int64(n.get)): some(int64(n.get)) else: none(int64)
+  # Asked before converting: NaN, the infinities and values past int64 have
+  # no int64 (the conversion is undefined behaviour in C).
+  if n.isSome and abs(n.get) < 9.2e18 and n.get == trunc(n.get): some(int64(n.get))
+  else: none(int64)
 
 func enumValue[E: enum](h: Seg2Header, key: string): Option[E] =
   let v = h.value(key)
@@ -312,14 +315,18 @@ func units*(f: Seg2File): Option[Seg2Units] {.inline.} =
 const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT",
   "NOV", "DEC"]
 
+func smallInt(s: string, v: var int): bool =
+  # A date or clock part: 1 to 4 digits and nothing else. The strings are
+  # free text, and `parseInt` raises `ValueError` past 19 digits.
+  s.len in 1..4 and s.allCharsInSet(Digits) and parseInt(s, v) == s.len
+
 func parseDate(s: string, day, month, year: var int): bool =
   # `dd/mm/yyyy`, `dd/mm/yy` or `dd/MMM/yyyy`; also `-` or `.` as separator.
   let p = s.strip.split({'/', '-', '.'})
   if p.len != 3: return false
-  if parseInt(p[0], day) != p[0].len or p[0].len == 0: return false
-  if parseInt(p[1], month) != p[1].len or p[1].len == 0:
-    month = monthNames.find(p[1].toUpperAscii) + 1
-  if parseInt(p[2], year) != p[2].len or p[2].len == 0: return false
+  if not smallInt(p[0], day): return false
+  if not smallInt(p[1], month): month = monthNames.find(p[1].toUpperAscii) + 1
+  if not smallInt(p[2], year): return false
   if p[2].len <= 2: year = fullYear(year)
   day in 1..31 and month in 1..12 and year in 1..9999
 
@@ -329,10 +336,10 @@ func parseClock(s: string, secs: var float64): bool =
   if p.len notin 2..3: return false
   var h, m: int
   var sec = 0.0
-  if parseInt(p[0], h) != p[0].len or parseInt(p[1], m) != p[1].len: return false
+  if not smallInt(p[0], h) or not smallInt(p[1], m): return false
   if p.len == 3 and not parseNumber(p[2], sec): return false
-  secs = float64(h * 3600 + m * 60) + sec
-  h in 0..23 and m in 0..59 and sec >= 0 and sec < 61
+  result = h in 0..23 and m in 0..59 and sec >= 0 and sec < 61
+  if result: secs = float64(h * 3600 + m * 60) + sec
 
 proc acquisitionTime*(f: Seg2File): Option[float64] =
   ## `ACQUISITION_DATE` and `ACQUISITION_TIME` as UTC seconds since 1970
