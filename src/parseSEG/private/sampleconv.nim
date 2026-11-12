@@ -86,7 +86,7 @@ proc encodeChecked*(fmt: SampleFormat, vals: openArray[float64], dst: var seq[by
   dst.setLenUninit n * sampleSize(fmt) # every byte is written below
   if n == 0: return true
   let d = cast[ByteBuf](addr dst[0])
-  let v = cast[ptr UncheckedArray[float64]](unsafeAddr vals[0])
+  let v = cast[ptr UncheckedArray[float64]](addr vals[0])
   var lost = 0 # or-ed flags, no branch per sample
   template differs(back, x: float64): int =
     ord(back != x) and not (ord(back != back) and ord(x != x)) # NaN == NaN here

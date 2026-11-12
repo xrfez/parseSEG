@@ -257,7 +257,7 @@ proc currentBytes(ed: HeaderEditor, at: int64, size: int): seq[byte] =
     let p = ed.pending[i]
     let a = max(at, p.at)
     let b = min(at + size, p.at + p.bytes.len)
-    copyMem(addr result[a - at], unsafeAddr p.bytes[a - p.at], b - a)
+    copyMem(addr result[a - at], addr p.bytes[a - p.at], b - a)
 
 proc beginBatch*(ed: var HeaderEditor) =
   ## Starts a batch: edits are journaled at once but synced and written to the
@@ -845,7 +845,7 @@ proc replayHere(ed: var HeaderEditor, undo: bool): DiagLog =
     if buf.len > 0: copyMem(addr buf[0], addr mem[at], buf.len)
     true
   let writeAt = proc (at: int64, buf: seq[byte]): bool =
-    if buf.len > 0: copyMem(addr mem[at], unsafeAddr buf[0], buf.len)
+    if buf.len > 0: copyMem(addr mem[at], addr buf[0], buf.len)
     true
   replayOn(ed.file.path, ed.journalPath, ed.file.mappedSize, undo, readAt, writeAt, result)
   ed.reloadHeaders()

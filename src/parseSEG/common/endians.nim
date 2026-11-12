@@ -149,7 +149,7 @@ type ByteBuf* = ptr UncheckedArray[byte] ## Raw bytes whose length the caller ha
 
 func byteBuf*(b: openArray[byte]): ByteBuf {.inline.} =
   ## The bytes of `b` as a `ByteBuf`; nil when `b` is empty.
-  if b.len == 0: nil else: cast[ByteBuf](unsafeAddr b[0])
+  if b.len == 0: nil else: cast[ByteBuf](addr b[0])
 
 {.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
 

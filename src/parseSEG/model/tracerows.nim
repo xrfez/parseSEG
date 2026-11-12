@@ -127,8 +127,8 @@ func sub*(r: TraceRows, rows: Slice[int]): TraceRows =
 
 template indexPointers(f: SeismicFile, r: var TraceRows) =
   if f.len > 0:
-    if f.hasKeys: r.keys = cast[ptr UncheckedArray[TraceKeys]](unsafeAddr f.index.keys[0])
-    r.entries = cast[ptr UncheckedArray[TraceEntry]](unsafeAddr f.index.entries[0])
+    if f.hasKeys: r.keys = cast[ptr UncheckedArray[TraceKeys]](addr f.index.keys[0])
+    r.entries = cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0])
 
 func rowsOf*(f: SeismicFile, traces: Slice[int]): TraceRows =
   ## A view of the traces `traces`, in order: row `i` is trace
@@ -151,7 +151,7 @@ func rowsOf*(f: SeismicFile, traces: openArray[int]): TraceRows =
       raise newException(ValueError, "trace " & $t & " is outside 0 ..< " & $f.len)
   indexPointers(f, result)
   result.count = traces.len
-  if traces.len > 0: result.sel = cast[ptr UncheckedArray[int]](unsafeAddr traces[0])
+  if traces.len > 0: result.sel = cast[ptr UncheckedArray[int]](addr traces[0])
 
 func rowsOf*(keys: openArray[TraceKeys], numSamples: openArray[int]): TraceRows =
   ## A view of synthetic traces with no file: row `i` has `keys[i]` and
@@ -163,8 +163,8 @@ func rowsOf*(keys: openArray[TraceKeys], numSamples: openArray[int]): TraceRows 
       " keys, " & $numSamples.len & " counts")
   result.count = keys.len
   if keys.len > 0:
-    result.keys = cast[ptr UncheckedArray[TraceKeys]](unsafeAddr keys[0])
-    result.samples = cast[ptr UncheckedArray[int]](unsafeAddr numSamples[0])
+    result.keys = cast[ptr UncheckedArray[TraceKeys]](addr keys[0])
+    result.samples = cast[ptr UncheckedArray[int]](addr numSamples[0])
 
 # ----------------------------------------------------------- uniform runs --
 

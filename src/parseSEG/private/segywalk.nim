@@ -19,8 +19,8 @@ proc openSegyWalk*(src: RecordSource): SegyReader =
 
 func walkHeaders*(r: SegyReader, t: SegyTrace): RawHeaders {.inline.} =
   ## The header bytes of the trace just read into `t`, for `segyKeys`.
-  RawHeaders(std: cast[ByteBuf](unsafeAddr r.rawStd[0]),
-    ext1: if t.hasExt1: cast[ByteBuf](unsafeAddr r.rawExt1[0]) else: nil,
+  RawHeaders(std: cast[ByteBuf](addr r.rawStd[0]),
+    ext1: if t.hasExt1: cast[ByteBuf](addr r.rawExt1[0]) else: nil,
     prop: byteBuf(t.proprietary), propLen: t.proprietary.len)
 
 proc takeLog*(r: var SegyReader): DiagLog {.inline.} =
