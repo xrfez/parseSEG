@@ -21,6 +21,41 @@ proc liveKeys(): TraceKeys =
   result.intervalUs = 2000
   result.status = tsLive
 
+proc isEmptyDir(dir: string): bool =
+  result = dirExists(dir)
+  for _ in walkDir(dir): return false
+
+block a_directory_as_destination_is_refused_before_any_work:
+  let dir = tmp / "taken.sgy"
+  createDir(dir)
+  doAssertRaises(IOError): discard openSeismicWriter(dir, SegyOutputOptions())
+  for name in ["survey.sgy", "shot.sgd", "line.sg2"]:
+    var f = openSeismic(demoDir() / name)
+    doAssertRaises(IOError): discard openSeismicWriter(dir, like = f)
+    for target in [skSegy, skSegd, skSeg2]:
+      if not (name == "survey.sgy" and target == skSegd): # SEG-Y to SEG-D: unsupported
+        var calls = 0
+        let log = convertFile(demoDir() / name, dir, ConvertOptions(target: target),
+          proc (done, total: int64): bool =
+            inc calls
+            true)
+        doAssert log.isFatal and log.has("is a directory", sevFatal), name & ": " & $log
+        doAssert calls == 0, name & " to " & $target & ": the input was read first"
+  doAssert isEmptyDir(dir)
+  noTempFiles()
+
+block a_failed_rename_leaves_no_temporary_file:
+  # The destination turns into a directory while the file is written.
+  let dst = tmp / "late.sgy"
+  var w = openSeismicWriter(dst, SegyOutputOptions())
+  w.writeTrace(liveKeys(), newSeq[float32](100))
+  createDir(dst)
+  let log = w.close()
+  doAssert log.isFatal and log.has("cannot move the output into place", sevFatal), $log
+  doAssert isEmptyDir(dst)
+  noTempFiles()
+  removeDir(dst)
+
 when defined(posix):
   import std/posix
 

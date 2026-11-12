@@ -72,7 +72,7 @@ proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
       "SEG-2)", loc = Location(file: dstPath))
     return
   of skSegy: discard
-  if sameAsInput(srcPath, dstPath, result):
+  if sameAsInput(srcPath, dstPath, result) or isDirectory(dstPath, result):
     return
   # SEG-D: one target format must hold every record, so the headers are
   # scanned first (a second pass over the input, for `progress`).

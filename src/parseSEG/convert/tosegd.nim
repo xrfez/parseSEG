@@ -857,7 +857,7 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions(),
   ## `dstPath` and renamed when complete. `progress` spans the header scan
   ## and the conversion (see `convertFile`); when it cancels, the result
   ## holds a fatal `dcCancelled` diagnostic and nothing is written.
-  if sameAsInput(srcPath, dstPath, result):
+  if sameAsInput(srcPath, dstPath, result) or isDirectory(dstPath, result):
     return
   let tmp = createTempFor(dstPath, result)
   if tmp.len == 0: return
@@ -1182,7 +1182,7 @@ proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions(),
   ## cancels, the result holds a fatal `dcCancelled` diagnostic and nothing
   ## is written.
   var c = Seg2Conv(loc: Location(file: dstPath))
-  if sameAsInput(srcPath, dstPath, result): return
+  if sameAsInput(srcPath, dstPath, result) or isDirectory(dstPath, result): return
   let r = opts.revision
   let passes = if r.major == 3: 2 else: 3 # Rev 2: through a Rev 3.0 file
   if not (r.major == 2 and r.minor in {0'u8, 1} or r.major == 3 and r.minor in {0'u8, 1}):

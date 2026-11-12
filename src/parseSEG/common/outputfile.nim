@@ -41,7 +41,10 @@ proc createTempFor*(path: string): string {.raises: [IOError].} =
   ## Creates a new, empty file next to `path`, named `<path>.<random>.tmp`,
   ## and returns its name. Never opens an existing file: a name that exists
   ## (a file, or a symlink, which is not followed) is passed over for
-  ## another. Raises `IOError` if no file can be created there.
+  ## another. Raises `IOError` if no file can be created there, or if
+  ## `path` is a directory (the output could never be renamed to it).
+  if dirExists(path):
+    raise newException(IOError, "the output path " & path & " is a directory")
   when defined(posix):
     const hex = "0123456789abcdef"
     var why = "no free name"
@@ -83,6 +86,14 @@ proc createTempFor*(path: string, log: var DiagLog): string {.raises: [].} =
   except IOError as e:
     log.report(sevFatal, dcIo, e.msg, loc = Location(file: path))
 
+proc isDirectory*(dst: string, log: var DiagLog): bool {.raises: [].} =
+  ## True, with a fatal diagnostic, when the output path `dst` is an
+  ## existing directory: for converters to refuse it before they read the
+  ## input (`createTempFor` refuses it too, but only when the writing starts).
+  result = dirExists(dst)
+  if result:
+    log.report(sevFatal, dcIo, "the output path is a directory", loc = Location(file: dst))
+
 proc sameAsInput*(src, dst: string, log: var DiagLog): bool {.raises: [].} =
   ## True, with a fatal diagnostic, when `dst` is the existing file `src`:
   ## writing it would destroy the input.
@@ -96,7 +107,8 @@ proc sameAsInput*(src, dst: string, log: var DiagLog): bool {.raises: [].} =
 
 proc finishOutput*(tmp, path: string, keep: bool, log: var DiagLog) {.raises: [].} =
   ## Renames the complete output `tmp` (from `createTempFor`) to `path` when
-  ## `keep`, else removes `tmp`. A failure to do either is logged as fatal.
+  ## `keep`, else removes `tmp`. A failure to do either is logged as fatal;
+  ## an output that cannot be moved into place is removed.
   try:
     if not fileExists(tmp):
       discard
@@ -108,3 +120,4 @@ proc finishOutput*(tmp, path: string, keep: bool, log: var DiagLog) {.raises: []
     let what = if keep: "cannot move the output into place: "
                else: "cannot remove the incomplete output: "
     log.report(sevFatal, dcIo, what & getCurrentExceptionMsg(), loc = Location(file: path))
+    if keep: discard tryRemoveFile(tmp) # nobody else knows its random name

@@ -342,7 +342,7 @@ proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions(),
   ## (see `convertFile`); when it cancels, the result holds a fatal
   ## `dcCancelled` diagnostic and nothing is written.
   var c = Seg2Conv(loc: Location(file: dstPath))
-  if sameAsInput(srcPath, dstPath, result): return
+  if sameAsInput(srcPath, dstPath, result) or isDirectory(dstPath, result): return
   var f: SeismicFile
   try:
     f = openSeismic(srcPath, keys = true, progress = progressPhase(progress, 0, 2))
