@@ -264,3 +264,45 @@ block close_then_destroy_while_prefetching:
   p.close()
 
 echo "close then destroy: ok"
+
+# A prefetcher made before `openEditor(f)`: the keys its chunks' rows and its
+# transform read are parked with the old map, as the entries and codecs are
+# (they were freed with the file; `nim asan` runs this file under ASan).
+proc stampCmpX(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
+    traces: TraceRows, failed: openArray[int], user: pointer) {.nimcall, gcsafe, raises: [].} =
+  # Column 0 of each row gets the midpoint the worker read for it.
+  for row in 0 ..< rows: samples[row * cols] = float32(traces.keysAt(row).cmpX)
+
+proc startThenEdit(path: string, expect: var seq[TraceKeys]): Prefetcher[float32] =
+  var f = openSeismic(path, keys = true)
+  expect = f.traceKeys(0 ..< f.len)
+  result = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, depth = 2, cols = 8,
+    transform = stampCmpX)
+  var c: PrefetchChunk[float32]
+  doAssert result.next(c)
+  var ed = openEditor(move f, journalPath = path & ".journal.nif")
+  var g = release(ed) # the viewer goes on reading
+  doAssert g.hasKeys
+  # `g` is destroyed here; the prefetcher lives on.
+
+block keys_outlive_a_file_handed_to_an_editor:
+  let path = tmp / "edited.sgy"
+  copyFile(demoDir() / "survey.sgy", path)
+  var expect: seq[TraceKeys]
+  var p = startThenEdit(path, expect)
+  # Without ASan: whatever now takes the freed keys' place is not the keys.
+  var filler = newSeq[TraceKeys](expect.len)
+  doAssert filler[0].record == 0
+  p.seek(0 ..< p.len)
+  var c: PrefetchChunk[float32]
+  var n = 0
+  while p.next(c):
+    for row in 0 ..< c.count:
+      let k = expect[c.first + row]
+      doAssert sameKeys(c.rows.traceKeys(row), k), $(c.first + row)
+      doAssert k.cmpX != 0 and c.samples[row, 0] == float32(k.cmpX), $(c.first + row)
+    n += c.count
+  p.close()
+  doAssert n == expect.len
+
+echo "editor hand-over: ok"

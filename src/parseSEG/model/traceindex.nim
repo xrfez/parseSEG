@@ -276,8 +276,9 @@ proc remapWritable*(f: var SeismicFile) =
   ## Raises `ValueError` for a closed file, a demultiplexed copy, or a file
   ## whose size changed since it was opened (its index would be stale);
   ## `f` is unchanged then. A prefetcher on `f` keeps the old map through its
-  ## pin, and the index tables it reads stay parked there: the file gets
-  ## copies of them.
+  ## pin, and the index tables it reads (entries, codecs and keys) stay
+  ## parked there: the file gets copies of them, so that prefetcher's chunks
+  ## show the keys as they were at this call.
   f.requireOpen()
   if f.demuxPath.len > 0:
     raise newException(ValueError, f.path & " holds multiplexed SEG-D, which cannot be " &
@@ -288,12 +289,16 @@ proc remapWritable*(f: var SeismicFile) =
     raise newException(ValueError, f.path & " changed size since it was opened (" &
       $f.map.src.size & " bytes, now " & $m.src.size & "); open it again")
   if f.map.pins > 0:
-    # A prefetcher reads `entries` and `codecs` through raw pointers: the
-    # payloads move to the map it keeps alive, the file keeps copies.
+    # A prefetcher reads `entries`, `codecs` and `keys` through raw pointers
+    # (the keys through its chunks' `TraceRows`): the payloads move to the
+    # map it keeps alive, the file keeps copies. The new map has no pins, so
+    # neither `close` nor the destructor would park them later.
     f.map.parkedEntries = move f.index.entries
     f.map.parkedCodecs = move f.index.codecs
+    f.map.parkedKeys = move f.index.keys
     f.index.entries = f.map.parkedEntries
     f.index.codecs = f.map.parkedCodecs
+    f.index.keys = f.map.parkedKeys
   f.map = m
 
 proc close*(f: var SeismicFile) =

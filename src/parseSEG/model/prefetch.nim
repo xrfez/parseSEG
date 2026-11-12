@@ -54,12 +54,15 @@
 ## Only tensors of the slot shape whose storage they own alone (no copy,
 ## view or `fromBuffer` shares it) are reused; others are dropped.
 ##
-## Lifetime: the prefetcher pins the file's map, so `f.close()` (or the file
-## going out of scope) while it runs is safe: the map, and if the file is
-## destroyed its trace entries and codecs, stay alive until the prefetcher's
-## `close`. What remains a rule: do not change the file's index
-## (`applySurvey`, `applyGeometry`, assigning to `f.index`) while a
-## prefetcher runs, and call the consumer procs from one thread.
+## Lifetime: the prefetcher pins the file's map, so `f.close()`, the file
+## going out of scope, or handing it to an editor (`openEditor(f)`) while it
+## runs is safe: the map and the index tables the prefetcher reads (trace
+## entries, codecs and stored keys) stay alive until the prefetcher's
+## `close`. From then on the prefetcher reads its own copy of those tables:
+## its chunks' `rows` show the keys as they were when the file was closed
+## or handed over, not later edits. What remains a rule: do not change the
+## file's index (`applySurvey`, `applyGeometry`, assigning to `f.index`)
+## while a prefetcher runs, and call the consumer procs from one thread.
 
 import std/locks
 import ../common/diagnostics
@@ -159,7 +162,9 @@ type
     rows*: TraceRows
       ## Which trace each row is, with its keys (when the file has stored
       ## keys), sample count and channel set, in place in the index: no
-      ## `traceAt` needed. Valid until the prefetcher's `close`.
+      ## `traceAt` needed. Valid until the prefetcher's `close`, also when
+      ## the file is closed, destroyed or handed to an editor first (the
+      ## keys are then those of that moment).
 
 proc shutdown[T](sh: ptr Shared[T]) =
   # Stops and joins the workers, then frees the shared state.
