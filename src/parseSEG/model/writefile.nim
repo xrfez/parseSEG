@@ -441,7 +441,7 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
 proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: openArray[T],
     overrides: openArray[HeaderOverride]) =
   let n = samples.len
-  let dt = k.intervalUs
+  let dt = wholeInterval(k.intervalUs) # 1000.9999999999999 is 1001 (ms × 1000)
   if dt.isNaN or dt <= 0 or dt > 4.0e9:
     refuse("the keys give no usable sample interval (intervalUs " & $dt & ")")
   let rev = s.segyFile.revision
@@ -693,7 +693,9 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   the keys wins), else 1 (live), 2 (dead) or 0 (unknown; also
   ##   auxiliary, which SEG-Y has no general code for). `component` is not
   ##   written as a code: outside SEG-Y it is a group index or sensor type;
-  ## - `time` is written in UTC (time basis 4).
+  ## - `time` is written in UTC (time basis 4);
+  ## - an `intervalUs` within 1e-9 of a whole number is that number (1001 µs
+  ##   kept as 1.001 ms and multiplied back is 1000.9999999999999).
   ##
   ## A file `like` an input whose Layout stanza moves these fields reads
   ## them elsewhere: write from keys into `SegyOutputOptions` files. Raises

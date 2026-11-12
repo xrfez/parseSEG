@@ -243,3 +243,40 @@ block like_a_rev0_input_whose_traces_leave_their_count_to_the_binary_header:
   doAssert g.traceField(2, "trace.numSamples").toFloat == 100
   g.close()
   f.close()
+
+block whole_intervals_with_float_noise:
+  # An interval kept in ms and handed back as ms × 1000 is not always the
+  # whole number it was: 1001 µs comes back as 1000.9999999999999, as do
+  # 1471 other values up to 65535. They are written as the whole numbers.
+  for rev in [SegyRevision(major: 0, minor: 0), SegyRevision(major: 1, minor: 0),
+      SegyRevision(major: 2, minor: 1)]:
+    let dst = tmp / ("noise_r" & $rev.major & ".sgy")
+    var w = openSeismicWriter(dst, SegyOutputOptions(revision: rev))
+    var k = initTraceKeys()
+    var noisy: seq[int]
+    for us in 1 .. 65535:
+      k.intervalUs = (float64(us) / 1000) * 1000
+      if k.intervalUs != float64(us):
+        noisy.add us
+        w.writeTrace(k, [0'f32])
+    doAssert noisy.len > 1000 and noisy[0] == 1001
+    discard w.close()
+    var g = openSeismic(dst, keys = true)
+    doAssert g.len == noisy.len
+    doAssert g.fileField("binary.sampleInterval").toFloat == 1001
+    for i, us in noisy:
+      doAssert g.traceKeys(i).intervalUs == float64(us), $rev & ": " & $us
+      doAssert g.traceField(i, "trace.sampleInterval").toFloat == float64(us)
+    g.close()
+  # An interval that really has a fraction is another matter.
+  var k = initTraceKeys()
+  k.intervalUs = 1000.999
+  var w1 = openSeismicWriter(tmp / "frac_r1.sgy",
+    SegyOutputOptions(revision: SegyRevision(major: 1, minor: 0)))
+  doAssertRaises(ValueError): w1.writeTrace(k, [0'f32])
+  var w2 = openSeismicWriter(tmp / "frac_r2.sgy", SegyOutputOptions())
+  w2.writeTrace(k, [0'f32])
+  discard w2.close()
+  var g = openSeismic(tmp / "frac_r2.sgy", keys = true)
+  doAssert g.traceKeys(0).intervalUs == 1000.999
+  g.close()

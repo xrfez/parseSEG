@@ -719,7 +719,7 @@ proc initSegyFileFor(c: SegdToSegy, rec: SegdRecord, t: SegdTrace, srcName: stri
     elif rev.major == 1: "SEG Y REV1" else: ""))
   result.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
   let ns = t.numSamples
-  let dt = rec.sampleIntervalUs(t)
+  let dt = wholeInterval(rec.sampleIntervalUs(t))
   let dtWhole = dt == round(dt) and dt <= 65535 and dt >= 0
   result.binary = SegyBinaryHeader(formatCode: int16(ord(c.outFmt)), segyMajor: rev.major,
     segyMinor: rev.minor, fixedLengthTraces: 0, traceSorting: 1, measurementSystem: 1,
@@ -748,7 +748,7 @@ proc noteLosses(c: var SegdToSegy, h: SegyTraceHeader, k: TraceKeys) =
   # What the headers `keysToHeaders` built could not hold of `k`'s interval,
   # start time and time of day.
   let rev = c.opts.revision
-  let dt = k.intervalUs
+  let dt = wholeInterval(k.intervalUs)
   if rev.major < 2 and not dt.isNaN and dt != float64(h.sampleInterval):
     c.log.note(c.seen, lnSegdIntervalRounding, "Rev 1 holds sample intervals as whole " &
       "microseconds; intervals were rounded", c.loc)
@@ -819,7 +819,7 @@ proc toSegyTrace(c: var SegdToSegy, rec: SegdRecord, t: SegdTrace, inRecord: int
     discard k.applySurvey(c.join.survey[], c.join.fields, c.join.overwrite)
   let rev = c.opts.revision
   # As the record gives them, also for a channel set the keys do not know.
-  k.intervalUs = rec.sampleIntervalUs(t)
+  k.intervalUs = wholeInterval(rec.sampleIntervalUs(t))
   k.t0Ms = rec.startTimeMs(t)
   result = SegyTrace(index: c.nOut, numSamples: t.numSamples, sampleInterval: k.intervalUs)
   result.keysToHeaders(k, t.numSamples, c.nOut + 1, rev, ext1 = rev.major >= 2)
@@ -1132,7 +1132,7 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
       let t = f.seg2Trace(i)
       var k = f.traceKeys(i)
       let ns = int(e.numSamples)
-      let dt = f.sampleIntervalUs(i)
+      let dt = wholeInterval(f.sampleIntervalUs(i)) # SAMPLE_INTERVAL is in s
       k.intervalUs = dt
       for x in t.strings:
         if x.key.toUpperAscii notin MappedSeg2Keys and x.key.toUpperAscii notin unmapped:

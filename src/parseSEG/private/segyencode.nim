@@ -76,6 +76,13 @@ func scaledTime*(ms: float64, scalar: int16): int16 =
   ## `scalar` (0 for NaN; clamped to int16).
   int16(clamp(scaled(ms, scalar), -32768, 32767))
 
+func wholeInterval*(us: float64): float64 =
+  ## `us` as the whole number it is to 1e-9 of its value, else unchanged: an
+  ## interval kept in another unit and converted back (ms × 1000, s × 1e6)
+  ## is 1000.9999999999999 for 1001 µs, which the 16-bit fields would refuse
+  ## or cut.
+  if abs(us - round(us)) <= 1e-9 * us: round(us) else: us
+
 func toInterval(us: float64): uint16 =
   # `us` rounded and clamped to the 16-bit interval field (0 for NaN).
   if us >= 65535: high(uint16) elif us >= 0: uint16(round(us)) else: 0
@@ -126,7 +133,7 @@ proc keysToHeaders*(t: var SegyTrace, k: TraceKeys, n, seqNo: int, rev: SegyRevi
   elif timeScalar != 0 or not k.t0Ms.isNaN:
     h.timeScalar = if timeScalar != 0: timeScalar else: timeScalarFor([k.t0Ms])
     h.delayRecordingTime = scaledTime(k.t0Ms, h.timeScalar)
-  let dt = k.intervalUs
+  let dt = wholeInterval(k.intervalUs)
   let whole = dt == round(dt) and dt >= 0 and dt <= 65535
   h.sampleInterval = if whole or rev.major < 2: toInterval(dt) else: 0
   h.numSamples = if n > int(high(uint16)): 0'u16 else: uint16(n)
