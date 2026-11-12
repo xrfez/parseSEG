@@ -47,7 +47,8 @@
 ##
 ## The output goes to a temporary file next to `path`, renamed when `close`
 ## succeeds. A writer dropped without `close`, or whose `close` raises,
-## leaves no output file. The per-standard writers validate as usual:
+## leaves no output file; nor does one whose `writeTrace` raised `IOError`
+## (a full disk): it is closed, and its `close` raises `ValueError`. The per-standard writers validate as usual:
 ## spec-invalid output raises `SegFormatError` (see `segy/writer`,
 ## `segd/writer`, `seg2/writer`); a value the format cannot hold raises
 ## `SegFormatError` from the encoder and writes nothing. Caller errors (a
@@ -719,7 +720,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   ## output cannot take, a broken SEG-D rule, or a SEG-Y writer opened from
   ## `SegyOutputOptions` (it takes traces from keys) (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold or output the
-  ## writer refuses; `IOError` on a write failure.
+  ## writer refuses; `IOError` on a write failure, which discards the
+  ## output and closes the writer (the file may hold part of the trace).
   ##
   ## `overrides` change header fields of the written trace (trace `trace`
   ## is then a template): e.g. a stacked trace written with a source trace's
@@ -732,11 +734,16 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
     refuse("the output is " & $w.s.kind & ", " & src.path & " is " & $src.kind)
   if not src.isOpen: refuse("the file " & src.path & " is closed")
   discard src.traceEntry(trace) # ValueError out of range
-  case w.s.kind
-  of skSegy: w.s.writeSegy(src, trace, samples, overrides)
-  of skSegd: w.s.writeSegd(src, trace, samples, overrides)
-  of skSeg2: w.s.writeSeg2(src, trace, samples, overrides)
-  of skUnknown: discard
+  try:
+    case w.s.kind
+    of skSegy: w.s.writeSegy(src, trace, samples, overrides)
+    of skSegd: w.s.writeSegd(src, trace, samples, overrides)
+    of skSeg2: w.s.writeSeg2(src, trace, samples, overrides)
+    of skUnknown: discard
+  except IOError:
+    # Part of the trace may be in the file: no later `close` may install it.
+    w.s.discardOutput()
+    raise
   inc w.s.written
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
@@ -787,10 +794,14 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## before Rev 2, a count
   ## the output cannot take, or a bad override (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold; `IOError` on a
-  ## write failure.
+  ## write failure, which discards the output and closes the writer.
   if not w.s.open: refuse("the writer is closed")
   if w.s.kind != skSegy: refuse("traces from keys are written to SEG-Y, the output is " & $w.s.kind)
-  w.s.writeSegyKeys(keys, samples, overrides)
+  try:
+    w.s.writeSegyKeys(keys, samples, overrides)
+  except IOError:
+    w.s.discardOutput() # as above: the file may be torn
+    raise
   inc w.s.written
 
 proc close*(w: var SeismicWriter): DiagLog =

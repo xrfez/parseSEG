@@ -96,5 +96,46 @@ when defined(posix):
       doAssert log.isFatal, dst & ": a file " & $(size - 900) & " bytes short is not fatal"
       doAssert not fileExists(dst), dst
       noTempFiles()
+
+  block a_failed_write_discards_the_output:
+    # `writeTrace` raises `IOError` when the disk fills up; a `close` after
+    # that (say, from a `finally`) must not install the torn file.
+    block from_keys:
+      let dst = tmp / "torn.sgy"
+      var w = openSeismicWriter(dst, SegyOutputOptions())
+      let x = newSeq[float32](1000)
+      var failedAt = -1
+      limitFileSize(3 shl 19) # 1.5 MiB
+      try:
+        for t in 0 ..< 1000:
+          if failedAt < 0:
+            try: w.writeTrace(liveKeys(), x)
+            except IOError: failedAt = t
+      finally:
+        limitFileSize(-1)
+      doAssert failedAt > 0, "4 MB were written under a limit of 1.5 MiB"
+      doAssertRaises(ValueError): w.writeTrace(liveKeys(), x)
+      doAssertRaises(ValueError): discard w.close()
+      doAssert not fileExists(dst)
+      noTempFiles()
+    block like_an_input:
+      let dst = tmp / "torn_like.sgy"
+      var f = openSeismic(demoDir() / "survey.sgy")
+      let x = f.readTraces(0 ..< f.len)
+      var w = openSeismicWriter(dst, like = f)
+      var failed = false
+      limitFileSize(3 shl 19)
+      try:
+        for pass in 0 ..< 3: # 1.65 MB each
+          for i in 0 ..< f.len:
+            if not failed:
+              try: w.writeTrace(f, i, x, i)
+              except IOError: failed = true
+      finally:
+        limitFileSize(-1)
+      doAssert failed, "5 MB were written under a limit of 1.5 MiB"
+      doAssertRaises(ValueError): discard w.close()
+      doAssert not fileExists(dst)
+      noTempFiles()
 else:
   echo "twritefail: the disk-full blocks need POSIX (RLIMIT_FSIZE); skipped"
