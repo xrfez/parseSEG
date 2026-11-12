@@ -352,25 +352,34 @@ func sampleIntervalUs*(rec: SegdRecord, t: SegdTrace): float64 {.inline.} =
   ## The trace's sample interval in µs (see above).
   rec.sampleIntervalUs(t.scanType, t.channelSet)
 
-func startTimeMs*(rec: SegdRecord, t: SegdTrace): float64 =
-  ## The start time of the trace's channel set in ms; 0 when it is unknown.
-  if t.channelSet < 0: return 0.0
-  template s: untyped = rec.scanTypes[t.scanType]
+func startTimeMs*(rec: SegdRecord, scanType, channelSet: int): float64 =
+  ## The start time of a channel set in ms; 0 when `channelSet` is -1.
+  if channelSet < 0: return 0.0
+  template s: untyped = rec.scanTypes[scanType]
   case s.layout
-  of slRev2: s.descriptors[t.channelSet].startTimeMs
-  of slRev3: float64(s.descriptorsRev3[t.channelSet].startTime) / 1000
+  of slRev2: s.descriptors[channelSet].startTimeMs
+  of slRev3: float64(s.descriptorsRev3[channelSet].startTime) / 1000
 
-func descaleFactor*(rec: SegdRecord, t: SegdTrace): float64 =
-  ## Millivolts per recorded unit of the trace's channel set: 2^MP factor
-  ## (Rev 1/2) or the descale multiplier (Rev 3; 1 when it is 0 or NaN).
-  ## 1 when the channel set is unknown.
-  if t.channelSet < 0: return 1.0
-  template s: untyped = rec.scanTypes[t.scanType]
+func startTimeMs*(rec: SegdRecord, t: SegdTrace): float64 {.inline.} =
+  ## The start time of the trace's channel set in ms; 0 when it is unknown.
+  rec.startTimeMs(t.scanType, t.channelSet)
+
+func descaleFactor*(rec: SegdRecord, scanType, channelSet: int): float64 =
+  ## Millivolts per recorded unit of a channel set: 2^MP factor (Rev 1/2) or
+  ## the descale multiplier (Rev 3; 1 when it is 0 or NaN). 1 when
+  ## `channelSet` is -1.
+  if channelSet < 0: return 1.0
+  template s: untyped = rec.scanTypes[scanType]
   case s.layout
-  of slRev2: pow(2.0, s.descriptors[t.channelSet].mpFactor)
+  of slRev2: pow(2.0, s.descriptors[channelSet].mpFactor)
   of slRev3:
-    let m = float64(s.descriptorsRev3[t.channelSet].descaleMultiplier)
+    let m = float64(s.descriptorsRev3[channelSet].descaleMultiplier)
     if m == 0 or m.isNaN: 1.0 else: m
+
+func descaleFactor*(rec: SegdRecord, t: SegdTrace): float64 {.inline.} =
+  ## Millivolts per recorded unit of the trace's channel set (see above);
+  ## 1 when the channel set is unknown.
+  rec.descaleFactor(t.scanType, t.channelSet)
 
 # ------------------------------------------------------------ bookkeeping --
 

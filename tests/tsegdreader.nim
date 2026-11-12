@@ -2,7 +2,7 @@
 ## multi-record streams in every format, disk and tape images, RECORD and
 ## FIXREC structures, damaged input.
 
-import std/[assertions, os, strutils]
+import std/[assertions, math, os, strutils]
 import parseSEG/common/errors
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer]
@@ -591,3 +591,32 @@ block extension_sample_count_of_zero:
   let e = readSegd(tmp / "the_ns0_window0.sgd")
   doAssert e.records.len == 1 and e.records[0].traces.len == 5 and not e.log.isFatal, $e.log
   doAssert e.records[0].traces[4].numSamples == 0 and e.records[0].traces[0].numSamples == 52
+
+block channel_set_values_without_a_trace:
+  # `descaleFactor` and `startTimeMs` by scan type and channel set, as
+  # `sampleIntervalUs` and `channelType` have them: what code holding only
+  # an index entry (record, scan type, channel set) needs.
+  var d = makeStream([sd8058])
+  d.records[0].record.scanTypes[0].descriptors[1].startTime = 4 # 8 ms
+  let rec = d.records[0].record
+  doAssert rec.descaleFactor(0, 0) == pow(2.0, -2.5) and rec.descaleFactor(0, 1) == 1.0
+  doAssert rec.startTimeMs(0, 0) == 0.0 and rec.startTimeMs(0, 1) == 8.0
+  doAssert rec.descaleFactor(0, -1) == 1.0 and rec.startTimeMs(0, -1) == 0.0
+  doAssert rec.descaleFactor(-1, -1) == 1.0 and rec.startTimeMs(-1, -1) == 0.0
+  discard d.toDisk(tmp / "sets_rev2.sgd", SegdWriteOptions(lenient: true))
+  for path in [tmp / "sets_rev2.sgd", demoDir() / "shot.sgd", demoDir() / "record.sgd"]:
+    let e = readSegd(path)
+    var traces = 0
+    for r in e.records:
+      for t in r.traces:
+        doAssert r.record.descaleFactor(t) == r.record.descaleFactor(t.scanType, t.channelSet)
+        doAssert r.record.startTimeMs(t) == r.record.startTimeMs(t.scanType, t.channelSet)
+        inc traces
+    doAssert traces > 0, path
+  # Rev 3: the descale multiplier and the start time in µs.
+  let shot = readSegd(demoDir() / "shot.sgd").records[0].record
+  for cs in 0 ..< shot.scanTypes[0].channelSetCount:
+    template c: untyped = shot.scanTypes[0].descriptorsRev3[cs]
+    let m = float64(c.descaleMultiplier)
+    doAssert shot.descaleFactor(0, cs) == (if m == 0 or m.isNaN: 1.0 else: m)
+    doAssert shot.startTimeMs(0, cs) == float64(c.startTime) / 1000

@@ -186,9 +186,12 @@ fatal diagnostic.
   `slRev3` (`gh2Rev3`, `gh3`, `generalBlocks`, `descriptorsRev3`, `ext1Rev3`,
   `trailerRev3`). `format`, the label and `ext1`/`ext1Rev3` are `Option`s. Accessors resolve a
   value for either layout: `fileNumber`, `channelSetsPerScanType`, `baseScanIntervalUs`,
-  `headerBytes`, `findChannelSet` (an `Option[SegdChannelSetRef]`), and per trace
-  `channelType`, `sampleIntervalUs`, `startTimeMs`, `descaleFactor`. The reader's `record`,
-  `label`, `log` and `toc` are read-only.
+  `headerBytes`, `findChannelSet` (an `Option[SegdChannelSetRef]`), and per channel set
+  `channelType`, `sampleIntervalUs`, `startTimeMs`, `descaleFactor`, each as
+  `(rec, trace)` and as `(rec, scanType, channelSet)`: the second form serves code that
+  holds an index entry and no `SegdTrace` (`f.index.segdRecords[e.record]`,
+  `int(e.scanType)`, `e.channelSetIndex`). The reader's `record`, `label`, `log` and `toc`
+  are read-only.
 - SEG-2 (random access, so the reader works on the whole file as an `openArray[byte]`,
   normally the map): `readSeg2(bytes, log, name): Seg2File` (File Descriptor Block: `order`,
   `revision`, `stringTerm`, `lineTerm`, `pointers`, `strings`), `traces(bytes, file, log)` /
