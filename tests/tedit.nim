@@ -582,3 +582,35 @@ block interrupted_edit_over_or_beside_an_earlier_one:
       let want = if undo: states[0] else: states[^1]
       doAssert equalMem(addr mem[0], addr want[0], want.len), scenario
     ed2.close()
+
+block current_fields_read_through_an_editor_that_is_not_var:
+  let path = tmp / "peek.sgy"
+  copyFile(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"), path)
+  if fileExists(path & ".edits.nif"): removeFile(path & ".edits.nif")
+  proc peek(ed: HeaderEditor): (int64, int64) =
+    # Compiles only when the readers take the editor by value.
+    (ed.currentTraceField(3, "trace.groupStatic").intVal, ed.currentFileField("binary.jobId").intVal)
+  var ed = openEditor(path)
+  ed.beginBatch()
+  doAssert ed.setTraceField(3, "trace.groupStatic", -7) and ed.setFileField("binary.jobId", 77)
+  doAssert peek(ed) == (-7'i64, 77'i64)
+  doAssert ed.endBatch()
+  ed.close()
+
+block refused_edits_do_not_grow_the_log_without_bound:
+  # A script that keeps trying a refused edit (here a structural field of
+  # every "trace") gets false each time; the log holds the first 1000
+  # refusals and counts the rest.
+  let path = tmp / "refused.sgy"
+  copyFile(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"), path)
+  if fileExists(path & ".edits.nif"): removeFile(path & ".edits.nif")
+  let original = readBytes(path)
+  var ed = openEditor(path)
+  for i in 0 ..< 3000:
+    doAssert not ed.setTraceField(i mod 4, "trace.numSamples", 5)
+  doAssert not ed.setTraceField(0, "trace.nope", 5)
+  doAssert ed.log.count(sevError) == 1000 and ed.log.count(sevInfo) == 1, $ed.log.len
+  doAssert ed.setTraceField(0, "trace.groupStatic", 3) and ed.edits == 1 # edits go on
+  ed.close()
+  doAssert ed.log.len == 1002 and ed.log.has("2001 refused edits were not logged", sevInfo)
+  doAssert rollbackJournal(path, path & ".edits.nif").len == 0 and readBytes(path) == original

@@ -134,7 +134,8 @@ CLI: `parseSEG survey-apply <file> --sps=... [-o out | --in-place]`.
 ## In-place edits
 `openEditor(path, journalPath)` and `setTraceField(trace, "trace.<f>", v)` /
 `setFileField("binary.<f>", v)` / `setRecordField(record, "gh1.<f>", v)` (each `false` when
-refused, with the reason in `log`; never raises), then `close`. `v` is a `FieldValue` or a
+refused, with the reason in `log`; never raises; `log` holds the first 1000 refusals of a
+session and `close` adds how many more there were), then `close`. `v` is a `FieldValue` or a
 plain number or string. Field names are as above. Edits are size-preserving and validated,
 and each is journaled, and synced to disk, before it is written: an edit whose journal
 entry cannot be synced is refused, and its entry is cut from the journal again (when that
@@ -142,7 +143,7 @@ fails too, the editor refuses every further edit). `beginBatch` / `endBatch` (fa
 batch's journal sync fails) share one sync among many edits; `close` raises `IOError` when
 the final batch cannot be journaled. `currentTraceField` (...) read fields as edited so far
 (a batch's pending edits included, without a sync; also `currentFileField`,
-`currentRecordField`). Several fields of one header can be
+`currentRecordField`; they only read, so they take the editor by value). Several fields of one header can be
 edited in one batch without a flush. `openEditor`
 raises `ValueError` when the journal is the file itself.
 `openEditor(f: sink SeismicFile, journalPath = "")` takes over an open file: maps it

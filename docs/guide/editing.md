@@ -13,7 +13,9 @@ joining geometry never change a byte; the calls on this page do, and only these.
 `openEditor(path, journalPath)` maps the file read-write and opens the journal (default
 `<path>.edits.nif`). Each `setTraceField` / `setRecordField` / `setFileField` returns `true`
 when the edit was written, or `false` with the reason in `ed.log`; it never raises for a
-refused edit. Field names are the ones the header listings show (`<block>.<field>`).
+refused edit. The log holds the first 1000 refusals of a session; a script that keeps trying
+gets `false` each time, and `close` adds how many were not logged. Field names are the ones
+the header listings show (`<block>.<field>`).
 
 ```nim
 import std/os

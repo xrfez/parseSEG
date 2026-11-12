@@ -27,8 +27,8 @@
 ##   flushed before the map is written, so an interrupted session can still
 ##   be rolled back.
 ##
-## A refused edit returns false and leaves a diagnostic in `log`; it never
-## raises. A journal entry that cannot be written or synced to disk refuses
+## A refused edit returns false and leaves a diagnostic in `log` (the first
+## 1000 of a session; the rest are counted); it never raises. A journal entry that cannot be written or synced to disk refuses
 ## its edit (and, in a batch, every edit not yet on the map): the map is
 ## written only after its journal entry is safely on disk, and the entries
 ## of refused edits are cut from the journal again (if that fails, the
@@ -93,6 +93,7 @@ type
     unsynced: string     ## Journal lines not yet written and synced.
     journalDead: bool    ## The journal could not be cut back after a failed write.
     edits: int
+    refusals: int        ## Refused edits; the first `MaxRefusalsLogged` are in `log`.
     stale: seq[int] ## Traces edited in the batch: their keys are refreshed when it is written.
     intervalStale: bool ## A batched interval edit: `segyIntervalUs` is refreshed with the keys.
     batch: bool          ## Inside `beginBatch` / `endBatch`.
@@ -116,6 +117,9 @@ proc `=dup`(src: JournalFile): JournalFile {.error.}
 const
   MaxJournalLine = 1 shl 16 ## Longer journal lines are malformed.
   MaxRepeats = 5 ## Journal diagnostics of one kind logged per call; the rest are counted.
+  MaxRefusalsLogged = 1000
+    ## Refused edits an editor logs; the rest are counted (a script retrying
+    ## a refused edit per trace would grow the log with the file).
 
 
 # ---------------------------------------------------------------- journal --
@@ -266,6 +270,24 @@ proc currentBytes(ed: HeaderEditor, at: int64, size: int): seq[byte] =
     let a = max(at, p.at)
     let b = min(at + size, p.at + p.bytes.len)
     copyMem(addr result[a - at], addr p.bytes[a - p.at], b - a)
+
+proc admitRefusal(ed: var HeaderEditor): bool =
+  # Counts a refused edit; true while it is one of the first
+  # `MaxRefusalsLogged`, which the caller logs. The first one past them is
+  # announced once.
+  inc ed.refusals
+  result = ed.refusals <= MaxRefusalsLogged
+  if ed.refusals == MaxRefusalsLogged + 1:
+    ed.log.report(sevInfo, dcValidation, "more than " & $MaxRefusalsLogged & " edits were " &
+      "refused; further refusals are counted, not logged (each still returns false)",
+      loc = Location(file: ed.file.path))
+
+proc countRefusals(ed: var HeaderEditor) =
+  # At the end of the session: how many refusals `log` does not hold.
+  if ed.refusals > MaxRefusalsLogged:
+    ed.log.report(sevInfo, dcValidation, $(ed.refusals - MaxRefusalsLogged) &
+      " refused edits were not logged", loc = Location(file: ed.file.path))
+    ed.refusals = 0
 
 proc beginBatch*(ed: var HeaderEditor) =
   ## Starts a batch: edits are journaled at once but synced and written to the
@@ -573,6 +595,7 @@ proc close*(ed: var HeaderEditor) =
   ## be flushed, or when the batch's journal entries cannot be synced: then
   ## its pending edits are not written (see `endBatch`; `log` says how many).
   var synced = true
+  ed.countRefusals()
   try:
     if ed.batch: synced = ed.endBatch()
     ed.file.flush()
@@ -592,6 +615,7 @@ proc release*(ed: sink HeaderEditor): SeismicFile =
   ## the journal. Raises `IOError` as `close` does; the file is closed then.
   var e = ed
   var synced = true
+  e.countRefusals()
   try:
     if e.batch: synced = e.endBatch()
     e.file.flush()
@@ -610,7 +634,9 @@ func file*(ed: HeaderEditor): lent SeismicFile {.inline.} =
   ed.file
 
 func log*(ed: HeaderEditor): lent DiagLog {.inline.} =
-  ## Refused edits and journal problems.
+  ## Refused edits and journal problems. The first 1000 refused edits of a
+  ## session are logged; after that they are counted, and `close` or
+  ## `release` adds how many were not logged.
   ed.log
 
 proc logVar*(ed: var HeaderEditor): var DiagLog {.inline.} =
@@ -661,9 +687,10 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
   let at = b.offset
   let size = b.size
   template refuse(msg: string) =
-    var l = loc
-    l.field = b.name & "." & field
-    ed.log.report(sevError, dcValidation, b.name & "." & field & ": " & msg, at, l)
+    if ed.admitRefusal():
+      var l = loc
+      l.field = b.name & "." & field
+      ed.log.report(sevError, dcValidation, b.name & "." & field & ": " & msg, at, l)
     return false
   if not ed.file.isOpen: refuse "the file is closed"
   if not ed.file.index.detected: refuse "the file is not SEG-Y, SEG-D or SEG-2"
@@ -711,9 +738,10 @@ proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label:
   ## writes nothing. False, with an error in `log` labelled `label`, when
   ## refused.
   template refuse(msg: string) =
-    var l = loc
-    l.field = label
-    ed.log.report(sevError, dcValidation, label & ": " & msg, at, l)
+    if ed.admitRefusal():
+      var l = loc
+      l.field = label
+      ed.log.report(sevError, dcValidation, label & ": " & msg, at, l)
     return false
   if not ed.file.isOpen: refuse "the file is closed"
   if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
@@ -735,12 +763,13 @@ proc flushPending*(ed: var HeaderEditor): bool =
   ed.flushBatch()
 
 proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
-  var l = loc
-  l.field = name
-  ed.log.report(sevError, dcValidation, name & ": " & msg, loc = l)
+  if ed.admitRefusal():
+    var l = loc
+    l.field = name
+    ed.log.report(sevError, dcValidation, name & ": " & msg, loc = l)
   false
 
-proc current(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
+proc current(ed: HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
   let r = ed.file.index.locate(scope, index, name)
   if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
   # The block as edited so far: a batch's pending writes laid over the map.
@@ -751,18 +780,18 @@ proc current(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string)
   if v.error.len > 0: raise newException(ValueError, name & ": " & v.error)
   v.value
 
-proc currentTraceField*(ed: var HeaderEditor, trace: int, name: string): FieldValue =
+proc currentTraceField*(ed: HeaderEditor, trace: int, name: string): FieldValue =
   ## Reads `trace.<field>` / `ext1.<field>` of trace `trace` as edited so far
   ## (a batch's pending edits included, without syncing them). Raises
   ## `ValueError` like `traceField`.
   ed.current(hsTrace, trace, name)
 
-proc currentRecordField*(ed: var HeaderEditor, record: int, name: string): FieldValue =
+proc currentRecordField*(ed: HeaderEditor, record: int, name: string): FieldValue =
   ## Reads a SEG-D record field as edited so far. Raises like
   ## `currentTraceField`.
   ed.current(hsRecord, record, name)
 
-proc currentFileField*(ed: var HeaderEditor, name: string): FieldValue =
+proc currentFileField*(ed: HeaderEditor, name: string): FieldValue =
   ## Reads a SEG-Y binary header field as edited so far. Raises like
   ## `currentTraceField`.
   ed.current(hsFile, 0, name)
