@@ -233,7 +233,8 @@ proc recordHeaders*(f: SeismicFile, record: int): seq[HeaderRow] =
     let n = rec.generalBlocks.len div SegdBlockSize
     L.addRev3Blocks("gh", 4, at, n)
     at += int64(rec.generalBlocks.len)
-  for st, s in rec.scanTypes:
+  for st in 0 ..< rec.scanTypes.len:
+    template s: untyped = rec.scanTypes[st] # in place: `for st, s in` copies each one
     let csd = if s.layout == slRev3: 3 * SegdBlockSize else: SegdBlockSize
     let kind = if s.layout == slRev3: hbSegdChannelSetRev3 else: hbSegdChannelSet
     for cs in 0 ..< s.channelSetCount:
