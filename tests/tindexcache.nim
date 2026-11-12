@@ -224,6 +224,12 @@ block damaged_caches:
   rebuiltBecause(p, cache, "corrupt")
   writeFile(cache, "")
   rebuiltBecause(p, cache, "no header")
+  # A cache that starts with NUL: what a crash between `saveIndex`'s rename
+  # and its data reaching the disk can leave (a zero-filled file).
+  writeFile(cache, newString(4096))
+  rebuiltBecause(p, cache, "no header")
+  writeFile(cache, "\0")
+  rebuiltBecause(p, cache, "no header")
   writeFile(cache, "(.nif27)\n(diagnostics)\n\0garbage")
   rebuiltBecause(p, cache, "not an index cache")
   removeFile(cache)

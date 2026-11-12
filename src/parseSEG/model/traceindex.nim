@@ -1077,7 +1077,8 @@ proc saveIndex*(f: SeismicFile, path: string) =
   ## file and record headers, the walk's diagnostics, keys when the file
   ## was opened with them), about 24 bytes per trace (plus 184 with keys),
   ## and stamps of the file (see `openSeismic`). Written through a new
-  ## temporary file next to `path` and renamed when complete.
+  ## temporary file next to `path`, synced to disk (POSIX) and renamed when
+  ## complete, so a crash leaves the previous cache or a whole new one.
   ##
   ## Raises `ValueError` for a closed or unrecognized file, a demultiplexed
   ## copy (`demuxPath`), keys changed by `applyGeometry`/`applySurvey` (the
