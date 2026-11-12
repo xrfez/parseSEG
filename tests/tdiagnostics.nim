@@ -103,3 +103,67 @@ block nif_malformed:
     discard parseDiagnostics("(.nif27)\n(diagnostics (diag info io (bogus 1) \"x\"))")
   doAssertRaises SegFormatError:
     discard parseDiagnostics("(.nif27)\n(diagnostics (diag info io")
+
+block nif_damaged_documents_raise:
+  # A damaged document is malformed, whatever its bytes are. The toolchain's
+  # NIF reader ended the process on the first (an unreadable line-info
+  # suffix after `(~`) and raised RangeDefect on the second.
+  for doc in ["(.nif27)\n(.vendor \"parseSEG\")\n(~diag2ostics\n (diag warni",
+      "(.nif27)\n(diagnostics\n (diag warning badValue \"x\" (offset 4340@99999999999,1)))",
+      "(.nif27)\n(diagnostics\n (diag warning badValue \"x\" (offset 99999999999999999999)))",
+      "(.nif27)\n(diagnostics\n (diag warning badValue \"x\" (offset 1.5)))",
+      "(.nif27)\n(diagnostics\n (diag warning badValue \"x\" (file 3)))",
+      "(.nif27)\n(diagnostics\n (diag warning badValue \"x\\ZZ\"))",
+      "(.nif27)\n(diagnostics\n (diag warning badValue \"unterminated))",
+      "(.nif27)\n(diagnostics\n (diag warning badValue@1,2 \"x\"))",
+      "(.nif27)\n(diagnostics\n (diag \"warning\" badValue \"x\"))",
+      "(.nif27)\n(diagnostics 7)", "(.nif27", "", "\0\xFF(", "(.nif27)\n(diagnostics"]:
+    doAssertRaises SegFormatError:
+      discard parseDiagnostics(doc)
+
+block nif_every_truncation_and_byte_change:
+  # Cut at every length, and with every byte replaced by each of a few
+  # hostile ones, the document parses or raises SegFormatError; nothing else.
+  let nif = sampleLog().toNif
+  var parsed, refused = 0
+  proc attempt(doc: string) =
+    try:
+      discard parseDiagnostics(doc)
+      inc parsed
+    except SegFormatError:
+      inc refused
+  for n in 0 ..< nif.len: attempt(nif[0 ..< n])
+  for i in 0 ..< nif.len:
+    for c in "()\"\\@~#;\0\xFF9 ":
+      var doc = nif
+      doc[i] = c
+      attempt(doc)
+  doAssert parsed > 0 and refused > nif.len div 2
+
+block nif_message_bytes_round_trip:
+  # Every byte value survives in a message, a file name and a field name.
+  var all = ""
+  for c in 0..255: all.add char(c)
+  var log = DiagLog()
+  log.report(sevWarning, dcBadValue, all, offset = high(int64),
+    loc = Location(file: all, record: high(int), field: all))
+  doAssert sameEntries(parseDiagnostics(log.toNif), log)
+
+block nif_reads_documents_of_earlier_versions:
+  # As written with the toolchain's builder up to 0.9.0: punctuation escaped
+  # as \HH, bytes past 0x7E written as they are.
+  let old = "(.nif27)\n(.vendor \"parseSEG\")\n(diagnostics\n" &
+    " (diag error unsupportedFormat \"tricky \\22quotes\\22 \\28parens\\29 \\5Bbrackets\\5D " &
+    "\\23hash \\27tick\\27 back\\5Cslash\\0Anewline\\09tab \xC3\xBCn\xC3\xAFcode\"\n" &
+    "  (channelSet 1)\n  (trace 0))\n (diag fatal truncated \"\"))"
+  let log = parseDiagnostics(old)
+  doAssert log.len == 2 and log[0] == sampleLog()[2] and log[1] == sampleLog()[3]
+
+block nif_layout:
+  var log = DiagLog()
+  log.report(sevWarning, dcBadValue, "format code 0 is not defined", 4340,
+    Location(file: "63.sgd", record: 0, field: "GH1.formatCode"))
+  doAssert log.toNif == "(.nif27)\n(.vendor \"parseSEG\")\n(diagnostics\n" &
+    " (diag warning badValue \"format code 0 is not defined\"\n  (file \"63.sgd\")\n" &
+    "  (offset 4340)\n  (record 0)\n  (field \"GH1.formatCode\")))"
+  doAssert DiagLog().toNif == "(.nif27)\n(.vendor \"parseSEG\")\n(diagnostics)"

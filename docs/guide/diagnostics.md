@@ -156,3 +156,17 @@ echo readFile("record.diagnostics.nif")
 let back = readDiagnostics("record.diagnostics.nif")
 doAssert back.len == f.log.len and back.count(sevInfo) == 2
 ```
+
+A log file is input like any other: `readDiagnostics` raises `IOError` when the file cannot
+be read, and it and `parseDiagnostics` raise `SegFormatError`, with the line, for a document
+that is damaged or is not a diagnostics log.
+
+```nim
+import parseSEG
+
+try:
+  discard parseDiagnostics("(.nif27)\n(diagnostics\n (diag warning badValue \"cut sho")
+  doAssert false
+except SegFormatError as e:
+  echo "not a diagnostics log: ", e.msg
+```
