@@ -2,7 +2,7 @@
 ## multi-record streams in every format, disk and tape images, RECORD and
 ## FIXREC structures, damaged input.
 
-import std/[assertions, math, os, strutils]
+import std/[assertions, math, os, strutils, times]
 import parseSEG/common/errors
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer]
@@ -620,3 +620,29 @@ block channel_set_values_without_a_trace:
     let m = float64(c.descaleMultiplier)
     doAssert shot.descaleFactor(0, cs) == (if m == 0 or m.isNaN: 1.0 else: m)
     doAssert shot.startTimeMs(0, cs) == float64(c.startTime) / 1000
+
+block general_header_time_reads_the_two_digit_year_like_the_library:
+  # GH#1 has a two-digit year. `generalHeaderUtc(g1)` put it in 2000-2099,
+  # so a 1999 record was dated 2099, while the trace keys and the
+  # converters read 50-99 as 19xx. The default is that pivot now.
+  proc utc(year, day: int): float64 =
+    float64(dateTime(year, mJan, 1, zone = utc()).toTime.toUnix + (day - 1) * 86400)
+  var g1 = SegdGeneralHeader1(year: 99, julianDay: 1)
+  doAssert generalHeaderUtc(g1) == 915_148_800.0 and utc(1999, 1) == 915_148_800.0
+  g1 = SegdGeneralHeader1(year: 50, julianDay: 32, hour: 1, minute: 2, second: 3)
+  doAssert generalHeaderUtc(g1) == utc(1950, 32) + 3723
+  g1.year = 49
+  doAssert generalHeaderUtc(g1) == utc(2049, 32) + 3723
+  g1.year = 0
+  doAssert generalHeaderUtc(g1) == utc(2000, 32) + 3723
+  # The century can still be given.
+  g1.year = 99
+  doAssert generalHeaderUtc(g1, 2000) == utc(2099, 32) + 3723
+  doAssert generalHeaderUtc(g1, century = 1900) == utc(1999, 32) + 3723
+  doAssert generalHeaderUtc(g1) == generalHeaderUtc(g1, 1900)
+  # Fields that are not valid BCD or out of range: no time.
+  for bad in [SegdGeneralHeader1(year: BcdInvalid, julianDay: 1),
+      SegdGeneralHeader1(year: BcdAllF, julianDay: 1), SegdGeneralHeader1(year: 26),
+      SegdGeneralHeader1(year: 26, julianDay: 367), SegdGeneralHeader1(year: 26, julianDay: 1,
+      hour: 24), SegdGeneralHeader1(year: 26, julianDay: 1, minute: 60)]:
+    doAssert generalHeaderUtc(bad).isNaN and generalHeaderUtc(bad, 2000).isNaN
