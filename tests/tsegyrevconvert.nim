@@ -2,7 +2,7 @@
 ## whose meaning the revision changes are rewritten, and what the target
 ## cannot hold is reported. Synthetic files, written by the library.
 
-import std/[assertions, math, os]
+import std/[assertions, math, options, os]
 import parseSEG
 import ./utils/testutils
 
@@ -175,3 +175,69 @@ block intervals_rev1_cannot_hold:
   doAssert log.count(sevError) == 0 and log.has("intervals were rounded", sevInfo), $log
   let got = keysOf(dst)
   doAssert got.len == 3 and got[0].intervalUs == 251
+
+proc rev2File(name: string, ns: int, fixed: bool, binNs: uint16, binExtNs: uint32,
+    dtUs: float64): string =
+  ## A Rev 2.1 big-endian float32 file of 3 traces without Trace Header
+  ## Extension 1, with the given binary header counts.
+  result = tmp / name
+  var f = SegyFile(byteOrder: boBig, format: some(sfFloat32), revision: rev(2, 1),
+    extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
+    text: initTextHeader(teEbcdic))
+  f.text.setCard(39, "C39 SEG-Y_REV2.1")
+  f.text.setCard(40, "C40 END TEXTUAL HEADER")
+  let whole = dtUs == round(dtUs) and dtUs <= 65535
+  f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 2, segyMinor: 1,
+    samplesPerTrace: binNs, extSamplesPerTrace: binExtNs,
+    sampleInterval: (if whole: uint16(dtUs) else: 0),
+    extSampleInterval: (if whole: 0.0 else: dtUs),
+    fixedLengthTraces: (if fixed: 1 else: 0), byteOrderMarker: ByteOrderMarker)
+  let sink = openDiskSink(result)
+  var w = openSegyWriter(sink, f, SegyWriteOptions(byteOrder: boBig, lenient: true))
+  var x = newSeq[float32](ns)
+  for i in 0 ..< ns: x[i] = float32(i mod 1000)
+  for t in 0 ..< 3:
+    var tr = SegyTrace(index: t, numSamples: ns)
+    tr.header = SegyTraceHeader(traceSeqLine: int32(t + 1), fieldRecord: 1,
+      traceNumberInField: int32(t + 1), traceIdCode: 1,
+      numSamples: (if ns > 65535: 0'u16 else: uint16(ns)),
+      sampleInterval: (if whole: uint16(dtUs) else: 0))
+    tr.samples = newSeq[byte](4 * ns)
+    encodeSamples(sfFloat32, x, tr.samples, boBig)
+    w.writeTrace(tr)
+  w.close()
+  sink.close()
+
+block a_count_held_in_the_extended_field_alone:
+  # Fixed-length Rev 2, the count only in binary bytes 3269-3272.
+  let src = rev2File("ext_count.sgy", 1000, true, 0, 1000, 2000)
+  for r in [rev(1), rev(0)]:
+    let (dst, log) = convertTo(src, r)
+    doAssert not log.isFatal and log.count(sevError) == 0, $log
+    var g = openSeismic(dst)
+    doAssert not g.log.isFatal and g.len == 3 and g.maxSamples == 1000, $r & ": " & $g.len &
+      " traces of " & $g.maxSamples
+    doAssert g.fileField("binary.samplesPerTrace").toFloat == 1000
+    g.close()
+    doAssert sameSamples(src, dst)
+
+block fixed_length_traces_rev1_cannot_hold:
+  for (name, ns, dt, what) in [("long.sgy", 70000, 2000.0, "70000 samples per trace need Rev 2"),
+      ("slow.sgy", 1000, 100000.0, "sample interval of 100000.0 needs Rev 2")]:
+    let src = rev2File(name, ns, true, 0, uint32(ns), dt)
+    var f = openSeismic(src)
+    doAssert f.len == 3 and f.maxSamples == ns and f.sampleIntervalUs(0) == dt
+    f.close()
+    for r in [rev(1), rev(0)]:
+      let (dst, log) = convertTo(src, r)
+      doAssert log.isFatal and log.has(what, sevFatal), $log
+      doAssert not fileExists(dst)
+
+block variable_length_traces_too_long_are_skipped:
+  let src = keysFile("long_var.sgy", rev(2, 1), baseKeys(), traces = 2, ns = 70000)
+  let (dst, log) = convertTo(src, rev(1))
+  doAssert not log.isFatal and log.count(sevError) == 2 and
+    log.has("70000 samples, which Rev 1 cannot hold", sevError), $log
+  var g = openSeismic(dst)
+  doAssert g.len == 0
+  g.close()

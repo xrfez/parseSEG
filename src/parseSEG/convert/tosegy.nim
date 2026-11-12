@@ -373,6 +373,7 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
       " cannot be pair-swapped; choose another target format", loc = loc)
     return
   # By the input's rules, before the revision bytes change.
+  let fileNs = f.binary.effectiveSamplesPerTrace
   let fileDt = f.binary.effectiveSampleInterval
   let fixedIn = fromRev.major >= 1 and f.binary.fixedLengthTraces == 1
   if fromRev.major < 2 and fromRev.major < rev.major and f.binary.dropUnassigned(fromRev):
@@ -384,6 +385,11 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     result.add r.log
     result.report(sevFatal, dcUnsupportedFormat, "the sample interval of " & $fileDt &
       " needs Rev 2 (Rev " & $rev & " holds whole intervals up to 65535)", loc = loc)
+    return
+  if rev.major < 2 and fixedIn and fileNs > high(uint16):
+    result.add r.log
+    result.report(sevFatal, dcUnsupportedFormat, $fileNs & " samples per trace need Rev 2 " &
+      "(Rev " & $rev & " holds up to 65535)", loc = loc)
     return
   f.binary.revision = rev
   f.revision = rev
@@ -423,6 +429,9 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     f.binary.numTraces = 0
     f.binary.firstTraceOffset = 0
     f.binary.numTrailerRecords = 0
+    # The count may be held in bytes 3269-3272 alone (Rev 2); over 65535 its
+    # traces are skipped below.
+    f.binary.samplesPerTrace = uint16(min(fileNs, uint32(high(uint16))))
     f.binary.extSamplesPerTrace = 0
     if fileDt != float64(f.binary.sampleInterval):
       # Held in bytes 3273-3280 (Rev 2), which override 3217-3218.
@@ -478,11 +487,11 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
           "unassigned: the CDP position, inline and crossline numbers, shotpoint and the " &
           "other Rev 1 fields there are dropped", loc)
     if rev.major < 2:
+      if t.numSamples > int(high(uint16)):
+        result.report(sevError, dcValidation, "the trace has " & $t.numSamples &
+          " samples, which Rev 1 cannot hold; skipped", t.offset, tl)
+        ok = false
       if t.hasExt1:
-        if t.ext1.extNumSamples > high(uint16) or t.numSamples > int(high(uint16)):
-          result.report(sevError, dcValidation, "the trace has " & $t.numSamples &
-            " samples, which Rev 1 cannot hold; skipped", t.offset, tl)
-          ok = false
         result.note(seen, lnTraceExtensions, "Rev 1 has no Trace Header Extension 1 or " &
           "proprietary trace headers: dropped", loc)
       t.hasExt1 = false
