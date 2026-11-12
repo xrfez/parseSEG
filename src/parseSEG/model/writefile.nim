@@ -56,7 +56,7 @@
 ## trace out of range, another standard, a closed file, a broken SEG-D
 ## record rule) raise `ValueError`.
 
-import std/[importutils, math, options, os]
+import std/[math, options, os]
 import ../common/[diagnostics, endians, outputfile, seismickind]
 import ../io/[records, diskio]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
@@ -160,30 +160,23 @@ method writeRecordImpl(s: NullSink; data: openArray[byte]) {.raises: [].} =
 
 method writeTapeMarkImpl(s: NullSink) {.raises: [].} = discard
 
-proc releaseOutput(s: WriterState) {.raises: [].} =
-  # Closes what is still open and removes the temporary file, mutating
-  # nothing: `=destroy` calls it, `discardOutput` adds the bookkeeping.
+proc discardOutput(s: var WriterState) {.raises: [].} =
+  # Closes what is still open and removes the temporary file; once.
   if s.sink != nil:
     try: s.sink.close()
     except CatchableError: discard
-  privateAccess(Seg2Writer)
-  if s.seg2.open: s.seg2.file.close() # the output is dropped: no pointers to write
+    s.sink = nil
+  s.seg2.abandon() # the output is dropped: no pointers to write
   if s.tmp.len > 0: discard tryRemoveFile(s.tmp)
-
-proc discardOutput(s: var WriterState) {.raises: [].} =
-  # `releaseOutput`, then marks it all gone so that it runs once.
-  s.releaseOutput()
-  s.open = false
-  s.sink = nil
-  privateAccess(Seg2Writer)
-  s.seg2.open = false
   s.tmp = ""
+  s.open = false
 
 proc `=destroy`(w: SeismicWriter) =
-  if w.s.open: w.s.releaseOutput()
-  # A plain object field has only the generic `=destroy(var T)`; the
-  # address is taken for that call alone, nothing is mutated before it.
-  `=destroy`((addr w.s)[])
+  # `discardOutput` and the field's generic `=destroy` take `var`: the
+  # address gives that view of the writer being destroyed.
+  let s = addr w.s
+  if s.open: s[].discardOutput()
+  `=destroy`(s[])
 
 proc `=copy`(dst: var SeismicWriter, src: SeismicWriter) {.error.}
   # A copy would share the temporary file and finish it twice.

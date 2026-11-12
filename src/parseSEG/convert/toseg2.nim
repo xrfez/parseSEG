@@ -287,6 +287,7 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
     c.fileStrings(f, fdb)
     fdb.strings.sortStrings()
   var w = openSeg2Writer(path, fdb, Seg2WriteOptions(lenient: f.kind == skSeg2))
+  var complete = false
   try:
     var vals, back: seq[float64]
     var data: seq[byte]
@@ -330,8 +331,10 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
           w.writeTrace(t, data)
     c.reportInexact("the SEG-2 target format")
     if not c.tk.finish(): raiseCancelled()
+    complete = true
   finally:
-    w.close()
+    # A failed or cancelled conversion's file is removed: no pointers to write.
+    if complete: w.close() else: w.abandon()
     c.log.add w.log
 
 proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions(),

@@ -13,6 +13,8 @@
 ## w.close()                    # writes N and the pointers
 ## ```
 ##
+## `abandon` closes a writer whose output is to be thrown away.
+##
 ## Layout (the same bytes a reader of this module's output writes back, so
 ## a file read and rewritten is byte-identical):
 ## - the fixed parts are written from `Seg2File` / `Seg2Trace` (order,
@@ -221,6 +223,14 @@ proc writeTrace*[T: Seg2SampleType](w: var Seg2Writer, t: Seg2Trace, samples: op
   var data = newSeq[byte](dataBytes(fmt.get, samples.len))
   encodeSamples(fmt.get, samples, data, w.fdb.order, twosComplement)
   w.writeBlock(t, t.formatCode, samples.len, data)
+
+proc abandon*(w: var Seg2Writer) {.raises: [].} =
+  ## Closes the file as it is, without the trace count and pointers: for
+  ## output that is being discarded (the caller removes the file). Does
+  ## nothing on a closed writer.
+  if w.open:
+    w.open = false
+    w.file.close()
 
 proc close*(w: var Seg2Writer) =
   ## Writes the trace count and pointers into the File Descriptor Block and

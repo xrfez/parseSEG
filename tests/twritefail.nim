@@ -78,6 +78,21 @@ block segd_writer_calls_out_of_order_are_value_errors:
   src.close()
   doAssert readFile(tmp / "order.sgd") == readFile(demoDir() / "record.sgd")
 
+block an_abandoned_seg2_writer_writes_no_pointers:
+  var fdb = initSeg2File()
+  fdb.traceCount = 2
+  let path = tmp / "abandoned.sg2"
+  var w = openSeg2Writer(path, fdb)
+  let t = Seg2Trace(formatCode: 4)
+  w.writeTrace(t, [1'f32, 2])
+  w.abandon()
+  w.abandon() # a closed writer: nothing to do
+  w.close()
+  doAssertRaises(ValueError): w.writeTrace(t, [1'f32])
+  let b = readFile(path)
+  doAssert b[6] == '\0' and b[7] == '\0' # the trace count was never written
+  removeFile(path)
+
 when defined(posix):
   import std/posix
 

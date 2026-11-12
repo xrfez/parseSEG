@@ -205,7 +205,8 @@ fatal diagnostic.
   - Writer (`seg2/writer`): `openSeg2Writer(path, initSeg2File(order), opts)` (set
     `traceCount` first: it sizes the pointer subblock), `writeTrace(t, rawData)` or
     `writeTrace(t, samples)` (encoded in `t.formatCode`; `encodeSamples`), `close()`
-    (writes N and the pointers). A file this writer wrote, read and written back, is
+    (writes N and the pointers; `IOError` when the last bytes did not reach the file) or
+    `abandon()` (closes it as it is, for output being discarded). A file this writer wrote, read and written back, is
     byte-identical (other writers' files may differ in padding and pointer layout); output the
     standard forbids raises `SegFormatError` unless `Seg2WriteOptions(lenient: true)`.
   - Named fields: `trace.<fixed field>` / `file.<fixed field>` (`Seg2TraceFixed`,
