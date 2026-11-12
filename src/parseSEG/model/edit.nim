@@ -56,8 +56,9 @@
 ## record or keyed binary field edit refreshes the keys of the traces it
 ## touches once its bytes are on the map (a batch's at `endBatch`) and bumps
 ## `keysRevision` when they changed. Keys a join wrote (`applyGeometry`,
-## `applySurvey`: `TraceIndex.joinedTraces`) keep their joined values; the
-## trace's other keys follow its headers.
+## `applySurvey`: `TraceIndex.joinedTraces`, by `JoinGroup`) keep their joined
+## values; the trace's other keys follow its headers, and an offset and
+## midpoint the join derived follow an end it left to the headers.
 ##
 ## `rollbackJournal` undoes a journal (newest first), `applyJournal` replays
 ## it (oldest first); their editor forms do it on the open file and refresh

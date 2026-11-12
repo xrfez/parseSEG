@@ -605,15 +605,37 @@ proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
   inc f.index.keysRevision
 
 func keepJoined(k: var TraceKeys, old: TraceKeys, groups: set[JoinGroup]) =
-  # The values a join wrote win over the headers (Phase 16, D2).
-  if jgCoordinates in groups:
-    (k.srcX, k.srcY, k.srcZ) = (old.srcX, old.srcY, old.srcZ)
-    (k.rcvX, k.rcvY, k.rcvZ) = (old.rcvX, old.rcvY, old.rcvZ)
-    (k.offset, k.cmpX, k.cmpY) = (old.offset, old.cmpX, old.cmpY)
-  if jgStations in groups:
+  # The values a join wrote win over the headers (Phase 16, D2), group by
+  # group: what the join did not change follows the headers (`k`, as just
+  # read from them), so an edit of it shows and `writeGeometry` does not
+  # write the old value back.
+  func same(x, y: float64): bool {.inline.} = x == y or (x.isNaN and y.isNaN)
+  if groups == {}: return
+  if jgSourceXy in groups: (k.srcX, k.srcY) = (old.srcX, old.srcY)
+  if jgReceiverXy in groups: (k.rcvX, k.rcvY) = (old.rcvX, old.rcvY)
+  if jgSourceZ in groups: k.srcZ = old.srcZ
+  if jgReceiverZ in groups: k.rcvZ = old.rcvZ
+  if jgSourceStation in groups:
     (k.srcLine, k.srcPoint, k.srcIndex) = (old.srcLine, old.srcPoint, old.srcIndex)
+  if jgReceiverStation in groups:
     (k.rcvLine, k.rcvPoint, k.rcvIndex) = (old.rcvLine, old.rcvPoint, old.rcvIndex)
-    k.component = old.component
+  if jgComponent in groups: k.component = old.component
+  if jgDerived in groups:
+    let endsMoved = not (same(k.srcX, old.srcX) and same(k.srcY, old.srcY) and
+      same(k.rcvX, old.rcvX) and same(k.rcvY, old.rcvY))
+    if not endsMoved:
+      (k.offset, k.cmpX, k.cmpY) = (old.offset, old.cmpX, old.cmpY)
+    else:
+      # An end the join left to the headers was edited, so the offset and
+      # midpoint the join derived are stale: derive them again from the ends
+      # as they are now (the join's stay where an end is unknown now). A
+      # header value the join had kept (the stored one still equals it) stays.
+      var d = k
+      (d.offset, d.cmpX, d.cmpY) = (old.offset, old.cmpX, old.cmpY)
+      d.deriveGeometry(overwrite = true)
+      if not same(k.offset, old.offset): k.offset = d.offset
+      if not (same(k.cmpX, old.cmpX) and same(k.cmpY, old.cmpY)):
+        (k.cmpX, k.cmpY) = (d.cmpX, d.cmpY)
 
 func sameKeys(a, b: TraceKeys): bool =
   result = true
@@ -1046,9 +1068,10 @@ proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): in
   ix.requireKeys()
   ix.joined = true
   for i, k in ix.keys.mpairs:
+    let before = k
     if k.applyGeometry(g, overwrite):
       inc result
-      ix.markJoined(i, {jgCoordinates})
+      ix.markJoined(i, changedGroups(before, k))
   if result > 0: inc ix.keysRevision
 
 # ------------------------------------------------------------ index cache --

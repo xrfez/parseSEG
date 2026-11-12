@@ -477,12 +477,6 @@ proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
   if rel.component > 0 and k.component == 0:
     k.component = uint8(min(rel.component, 255))
 
-func coordinatesDiffer(a, b: TraceKeys): bool =
-  func same(x, y: float64): bool = x == y or (x.isNaN and y.isNaN)
-  not (same(a.srcX, b.srcX) and same(a.srcY, b.srcY) and same(a.srcZ, b.srcZ) and
-    same(a.rcvX, b.rcvX) and same(a.rcvY, b.rcvY) and same(a.rcvZ, b.rcvZ) and
-    same(a.offset, b.offset) and same(a.cmpX, b.cmpX) and same(a.cmpY, b.cmpY))
-
 func stationsDiffer(a, b: TraceKeys): bool =
   func same(x, y: float64): bool = x == y or (x.isNaN and y.isNaN)
   not (same(a.srcLine, b.srcLine) and same(a.srcPoint, b.srcPoint) and
@@ -516,10 +510,7 @@ proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, stats: var JoinStats,
     var match: JoinMatch
     if k.join(g, overwrite, match):
       inc result
-      var groups: set[JoinGroup]
-      if coordinatesDiffer(before, k): groups.incl jgCoordinates
-      if stationsDiffer(before, k): groups.incl jgStations
-      ix.markJoined(i, groups)
+      ix.markJoined(i, changedGroups(before, k))
     inc stats.matches[match]
     if match != jmAuxiliary:
       if not k.hasSourceXY: inc stats.noSourceXy

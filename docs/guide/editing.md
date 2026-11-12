@@ -82,8 +82,11 @@ doAssert rollbackJournal("view.sgy", "view.sgy.edits.nif").len == 0
 
 When the file has stored keys, they follow the edits: a trace, record or keyed binary field
 edit refreshes the affected traces' keys once the bytes are on the map (a batch's at
-`endBatch`), and `keysRevision` goes up. Coordinates or stations that a survey join wrote
-stay as joined; the trace's other keys follow its headers. On the open editor,
+`endBatch`), and `keysRevision` goes up. Values that a survey join wrote stay as joined, group
+by group (`JoinGroup`: source X/Y, receiver X/Y, each elevation, each station, the
+component); the trace's other keys follow its headers. After a join that filled the source
+coordinates only, an edit of the header's receiver coordinates shows in the keys, and the
+offset and midpoint the join derived are derived again. On the open editor,
 `rollbackJournal(ed)` and `applyJournal(ed)` undo and redo the session's journal and refresh
 the cached headers and keys too.
 
