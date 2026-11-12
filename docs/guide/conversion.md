@@ -222,3 +222,9 @@ trace headers have no coordinate fields: that is what `unwritable` counts); SEG-
 THE#1 fields and the Position and Source Description blocks the traces already have. SEG-2
 is refused for now. `GeometryFields` selects which values to write (`sourceXy`,
 `receiverXy`, `elevations`, `midpoints`, `offsets`, `stations`; all by default).
+
+The counts (`GeometryChanges`) say what the headers hold differently afterwards: a source
+point 99.5 for an integer field that already holds 100 is no change. A value that a field
+cannot hold exactly is written rounded, with one "rounded" warning per kind of value, unless
+another field of the same value holds it exactly (the SEG-Y shotpoint with its scalar holds
+99.5 beside the energy source point's 100).

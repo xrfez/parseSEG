@@ -316,6 +316,7 @@ sampleBlock survey_apply:
   # 99.5 in the layout's station fields. No byte changes, so nothing counts.
   let c = ok("survey-apply", path, "--sps=" & sps, "-o", copy, "--values=stations")
   doAssert "changed in " & copy in c and "src station: 0 traces" in c, c
+  doAssert "rounded" notin c, c # sp holds 99.5 exactly, and nothing was written
   doAssert readFile(copy) == original, "the stations were there already"
   doAssert "500100" notin ok("keys", copy), "stations only"
   # SEG-D 2.0 headers already carry the stations and have no coordinate fields.
