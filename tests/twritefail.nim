@@ -50,8 +50,13 @@ block a_failed_rename_leaves_no_temporary_file:
   var w = openSeismicWriter(dst, SegyOutputOptions())
   w.writeTrace(liveKeys(), newSeq[float32](100))
   createDir(dst)
-  let log = w.close()
-  doAssert log.isFatal and log.has("cannot move the output into place", sevFatal), $log
+  # One error channel: `close` raises for this as for every other failure.
+  try:
+    discard w.close()
+    doAssert false, "close returned"
+  except IOError as e:
+    doAssert "cannot move the output into place" in e.msg, e.msg
+  doAssertRaises(ValueError): discard w.close() # closed
   doAssert isEmptyDir(dst)
   noTempFiles()
   removeDir(dst)

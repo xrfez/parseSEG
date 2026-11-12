@@ -188,7 +188,7 @@ block changed_sample_counts_segy:
     let dst = tmp / ("half_" & src.extractFilename)
     var w = openSeismicWriter(dst, f)
     let x = f.readTraces(0 ..< f.len, float64)
-    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = n)
+    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = n)
     discard w.close()
     var g = openSeismic(dst)
     doAssert g.len == f.len and g.maxSamples == n and not g.log.isFatal, $g.log
@@ -204,7 +204,7 @@ block changed_sample_counts_segy:
     let dst = tmp / "mixed.sgy"
     var w = openSeismicWriter(dst, f)
     let x = f.readTraces(0 ..< f.len)
-    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = n - i mod 2)
+    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = n - i mod 2)
     discard w.close()
     var g = openSeismic(dst)
     doAssert g.fileField("binary.samplesPerTrace").intVal == n
@@ -215,9 +215,9 @@ block changed_sample_counts_segy:
     var f = openSeismic(bo)
     var w = openSeismicWriter(tmp / "fixed.sgy", f)
     let x = f.readTraces(0..1)
-    w.writeTrace(f, 0, x, 0, samples = 100)
-    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, samples = 99)
-    w.writeTrace(f, 1, x, 1, samples = 100)
+    w.writeTrace(f, 0, x, 0, count = 100)
+    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, count = 99)
+    w.writeTrace(f, 1, x, 1, count = 100)
     discard w.close()
     var g = openSeismic(tmp / "fixed.sgy")
     doAssert g.len == 2 and g.maxSamples == 100
@@ -236,7 +236,7 @@ block changed_sample_counts_seg2:
   var f = openSeismic(boSg2)
   var w = openSeismicWriter(tmp / "half.sg2", f)
   let x = f.readTraces(0 ..< f.len)
-  for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = 10 + i)
+  for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = 10 + i)
   discard w.close()
   var g = openSeismic(tmp / "half.sg2")
   doAssert g.len == f.len and g.maxSamples == 10 + f.len - 1
@@ -266,7 +266,7 @@ block segd_record_rule:
     doAssertRaises(ValueError): w.writeTrace(f, 2, x, 2)    # trace 1 is next
     doAssertRaises(ValueError): w.writeTrace(f, 0, x, 0)    # nor again
     doAssertRaises(ValueError): w.writeTrace(f, 5, x, 5)    # record 0 is incomplete
-    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, samples = 10) # count changes
+    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, count = 10) # count changes
     w.writeTrace(f, 1, x, 1)                                # the writer is still usable
     doAssertRaises(ValueError): discard w.close()           # record 0 is incomplete
     doAssert not fileExists(tmp / "bad.sgd")
@@ -298,7 +298,7 @@ block refusals:
   doAssertRaises(ValueError): w.writeTrace(s2, 0, x, 0)
   doAssertRaises(ValueError): w.writeTrace(sy, sy.len, x, 0)          # out of range
   doAssertRaises(ValueError): w.writeTrace(sy, 0, x, 1)               # no such row
-  doAssertRaises(ValueError): w.writeTrace(sy, 0, x, 0, samples = 5000) # row too short
+  doAssertRaises(ValueError): w.writeTrace(sy, 0, x, 0, count = 5000) # row too short
   doAssertRaises(SegFormatError): # int16 overflow
     w.writeTrace(sy, 0, 1e9'f32 * ones[float32](1, sy.maxSamples), 0)
   doAssert w.len == 0

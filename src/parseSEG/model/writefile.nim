@@ -671,15 +671,15 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   inc w.s.written
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
-    x: Tensor[T], row: int, samples = -1, overrides: openArray[HeaderOverride] = []) =
-  ## `writeTrace` with the first `samples` values of row `row` of a
+    x: Tensor[T], row: int, count = -1, overrides: openArray[HeaderOverride] = []) =
+  ## `writeTrace` with the first `count` values of row `row` of a
   ## row-major `[traces, samples]` tensor (e.g. from `readTraces`); -1
   ## takes as many as the input trace has. Raises `ValueError` also for
   ## another tensor shape, a row outside it or a row too short.
   if x.rank != 2 or not x.is_C_contiguous:
     refuse("need a row-major [traces, samples] tensor")
   if row notin 0 ..< x.shape[0]: refuse("row " & $row & " is outside the tensor")
-  let n = if samples >= 0: samples else: int(src.traceEntry(trace).numSamples)
+  let n = if count >= 0: count else: int(src.traceEntry(trace).numSamples)
   if n > x.shape[1]:
     refuse($n & " samples were asked for, the tensor rows hold " & $x.shape[1])
   let p = rowPtr(x, row)
@@ -738,10 +738,12 @@ proc close*(w: var SeismicWriter): DiagLog =
   ## Finishes the output: ends the SEG-D record in progress, writes the
   ## SEG-Y trailer and final counts or the SEG-2 trace pointers, and renames
   ## the temporary file to the output path. Returns the writer's
-  ## diagnostics (warnings; a fatal one when the rename failed). On a raise
-  ## (`ValueError` for an incomplete SEG-D record, `SegFormatError` for
-  ## output the writer refuses, e.g. a SEG-2 file without traces, `IOError`)
-  ## the output is discarded. Raises `ValueError` when already closed.
+  ## diagnostics: warnings only, since every failure raises and discards
+  ## the output (`ValueError` for an incomplete SEG-D record,
+  ## `SegFormatError` for output the writer refuses, e.g. a SEG-2 file
+  ## without traces, `IOError` when the last bytes cannot be written or the
+  ## file cannot be moved into place). Raises `ValueError` when already
+  ## closed.
   if not w.s.open: refuse("the writer is closed")
   try:
     case w.s.kind
@@ -755,5 +757,8 @@ proc close*(w: var SeismicWriter): DiagLog =
     w.s.discardOutput()
     raise
   w.s.open = false
-  finishOutput(w.s.tmp, w.s.path, keep = true, result)
+  var moved: DiagLog
+  finishOutput(w.s.tmp, w.s.path, keep = true, moved) # removes what it cannot move
   w.s.tmp = ""
+  for d in moved:
+    if d.severity == sevFatal: raise newException(IOError, d.msg & ": " & w.s.path)

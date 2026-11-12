@@ -258,7 +258,7 @@ import parseSEG
 var f = openSeismic("survey.sgy")
 var w = openSeismicWriter("survey_1000.sgy", like = f)
 let x = f.readTraces(0 ..< f.len)
-for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = 1000)
+for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = 1000)
 discard w.close()
 var g = openSeismic("survey_1000.sgy")
 doAssert g.maxSamples == 1000 and g.fileField("binary.samplesPerTrace").intVal == 1000
