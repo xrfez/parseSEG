@@ -55,7 +55,7 @@
 ## trace out of range, another standard, a closed file, a broken SEG-D
 ## record rule) raise `ValueError`.
 
-import std/[importutils, math, options, os, times]
+import std/[importutils, math, options, os]
 import ../common/[diagnostics, endians, outputfile, seismickind]
 import ../io/[records, diskio]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
@@ -66,7 +66,7 @@ import ../convert
 import std/strutils
 import ./[traceindex, fieldvalues, keytypes]
 import ../common/tensors
-import ../private/[tensorrows, fieldaccess, segyencode, segykeys]
+import ../private/[tensorrows, fieldaccess, segyencode]
 import ../version
 
 type
@@ -438,100 +438,6 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
 
 # ------------------------------------------------------- SEG-Y from keys --
 
-func timeScalarFor(ms: float64): int16 =
-  # The time scalar (bytes 215-216) that holds `ms` in the int16 delay most
-  # exactly: whole ms (to 1 ns: float noise such as 4.0000000001 is whole)
-  # as 1, so readers that ignore the scalar still read it; else the finest
-  # of -10, -100, -1000 that fits; 10, 100, 1000 for delays past 32767 ms.
-  if abs(ms - round(ms)) < 1e-6 and abs(round(ms)) <= 32767: return 1
-  for s in [-1000'i16, -100, -10]:
-    if abs(round(ms * float64(-s))) <= 32767: return s
-  if abs(ms) <= 32767: return 1
-  for s in [10'i16, 100, 1000]:
-    if abs(round(ms / float64(s))) <= 32767: return s
-  1000
-
-proc keysTrace(t: var SegyTrace, k: TraceKeys, n: int, seqNo: int, rev: SegyRevision,
-    ext1: bool) =
-  # Trace headers holding `k` in the standard layout of `rev` (see `writeTrace`).
-  t.header = SegyTraceHeader(traceSeqLine: int32(min(seqNo, int(high(int32)))),
-    traceSeqFile: int32(min(seqNo, int(high(int32)))))
-  template h: untyped = t.header
-  if not k.record.isNaN: h.fieldRecord = clampI32(k.record)
-  if not k.channel.isNaN: h.traceNumberInField = clampI32(k.channel)
-  if not k.ensemble.isNaN: h.ensembleNumber = clampI32(k.ensemble)
-  h.traceIdCode =
-    # The stored code when it says what the status says (a status changed
-    # in the keys, e.g. a trace killed, wins over the input's code).
-    # `component` is not used: for SEG-D, SEG-2 and survey keys it is a
-    # group index or sensor type, not a SEG-Y code (a SEG-Y input's code is
-    # in `traceCode`).
-    if k.traceCode != 0 and segyStatus(k.traceCode, int(rev.major)) == k.status: k.traceCode
-    else:
-      case k.status
-      of tsLive: 1
-      of tsDead: 2
-      of tsUnknown, tsAuxiliary: 0
-  if not k.srcPoint.isNaN:
-    # Readers take the energy source point when non-zero, else the scaled
-    # shotpoint (Rev 1): a fractional point goes in the second alone.
-    let whole = k.srcPoint == round(k.srcPoint)
-    if whole or rev.major == 0: h.energySourcePoint = clampI32(k.srcPoint)
-    if rev.major >= 1:
-      h.shotpointScalar = if whole: 1 else: -100
-      h.shotpointNumber = scaled(k.srcPoint, h.shotpointScalar)
-  h.setGeometry(k)
-  if not k.t0Ms.isNaN:
-    if rev.major >= 1:
-      h.timeScalar = timeScalarFor(k.t0Ms)
-      h.delayRecordingTime = scaled(k.t0Ms, h.timeScalar).clamp(-32768, 32767).int16
-    else:
-      h.delayRecordingTime = clampI16(k.t0Ms)
-  let dt = k.intervalUs
-  let whole = dt == round(dt) and dt <= 65535
-  h.sampleInterval = uint16(if whole or rev.major < 2: clamp(round(dt), 0, 65535) else: 0)
-  h.numSamples = if n > int(high(uint16)): 0'u16 else: uint16(n)
-  if rev.major >= 1:
-    if not k.inline.isNaN: h.inlineNumber = clampI32(k.inline)
-    if not k.crossline.isNaN: h.crosslineNumber = clampI32(k.crossline)
-  var nanos = 0'i32
-  if not k.time.isNaN and k.time > -62135596800.0 and k.time < 253402300800.0:
-    let whole = floor(k.time)
-    let d = fromUnix(int64(whole)).utc
-    h.year = int16(d.year)
-    h.dayOfYear = int16(d.yearday + 1)
-    h.hour = int16(d.hour)
-    h.minute = int16(d.minute)
-    h.second = int16(d.second)
-    h.timeBasisCode = 4 # UTC
-    nanos = int32(min(round((k.time - whole) * 1e9), 999_999_999.0))
-  t.hasExt1 = ext1
-  t.proprietary.setLen 0
-  if ext1:
-    t.ext1 = initTraceHeaderExt1()
-    template x: untyped = t.ext1
-    x.numAddlTraceHeaders = 1
-    x.extTraceSeqLine = uint64(seqNo)
-    x.extTraceSeqFile = uint64(seqNo)
-    if not k.record.isNaN: x.extFieldRecord = int64(clamp(round(k.record), -9.2e18, 9.2e18))
-    if not k.ensemble.isNaN: x.extEnsembleNumber = int64(clamp(round(k.ensemble), -9.2e18, 9.2e18))
-    if n > int(high(uint16)): x.extNumSamples = uint32(n)
-    if h.sampleInterval == 0: x.extSampleInterval = dt
-    x.nanoseconds = nanos
-    template f64(dst: untyped, v: float64) =
-      if not v.isNaN: dst = v
-    f64(x.extSourceX, k.srcX)
-    f64(x.extSourceY, k.srcY)
-    f64(x.extGroupX, k.rcvX)
-    f64(x.extGroupY, k.rcvY)
-    f64(x.extCdpX, k.cmpX)
-    f64(x.extCdpY, k.cmpY)
-    f64(x.extOffset, k.offset)
-    f64(x.extReceiverElevation, k.rcvZ)
-    f64(x.extSourceSurfaceElevation, k.srcZ)
-  elif n > int(high(uint16)):
-    refuse("a trace of " & $n & " samples needs Trace Header Extension 1 (SEG-Y Rev 2)")
-
 proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: openArray[T],
     overrides: openArray[HeaderOverride]) =
   let n = samples.len
@@ -545,8 +451,10 @@ proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
     refuse("SEG-Y Rev " & $rev & " holds intervals up to 65535 µs, not " & $dt)
   template b: untyped = s.segyFile.binary
   let ext1 = rev.major >= 2 and b.maxAddlTraceHeaders > 0
+  if n > int(high(uint16)) and not ext1:
+    refuse("a trace of " & $n & " samples needs Trace Header Extension 1 (SEG-Y Rev 2)")
   template t: untyped = s.segyTrace
-  t.keysTrace(k, n, s.written + 1, rev, ext1)
+  t.keysToHeaders(k, n, s.written + 1, rev, ext1)
   t.overrideSegy(overrides)
   if s.segyFixed:
     if not s.segyStarted: b.setFileCount(n)
