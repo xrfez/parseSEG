@@ -84,6 +84,14 @@ task testRelease, "Run the test suite in -d:release and -d:danger builds (as shi
   selfExec "c -r --hints:off -d:release" & dev() & "tests/tester.nim"
   selfExec "c -r --hints:off -d:danger" & dev() & "tests/tester.nim"
 
+task testV3, "Run the test suite in a -d:release x86-64-v3 (AVX2) build, as the CLI ships":
+  ## `nim cli`, the benchmarks and processSEG compile the library for
+  ## x86-64-v3: the decoders have AVX2-only paths there, and the C compiler
+  ## contracts multiply-adds. `nim test` and `nim testRelease` build for the
+  ## baseline CPU, so this is the run that covers the code as shipped. On
+  ## other CPUs it is the plain release run.
+  selfExec "c -r --hints:off -d:release -d:cpuV3" & dev() & "tests/tester.nim"
+
 task asan, "Run the threaded tests under ASan/LSan (any leak or memory error fails)":
   ## The tests whose worker or caller threads decode (15.1: a leak there once
   ## came from exceptions destroyed on worker threads). Needs gcc or clang

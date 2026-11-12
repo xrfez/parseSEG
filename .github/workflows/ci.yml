@@ -50,6 +50,11 @@ jobs:
       - name: Run test suite in release and danger builds
         run: nim testRelease
 
+      # The CLI and processSEG build the library for x86-64-v3 (AVX2-only
+      # decode paths, contracted multiply-adds); the runs above are baseline.
+      - name: Run test suite in an x86-64-v3 release build
+        run: nim testV3
+
       - name: Threaded tests under ASan/LSan (fails on any leak)
         run: nim asan
 
