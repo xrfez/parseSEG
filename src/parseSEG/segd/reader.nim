@@ -1062,19 +1062,24 @@ proc nextRecord*(r: var SegdReader): bool =
     while r.readTrace(t): discard
   if r.done:
     return false
-  var ok = r.log.tryRecord(Location(file: r.name, record: r.records)):
-    while r.input.stoppedAt == rkTapeMark: r.input.skipTapeMark()
-  if not ok or not r.input.atData:
-    r.stop()
-    return false
-  var peek: array[13, byte]
-  let got = r.input.readAvail(peek)
-  r.input.unread(peek.toOpenArray(0, got - 1))
-  if isTocFile(peek):
-    if not r.log.tryRecord(Location(file: r.name, field: "toc"), r.readToc()):
+  # To the next record, over tape marks and Table of Contents files: in a
+  # loop, since a call per TOC file overflowed the stack on a run of them
+  # (50000 files of 448 bytes).
+  var toc = true
+  while toc:
+    var more = false
+    let ok = r.log.tryRecord(Location(file: r.name, record: r.records)):
+      while r.input.stoppedAt == rkTapeMark: r.input.skipTapeMark()
+      more = r.input.atData
+      if more:
+        var peek: array[13, byte]
+        let got = r.input.readAvail(peek)
+        r.input.unread(peek.toOpenArray(0, got - 1))
+        toc = isTocFile(peek.toOpenArray(0, got - 1))
+    if not ok or not more or
+        (toc and not r.log.tryRecord(Location(file: r.name, field: "toc"), r.readToc())):
       r.stop()
       return false
-    return r.nextRecord()
   let index = r.records
   inc r.records
   r.tracesRead = 0

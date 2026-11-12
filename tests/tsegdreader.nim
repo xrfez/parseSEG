@@ -493,3 +493,54 @@ sampleBlock channel_set_hint_matches_the_search:
           inc traces
       doAssert traces > 0, name
     finally: src.close()
+
+proc tocFile(entries = 0): string =
+  ## A Table of Contents file: the 448-byte header and `entries` blank entries.
+  result = alignLeft("SEGD TOC FILE", 13) & alignLeft("SD3.0", 6) & alignLeft("T1", 12)
+  result = alignLeft(result, 438) & align($entries, 10) & spaces(128 * entries)
+
+block table_of_contents_files_between_records:
+  # One or several TOC files before, between and after the records.
+  let recs = makeStream([sd8058, sd8024])
+  discard recs.toDisk(tmp / "toc_recs.sgd")
+  let whole = readFile(tmp / "toc_recs.sgd")
+  discard makeStream([sd8058]).toDisk(tmp / "toc_first.sgd")
+  let first = readFile(tmp / "toc_first.sgd")
+  let second = whole[first.len .. ^1]
+  doAssert whole[0 ..< first.len] == first
+  let path = tmp / "toc_runs.sgd"
+  writeFile(path, tocFile() & tocFile(2) & first & tocFile() & tocFile() & tocFile(1) & second &
+    tocFile())
+  let src = openDiskSource(path)
+  var r = openSegd(src)
+  var files: seq[int64]
+  var traces = 0
+  while r.nextRecord():
+    files.add r.record.fileNumber
+    var t: SegdTrace
+    while r.readTrace(t): inc traces
+  src.close()
+  doAssert r.log.len == 0, $r.log
+  doAssert files == @[100'i64, 101] and traces == 2 * recs.records[0].traces.len
+  doAssert r.toc.len == 6 and r.toc[1].entries.len == 2 and r.toc[4].entries.len == 1
+  sameRecords(readSegd(path), recs)
+
+block a_long_run_of_table_of_contents_files:
+  # `nextRecord` called itself once per TOC file: 50000 of them (22 MB)
+  # overflowed the stack. They are read in a loop now.
+  const n = 50_000
+  let path = tmp / "toc_many.sgd"
+  let one = tocFile()
+  var s = newStringOfCap(one.len * n)
+  for i in 0 ..< n: s.add one
+  writeFile(path, s)
+  let src = openDiskSource(path)
+  var r = openSegd(src, headersOnly = true)
+  doAssert not r.nextRecord() and r.isDone
+  src.close()
+  doAssert r.toc.len == n and r.log.len == 0
+  removeFile(path)
+  # A TOC file cut short ends the read with a fatal entry.
+  writeFile(path, one & one[0 ..< 300])
+  let d = readSegd(path)
+  doAssert d.records.len == 0 and d.log.isFatal and d.log[d.log.len - 1].code == dcTruncated
