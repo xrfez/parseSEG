@@ -52,7 +52,13 @@
 ## returned by `next` is never written again. That one is fresh, or one the
 ## caller gave up: the previous chunk's with `nextInto`, a `recycle`d one.
 ## Only tensors of the slot shape whose storage they own alone (no copy,
-## view or `fromBuffer` shares it) are reused; others are dropped.
+## view or `fromBuffer` shares it) are reused; others are dropped. A chunk
+## shorter than `chunkTraces` (the first with `quickFirst`, the last of a
+## range, a `uniform` cut) gets the slot's tensor as well: its `samples` are
+## a view of the first `count` rows, nothing is copied. Given back
+## (`nextInto`, `recycle`), that buffer is a slot buffer again; kept, it
+## keeps the whole `chunkTraces × cols` buffer alive, so `clone` a short
+## chunk that is kept for long.
 ##
 ## Lifetime: the prefetcher pins the file's map, so `f.close()`, the file
 ## going out of scope, or handing it to an editor (`openEditor(f)`) while it
@@ -153,6 +159,8 @@ type
     pin: MapPin             # keeps the map (and a destroyed file's index) alive for the workers
     tensors: seq[Tensor[T]] # slot storage, consumer side
     spare: seq[Tensor[T]]   # recycled slot-shaped buffers, at most `depth`
+    lent: Tensor[T]         # the whole buffer of the last short chunk taken, whose `samples`
+                            # is a view of it: given back, it is a slot buffer again
     last: int               # end of the whole range (exclusive)
     selection: seq[int]     # selection mode: the trace list (fixed for the prefetcher's life)
     path: string            # the file's, for diagnostics
@@ -165,7 +173,11 @@ type
       ## Position of the chunk's first row: its trace index, or in selection
       ## mode its position in the selection (`traceAt` maps it).
     count*: int         ## Traces in the chunk.
-    samples*: Tensor[T] ## `[count, cols]`; shorter traces are zero-padded.
+    samples*: Tensor[T]
+      ## `[count, cols]`; shorter traces are zero-padded. The caller's: no
+      ## worker writes it again. For a chunk shorter than `chunkTraces` it is
+      ## a view of the first rows of a whole chunk buffer (see the module
+      ## documentation).
     failed*: int        ## Traces that could not be decoded (left zero).
     failedRows*: seq[int] ## Those traces' rows (0-based in the chunk), ascending.
     firstSample*: int
@@ -206,6 +218,9 @@ proc `=destroy`[T](p: Prefetcher[T]) =
   `=destroy`(p.pin) # after the shutdown: the workers read the map
   `=destroy`(p.tensors)
   `=destroy`(p.spare)
+  # `p` is passed by reference and this is its last use (a `Tensor` has only
+  # the generic `var` destructor).
+  `=destroy`((addr p.lent)[])
   `=destroy`(p.selection) # after the shutdown: the workers read it
   `=destroy`(p.path)
   `=destroy`(p.bounds) # after the shutdown: the workers read it
@@ -501,13 +516,24 @@ proc reusable[T](p: Prefetcher[T], t: Tensor[T]): bool =
     t.offset == 0 and t.is_C_contiguous and not t.storage.isNil and
     t.storage.isMemOwner and isUniqueRef(t.storage)
 
+proc giveBack[T](p: var Prefetcher[T], t: var Tensor[T]): bool =
+  # The caller gives `t` up: true when it can be a slot buffer (`reusable`).
+  # The `samples` of the last short chunk are a view of a whole slot buffer:
+  # that view is first replaced by the buffer itself, which the prefetcher
+  # kept (`lent`), so it is known by identity and not by its shape.
+  if not t.storage.isNil and t.storage == p.lent.storage: t = move p.lent
+  p.reusable(t)
+
 proc recycle*[T](p: var Prefetcher[T], t: sink Tensor[T]) =
   ## Gives a chunk's tensor back: a later chunk is decoded into it instead of
   ## a fresh allocation. The caller gives the buffer up (pass it with `move`;
   ## its raw data must not be used again). Dropped, as if destroyed, unless it
-  ## has the chunk shape `[chunkTraces, cols]` and nothing else shares its
-  ## storage (a copy, a view), or when `depth` buffers are already spare.
-  if p.sh != nil and p.spare.len < p.sh.depth and p.reusable(t): p.spare.add t
+  ## has the chunk shape `[chunkTraces, cols]` (or is the last short chunk
+  ## taken) and nothing else shares its storage (a copy, a view), or when
+  ## `depth` buffers are already spare.
+  if p.sh != nil and p.spare.len < p.sh.depth:
+    var buf = t
+    if p.giveBack(buf): p.spare.add buf
 
 proc recycle*[T](p: var Prefetcher[T], c: sink PrefetchChunk[T]) {.inline.} =
   ## `recycle(p, c.samples)`.
@@ -538,17 +564,26 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool) =
       e.offset, Location(file: p.path, trace: trace,
         # SEG-2: `record` indexes the codecs; the file is one record.
         record: if sh.codecs[e.record].kind == skSeg2: 0 else: int(e.record)))
-  if s.count == sh.chunkTraces:
-    if into and p.reusable(c.samples):
-      swap(c.samples, p.tensors[i])
-    else:
-      c.samples = move(p.tensors[i])
-      p.tensors[i] = if p.spare.len > 0: p.spare.pop
-        else: newTensorUninit[T](sh.chunkTraces, sh.cols)
+  if sh.cols == 0:
+    c.samples = newTensor[T](s.count, 0)
   else:
-    if into: p.recycle(move c.samples)
-    c.samples = if sh.cols == 0: newTensor[T](s.count, 0)
-      else: p.tensors[i][0..<s.count, _].clone() # the slot keeps its buffer
+    # The slot's buffer goes to the caller and the slot gets another: the
+    # caller's previous one if it gave it up (`into`) and it can be one, else
+    # a spare or a fresh one.
+    var next: Tensor[T]
+    if into and p.giveBack(c.samples): next = move c.samples
+    elif p.spare.len > 0: next = p.spare.pop
+    else: next = newTensorUninit[T](sh.chunkTraces, sh.cols)
+    swap(next, p.tensors[i])
+    if s.count == sh.chunkTraces:
+      c.samples = move next
+    else:
+      # A short chunk (the first with `quickFirst`, the last of a range, a
+      # uniform cut) is a view of the buffer's first rows. A copy of them
+      # cost the consumer thread two allocations and a page fault per 4 KiB
+      # after every seek (256 rows of 12000 samples: 260 -> 86 us).
+      c.samples = next[0 ..< s.count, _]
+      p.lent = move next
   acquire(sh.lock)
   s.data = rawData(p.tensors[i])
   s.state = ssFree
@@ -657,5 +692,6 @@ proc close*[T](p: var Prefetcher[T]) =
     p.pin = MapPin() # the last pin unmaps a file closed meanwhile
     p.tensors.setLen 0
     p.spare.setLen 0
+    p.lent = default(Tensor[T])
     p.selection.setLen 0
     p.bounds.setLen 0

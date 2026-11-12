@@ -390,6 +390,63 @@ block steady_next_into_allocates_nothing:
     p.close()
   f.close()
 
+block short_chunks_hand_the_slot_buffer_over:
+  # A chunk shorter than `chunkTraces` (the first with `quickFirst`, the last
+  # of a range) is a view of a whole slot buffer, not a copy of its rows:
+  # with `nextInto`, seeking allocates nothing and the buffers keep cycling.
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
+  let all = f.readTraces(0..<f.len)
+  let cols = all.shape[1]
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, depth = 3,
+    quickFirst = true)
+  var c: PrefetchChunk[float32]
+  var bufs: seq[uint]
+  var a, short = 0
+  for round in 0 ..< 30:
+    var a0 = allocs()
+    p.seek(round ..< 200 - round) # 4 rows first, a ragged last chunk
+    var expect = round
+    var more = p.nextInto(c)
+    while more:
+      if round >= 2: a += allocs() - a0 # after the warm-up rounds
+      doAssert c.first == expect and c.samples == all.rows(c.first, c.count)
+      doAssert c.samples.shape == [c.count, cols]
+      if c.count < 16: inc short
+      if buf(c.samples) notin bufs: bufs.add buf(c.samples)
+      expect += c.count
+      a0 = allocs()
+      more = p.nextInto(c)
+    doAssert expect == 200 - round
+  when defined(nimAllocStats): doAssert a == 0, $a
+  doAssert short >= 30 and bufs.len <= 3 + 1, $bufs.len
+  p.close()
+  # A short chunk the caller keeps is never decoded into again, and a short
+  # tensor of the caller's own is never taken for a slot buffer (it is
+  # smaller than one).
+  var q = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, depth = 2,
+    quickFirst = true)
+  var kept: seq[PrefetchChunk[float32]]
+  for round in 0 ..< 8:
+    q.seek(round * 20 ..< 200)
+    doAssert q.nextInto(c) and c.count == 4
+    kept.add c # shares the buffer
+    if round mod 2 == 0: c.samples = newTensor[float32](4, cols)
+    doAssert q.nextInto(c) and c.count == 16 and c.samples == all.rows(c.first, 16)
+    doAssert q.nextInto(c) and c.samples == all.rows(c.first, 16)
+  for k in kept: doAssert k.samples == all.rows(k.first, 4), $k.first
+  # A recycled short chunk is a slot buffer again.
+  q.seek(0 ..< 200)
+  doAssert q.next(c) and c.count == 4
+  let given = buf(c.samples)
+  q.recycle(move c)
+  var back = false
+  while q.next(c):
+    if buf(c.samples) == given: back = true
+    doAssert c.samples == all.rows(c.first, c.count)
+  doAssert back
+  q.close()
+  f.close()
+
 proc stamp(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
     traces: TraceRows, failed: openArray[int], user: pointer) {.nimcall, gcsafe, raises: [].} =
   # Marks a chunk as decoded to its end: the last sample of its last row.
