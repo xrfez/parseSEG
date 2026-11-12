@@ -61,9 +61,11 @@
 ##
 ## `rollbackJournal` undoes a journal (newest first), `applyJournal` replays
 ## it (oldest first); their editor forms do it on the open file and refresh
-## its cached headers and keys. Both check each location first: bytes that already
-## hold the target are skipped, and bytes that hold neither the original
-## nor the edited value are a conflict, logged and left alone.
+## its cached headers and keys. Both check each location first: bytes that
+## already hold the target are skipped, and so are the bytes of an edit that
+## was journaled but never written (an interrupted session), also where that
+## edit overlaps or abuts an earlier one. Bytes that hold none of the values
+## the journal's edits gave them are a conflict, logged and left alone.
 
 import std/[algorithm, macros, math, options, os, strutils, tables]
 when defined(posix):
@@ -118,8 +120,13 @@ const
 # ---------------------------------------------------------------- journal --
 
 func hexOf(b: openArray[byte]): string =
-  result = newStringOfCap(2 * b.len)
-  for x in b: result.add toHex(x, 2).toLowerAscii
+  # Two lowercase digits per byte, from a table: `toHex` and `toLowerAscii`
+  # allocate two strings per byte (57 % of a geometry write-back).
+  const digits = "0123456789abcdef"
+  result = newString(2 * b.len)
+  for i, x in b:
+    result[2 * i] = digits[int(x shr 4)]
+    result[2 * i + 1] = digits[int(x and 15)]
 
 when defined(windows):
   proc c_fileno(f: File): cint {.importc: "_fileno", header: "<stdio.h>".}
@@ -309,10 +316,21 @@ proc parseString(line: string, i: var int, s: var string): bool =
   inc i
   true
 
+func hexVal(c: char): int {.inline.} =
+  # The value of a hex digit, -1 for any other character.
+  case c
+  of '0'..'9': ord(c) - ord('0')
+  of 'a'..'f': ord(c) - ord('a') + 10
+  of 'A'..'F': ord(c) - ord('A') + 10
+  else: -1
+
 proc parseHexBytes(s: string, b: var seq[byte]): bool =
-  if s.len mod 2 != 0 or not s.allCharsInSet(HexDigits): return false
+  if s.len mod 2 != 0: return false
   b = newSeq[byte](s.len div 2)
-  for k in 0..<b.len: b[k] = byte(fromHex[int](s[2 * k .. 2 * k + 1]))
+  for k in 0..<b.len:
+    let (h, l) = (hexVal(s[2 * k]), hexVal(s[2 * k + 1]))
+    if h < 0 or l < 0: return false
+    b[k] = byte(h shl 4 or l)
   true
 
 proc parseEditLine(line: string, e: var JournalEdit): bool =
@@ -388,70 +406,97 @@ proc readJournal*(journalPath: string, log: var DiagLog): seq[JournalEdit] =
   summarize(log, bad, "malformed journal lines", Location(file: journalPath, field: "journal"))
 
 type
-  ByteState = object
-    original, final: byte
-    label: string # of the last edit touching the byte (for diagnostics)
-
-type
   ReadSpan = proc (at: int64, buf: var seq[byte]): bool {.closure.}
   WriteSpan = proc (at: int64, buf: seq[byte]): bool {.closure.}
 
+const MaxShownBytes = 32 ## Bytes of a conflicting span quoted in its diagnostic.
+
 proc replayOn(path, journalPath: string, size: int64, undo: bool, readAt: ReadSpan,
     writeAt: WriteSpan, log: var DiagLog) =
-  # Merges the journal per byte (original = the first edit's old byte, final
-  # = the last edit's new byte) and moves each contiguous run of touched
-  # bytes as a whole: from final to original (undo) or back (apply). A run
-  # already at the target is skipped and any other run is a conflict, so
-  # both operations can be repeated, also when a location was edited twice.
+  # Edits whose spans share a byte form one component, replayed as a chain of
+  # states: the original bytes, then the bytes after each edit in journal
+  # order. The file may hold any state of the chain (a crash between the
+  # journal sync and the map write leaves an earlier one) and is moved to the
+  # first state (undo) or the last (apply). A component already there is
+  # skipped and one that holds no state of its chain is a conflict, so both
+  # operations can be repeated. Spans that only abut share no byte: they are
+  # independent, and an interrupted edit beside an earlier one is no conflict.
+  #
+  # One pass over the edits sorted by offset, with buffers of the largest
+  # component: a table entry per journaled byte took 26 KiB and 100 us per
+  # trace of a geometry write-back (200 000 traces: 5.3 GiB, 21 s).
   var edits: seq[JournalEdit]
   if not log.tryRecord(Location(file: journalPath), (edits = readJournal(journalPath, log))):
     return
-  var bytes: Table[int64, ByteState]
+  var order = newSeqOfCap[int](edits.len)
   var pastEnd = 0
-  for e in edits:
+  for i, e in edits:
     if e.offset + e.old.len > size:
       capped(log, pastEnd, sevError, dcInconsistent, "journal line " & $e.line &
         " lies past the end of the file; skipped", e.offset, Location(file: path, field: e.label))
     else:
-      for k in 0..<e.old.len:
-        let at = e.offset + k
-        if at in bytes:
-          bytes[at].final = e.new[k]
-          bytes[at].label = e.label
-        else:
-          bytes[at] = ByteState(original: e.old[k], final: e.new[k], label: e.label)
+      order.add i
   summarize(log, pastEnd, "journal lines past the end of the file", Location(file: path))
-  var offsets = newSeqOfCap[int64](bytes.len)
-  for at in bytes.keys: offsets.add at
-  offsets.sort()
+  order.sort(proc (a, b: int): int =
+    result = cmp(edits[a].offset, edits[b].offset)
+    if result == 0: result = cmp(a, b))
   var conflicts = 0
+  var cur, first, last: seq[byte]
+  var seen: seq[bool]
+  var members: seq[int]
   var i = 0
-  while i < offsets.len:
+  while i < order.len:
+    let lo = edits[order[i]].offset
+    var hi = lo + edits[order[i]].old.len
     var j = i + 1
-    while j < offsets.len and offsets[j] == offsets[j - 1] + 1: inc j
-    let at = offsets[i]
-    var cur = newSeq[byte](j - i)
-    if not readAt(at, cur):
-      log.report(sevFatal, dcIo, "short read", at, Location(file: path))
+    while j < order.len and edits[order[j]].offset < hi:
+      hi = max(hi, edits[order[j]].offset + edits[order[j]].old.len)
+      inc j
+    members.setLen 0
+    for k in i ..< j: members.add order[k]
+    if members.len > 1: members.sort() # journal order
+    let n = int(hi - lo)
+    cur.setLen n
+    if not readAt(lo, cur):
+      log.report(sevFatal, dcIo, "short read", lo, Location(file: path))
       return
-    var target = newSeq[byte](cur.len)
-    var atTarget, atSource = true
-    for k in 0..<cur.len:
-      let b = bytes[offsets[i + k]]
-      let (src, dst) = if undo: (b.final, b.original) else: (b.original, b.final)
-      target[k] = dst
-      if cur[k] != dst: atTarget = false
-      if cur[k] != src: atSource = false
+    # The first state: each byte as the first edit touching it found it.
+    first.setLen n
+    seen.setLen 0
+    seen.setLen n
+    for m in members:
+      let at = int(edits[m].offset - lo)
+      for k, b in edits[m].old:
+        if not seen[at + k]:
+          first[at + k] = b
+          seen[at + k] = true
+    # Walk the chain, counting the bytes where the file differs from the
+    # state: 0 at any state puts the file on the chain.
+    last = first
+    var differing = 0
+    for k in 0 ..< n:
+      if cur[k] != first[k]: inc differing
+    let atFirst = differing == 0
+    var onChain = atFirst
+    for m in members:
+      let at = int(edits[m].offset - lo)
+      for k, b in edits[m].new:
+        differing += ord(cur[at + k] != b) - ord(cur[at + k] != last[at + k])
+        last[at + k] = b
+      if differing == 0: onChain = true
+    let atTarget = if undo: atFirst else: differing == 0
     if atTarget:
       discard "already done"
-    elif atSource:
-      if not writeAt(at, target):
-        log.report(sevFatal, dcIo, "write failed", at, Location(file: path))
+    elif onChain:
+      if not (if undo: writeAt(lo, first) else: writeAt(lo, last)):
+        log.report(sevFatal, dcIo, "write failed", lo, Location(file: path))
         return
     else:
-      capped(log, conflicts, sevError, dcInconsistent, "the file holds " & hexOf(cur) &
-        ", neither the original nor the edited bytes; left alone", at,
-        Location(file: path, field: bytes[at].label))
+      let shown = if n <= MaxShownBytes: hexOf(cur)
+                  else: hexOf(cur.toOpenArray(0, MaxShownBytes - 1)) & "... (" & $n & " bytes)"
+      capped(log, conflicts, sevError, dcInconsistent, "the file holds " & shown &
+        ", neither the original nor the edited bytes; left alone", lo,
+        Location(file: path, field: edits[members[^1]].label))
     i = j
   summarize(log, conflicts, "conflicts", Location(file: path))
 
@@ -473,13 +518,16 @@ proc replay(path, journalPath: string, undo: bool): DiagLog =
 proc rollbackJournal*(path, journalPath: string): DiagLog =
   ## Undoes the journal's edits on `path`, newest first. Locations already
   ## holding their original bytes are skipped (so a rollback can be
-  ## repeated); conflicts are logged and left alone.
+  ## repeated), also when the session was interrupted before its last edits
+  ## reached the file; conflicts (bytes that are neither the original nor
+  ## what one of the journal's edits left there) are logged and left alone.
   replay(path, journalPath, undo = true)
 
 proc applyJournal*(path, journalPath: string): DiagLog =
   ## Replays the journal's edits on `path`, oldest first: redo after a
-  ## rollback, or the same edits on a copy of the file. Locations already
-  ## holding the edited bytes are skipped; conflicts are logged and left alone.
+  ## rollback, the same edits on a copy of the file, or the rest of an
+  ## interrupted session. Locations already holding the edited bytes are
+  ## skipped; conflicts are logged and left alone.
   replay(path, journalPath, undo = false)
 
 # ------------------------------------------------------------------ edits --

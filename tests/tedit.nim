@@ -514,3 +514,71 @@ sampleBlock p6_b5_huge_general_header_numbers_are_refused:
     raised = true
   doAssert not raised
   ed.close()
+
+# An edit interrupted between its journal sync and its map write.
+
+proc writeAt(path: string, at: int64, bytes: openArray[byte]) =
+  var f = open(path, fmReadWriteExisting)
+  f.setFilePos(at)
+  doAssert f.writeBytes(bytes, 0, bytes.len) == bytes.len
+  f.close()
+
+proc chainStates(path, journal: string, original: seq[byte]): seq[seq[byte]] =
+  ## The file after 0, 1, ... of the journal's edits, from `original`.
+  var log: DiagLog
+  let edits = readJournal(journal, log)
+  doAssert log.len == 0
+  result.add original
+  for e in edits:
+    var s = result[^1]
+    for k, b in e.new: s[int(e.offset) + k] = b
+    result.add s
+
+block interrupted_edit_over_or_beside_an_earlier_one:
+  # A crash can leave the file at any state between two edits: the journal
+  # must undo and redo from each, also when the spans overlap or abut.
+  let src = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
+  for scenario in ["twice", "adjacent", "overlapping"]:
+    let path = tmp / ("chain_" & scenario & ".sgy")
+    let journal = path & ".edits.nif"
+    copyFile(src, path)
+    if fileExists(journal): removeFile(journal)
+    let original = readBytes(path)
+    var ed = openEditor(path)
+    let at = ed.file.index.entries[5].offset
+    doAssert ed.setTraceField(5, "trace.sourceX", 0x11223344) # bytes 73-76
+    case scenario
+    of "twice": doAssert ed.setTraceField(5, "trace.sourceX", 0x55667788)
+    of "adjacent": doAssert ed.setTraceField(5, "trace.sourceY", 0x55667788) # bytes 77-80
+    else:
+      # Three spans, each sharing bytes with the next only.
+      doAssert ed.writeBytes(at + 74, [0xA1'u8, 0xA2, 0xA3, 0xA4], "bytes 75-78",
+        Location(file: path, trace: 5))
+      doAssert ed.setTraceField(5, "trace.sourceY", 0x55667788)
+    ed.close()
+    let states = chainStates(path, journal, original)
+    doAssert states[^1] == readBytes(path)
+    for k, state in states:
+      for undo in [true, false]:
+        writeAt(path, at, state.toOpenArray(int(at), int(at) + 239))
+        let log = if undo: rollbackJournal(path, journal) else: applyJournal(path, journal)
+        doAssert log.len == 0, scenario & " at state " & $k & ": " & $log
+        doAssert readBytes(path) == (if undo: states[0] else: states[^1]),
+          scenario & " at state " & $k
+    # Bytes of no state of the chain are still a conflict, left alone.
+    var odd = states[1]
+    odd[int(at) + 73] = odd[int(at) + 73] xor 0xFF
+    writeAt(path, at, odd.toOpenArray(int(at), int(at) + 239))
+    let log = rollbackJournal(path, journal)
+    doAssert log.count(sevError) == 1 and readBytes(path)[int(at) + 72 .. int(at) + 75] ==
+      odd[int(at) + 72 .. int(at) + 75], scenario
+    # The same on the editor's own map.
+    var ed2 = openEditor(path, tmp / "chain_other.nif")
+    let mem = ed2.file.unsafeMemory
+    for undo in [true, false]:
+      copyMem(addr mem[at], addr states[1][int(at)], 240)
+      let log = if undo: rollbackJournal(path, journal) else: applyJournal(path, journal)
+      doAssert log.len == 0, scenario & ": " & $log
+      let want = if undo: states[0] else: states[^1]
+      doAssert equalMem(addr mem[0], addr want[0], want.len), scenario
+    ed2.close()
