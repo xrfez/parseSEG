@@ -647,3 +647,38 @@ block a_join_that_changes_nothing_is_no_change:
   doAssertRaises(ValueError): f.saveIndex(dir / "record.idx")
   f.close()
   removeDir(dir)
+
+block a_station_part_in_the_header_checks_the_relation:
+  # A header with only one part of a station (a SEG-Y shotpoint without a
+  # line) has it filled whole only when the relation agrees with that part.
+  var g: SurveyGeometry
+  g.addSps(parseSps((@joinSurvey & @[
+    x21("T1", 63, "13.00", "99.50", '1', 1, 1, '1', "13.00", "104.00", "104.00", '1')]).join("\n")))
+  const none = (NaN, NaN)
+  # Record 151, channel 2 is source 511/117, receiver 100/103.
+  var k = traceAt(151, 2, (NaN, 117.0), none)
+  doAssert k.joinStations(g) == jmRecord and k.srcLine == 511 and k.rcvPoint == 103
+  k = traceAt(151, 2, (NaN, 2345.0), none)
+  doAssert k.joinStations(g) == jmConflict, "the record's source point is 117"
+  doAssert k.srcLine.isNaN and k.srcPoint == 2345 and k.rcvLine.isNaN and k.rcvPoint.isNaN
+  doAssert not k.applySurvey(g) and k.srcX.isNaN
+  k = traceAt(151, 2, (511.0, NaN), (100.0, NaN))
+  doAssert k.joinStations(g) == jmRecord and k.srcPoint == 117 and k.rcvPoint == 103
+  k = traceAt(151, 2, (129.0, NaN), none)
+  doAssert k.joinStations(g) == jmConflict and k.srcPoint.isNaN, "the record's source line is 511"
+  k = traceAt(151, 2, none, (NaN, 102.0))
+  doAssert k.joinStations(g) == jmConflict and k.srcLine.isNaN, "channel 2 is receiver 103"
+  # The part of the station the header lacks beside a whole one.
+  k = traceAt(151, 2, (129.0, 113.0), (NaN, 102.0))
+  doAssert k.joinStations(g) == jmSource and k.rcvLine == 100 and k.rcvPoint == 102
+  k = traceAt(151, 2, (129.0, 113.0), (NaN, 103.0))
+  doAssert k.joinStations(g) == jmConflict and k.rcvLine.isNaN, "source 129/113 ch 2 is 102"
+  # An integer header field holds 99.5 as 100: that is the same point, and
+  # the survey's value replaces it. 99 is another point.
+  k = traceAt(63, 1, (NaN, 100.0), none)
+  doAssert k.joinStations(g) == jmRecord and k.srcLine == 13 and k.srcPoint == 99.5
+  k = traceAt(63, 1, (NaN, 99.0), none)
+  doAssert k.joinStations(g) == jmConflict and k.srcPoint == 99
+  # A point index the header has is a part too.
+  k = traceAt(63, 1, (NaN, 100.0), none, srcIndex = 2)
+  doAssert k.joinStations(g) == jmConflict and k.srcIndex == 2

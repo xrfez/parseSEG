@@ -107,6 +107,11 @@ file's. Stations a header has are never replaced; the relations only fill the on
   header's);
 - no station: the trace's record and channel, the fallback.
 
+A header that has only the line or only the point of a station (a SEG-Y shotpoint without a
+line) has the station filled whole, when the relation agrees with the part it has: the same
+value to 1/100, or the relation's as a whole number (an integer field holds point 99.5 as
+100). A relation that contradicts the part is a conflict (`jmConflict`) and fills nothing.
+
 Then coordinates come from the stations, then offset and midpoint. `overwrite` replaces
 coordinates already known, never stations. Auxiliary traces are left alone. A `JoinStats`
 says how the traces matched and how many changed: a trace that already holds the survey's

@@ -24,9 +24,14 @@
 ## 4. no station: the relation of the trace's record and channel (X, then O).
 ##
 ## A relation is used only when it agrees with every station the header has.
-## A station is known when both its line and its point are; a header with
-## only one of them (e.g. a SEG-Y shotpoint without a line) has it filled
-## whole.
+## A station is known when both its line and its point are. A header with
+## only one of them (e.g. a SEG-Y shotpoint without a line) has the station
+## filled whole, when the relation agrees with the part the header has: the
+## same value to 1/100, or the relation's as a whole number (an integer
+## header field holds point 99.5 as 100; the survey's 99.5 then replaces it).
+## A relation that contradicts the part (header shotpoint 2345, relation
+## 13/99.5) is a conflict (`jmConflict`): nothing is filled, as for a whole
+## station.
 ## `applySurvey` then takes coordinates from the table by station
 ## (`keys.applyGeometry`), then the offset and midpoint. Auxiliary traces are
 ## left alone. The channel → station step (2-4) assumes the recorder numbers
@@ -104,7 +109,9 @@ type
     jmReceiver = "via the receiver"    ## Source from the O gathers of the receiver station.
     jmRecord = "by record number"      ## Record and channel (no station, or checked by one).
     jmAmbiguous = "ambiguous"          ## The station's records disagree on the channel.
-    jmConflict = "conflicting"         ## The record's relation contradicts a header station.
+    jmConflict = "conflicting"
+      ## The relation contradicts a header station, or the line or point the
+      ## header has of one.
     jmUnmatched = "unmatched"          ## No relation found.
     jmAuxiliary = "auxiliary"          ## Not seismic: left alone.
 
@@ -432,11 +439,25 @@ proc viaStation(g: SurveyGeometry, domain: RelationDomain, station: StationKey,
         result = vsFound
       elif not sameRelation(rel, r.get): return vsAmbiguous
 
+func partAgrees(header, relation: float64): bool {.inline.} =
+  # A line or point the header has agrees with the relation's when it is the
+  # same to 1/100 (`stationKey`) or the relation's as a whole number: an
+  # integer field (the SEG-Y energy source point) holds 99.5 as 100.
+  header.isNaN or round(header * 100) == round(relation * 100) or header == round(relation)
+
+func contradicts(line, point: float64, index: int16, st: StationKey): bool =
+  # The parts the header has of a station it does not know whole (a line or
+  # a point, a point index other than 0) against the relation's station.
+  not (partAgrees(line, st.line) and partAgrees(point, st.point) and
+    (index == 0 or st.index == 0 or index == st.index))
+
 proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
   ## Fills the source and receiver stations (line, point, index) and the
   ## component a trace's header lacks, from the relations, by the rules in
-  ## the module documentation. Stations the header has are never changed.
-  ## Auxiliary traces are left alone.
+  ## the module documentation. Stations the header has are never changed; a
+  ## relation that contradicts the line or the point a header has of a
+  ## station is a conflict and fills nothing. Auxiliary traces are left
+  ## alone.
   if k.status == tsAuxiliary: return jmAuxiliary
   let hasSrc = not (k.srcLine.isNaN or k.srcPoint.isNaN)
   let hasRcv = not (k.rcvLine.isNaN or k.rcvPoint.isNaN)
@@ -469,6 +490,9 @@ proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
     if r.isNone: return jmUnmatched
     rel = r.get
     result = jmRecord
+  if (not hasSrc and contradicts(k.srcLine, k.srcPoint, k.srcIndex, rel.source)) or
+      (not hasRcv and contradicts(k.rcvLine, k.rcvPoint, k.rcvIndex, rel.receiver)):
+    return jmConflict
   if not hasSrc:
     (k.srcLine, k.srcPoint, k.srcIndex) = (rel.source.line, rel.source.point, rel.source.index)
   if not hasRcv:
