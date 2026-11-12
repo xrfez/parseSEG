@@ -13,7 +13,10 @@
 ##   come from `P1Options` (default 0); they are never guessed from the
 ##   header text.
 ## - Latitude/longitude are DMS unless the option says grads; `auAuto`
-##   picks per record (DMS when minutes < 60 and seconds < 60).
+##   decides once per file, from its first P1 records: grads when a good
+##   part of their angles is not valid DMS (minutes or seconds of 60 or
+##   more), else DMS. (In a grads file four angles in ten also read as valid
+##   DMS, so the unit cannot be told per angle.)
 ## - Headers: lenient. After an `H` record, every record is header text until
 ##   the first record that validates as data; an `H` after data starts a new
 ##   logical file.
@@ -34,7 +37,10 @@ type
     pfP4 = "P4"  ## Transit Doppler satellite field data.
 
   AngleUnit* = enum
-    auAuto = "auto"    ## Per record: DMS if it is valid DMS, else grads.
+    auAuto = "auto"
+      ## `readP1`: decided once per file from its first records (grads when
+      ## many of their angles are not valid DMS, else DMS). For one record
+      ## (`encodeP1`, a built file): DMS.
     auDms = "dms"      ## Degrees, minutes, seconds (implicit 2 decimals).
     auGrads = "grads"  ## Grads to 5 decimals.
 
@@ -68,7 +74,8 @@ type
     files*: seq[PLogicalFile]
     options*: P1Options
       ## How the file was read: the implicit decimals, which the writer
-      ## also uses (set them to re-encode with other decimals).
+      ## also uses (set them to re-encode with other decimals), and the
+      ## angle unit (the one decided, when the option was `auAuto`).
     log*: DiagLog
 
   P1Options* = object
@@ -127,23 +134,38 @@ proc isP2Pair(a, b: string): bool =
     b.colChar(19) in {'E', 'W'}
 
 proc isP3Data(line: string): bool =
+  # Columns 37-64 hold the observation: numbers, and not blank (a header
+  # line that ends in a 1 in column 36 is not data).
+  let obs = line.col(37, 64)
   line.colChar(1) == ' ' and line.colChar(36) in {'1', '2'} and
-    line.col(37, 64).allCharsInSet(Digits + {' ', '.', '-', '+'})
+    obs.allCharsInSet(Digits + {' ', '.', '-', '+'}) and obs.contains(Digits)
+
+proc isGridOnly(line: string): bool =
+  # A P1-shaped record without latitude and longitude: a point in 18-25,
+  # columns 27-45 blank, grid coordinates in 46-61.
+  line.colChar(1) == ' ' and line.col(27, 45).isBlank and not line.col(18, 25).isBlank and
+    line.col(46, 53).allDigitsOrBlank and line.col(54, 61).allDigitsOrBlank
 
 proc isP4Data(line: string): bool =
   line.colChar(1) == 'S' and parseFortranInt(line.col(8, 10)) == some(1'i64)
 
 type Ctx = object
-  ## Where a record is being decoded; problems go to the `log` passed along.
+  ## Where a record is being decoded; problems go to the `log` passed along,
+  ## the first few of each code and field (`cap`).
   name: string
-  rec: TextRecord
+  offset: int64 ## Of the record in the stream.
+  index: int    ## 0-based record (line) number.
   opts: P1Options
+  cap: RepeatCap
 
-proc problem(x: Ctx, log: var DiagLog, sev: Severity, code: DiagCode, field, msg: string) =
-  log.report(sev, code, msg, x.rec.offset,
-    Location(file: x.name, record: x.rec.index, field: field))
+template problem(x: var Ctx, log: var DiagLog, sev: Severity, code: DiagCode, where,
+    msg: string) =
+  # A diagnostic for field `where` of the current record; `msg` is built
+  # only when it is logged.
+  if x.cap.admit(code, where):
+    log.report(sev, code, msg, x.offset, Location(file: x.name, record: x.index, field: where))
 
-proc decodeP1(x: Ctx, log: var DiagLog, line: string): P1Record =
+proc decodeP1(x: var Ctx, log: var DiagLog, line: string): P1Record =
   result = initP1Record()
   result.raw = line
   result.lineName = line.col(2, 17).strip
@@ -189,26 +211,76 @@ proc decodeP1(x: Ctx, log: var DiagLog, line: string): P1Record =
     result.year = fullYear(result.year)
 
 proc detect(lines: openArray[string]): PFormat =
-  ## The format of a logical file from the first of its data records that
-  ## matches one of P1-P4.
+  ## The format most of a logical file's first data records match (P1-P4);
+  ## on a tie the one matched first. One stray record (a header line that
+  ## passes for P3 data) does not decide for the P1 records after it.
   result = pfUnknown
+  var votes: array[PFormat, int]
+  var best = 0
   for i in 0..<lines.len:
-    if isP4Data(lines[i]): return pfP4
-    if i + 1 < lines.len and isP2Pair(lines[i], lines[i + 1]): return pfP2
-    if isP1Data(lines[i]): return pfP1
-    if isP3Data(lines[i]): return pfP3
+    let f = if isP4Data(lines[i]): pfP4
+            elif i + 1 < lines.len and isP2Pair(lines[i], lines[i + 1]): pfP2
+            elif isP1Data(lines[i]): pfP1
+            elif isP3Data(lines[i]): pfP3
+            else: pfUnknown
+    if f != pfUnknown: inc votes[f]
+  for i in 0..<lines.len: # in record order, so a tie goes to the first match
+    let f = if isP4Data(lines[i]): pfP4
+            elif i + 1 < lines.len and isP2Pair(lines[i], lines[i + 1]): pfP2
+            elif isP1Data(lines[i]): pfP1
+            elif isP3Data(lines[i]): pfP3
+            else: pfUnknown
+    if f != pfUnknown and votes[f] > best:
+      best = votes[f]
+      result = f
+
+const
+  AngleSample = 200  ## P1 data records the angle unit of a file is decided from.
+  AngleScan = 5000   ## Records read at most to find them.
+
+proc decideAngleUnit(s: Stream, layout: TextLayout, name: string, log: var DiagLog): AngleUnit =
+  ## `auAuto` for a file: grads when more than a tenth of the angles of its
+  ## first P1 data records are not valid DMS, else DMS. Rewinds `s`.
+  let start = s.getPosition
+  var angles, notDms, seen = 0
+  for r in textRecords(s, layout):
+    if isP1Data(r.text):
+      inc seen
+      for (first, degDigits) in [(27, 2), (36, 3)]:
+        let t = r.text.col(first, first + degDigits + 5)
+        if not t.isBlank:
+          inc angles
+          if dms(t[0 ..< degDigits], t[degDigits ..< degDigits + 2],
+              t[degDigits + 2 ..< degDigits + 6]).isNone:
+            inc notDms
+    if seen >= AngleSample or r.index >= AngleScan: break
+  s.setPosition(start)
+  result = auDms
+  if notDms * 10 > angles:
+    result = auGrads
+    log.report(sevInfo, dcBadValue, "latitude and longitude read as grads: " & $notDms &
+      " of the first " & $angles & " angles are not valid degrees, minutes and seconds (set " &
+      "P1Options.angleUnit to choose)", loc = Location(file: name))
 
 proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
-  ## Reads P1-P4 logical files from `s`. Problems are in `result.log`; the
-  ## read stops early only on an I/O failure (fatal).
+  ## Reads P1-P4 logical files from `s`. Problems are in `result.log` (the
+  ## first few of each kind, then a count); the read stops early only on an
+  ## I/O failure (fatal). A read that finds no data record says so, and why
+  ## when it can (records with grid coordinates only are not recognised);
+  ## records that look like P1 data in a logical file taken as another
+  ## format are reported too. With `auAuto` the angle unit is decided once
+  ## for the file (`result.options.angleUnit` holds it; an info says when it
+  ## is grads).
   result = P1File(name: name, options: opts)
+  skipBom(s)
   result.layout = if opts.forceLayout: opts.layout else: openLayout(s)
   var x = Ctx(name: name, opts: opts)
   var cur = PLogicalFile()
   var inHeader = false
   var pending: seq[TextRecord] # data records until the format is known
   var prev: TextRecord          # the previous record (P2 groups start one early)
-  proc flushPending(x: Ctx, log: var DiagLog, cur: var PLogicalFile,
+  var records, gridOnly = 0     # records read; header records shaped like grid-only P1 data
+  proc flushPending(x: var Ctx, log: var DiagLog, cur: var PLogicalFile,
       pending: var seq[TextRecord]) {.nimcall.} =
     if pending.len > 0:
       if cur.format == pfUnknown:
@@ -219,23 +291,30 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
           log.report(sevWarning, dcBadValue, "data records match none of P1-P4; kept raw",
             pending[0].offset, Location(file: x.name, record: pending[0].index))
       for r in pending:
-        var xr = x
-        xr.rec = r
+        (x.offset, x.index) = (r.offset, r.index)
         if cur.format == pfP1:
-          if isP1Data(r.text): cur.records.add xr.decodeP1(log, r.text)
+          if isP1Data(r.text): cur.records.add x.decodeP1(log, r.text)
           else:
-            xr.problem(log, sevWarning, dcBadValue, "", "not a P1 data record; kept raw")
+            x.problem(log, sevWarning, dcBadValue, "", "not a P1 data record; kept raw")
             var raw = initP1Record()
             raw.raw = r.text
             cur.records.add raw
         else:
+          if isP1Data(r.text):
+            x.problem(log, sevWarning, dcInconsistent, "P1", "this record and others look " &
+              "like P1 data, but its logical file was taken as " & $cur.format &
+              " from its first data records; kept raw")
           var raw = initP1Record()
           raw.raw = r.text
           cur.records.add raw
       pending.setLen(0)
   try:
+    if opts.angleUnit == auAuto:
+      x.opts.angleUnit = decideAngleUnit(s, result.layout, name, result.log)
+      result.options.angleUnit = x.opts.angleUnit
     for r in textRecords(s, result.layout):
-      x.rec = r
+      (x.offset, x.index) = (r.offset, r.index)
+      inc records
       if r.index == 0: result.crlf = r.crlf
       result.finalNewline = r.terminated
       if r.cut:
@@ -254,6 +333,7 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
           (cur.format == pfUnknown and isP3Data(line)) or
           (line.colChar(1) in Digits and isP2Pair(prev.text, line))):
         cur.header.add line
+        if isGridOnly(line): inc gridOnly
       else:
         if cur.header.len == 0 and pending.len == 0 and cur.records.len == 0:
           x.problem(result.log, sevWarning, dcBadValue, "", "data before any header record")
@@ -269,6 +349,16 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
     if cur.header.len > 0 or cur.records.len > 0: result.files.add cur
   except IOError, OSError:
     result.log.report(sevFatal, dcIo, getCurrentExceptionMsg(), loc = Location(file: name))
+  x.cap.summarize(result.log, name)
+  var data = 0
+  for lf in result.files: data += lf.records.len
+  if data == 0 and records > 0 and not result.log.isFatal:
+    # Why nothing came back: every record passed for header text.
+    result.log.report(sevWarning, dcBadValue, "no data records found: all " & $records &
+      " records were taken as header text (a P1 data record has a blank in column 1, N or S " &
+      "in column 35 and E or W in column 45)" & (if gridOnly == 0: "" else: "; " & $gridOnly &
+      " of them hold a point and grid coordinates but no latitude and longitude, which " &
+      "is not decoded"), loc = Location(file: name))
 
 proc readP1*(path: string, opts = P1Options()): P1File =
   ## Reads the P1-P4 file at `path` (streamed).
@@ -346,8 +436,9 @@ proc recordLine(r: P1Record, format: PFormat, decimals: P1Options): string =
   ## record), else encoded.
   if r.raw.len > 0:
     if format != pfP1 or not isP1Data(r.raw): return r.raw
-    var scratch: DiagLog # a re-decode to compare; its diagnostics are dropped
-    if sameValues(Ctx(opts: decimals).decodeP1(scratch, r.raw), r): return r.raw
+    var scratch: DiagLog # a re-decode to compare; its diagnostics are not made
+    var quiet = Ctx(opts: decimals, cap: RepeatCap(quiet: true))
+    if sameValues(quiet.decodeP1(scratch, r.raw), r): return r.raw
   encodeP1(r, decimals)
 
 proc writeP1*(f: P1File, s: Stream, opts = P1WriteOptions()): DiagLog =

@@ -96,7 +96,9 @@ type
   SpsFile* = object
     ## The records of one or more SPS files, in file order per kind.
     name*: string         ## Path or name, for diagnostics.
-    revision*: SpsRevision
+    revision*: SpsRevision = sps21
+      ## The layout of the records: `sps10` or `sps21` (a built file is 2.1
+      ## unless it says otherwise; `spsAuto` counts as 2.1).
     revisionDeclared*: bool ## The revision came from H00.
     layout*: TextLayout
     crlf*: bool           ## Lines ended in CR LF (the spec's disk layout).
@@ -177,16 +179,22 @@ func c(line: string, s: Slice[int]): string {.inline.} = col(line, s.a, s.b)
 # ------------------------------------------------------------------ reading --
 
 type Ctx = object
-  ## Where a record is being parsed; problems go to the `log` passed along.
+  ## Where a record is being parsed; problems go to the `log` passed along,
+  ## the first few of each code and field (`cap`).
   name: string
-  rec: TextRecord
+  offset: int64 ## Of the record in the stream.
+  index: int    ## 0-based record (line) number.
   opts: SpsOptions
+  cap: RepeatCap
 
-proc problem(x: Ctx, log: var DiagLog, sev: Severity, code: DiagCode, field, msg: string) =
-  log.report(sev, code, msg, x.rec.offset,
-    Location(file: x.name, record: x.rec.index, field: field))
+template problem(x: var Ctx, log: var DiagLog, sev: Severity, code: DiagCode, where,
+    msg: string) =
+  # A diagnostic for field `where` of the current record; `msg` is built
+  # only when it is logged.
+  if x.cap.admit(code, where):
+    log.report(sev, code, msg, x.offset, Location(file: x.name, record: x.index, field: where))
 
-proc numberField(x: Ctx, log: var DiagLog, text, field: string, decimals: int,
+proc numberField(x: var Ctx, log: var DiagLog, text, field: string, decimals: int,
     rev: SpsRevision): float64 =
   ## A real field; bad text is a warning and NaN. In Rev 2.1, `decimals` only
   ## applies in strict mode (else a value without `.` is an integer).
@@ -198,7 +206,7 @@ proc numberField(x: Ctx, log: var DiagLog, text, field: string, decimals: int,
       x.problem(log, sevWarning, dcBadValue, field, "not a number: '" & text.strip & "'")
     NaN
 
-proc intField(x: Ctx, log: var DiagLog, text, field: string, default: int64): int64 =
+proc intField(x: var Ctx, log: var DiagLog, text, field: string, default: int64): int64 =
   let v = parseFortranInt(text)
   if v.isNone:
     x.problem(log, sevWarning, dcBadValue, field, "not an integer: '" & text.strip & "'")
@@ -206,11 +214,11 @@ proc intField(x: Ctx, log: var DiagLog, text, field: string, default: int64): in
   elif v.get == MissingInt: default
   else: v.get
 
-proc smallField(x: Ctx, log: var DiagLog, text, field: string, default: int): int =
+proc smallField(x: var Ctx, log: var DiagLog, text, field: string, default: int): int =
   let v = x.intField(log, text, field, default)
   if v == MissingInt: default else: int(v)
 
-proc nameField(x: Ctx, log: var DiagLog, text, field: string, rev: SpsRevision,
+proc nameField(x: var Ctx, log: var DiagLog, text, field: string, rev: SpsRevision,
     name: var string, value: var float64) =
   ## A line or point: text in 1.0 (numeric value when it is a number), F10.2
   ## in 2.1.
@@ -218,7 +226,7 @@ proc nameField(x: Ctx, log: var DiagLog, text, field: string, rev: SpsRevision,
   value = if rev == sps10: parseFortranFloat(text).get(NaN)
           else: x.numberField(log, text, field, 2, rev)
 
-proc parsePoint(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsPoint =
+proc parsePoint(x: var Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsPoint =
   let cols = pointCols[rev]
   let k = $line[0]
   result = initSpsPoint(if line[0] == 'R': pkReceiver else: pkSource)
@@ -242,10 +250,17 @@ proc parsePoint(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsPo
   result.dayOfYear = x.smallField(log, line.c(dayCols), k & ".dayOfYear", -1)
   let t = line.col(75, 80)
   if not t.isBlank:
-    if t.allCharsInSet(Digits):
-      result.hour = parseInt(t[0..1])
-      result.minute = parseInt(t[2..3])
-      result.second = parseInt(t[4..5])
+    # 3I2: a blank stands for a leading zero (" 91530" is 09:15:30).
+    var parts: array[3, int]
+    var valid = true
+    for i in 0 .. 2:
+      let (a, b) = (t[2 * i], t[2 * i + 1])
+      if b in Digits and a in Digits + {' '}:
+        parts[i] = (if a == ' ': 0 else: ord(a) - ord('0')) * 10 + ord(b) - ord('0')
+      elif a == ' ' and b == ' ': parts[i] = 0
+      else: valid = false
+    if valid:
+      (result.hour, result.minute, result.second) = (parts[0], parts[1], parts[2])
       if result.hour > 23 or result.minute > 59 or result.second > 59:
         x.problem(log, sevWarning, dcBadValue, k & ".time", "time out of range: " & t)
     else:
@@ -257,7 +272,7 @@ proc parsePoint(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsPo
     x.problem(log, sevWarning, dcBadValue, k & ".easting", "no coordinates")
   result.raw = line
 
-proc parseRelation(x: Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsRelation =
+proc parseRelation(x: var Ctx, log: var DiagLog, line: string, rev: SpsRevision): SpsRelation =
   let cols = relCols[rev]
   result = initSpsRelation()
   result.recordType = line[0]
@@ -393,6 +408,7 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
   ## Reads SPS records from `s`. Problems are in `result.log`; only an I/O
   ## failure ends the read early (fatal).
   result = SpsFile(name: name)
+  skipBom(s)
   result.layout = if opts.forceLayout: opts.layout else: openLayout(s)
   # The revision is needed before data records are parsed: decide it from
   # H00 or the first data records, then rewind.
@@ -426,7 +442,7 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
   var x = Ctx(name: name, opts: opts)
   try:
     for r in textRecords(s, result.layout):
-      x.rec = r
+      (x.offset, x.index) = (r.offset, r.index)
       let line = r.text
       if r.index == 0: result.crlf = r.crlf
       result.finalNewline = r.terminated
@@ -456,11 +472,12 @@ proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
               line[0] & "'; kept raw")
           result.order.add SpsEntry(kind: seOther, at: result.others.len)
           result.others.add line
-        if line.len > 80:
+        if line.len > 80 and not line.toOpenArray(80, line.high).allBlank:
           x.problem(result.log, sevInfo, dcBadValue, "",
             "record longer than 80 columns (" & $line.len & ")")
   except IOError, OSError:
     result.log.report(sevFatal, dcIo, getCurrentExceptionMsg(), loc = Location(file: name))
+  x.cap.summarize(result.log, name)
 
 proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
   ## Whether `s` holds SPS rather than SEG P1 records, judged from the data
@@ -469,6 +486,7 @@ proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
   ## records (X) channel numbers in 39-48; P1 data records start with a blank and
   ## have hemisphere letters in columns 35 and 45. Rewinds `s`.
   let start = s.getPosition
+  skipBom(s)
   var sps, p1 = 0
   for r in textRecords(s, openLayout(s)):
     let t = r.text
@@ -624,21 +642,23 @@ proc encodeSps*(h: SpsHeader): string =
     result.add alignLeft(h.description, 28) & h.data
 
 func quietCtx(strict: bool): Ctx =
-  # Re-parses a record to compare it; its diagnostics are dropped.
-  Ctx(opts: SpsOptions(strictImpliedDecimals: strict))
+  # Re-parses a record to compare it; its diagnostics are not made.
+  Ctx(opts: SpsOptions(strictImpliedDecimals: strict), cap: RepeatCap(quiet: true))
 
 proc pointLine(p: SpsPoint, rev, fileRev: SpsRevision, strict: bool): string =
   ## The raw text when `p` is unchanged since it was read (its raw text
   ## parses to the same values), else encoded.
   if p.raw.len > 0 and rev == fileRev and p.raw[0] in {'R', 'S'}:
     var scratch: DiagLog
-    if sameValues(quietCtx(strict).parsePoint(scratch, p.raw, rev), p): return p.raw
+    var quiet = quietCtx(strict)
+    if sameValues(quiet.parsePoint(scratch, p.raw, rev), p): return p.raw
   encodeSps(p, rev)
 
 proc relationLine(r: SpsRelation, rev, fileRev: SpsRevision, strict: bool): string =
   if r.raw.len > 0 and rev == fileRev and r.raw[0] in {'X', 'O'}:
     var scratch: DiagLog
-    if sameValues(quietCtx(strict).parseRelation(scratch, r.raw, rev), r): return r.raw
+    var quiet = quietCtx(strict)
+    if sameValues(quiet.parseRelation(scratch, r.raw, rev), r): return r.raw
   encodeSps(r, rev)
 
 proc headerLine(h: SpsHeader): string =
@@ -652,8 +672,10 @@ proc writeSps*(f: SpsFile, s: Stream, opts = SpsWriteOptions()): DiagLog =
   ## `opts.lenient` (then the record is written as read, or skipped if it
   ## has no raw text). Unchanged records are written byte for byte. Output is
   ## always text lines (fixed 80-byte or EBCDIC input comes back as lines).
-  let rev = if opts.revision == spsAuto: f.revision else: opts.revision
-  let fileRev = f.revision
+  ## A file built by hand is written like one that was read; its records are
+  ## Rev 2.1 unless `f.revision` says 1.0.
+  let fileRev = if f.revision == spsAuto: sps21 else: f.revision
+  let rev = if opts.revision == spsAuto: fileRev else: opts.revision
   let nl = if opts.lineEnding.len > 0: opts.lineEnding elif f.crlf: "\r\n" else: "\n"
   let strict = f.options.strictImpliedDecimals
   var lines: seq[string]

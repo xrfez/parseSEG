@@ -183,6 +183,44 @@ func idx(i: int): int16 {.inline.} =
 proc note(g: var SurveyGeometry, sev: Severity, file, msg: string, record = -1) =
   g.log.report(sev, dcBadValue, msg, loc = Location(file: file, record: record))
 
+template noteCapped(g: var SurveyGeometry, cap: var RepeatCap, kind: string, sev: Severity,
+    file, msg: string, record = -1) =
+  # `note` for the first few problems of `kind` in one file (`msg` is built
+  # only for those); `cap.summarize` counts the rest.
+  if cap.admit(dcBadValue, kind): g.note(sev, file, msg, record)
+
+func sameCoordinates(a, b: Coordinates): bool =
+  func same(x, y: float64): bool {.inline.} = x == y or (x.isNaN and y.isNaN)
+  same(a.x, b.x) and same(a.y, b.y) and same(a.z, b.z)
+
+func stationsOf(t: var GeometryTable, kind: SpsPointKind): var Table[StationKey, Coordinates] =
+  if kind == pkSource: return t.sources
+  t.receivers
+
+proc addStation(g: var SurveyGeometry, cap: var RepeatCap, kind: SpsPointKind, file: string,
+    record: int, line, point: float64, index: int16, c: Coordinates) =
+  # Adds or replaces a station. One given before is reported: the later
+  # coordinates are used, and nothing else would say that two records name
+  # one station.
+  let key = stationKey(line, point, index)
+  var known = false
+  var same = false
+  g.table.stationsOf(kind).withValue(key, held):
+    known = true
+    same = sameCoordinates(held[], c)
+    held[] = c
+  do:
+    g.table.stationsOf(kind)[key] = c
+  if known:
+    let what = (if kind == pkSource: "source " else: "receiver ") & $key.line & "/" &
+      $key.point & "/" & $key.index
+    if same:
+      g.noteCapped(cap, "again", sevInfo, file, what & " is given again with the same " &
+        "coordinates", record)
+    else:
+      g.noteCapped(cap, "moved", sevWarning, file, what & " is given again with other " &
+        "coordinates; the later ones are used", record)
+
 proc lineOf(g: var SurveyGeometry, unresolved: var HashSet[string], file, name: string,
     v: float64, rec = -1): Option[float64] =
   # `resolveLine`, with one warning per unresolved line name.
@@ -258,36 +296,41 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, xDomain = rdSource) =
   ## `rdReceiver` for an O file written with `X` records, e.g. `.ops`).
   ## Grid coordinates are taken as they are (units of H20); z is the surface
   ## elevation. Records whose line or point cannot be made numeric are
-  ## skipped, with one warning per line name.
+  ## skipped, with one warning per line name. A station given before (in
+  ## this file or an earlier one) is replaced and reported: a warning when
+  ## its coordinates differ, an info when they are the same. `g.log` gets
+  ## the first few reports of each kind per file, then a count.
   var unresolved: HashSet[string]
+  var cap: RepeatCap
   for i, p in f.points:
     let l = g.lineOf(unresolved, f.name, p.lineName, p.line, i)
     if l.isNone: discard
     elif p.point.isNaN:
-      g.note(sevInfo, f.name, "point '" & p.pointName & "' on line " & p.lineName &
-        " is not a number; skipped")
+      g.noteCapped(cap, "point", sevInfo, f.name, "point '" & p.pointName & "' on line " &
+        p.lineName & " is not a number; skipped", i)
     elif p.easting.isNaN or p.northing.isNaN:
       discard # no coordinates: nothing to add
-    elif p.kind == pkSource:
-      g.table.addSource(l.get, p.point, idx(p.index), p.easting, p.northing, p.elevation)
     else:
-      g.table.addReceiver(l.get, p.point, idx(p.index), p.easting, p.northing, p.elevation)
+      g.addStation(cap, p.kind, f.name, i, l.get, p.point, idx(p.index),
+        Coordinates(x: p.easting, y: p.northing, z: p.elevation))
   for i, r in f.relations:
     let domain = if r.recordType == 'O': rdReceiver else: xDomain
     if g.tape.len > 0 and r.fieldTape != g.tape: discard
     elif r.fieldRecord == MissingInt or r.fromChannel == MissingInt or
         r.toChannel == MissingInt or r.channelIncrement < 1 or r.toChannel < r.fromChannel:
-      g.note(sevWarning, f.name, r.recordType & " record without a usable record or channel " &
-        "range; skipped", i)
+      g.noteCapped(cap, "range", sevWarning, f.name, r.recordType &
+        " record without a usable record or channel range; skipped", i)
     else:
       let sl = g.lineOf(unresolved, f.name, r.srcLineName, r.srcLine, i)
       let rl = if sl.isSome: g.lineOf(unresolved, f.name, r.rcvLineName, r.rcvLine, i)
                else: none(float64)
       if rl.isNone: discard
       elif r.srcPoint.isNaN or r.fromReceiver.isNaN or r.toReceiver.isNaN:
-        g.note(sevWarning, f.name, r.recordType & " record with a non-numeric point; skipped", i)
+        g.noteCapped(cap, "relpoint", sevWarning, f.name, r.recordType &
+          " record with a non-numeric point; skipped", i)
       else:
         g.addRelation(domain, f.name, i, r, sl.get, rl.get)
+  cap.summarize(g.log, f.name)
 
 proc addP1*(g: var SurveyGeometry, f: P1File, elevation = false) =
   ## Adds the shotpoints of the P1 logical files in `f` as sources. The

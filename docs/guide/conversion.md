@@ -168,7 +168,13 @@ doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
 - A host with its own coordinate database can fill the table directly:
   `g.addSource(line, point, index, x, y, z)` and `g.addReceiver(...)`.
 - `readSps`/`writeSps` and `readP1`/`writeP1` read and write the survey files themselves
-  (column-exact, unchanged records byte for byte, Rev 1.0 ↔ 2.1).
+  (column-exact, unchanged records byte for byte, Rev 1.0 ↔ 2.1). Their logs hold the first
+  five problems of each kind and field and a count of the rest, so a file of bad records
+  stays readable. An SPS file without a revision in H00 is read by its column layout, with a
+  warning (`SpsOptions(revision: ...)` chooses); a P1 file's angles are read as DMS or grads
+  for the whole file (`P1Options.angleUnit`, by default decided from its first records).
+- A station that a survey file gives twice is reported in `g.log`; the later coordinates are
+  used.
 
 ## Write the geometry into the file
 

@@ -744,3 +744,158 @@ block sps_h00_spellings_of_the_revision:
   for data in ["SEG-P1", "SPS", "SPS 12.10.90", "SPS 3.0", "12.10.90 SPS 2.1"]:
     let f = parseSps("H00 SPS format version num.     " & data & "\n")
     doAssert not f.revisionDeclared and f.log.count(sevWarning) == 1, data
+
+# ------------------------------------------------------- text readers ---
+
+block reader_diagnostics_are_capped_per_code_and_field:
+  # A file of bad records logs a few diagnostics of each kind and a count,
+  # not three per record (1e6 lines of "R" took 1.4 GB of log).
+  var text = H00 & "\n"
+  for _ in 0 ..< 1000: text.add "R\n"
+  let f = parseSps(text)
+  doAssert f.points.len == 1000
+  doAssert f.log.count(sevWarning) == 15, $f.log.count(sevWarning) # no line, point, coordinates
+  doAssert f.log.count(sevInfo) == 3 and f.log.has("995 more", sevInfo), $f.log
+  # P1: a bad easting in every record.
+  var p = "H X\n"
+  for _ in 0 ..< 300: p.add p1a[0 .. 44] & "  15x590" & p1a[53 .. ^1] & "\n"
+  let g = parseP1(p)
+  doAssert g.files[0].records.len == 300 and g.files[0].records[299].easting.isNaN
+  doAssert g.log.count(sevWarning) == 5 and g.log.has("295 more", sevInfo), $g.log
+  # The join's own notes too.
+  var s = initSurveyGeometry()
+  var bad = SpsFile(name: "bad")
+  for _ in 0 ..< 100: bad.relations.add initSpsRelation() # no record, no channels
+  s.addSps(bad)
+  doAssert s.log.count(sevWarning) == 5 and s.log.has("95 more", sevInfo), $s.log
+
+block blank_columns_past_80_are_not_reported:
+  let f = parseSps([H00, rcv1 & "    ", rcv2 & "  x"].join("\n"))
+  doAssert f.points.len == 2 and f.log.len == 1, $f.log
+  doAssert f.log.has("record longer than 80 columns (83)", sevInfo)
+
+block a_built_sps_file_is_written:
+  # `SpsFile()` used to hold `spsAuto`, which is no layout: writing it was
+  # an IndexDefect.
+  let src = parseSps([H00, rcv1, rcv2].join("\n") & "\n")
+  var sel = SpsFile(name: "selection")
+  doAssert sel.revision == sps21
+  sel.points.add src.points[1]
+  var t = spsText(sel)
+  doAssert t.log.len == 0 and t.text == rcv2 & "\n", t.text
+  sel.points[0].raw = ""
+  sel.revision = spsAuto # set by hand: still the 2.1 layout
+  t = spsText(sel)
+  doAssert t.log.len == 0 and parseSps(t.text, opts = SpsOptions(revision: sps21)).points[0].point ==
+    534600
+  var x = SpsFile()
+  var r = initSpsRelation()
+  (r.fieldRecord, r.fromChannel, r.toChannel) = (7'i64, 1'i64, 4'i64)
+  (r.srcLine, r.srcPoint, r.rcvLine, r.fromReceiver, r.toReceiver) = (1.0, 2.0, 3.0, 4.0, 7.0)
+  x.relations.add r
+  let xt = spsText(x)
+  doAssert xt.log.len == 0, $xt.log
+  doAssert parseSps(xt.text, opts = SpsOptions(revision: sps21)).relations[0].toReceiver == 7
+
+block survey_numbers_are_finite:
+  for t in ["inf", "-inf", "nan", "1e999", "-1E999", "Infinity"]:
+    doAssert parseFortranFloat(t).isNone and parseFortranFloat(t, 2).isNone, t
+  doAssert parseFortranFloat("1e3") == some(1000.0)
+  let f = parseSps([H00, rcv1[0 .. 45] & "      inf" & rcv1[55 .. ^1],
+    rcv2[0 .. 45] & "    1e999" & rcv2[55 .. ^1]].join("\n"))
+  doAssert f.points[0].easting.isNaN and f.points[1].easting.isNaN
+  doAssert f.log.has("not a number: 'inf'", sevWarning) and f.log.has("'1e999'", sevWarning)
+
+block a_station_given_twice_is_logged:
+  let moved = r21('R', "5646.00", "534550.00", '1', "G1", "999999.0", "3058380.0", "83.2")
+  var g: SurveyGeometry
+  g.addSps(parseSps([H00, rcv1, rcv2, moved, rcv2].join("\n")))
+  doAssert g.receiverCount == 2
+  doAssert g.table.receivers[stationKey(5646, 534550, 1)].x == 999999, "the later one is used"
+  doAssert g.log.count(sevWarning) == 1 and g.log.has("other coordinates", sevWarning), $g.log
+  doAssert g.log.count(sevInfo) == 1 and g.log.has("same coordinates", sevInfo), $g.log
+
+block a_byte_order_mark_is_not_a_record:
+  const bom = "\xEF\xBB\xBF"
+  var f = parseSps(bom & [H00, rcv1, x1].join("\n") & "\n")
+  doAssert f.revisionDeclared and f.headers.len == 1 and f.points.len == 1 and f.log.len == 0
+  doAssert f.others.len == 0
+  f = parseSps(bom & [rcv1, rcv2].join("\r\n") & "\r\n", opts = SpsOptions(revision: sps21))
+  doAssert f.points.len == 2 and f.points[0].line == 5646 and f.crlf and f.log.len == 0
+  doAssert looksLikeSps(newStringStream(bom & [H00, src1, x1].join("\n")))
+  let p = parseP1(bom & ["H X", p1a].join("\n") & "\n")
+  doAssert p.files.len == 1 and p.files[0].header == @["H X"] and p.files[0].records.len == 1
+  doAssert p.log.len == 0, $p.log
+
+block a_time_with_a_blank_for_a_leading_zero:
+  let f = parseSps([H00, rcv1[0 .. 73] & " 91530", rcv2[0 .. 73] & "9 1530"].join("\n"))
+  let p = f.points[0]
+  doAssert p.hour == 9 and p.minute == 15 and p.second == 30
+  doAssert f.log.len == 1 and f.log.has("not hhmmss: '9 1530'", sevWarning), $f.log
+  doAssert spsText(f).text.splitLines[1] == rcv1[0 .. 73] & " 91530" # unchanged: as read
+
+block p1_says_why_it_decoded_nothing:
+  proc p1rec(point: int, lat, lon: float64, unit = auDms): string =
+    var r = initP1Record()
+    (r.lineName, r.pointName, r.point) = ("CLT4960", $point, float64(point))
+    (r.latitude, r.longitude, r.angleUnit) = (lat, lon, unit)
+    (r.easting, r.northing, r.depthOrElevation) = (155590.0, 161670.0, 857.0)
+    encodeP1(r)
+  # Grid coordinates only: the records are not recognised, and the log says so.
+  var t = "H SEG P1 POSTPLOT\n UNITS: METERS\n"
+  for i in 0 ..< 50: t.add p1rec(1000 + i, NaN, NaN) & "\n"
+  var f = parseP1(t)
+  doAssert f.files.len == 1 and f.files[0].records.len == 0
+  doAssert f.log.count(sevWarning) == 1 and f.log.has("no data records", sevWarning), $f.log
+  doAssert f.log.has("50 of them", sevWarning) and f.log.has("latitude", sevWarning), $f.log
+  doAssert p1Text(f).text == t # still written back as read
+  # A header line that passes for P3 data (a 1 in column 36) no longer
+  # makes the logical file P3: the P1 records after it are decoded.
+  t = "H SEG P1 POSTPLOT\n" & " NUMBER OF SOURCES:".alignLeft(35) & "1 2\n"
+  for i in 0 ..< 50: t.add p1rec(1000 + i, 17.9 + float64(i) * 1e-4, 110.7) & "\n"
+  f = parseP1(t)
+  doAssert f.files[0].format == pfP1 and f.files[0].records.len == 51
+  doAssert f.files[0].records[0].point.isNaN and f.files[0].records[50].point == 1049
+  doAssert f.log.len == 1 and f.log.has("not a P1 data record", sevWarning), $f.log
+  # A logical file taken as another format says so when it holds P1 records.
+  f = parseP1(["H P4 FILE", "S00001 001 doppler", "S00002 001 doppler", "S00003 001 doppler",
+    p1a, p1b].join("\n"))
+  doAssert f.files[0].format == pfP4 and f.files[0].records.len == 5
+  doAssert f.log.len == 2 and f.log.has("look like P1 data", sevWarning), $f.log
+
+block p1_angle_unit_is_decided_once_per_file:
+  # In a grads file four angles in ten also read as valid DMS: deciding per
+  # angle decoded those as DMS without a word.
+  proc p1rec(point: int, lat, lon: float64, unit: AngleUnit): string =
+    var r = initP1Record()
+    (r.lineName, r.pointName, r.point) = ("L1", $point, float64(point))
+    (r.latitude, r.longitude, r.angleUnit) = (lat, lon, unit)
+    (r.easting, r.northing) = (155590.0, 161670.0)
+    encodeP1(r)
+  var t = "H ANGLES IN GRADS\n"
+  var truth: seq[(float64, float64)]
+  for i in 0 ..< 400:
+    # A deterministic spread of the minute and second digits.
+    let lat = 40.0 + float64((i * 7919) mod 100_000) / 10_000
+    let lon = 1.0 + float64((i * 104_729) mod 80_000) / 10_000
+    truth.add (lat, lon)
+    t.add p1rec(i, lat, lon, auGrads) & "\n"
+  for unit in [auAuto, auGrads]:
+    let f = parseP1(t, opts = P1Options(angleUnit: unit))
+    doAssert f.options.angleUnit == auGrads
+    for i, r in f.files[0].records:
+      doAssert abs(r.latitude - truth[i][0]) < 1e-4 and abs(r.longitude - truth[i][1]) < 1e-4, $i
+      doAssert r.angleUnit == auGrads
+    doAssert f.log.len == (if unit == auAuto: 1 else: 0), $f.log
+    doAssert p1Text(f).text == t
+  doAssert parseP1(t).log.has("read as grads", sevInfo)
+  # DMS files stay DMS and silent; one bad angle is a warning, not grads.
+  var d = "H X\n"
+  for i in 0 ..< 30: d.add p1rec(i, 17.5 + float64(i) / 100, 110.25, auDms) & "\n"
+  var f = parseP1(d)
+  doAssert f.options.angleUnit == auDms and f.log.len == 0
+  doAssert abs(f.files[0].records[7].latitude - 17.57) < 1e-6
+  d.add p1a[0 .. 25] & "17613354N" & p1a[35 .. ^1] & "\n" # 61 minutes
+  f = parseP1(d)
+  doAssert f.options.angleUnit == auDms and f.files[0].records[30].latitude.isNaN
+  doAssert f.log.len == 1 and f.log.has("bad latitude", sevWarning), $f.log
