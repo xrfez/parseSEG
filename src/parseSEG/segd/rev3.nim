@@ -387,8 +387,9 @@ func baseScanIntervalUs*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): fl
 
 func recordLengthUs*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): float64 =
   ## GH#1's BCD RR.R × 1.024 s (as in Rev 2; `segd_rev3_0_b.md` §3.1), or
-  ## GH#2's µs when it is `FFF`.
+  ## GH#2's µs when it is `FFF`. NaN when GH#1's field is not valid BCD.
   if g1.recordLength == BcdAllF: float64(g2.extRecordLength)
+  elif g1.recordLength < 0: NaN
   else: float64(g1.recordLength) * 102_400.0
 
 func traceNumber*(t: SegdTraceHeader, e: SegdTraceHeaderExt1Rev3): int64 =

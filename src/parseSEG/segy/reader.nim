@@ -490,7 +490,7 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
       r.lastTraceSeen = true
 
   let traceNs = if extNs != 0: int(extNs) else: int(t.header.numSamples)
-  let traceDt = if extDt != 0: extDt else: float64(t.header.sampleInterval)
+  let traceDt = if usableExtInterval(extDt): extDt else: float64(t.header.sampleInterval)
   if f.revision.major >= 1 and f.binary.fixedLengthTraces == 1:
     t.numSamples = int(f.binary.effectiveSamplesPerTrace)
     t.sampleInterval = f.binary.effectiveSampleInterval

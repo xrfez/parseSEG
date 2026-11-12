@@ -77,7 +77,7 @@ type
     recordLengthMs*: float64
       ## SEG-Y: (samples - 1) × interval when both are uniform. SEG-D: the
       ## general header's record length when every record has the same (NaN
-      ## for 0, "indeterminate").
+      ## for 0, "indeterminate", and for a field that is not valid BCD).
     coordinateUnits*: CoordinateUnits
     crsFormat*: CrsTextFormat ## Format of `crsText`; `ctNone` when there is none.
 

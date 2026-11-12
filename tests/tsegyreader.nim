@@ -656,3 +656,36 @@ block zero_sample_count_in_any_revision:
   writeFile(tmp / "ns0_nowhere.sgy", s[0 ..< first + 240])
   let d = readSegy(tmp / "ns0_nowhere.sgy")
   doAssert d.traces.len == 1 and d.traces[0].numSamples == 0 and not d.log.isFatal, $d.log
+
+block nan_extended_interval_does_not_override:
+  # A Rev 2 extended sample interval overrides its 16-bit field when it is
+  # non-zero. A NaN there (damage) was taken as the interval by the binary
+  # header and the reader, while the keys fell back to the 16-bit field: one
+  # rule now (`usableExtInterval`), and it is the keys'.
+  doAssert usableExtInterval(2000.0) and usableExtInterval(-1.0) and usableExtInterval(Inf)
+  doAssert not usableExtInterval(0.0) and not usableExtInterval(-0.0) and
+    not usableExtInterval(NaN)
+  var b = SegyBinaryHeader(segyMajor: 2, segyMinor: 1, formatCode: 5, sampleInterval: 2000,
+    sampleIntervalOrig: 1000, samplesPerTrace: 100, byteOrderMarker: ByteOrderMarker)
+  doAssert b.effectiveSampleInterval == 2000 and b.effectiveSampleIntervalOrig == 1000
+  b.extSampleInterval = NaN
+  b.extSampleIntervalOrig = NaN
+  doAssert b.effectiveSampleInterval == 2000 and b.effectiveSampleIntervalOrig == 1000
+  b.extSampleInterval = 250.5
+  b.extSampleIntervalOrig = 125.25
+  doAssert b.effectiveSampleInterval == 250.5 and b.effectiveSampleIntervalOrig == 125.25
+  b.segyMajor = 1 # before Rev 2 the bytes are not an interval
+  doAssert b.effectiveSampleInterval == 2000 and b.effectiveSampleIntervalOrig == 1000
+  # In a trace: Extension 1 bytes 145-152.
+  var d = rev2File(3, 0, false)
+  d.file.trailer = initExtendedTextHeader()
+  for k in 0..<3:
+    d.traces[k].header.sampleInterval = 4000
+    d.traces[k].ext1.extSampleInterval = [NaN, 0.0, 333.25][k]
+  let path = tmp / "ext_dt_nan.sgy"
+  d.copyTo(path, initSegyWriteOptions(d.file, lenient = true))
+  let e = readSegy(path)
+  doAssert e.traces.len == 3 and not e.log.hasErrors, $e.log
+  doAssert e.traces[0].ext1.extSampleInterval.isNaN # the header stays as read
+  doAssert e.traces[0].sampleInterval == 4000 and e.traces[1].sampleInterval == 4000
+  doAssert e.traces[2].sampleInterval == 333.25

@@ -170,6 +170,33 @@ sampleBlock segd_mixed_records:
   let cs = f.channelSets
   doAssert cs.len == 2 and cs[1].record == 1 and cs[1].traceCount == 1
 
+block record_length_of_an_invalid_bcd_field:
+  # General Header #1 bytes 26-27 hold the record length as three BCD
+  # digits. A non-decimal digit there decodes as BcdInvalid (-2), which the
+  # summary scaled like a length: -204.8 ms. Unknown is NaN.
+  doAssert recordLengthMs(SegdGeneralHeader1(recordLength: BcdInvalid),
+    SegdGeneralHeader2()).isNaN
+  doAssert recordLengthUs(SegdGeneralHeader1(recordLength: BcdInvalid),
+    SegdGeneralHeader2Rev3()).isNaN
+  doAssert recordLengthMs(SegdGeneralHeader1(recordLength: 20), SegdGeneralHeader2()) == 2048
+  doAssert recordLengthMs(SegdGeneralHeader1(recordLength: BcdAllF),
+    SegdGeneralHeader2(extRecordLength: 3000)) == 3000
+  doAssert recordLengthUs(SegdGeneralHeader1(recordLength: BcdAllF),
+    SegdGeneralHeader2Rev3(extRecordLength: 4_000_000)) == 4_000_000
+  for name in ["record.sgd", "shot.sgd"]: # Rev 2.0 and Rev 3.0
+    var b = readBytes(demoDir() / name)
+    var f = openSeismic(demoDir() / name)
+    doAssert f.summary.recordLengthMs > 0, name
+    f.close()
+    b[25] = (b[25] and 0xF0) or 0x0A
+    b[26] = 0x00
+    writeBytes(tmp / ("badlen_" & name), b)
+    f = openSeismic(tmp / ("badlen_" & name))
+    doAssert f.recordCount == 1 and f.log.has("recordLength holds a non-decimal digit",
+      sevWarning), $f.log
+    doAssert f.summary.recordLengthMs.isNaN, name & " " & $f.summary.recordLengthMs
+    f.close()
+
 block unknown_file:
   let junk = tmp / "junk.bin"
   writeFile(junk, repeat('\0', 5000))

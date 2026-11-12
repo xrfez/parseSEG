@@ -11,6 +11,7 @@
 ## additional trace headers, where 2.1 has a u16 count plus a u16 survey type.
 ## `decodeBinaryHeader` and `encode` branch on the revision bytes for that.
 
+from std/math import isNaN
 import ../common/[endians, fieldlayout, diagnostics]
 
 const
@@ -172,6 +173,15 @@ func encode*(h: SegyBinaryHeader, b: var openArray[byte], order: ByteOrder) =
 # Effective values: a Rev 2 extended field overrides its 16-bit field when
 # it is non-zero.
 
+func usableExtInterval*(x: float64): bool {.inline.} =
+  ## Whether `x`, read from a Rev 2 extended sample interval (binary header
+  ## bytes 3273-3280 and 3281-3288, Trace Header Extension 1 bytes 145-152),
+  ## overrides its 16-bit field: when it is non-zero, as the standard says,
+  ## and a number. A NaN there is damage, and the interval is then the
+  ## 16-bit field's, not NaN. The binary header, the reader and the trace
+  ## keys all decide with this.
+  x != 0 and not x.isNaN
+
 template override(h: SegyBinaryHeader, ext, std: untyped): untyped =
   if h.rulesRevision.major >= 2 and ext != 0: typeof(ext)(ext) else: typeof(ext)(std)
 
@@ -179,9 +189,14 @@ func effectiveSamplesPerTrace*(h: SegyBinaryHeader): uint32 =
   ## Samples per trace of the primary trace set.
   override(h, h.extSamplesPerTrace, h.samplesPerTrace)
 
+template overrideInterval(h: SegyBinaryHeader, ext, std: untyped): float64 =
+  if h.rulesRevision.major >= 2 and usableExtInterval(ext): ext else: float64(std)
+
 func effectiveSampleInterval*(h: SegyBinaryHeader): float64 =
-  ## Sample interval of the primary trace set (µs for time data).
-  override(h, h.extSampleInterval, h.sampleInterval)
+  ## Sample interval of the primary trace set (µs for time data): the Rev 2
+  ## extended interval when it is usable (`usableExtInterval`), else the
+  ## 16-bit field.
+  overrideInterval(h, h.extSampleInterval, h.sampleInterval)
 
 func effectiveSamplesPerTraceOrig*(h: SegyBinaryHeader): uint32 =
   ## Samples per trace of the original field recording.
@@ -189,7 +204,7 @@ func effectiveSamplesPerTraceOrig*(h: SegyBinaryHeader): uint32 =
 
 func effectiveSampleIntervalOrig*(h: SegyBinaryHeader): float64 =
   ## Sample interval of the original field recording.
-  override(h, h.extSampleIntervalOrig, h.sampleIntervalOrig)
+  overrideInterval(h, h.extSampleIntervalOrig, h.sampleIntervalOrig)
 
 func effectiveDataTracesPerEnsemble*(h: SegyBinaryHeader): int64 =
   ## Data traces per ensemble.
