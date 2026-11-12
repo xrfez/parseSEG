@@ -11,9 +11,11 @@ import ./common/niftext
 
 const
   Usage = """
-parseSEG """ & PackageVersion & """ — read, index, edit and convert SEG-Y and SEG-D
+parseSEG """ & PackageVersion & """ — read, index, edit and convert SEG-Y, SEG-D and SEG-2
 
 Usage: parseSEG <command> [options] <arguments>
+  Options are --key=value or --key value, anywhere on the line (before the
+  command too); -o out can be written --out=out.
 
 Inspecting
   info <file> [--keys] [SURVEY] what the file is: standard, revision, format,
@@ -79,8 +81,9 @@ Editing (in place, size-preserving, journaled; see `journal`)
   headers export <file> [-o out.nif] [--fields-only]
                                 every header field as NIF (with raw bytes)
   headers import <file> <patch.nif> [-o new-file] [--journal=J] [--dry-run]
-                                apply an (edited) export: only changed fields
-                                are written, in place or into a copy
+          [--force]             apply an (edited) export: only changed fields
+                                are written, in place or into a copy; --force
+                                applies an export made from another file
   journal apply|rollback <file> <journal>
                                 re-apply or undo journaled edits
 
@@ -126,6 +129,14 @@ const Flags = ["force", "keys", "all", "nif", "descale", "no-station-header", "f
 const SurveyOptions = ["sps", "p1", "decimals", "line-map", "elevation", "trailing-digits",
   "multi-component", "overwrite"]
 
+func takesNext(args: seq[string], i: int): bool =
+  ## Option `args[i]`, written without `=`, has its value in `args[i + 1]`
+  ## (`--traces 0`, `-o out`): a value option followed by something that is
+  ## not another option (a negative number is a value).
+  let key = args[i].strip(trailing = false, chars = {'-'})
+  key in ValueOptions and i + 1 < args.len and
+    not (args[i + 1].startsWith("-") and args[i + 1].len > 1 and args[i + 1][1] notin Digits)
+
 proc parseArgs(args: seq[string]): Args =
   ## `--key=value`, `--key:value` or `--key value` (and `-o value`) for value
   ## options; flags take no value; `--` ends the options.
@@ -144,9 +155,7 @@ proc parseArgs(args: seq[string]): Args =
       var val = ""
       if sep >= 0:
         val = body[sep + 1 .. ^1]
-      elif key notin Flags and key in ValueOptions and i + 1 < args.len and
-          not (args[i + 1].startsWith("-") and args[i + 1].len > 1 and
-               args[i + 1][1] notin Digits):
+      elif takesNext(args, i):
         val = args[i + 1]
         inc i
       if key in ValueOptions and val.len == 0:
@@ -498,6 +507,8 @@ proc convertCmd(a: Args): int =
       if a.has(k): usage("--" & k & " applies to SEG-Y output only")
     var o = SegdConvertOptions()
     let (ma, mi) = parseRev(a.get("rev", "3.0"), 2, 2, "2.0, 2.1, 3.0 or 3.1")
+    if ma notin 2'u8..3'u8 or mi > 1:
+      usage("--rev: SEG-D revisions are 2.0, 2.1, 3.0 or 3.1, not " & a.get("rev"))
     o.revision = SegdRevision(major: ma, minor: mi)
     let code = parseIntOpt(a.get("format", "0"), "format")
     if code != 0:
@@ -509,6 +520,8 @@ proc convertCmd(a: Args): int =
     var o = ConvertOptions()
     if a.has("rev"):
       let (ma, mi) = parseRev(a.get("rev"), 1, 2, "0, 1, 2.0 or 2.1")
+      if not ((ma <= 1 and mi == 0) or (ma == 2 and mi <= 1)):
+        usage("--rev: SEG-Y revisions are 0, 1, 2.0 or 2.1, not " & a.get("rev"))
       o.revision = SegyRevision(major: ma, minor: mi)
     let code = parseIntOpt(a.get("format", "0"), "format")
     if code != 0: # 0 keeps the format, as for SEG-D
@@ -959,11 +972,12 @@ proc run*(args: seq[string]): int =
   if args.len == 0:
     stdout.write Usage
     return 2
-  # Options may come before the command: the command is the first argument.
+  # Options may come before the command: the command is the first argument
+  # that is neither an option nor the value of one (`--traces 0 dump f`).
   var k = 0
   while k < args.len and args[k].startsWith("-") and args[k] notin ["--help", "-h", "--version"]:
-    inc k
-  if k == args.len: k = 0
+    k += (if takesNext(args, k): 2 else: 1)
+  if k >= args.len: k = 0
   let cmd = args[k]
   try:
     let a = parseArgs(args[0 ..< k] & args[k + 1 .. ^1])

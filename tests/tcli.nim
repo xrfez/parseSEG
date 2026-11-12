@@ -78,6 +78,27 @@ block demo_files:
   discard ok("journal", "rollback", f, f & ".edits.nif")
   doAssert readFile(f) == readFile(survey)
 
+block options_before_the_command_and_usage_errors:
+  let survey = demoDir() / "survey.sgy"
+  let rec = demoDir() / "record.sgd"
+  # An option with its value as the next argument, before the command (the
+  # value was taken for the command: "unknown command '0'").
+  let d = ok("--traces", "0", "dump", survey)
+  doAssert d == ok("dump", survey, "--traces", "0") and d == ok("--traces=0", "dump", survey)
+  doAssert "unknown command" in fails(2, "--traces", "0", "frobnicate", survey)
+  discard fails(2, "--traces") # no command at all
+  # A revision the target standard does not have is a usage error (it ran
+  # the conversion and exited 1).
+  for r in ["3", "1.1", "2.2", "0.1"]:
+    doAssert "SEG-Y revisions are" in fails(2, "convert", survey, tmp / "rev.sgy", "--rev=" & r)
+  for r in ["1.0", "2.2", "3.2", "4.0"]:
+    doAssert "SEG-D revisions are" in fails(2, "convert", rec, tmp / "rev.sgd", "--rev=" & r)
+  doAssert not fileExists(tmp / "rev.sgy") and not fileExists(tmp / "rev.sgd")
+  # The help names what the tool accepts.
+  let help = ok("help")
+  doAssert "SEG-Y, SEG-D and SEG-2" in help.splitLines[0]
+  doAssert "--force" in help and "--out" in help
+
 # -------------------------------------------------------- 7.1: inspecting --
 
 sampleBlock usage_and_version:
@@ -153,7 +174,8 @@ sampleBlock convert:
   doAssert "applies to SEG-Y output only" in
     fails(2, "convert", s63, tmp / "x.sgd", "--to=segd", "--descale")
   doAssert "--to is segy, segd or seg2" in fails(2, "convert", s63, tmp / "x.sgy", "--to=segx")
-  discard fails(1, "convert", s63, tmp / "x.sgd", "--to=segd", "--rev=1.0")
+  doAssert "SEG-D revisions are" in # a usage error, not a failed conversion
+    fails(2, "convert", s63, tmp / "x.sgd", "--to=segd", "--rev=1.0")
   doAssert "--format: 1234" in fails(2, "convert", s63, tmp / "x.sgd", "--to=segd",
     "--format=1234")
   discard fails(2, "convert", inglewood, inglewood)
