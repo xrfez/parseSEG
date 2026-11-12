@@ -195,8 +195,8 @@ block stale_options_and_path:
 block stale_version_or_schema:
   let (p, cache) = fresh("version.sgy")
   let s = readFile(cache)
-  doAssert "(version 2)" in s
-  writeFile(cache, s.replace("(version 2)", "(version 3)"))
+  doAssert "(version 3)" in s
+  writeFile(cache, s.replace("(version 3)", "(version 4)"))
   rebuiltBecause(p, cache, "another version")
   let i = s.find("(schema \"") + 9
   var t = s

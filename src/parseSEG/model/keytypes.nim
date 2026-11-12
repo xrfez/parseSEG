@@ -22,8 +22,15 @@ type
     ensemble*: float64   ## SEG-Y ensemble (CDP) number; NaN for SEG-D.
     offset*: float64     ## SEG-Y source-receiver offset; NaN for SEG-D.
     srcLine*, srcPoint*: float64
+      ## The source station. SEG-Y has a point only (the energy source point,
+      ## or the scaled shotpoint when that is the same point with its
+      ## fraction), unless the file's Layout stanza names `sht_line`,
+      ## `sht_point`, `sht_index` (as a SEG-D file converted by this library
+      ## does).
     srcX*, srcY*: float64
     rcvLine*, rcvPoint*: float64
+      ## The receiver station; SEG-Y: only from a Layout stanza's `rec_line`,
+      ## `rec_point`, `rec_index`.
     rcvX*, rcvY*: float64
     srcZ*, rcvZ*: float64 ## Source and receiver elevation (SEG-Y scaled; SEG-D coordinate 3).
     cmpX*, cmpY*: float64 ## Midpoint: SEG-Y CDP X/Y, else halfway between source and receiver.
@@ -33,25 +40,29 @@ type
     sensorType*: uint8   ## SEG-D THE#1 byte 21.
     component*: uint8    ## Distinguishes the components of one station (see module doc).
     traceCode*: int16
-      ## SEG-Y trace identification code (bytes 29-30) as stored; 0 when unknown
-      ## and for SEG-D and SEG-2.
+      ## SEG-Y trace identification code (the layout's `trctype`: bytes 29-30
+      ## unless a Layout stanza moves it) as stored; 0 when unknown and for
+      ## SEG-D and SEG-2.
     status*: TraceStatus ## Live, dead or auxiliary (see `TraceStatus`).
     channel*: float64
-      ## Channel (trace) number in the field record: SEG-Y bytes 13-16, SEG-D
-      ## the demux trace number (Rev 3: extended when `FFFF`). Survey relation
-      ## records (SPS X) map (record, channel) to stations.
+      ## Channel (trace) number in the field record: SEG-Y the layout's `chan`
+      ## (bytes 13-16; NaN when 0, and when a Layout stanza keeps something
+      ## else there), SEG-D the demux trace number (Rev 3: extended when
+      ## `FFFF`). Survey relation records (SPS X) map (record, channel) to
+      ## stations.
     time*: float64
       ## When the trace was recorded, in UTC POSIX seconds (fractional); NaN if
-      ## unknown. SEG-Y: trace bytes 157-168 in their time basis; SEG-D: GH#1,
-      ## for Rev 3 the trace's Timestamp block or the GH#3 time zero (see the
-      ## module documentation).
+      ## unknown. SEG-Y: the layout's date and time fields (trace bytes
+      ## 157-168) in their time basis; SEG-D: GH#1, for Rev 3 the trace's
+      ## Timestamp block or the GH#3 time zero (see the module documentation).
     t0Ms*: float64
       ## Time of sample 0 in ms (in ms also for SEG-Y depth data, whose "time"
-      ## fields hold depths). SEG-Y: the delay recording time (bytes 109-110)
-      ## times the time scalar (bytes 215-216, Rev 1 and later; 0 means 1);
-      ## SEG-D: the channel set's start time; SEG-2: DELAY × 1000. 0 when the
-      ## field is unset, NaN when the headers cannot give it (an unknown SEG-D
-      ## channel set).
+      ## fields hold depths). SEG-Y: the delay recording time (the layout's
+      ## `delay`: bytes 109-110) times the time scalar (bytes 215-216, Rev 1
+      ## and later; 0 means 1); SEG-D: the channel set's start time; SEG-2:
+      ## DELAY × 1000. 0 when the field is unset, NaN when the headers cannot
+      ## give it (an unknown SEG-D channel set, a SEG-Y Layout stanza that
+      ## keeps something else in the delay's bytes).
     intervalUs*: float64
       ## The trace's sample interval in µs (Hz or m/ft for SEG-Y non-time
       ## data), exactly as `sampleIntervalUs(f, trace)` resolves it; NaN when

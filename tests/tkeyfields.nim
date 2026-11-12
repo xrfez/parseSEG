@@ -39,6 +39,8 @@ type SegyCase = object
   code, delay, tmScal: int16
   dt: uint16
   iline, xline: int32
+  chan, espnum, sp: int32 # bytes 13-16, 17-20, 197-200
+  spScal: int16           # bytes 201-202
 
 proc put16(b: var seq[byte], at: int, v: int) =
   b[at] = byte((v shr 8) and 0xFF)
@@ -61,6 +63,10 @@ proc writeSegy(path: string, major: int, fixed: bool, binDt: int,
   for t, c in cases:
     let at = 3600 + t * 244
     b.put32(at, t + 1)
+    b.put32(at + 12, c.chan)
+    b.put32(at + 16, c.espnum)
+    b.put32(at + 196, c.sp)
+    b.put16(at + 200, c.spScal)
     b.put16(at + 28, c.code)
     b.put16(at + 108, c.delay)
     b.put16(at + 114, 1)
@@ -133,6 +139,85 @@ block segy_inline_crossline_from_a_layout_stanza:
     doAssert k.intervalUs == 2000 and k.t0Ms == 0 and k.status == tsLive
   f.close()
   checkAgree(p)
+
+block segy_channel_follows_the_layout:
+  # survey.sgy's Layout stanza keeps the inline number in bytes 13-16 (as
+  # the Inglewood sample does), so those bytes are no channel number.
+  for keys in [true, false]:
+    var f = openSeismic(demoDir() / "survey.sgy", keys = keys)
+    for k in f.traceKeys([0, 5, 199]): doAssert k.channel.isNaN and k.inline == 1001, $k.channel
+    f.close()
+  # A standard header: bytes 13-16.
+  let p = tmp / "chan.sgy"
+  writeSegy(p, 1, fixed = false, binDt = 2000, [SegyCase(code: 1, dt: 2000, chan: 7),
+    SegyCase(code: 1, dt: 2000)])
+  for keys in [true, false]:
+    var f = openSeismic(p, keys = keys)
+    let k = f.traceKeys(0 ..< f.len)
+    doAssert k[0].channel == 7 and k[1].channel.isNaN # 0 is "not set"
+    f.close()
+
+block segy_source_point_keeps_its_fraction:
+  # The energy source point (17-20) is an integer; the scaled shotpoint
+  # (197-202) carries the fraction when it is the same point (the library's
+  # converters write 100 and 9950 / -100 for point 99.5).
+  let p = tmp / "sp.sgy"
+  writeSegy(p, 1, fixed = false, binDt = 2000, [
+    SegyCase(code: 1, dt: 2000, espnum: 100, sp: 9950, spScal: -100),
+    SegyCase(code: 1, dt: 2000, espnum: 100),                    # only the energy source point
+    SegyCase(code: 1, dt: 2000, espnum: 100, sp: 250, spScal: 1), # a shotpoint of its own
+    SegyCase(code: 1, dt: 2000, sp: 2505, spScal: -10),          # only the shotpoint
+    SegyCase(code: 1, dt: 2000, espnum: 100, sp: 100),
+    SegyCase(code: 1, dt: 2000, espnum: 99, sp: 9860, spScal: -100)]) # 98.6 rounds to 99
+  for keys in [true, false]:
+    var f = openSeismic(p, keys = keys)
+    let k = f.traceKeys(0 ..< f.len)
+    doAssert k[0].srcPoint == 99.5, $k[0].srcPoint
+    doAssert k[1].srcPoint == 100 and k[2].srcPoint == 100 and k[3].srcPoint == 250.5
+    doAssert k[4].srcPoint == 100 and k[5].srcPoint == 98.6
+    f.close()
+
+block converted_segd_keeps_its_stations:
+  # `convertFile` stores a SEG-D trace's stations in the PSEGD001 header and
+  # names them in a Layout stanza (sht_line, sht_point, sht_index, rec_line,
+  # rec_point, rec_index): the SEG-Y keys read them back.
+  for name in ["63.sgd", "inova_rev30_5traces.sgd"]:
+    let src = sampleOr(name)
+    let dst = tmp / (name & ".sgy")
+    doAssert not convertFile(src, dst, ConvertOptions()).isFatal
+    var a = openSeismic(src, keys = true)
+    for keys in [true, false]:
+      var b = openSeismic(dst, keys = keys)
+      doAssert a.len == b.len
+      let got = b.traceKeys(0 ..< b.len)
+      var sources, receivers = 0
+      for i in 0 ..< a.len:
+        let x = a.traceKeys(i)
+        let y = got[i]
+        doAssert same(x.srcLine, y.srcLine) and same(x.srcPoint, y.srcPoint) and
+          x.srcIndex == y.srcIndex, name & " source of trace " & $i
+        doAssert same(x.rcvLine, y.rcvLine) and same(x.rcvPoint, y.rcvPoint) and
+          x.rcvIndex == y.rcvIndex, name & " receiver of trace " & $i
+        if not y.srcLine.isNaN: inc sources
+        if not y.rcvLine.isNaN: inc receivers
+      doAssert sources > 0 and receivers > 0, name
+      b.close()
+    a.close()
+    checkAgree(dst)
+
+sampleBlock converted_63_has_its_fractional_source_point:
+  # 63.sgd: source line 13, point 99.5; receiver line 13.
+  var b = openSeismic(tmp / "63.sgd.sgy", keys = true)
+  let k = b.traceKeys(0)
+  doAssert k.srcLine == 13 and k.srcPoint == 99.5 and k.rcvLine == 13, $k
+  b.close()
+  # Without the station header the scaled shotpoint still gives the fraction.
+  let plain = tmp / "63plain.sgy"
+  doAssert not convertFile(exampleDir / "63.sgd", plain,
+    ConvertOptions(stationHeader: false)).isFatal
+  var c = openSeismic(plain, keys = true)
+  doAssert c.traceKeys(0).srcPoint == 99.5 and c.traceKeys(0).srcLine.isNaN
+  c.close()
 
 # ------------------------------------------------------------------ SEG-D --
 
@@ -226,9 +311,9 @@ block old_index_cache_is_rebuilt:
   g.close()
   # The same cache labelled with the previous format version.
   var s = readFile(cache)
-  let v = s.find("(version 2)")
+  let v = s.find("(version 3)")
   doAssert v >= 0
-  s[v + len("(version ")] = '1'
+  s[v + len("(version ")] = '2'
   writeFile(cache, s)
   var h = openSeismic(p, keys = true, opts = OpenOptions(cache: cache))
   doAssert not h.fromCache and h.len == segyCases.len and h.traceKeys(1).t0Ms == 250
