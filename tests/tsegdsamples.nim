@@ -78,6 +78,31 @@ block quantization_is_stable:
       doAssert abs(ys[i] - xs[i]) <= abs(xs[i]) * rel + absTol + 1e-12,
         $f & " " & $xs[i] & " " & $ys[i]
 
+block twos_complement_8015_encodes_what_it_decodes:
+  # Some field systems write 8015 fractions as two's complement. Read that
+  # way and written back that way, every word is the same (the one's
+  # complement encoder was one LSB off on each negative sample). Exponents
+  # 1, 2, 0, 15 with fractions 0.5, -16385/32768, -1/32768 and the largest.
+  let g = [0x12'u8, 0x0F, 0x40, 0x00, 0xBF, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF]
+  var v = newSeq[float64](4)
+  decodeSamples(sd8015, g, v, twosComplement8015 = true)
+  var b = newSeq[byte](10)
+  encodeSamples(sd8015, v, b, twosComplement8015 = true)
+  doAssert b == @g
+  encodeSamples(sd8015, v, b)
+  doAssert b != @g
+  var rng = initRand(7)
+  var xs = newSeq[float64](64)
+  for i in 0 ..< xs.len: xs[i] = rng.rand(-1000.0 .. 1000.0)
+  var words = newSeq[byte](dataBytes(sd8015, xs.len))
+  encodeSamples(sd8015, xs, words, twosComplement8015 = true)
+  var ys = newSeq[float64](xs.len)
+  decodeSamples(sd8015, words, ys, twosComplement8015 = true)
+  for i in 0 ..< xs.len: doAssert abs(ys[i] - xs[i]) <= abs(xs[i]) / 32768 + 1e-12
+  var again = newSeq[byte](words.len)
+  encodeSamples(sd8015, ys, again, twosComplement8015 = true)
+  doAssert again == words
+
 block rev31_little_endian:
   # The 90xx formats are the 80xx ones with their bytes reversed.
   doAssert toSegdFormat(9058) == some(sd9058) and sd9058.isLittleEndian

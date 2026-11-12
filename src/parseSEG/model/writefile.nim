@@ -591,7 +591,8 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     s.startRecord(src, trace)
   t.index = trace - s.recFirst
   t.samples = newSeq[byte](dataBytes(s.recFormat, samples.len))
-  encodeSamples(s.recFormat, samples, t.samples)
+  # 8015 fractions as the input was read: its convention is the file's.
+  encodeSamples(s.recFormat, samples, t.samples, src.index.codecs[r].twosComplement8015)
   s.segd.writeTrace(t)
   s.nextTrace = trace + 1
 

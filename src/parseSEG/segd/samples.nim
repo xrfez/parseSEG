@@ -233,11 +233,13 @@ proc toInt(x: float64, lo, hi: int64, i: int): int64 =
   int64(r)
 
 proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
-    dst: var openArray[byte]) =
+    dst: var openArray[byte], twosComplement8015 = false) =
   ## Encodes `src` as format `f` into the start of `dst`. Exponent formats
   ## quantize (rounding to nearest) and clamp at full scale; integer formats
   ## round and refuse values out of range; NaN is refused by every format
-  ## except the IEEE ones. Raises `SegFormatError`.
+  ## except the IEEE ones. Raises `SegFormatError`. `twosComplement8015`
+  ## writes 8015 fractions as two's complement, the inverse of the
+  ## decoders' option (the spec says one's complement).
   let n = src.len
   doAssert dst.len >= dataBytes(f, n), "destination too short"
   case f
@@ -253,7 +255,9 @@ proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
           let x = float64(src[i])
           let (ee, mag) = expFraction(x, 2.0, 15, 15, i)
           e = ee
-          w = if x < 0 and mag != 0: uint16((not mag) and 0xFFFF) else: uint16(mag)
+          w = if x >= 0 or mag == 0: uint16(mag)
+              elif twosComplement8015: uint16(0x1_0000'u32 - mag)
+              else: uint16((not mag) and 0xFFFF)
         if k mod 2 == 0: dst[10 * g + k div 2] = dst[10 * g + k div 2] or byte(e shl 4)
         else: dst[10 * g + k div 2] = dst[10 * g + k div 2] or byte(e)
         putBeU16(dst, 10 * g + 2 + 2 * k, w)

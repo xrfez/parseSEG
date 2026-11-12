@@ -148,6 +148,25 @@ block scaled_segd:
       if a.isRev3: doAssert b.trailerRev3 == a.trailerRev3
       else: doAssert b.trailer == a.trailer
 
+block segd_8015_read_as_twos_complement_is_written_like_that:
+  # The reader's `twosComplement8015` is the file's convention: written
+  # "like" it, the samples read back the same (they were one LSB off on
+  # every negative sample).
+  var o = ConvertOptions(target: skSegd)
+  o.segd.format = tf8015
+  let src = convert(inova, "inova_8015.sgd", o)
+  var f = openSeismic(src, opts = OpenOptions(twosComplement8015: true))
+  let x = f.readTraces(0 ..< f.len, float64)
+  let dst = tmp / "inova_8015_like.sgd"
+  var w = openSeismicWriter(dst, like = f)
+  for i in 0 ..< f.len: w.writeTrace(f, i, x, i)
+  discard w.close()
+  var g = openSeismic(dst, opts = OpenOptions(twosComplement8015: true))
+  doAssert g.len == f.len and g.readTraces(0 ..< g.len, float64) == x
+  doAssert readFile(dst) == readFile(src)
+  g.close()
+  f.close()
+
 block scaled_seg2:
   for (src, fmt, tol) in [(boSg2, s2tKeep, 1e-6), (boSg2, s2t5, 1e-15), (inovaSg2, s2tKeep, 0.0),
       (inovaSg2, s2t4, 1e-6)]:

@@ -313,10 +313,12 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
         if ok:
           t.numSamples = uint32(vals.len)
           data.setLen dataBytes(fmt, vals.len)
+          # Format-3 mantissas as a SEG-2 input was read (its convention).
+          let twos = f.kind == skSeg2 and codec.twosComplement8015
           try:
-            encodeSamples(fmt, vals, data, fdb.order)
+            encodeSamples(fmt, vals, data, fdb.order, twos)
             back.setLen vals.len
-            decodeSamples(fmt, data, back, fdb.order)
+            decodeSamples(fmt, data, back, fdb.order, twos)
             for k in 0..<vals.len:
               if back[k] != vals[k] and not (back[k].isNaN and vals[k].isNaN):
                 c.inexactTrace(i)

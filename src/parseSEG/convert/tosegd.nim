@@ -230,15 +230,17 @@ proc samplesFor(c: var Conv, src: openArray[byte], nIn, nOut: int,
   var v = newSeq[float64](nIn)
   decodeSamples(fIn, src, v, c.opts.twosComplement8015)
   v.setLen nOut
+  # A resized 8015 trace keeps the input's convention, as the copied ones do.
+  let twos = c.opts.twosComplement8015 and fIn == sd8015
   try:
-    encodeSamples(fOut, v, result)
+    encodeSamples(fOut, v, result, twos)
   except SegFormatError:
     # A value out of the target's range: the trace is zeroed, and counted.
     for b in result.mitems: b = 0
     inc c.zeroed
     return
   var back = newSeq[float64](nOut)
-  decodeSamples(fOut, result, back)
+  decodeSamples(fOut, result, back, twos)
   for i in 0..<nOut:
     if back[i] != v[i] and not (back[i].isNaN and v[i].isNaN):
       inc c.inexact
