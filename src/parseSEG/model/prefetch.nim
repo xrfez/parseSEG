@@ -75,7 +75,7 @@
 ## prefetchers is for the thread that opened it and the prefetchers it made
 ## itself.
 
-import std/locks
+import std/[locks, atomics]
 import ../common/diagnostics
 import ../segy/samples
 import ./[traceindex, tracerows]
@@ -119,6 +119,10 @@ type
     slots: ptr UncheckedArray[Slot[T]]
     depth: int
     gen: int
+    live: Atomic[int]
+      # `gen`, readable without the lock: a worker inside a chunk compares it
+      # with the chunk's generation to stop decoding what a `seek` dropped.
+    stopNow: Atomic[bool] # set by `shutdown` before it takes the lock, for the same reason
     start, stop: int # trace range [start, stop) of the current generation
     nextChunk: int   # next chunk a worker claims
     takeChunk: int   # next chunk the consumer takes
@@ -179,6 +183,7 @@ type
 
 proc shutdown[T](sh: ptr Shared[T]) =
   # Stops and joins the workers, then frees the shared state.
+  sh.stopNow.store(true) # a worker inside a chunk gives it up (`decodeChunk`)
   acquire(sh.lock)
   sh.quit = true
   broadcast(sh.work)
@@ -235,14 +240,23 @@ func headRows[T](sh: ptr Shared[T]): int {.inline.} =
 proc traceOf[T](sh: ptr Shared[T], pos: int): int {.inline.} =
   if sh.sel != nil: sh.sel[pos] else: pos
 
-proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int) {.raises: [].} =
+proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.raises: [].} =
   # Runs without the lock: the slot is busy, so nobody else touches it.
   # `tryDecodeEntry` reports failures as a status: no exception is made on
   # this thread (one destroyed here would leak ORC's per-thread cycle buffer).
+  # False when the chunk was given up: a `seek` or a `close` made it stale.
   adviseTraces(sh.mem, sh.size, sh.entries, sh.codecs, sh.sel, s.aheadLo, s.aheadHi, sh.cols,
     sh.firstSample)
   s.failed = 0
   for k in 0..<s.count:
+    # Every 8 traces: has a `seek` or a `close` dropped this chunk? Then the
+    # consumer is waiting for the worker (a 1024-trace IBM chunk took 0.6 ms
+    # to finish: a seek while it decoded took twice as long as an idle one).
+    # Only a hint, read without the lock: `live` trails `gen`, so a stale
+    # read decodes on, and the worker decides under the lock as it always did.
+    if (k and 7) == 0 and
+        (sh.live.load(moRelaxed) != s.gen or sh.stopNow.load(moRelaxed)):
+      return false
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
     let e = sh.entries[sh.traceOf(s.first + k)]
     let st = tryDecodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols,
@@ -256,6 +270,7 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int) {.raises: []
   if sh.transform != nil:
     sh.transform(worker, s.data, s.count, sh.cols, chunkView(sh.view, s.first, s.count),
       s.failRows.toOpenArray(0, s.failed - 1), sh.user)
+  true
 
 proc worker[T](arg: (ptr Shared[T], int)) {.thread.} =
   let (sh, index) = arg
@@ -287,14 +302,18 @@ proc worker[T](arg: (ptr Shared[T], int)) {.thread.} =
         s.aheadHi = 0
       inc sh.nextChunk
       release(sh.lock)
+      var done = false
       {.cast(gcsafe).}:
-        decodeChunk(sh, s, index)
+        done = decodeChunk(sh, s, index)
       acquire(sh.lock)
-      if s.gen == sh.gen:
+      if done and s.gen == sh.gen:
         s.state = ssReady
         broadcast(sh.ready)
       else:
-        s.state = ssFree # dropped by a seek: another worker may wait for the slot
+        # Dropped by a seek (given up or not), or given up for a `close`,
+        # whose consumer takes nothing more: another worker may wait for
+        # the slot.
+        s.state = ssFree
         broadcast(sh.work)
     else:
       wait(sh.work, sh.lock)
@@ -598,8 +617,10 @@ iterator chunks*[T](p: var Prefetcher[T]): PrefetchChunk[T] =
 
 proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   ## Restarts read-ahead over the positions `span` (traces in range mode).
-  ## Chunks decoded for the old positions are dropped; one being decoded
-  ## finishes in the background and is discarded. A no-op after `close`.
+  ## Chunks decoded for the old positions are dropped, and a worker inside
+  ## one gives it up within 8 traces (before the `transform`), so the first
+  ## chunk of the new span arrives as fast as after an idle seek. A no-op
+  ## after `close`.
   ## Raises `ValueError` for positions out of range (an empty span must
   ## still start in `0 .. len`).
   if p.sh == nil: return
@@ -613,6 +634,7 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   if sh.uniform: bounds = uniformBounds(sh.view, first, stop, sh.chunkTraces, sh.headRows)
   acquire(sh.lock)
   inc sh.gen
+  sh.live.store(sh.gen)
   sh.start = first
   sh.stop = stop
   sh.nextChunk = 0
@@ -627,7 +649,8 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   release(sh.lock)
 
 proc close*[T](p: var Prefetcher[T]) =
-  ## Stops and joins the workers and frees the ring. Idempotent.
+  ## Stops and joins the workers (one inside a chunk gives it up within 8
+  ## traces) and frees the ring. Idempotent.
   if p.sh != nil:
     shutdown(p.sh)
     p.sh = nil

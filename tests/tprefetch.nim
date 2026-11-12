@@ -1,7 +1,7 @@
 ## Read-ahead on worker threads (task 6.3; workers, ring cap, quickFirst 15.3-11).
 
 import std/[assertions, os, random, strutils]
-import parseSEG/model/[traceindex, prefetch]
+import parseSEG/model/[traceindex, prefetch, tracerows]
 import ./utils/testutils
 
 const files = ["BO_3D-Inglewood_rev21_v7.sgy", "inova_rev30_5traces.sgd", "63.sgd",
@@ -388,6 +388,36 @@ block steady_next_into_allocates_nothing:
       if into: doAssert a == 0, $a
       else: doAssert a >= chunks, $a # a fresh slot buffer per chunk
     p.close()
+  f.close()
+
+proc stamp(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
+    traces: TraceRows, failed: openArray[int], user: pointer) {.nimcall, gcsafe, raises: [].} =
+  # Marks a chunk as decoded to its end: the last sample of its last row.
+  samples[rows * cols - 1] = 12345'f32
+
+block a_stale_chunk_is_given_up_and_never_handed_out:
+  # A worker inside a chunk that a seek or a close made stale stops decoding
+  # it. Such a chunk never reaches the consumer: every chunk taken is the one
+  # asked for and whole (the transform, which runs last, stamped it).
+  var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
+  let all = f.readTraces(0..<f.len)
+  let cols = all.shape[1]
+  var rng = initRand(5)
+  for workers in 1..3:
+    for quick in [false, true]:
+      var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, depth = 3,
+        workers = workers, quickFirst = quick, transform = stamp)
+      var c: PrefetchChunk[float32]
+      for step in 0 ..< 600:
+        let a = rng.rand(f.len - 1)
+        p.seek(a ..< f.len)
+        for spin in 0 ..< rng.rand(40) * 100: cpuRelax() # a worker gets into the chunk
+        if rng.rand(2) == 0:
+          doAssert p.nextInto(c) and c.first == a
+          doAssert c.samples[c.count - 1, cols - 1] == 12345'f32
+          for k in 0 ..< c.count: doAssert c.samples[k, 7] == all[c.first + k, 7]
+      p.seek(0 ..< f.len)
+      p.close() # while a worker decodes
   f.close()
 
 # ------------------------------------- workers, ring cap, quickFirst (15.3-11) --
