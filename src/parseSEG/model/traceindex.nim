@@ -30,7 +30,7 @@
 ## a temporary demultiplexed copy (`segd/demux`) and maps and indexes that
 ## instead (`demuxPath`); the copy is deleted on `close`.
 
-import std/[math, os, times]
+import std/[math, os, times, locks]
 import ../common/[errors, diagnostics, seismickind, progress, tensors]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
@@ -53,7 +53,7 @@ type
     ## decodes defers the unmap to the prefetcher's `close`.
     src: MemFileSource
     tempPath: string ## A demultiplexed copy to delete with the map ("" if none).
-    pins: int        ## Live `MapPin`s (prefetchers); consumer thread only.
+    pins: int        ## Live `MapPin`s (prefetchers); read and changed under `mapLock`.
     parkedEntries: seq[TraceEntry]
       ## The index tables of a file destroyed while pinned: the prefetchers
       ## read them through raw pointers, so they live as long as the map.
@@ -77,6 +77,15 @@ proc `=destroy`(m: MapOwner) =
 proc `=copy`(dst: var MapOwner, src: MapOwner) {.error.}
 proc `=dup`(src: MapOwner): MapOwner {.error.}
 
+var mapLock: Lock
+  # Guards every map's pin count and every copy or drop of a `MapRef` that
+  # another thread may also hold: prefetchers of one file are made and
+  # closed on different threads (a background job beside the UI's
+  # read-ahead), and neither `pins` nor ORC's reference counts are atomic.
+  # One lock for all files: it is held for a few instructions, except by
+  # the last holder of a map, which unmaps the file under it.
+initLock(mapLock)
+
 type
   MapPin* = object
     ## **Internal** (the prefetcher). Keeps a file's map alive, and the
@@ -86,8 +95,11 @@ type
 proc `=destroy`*(p: MapPin) =
   # Exported: `Prefetcher`'s destructor (another module) destroys its pin
   # explicitly, and only a visible hook binds to a non-`var` field there.
-  if p.m != nil: dec p.m.pins
-  `=destroy`(p.m)
+  if p.m != nil:
+    acquire(mapLock)
+    dec p.m.pins
+    `=destroy`(p.m)
+    release(mapLock)
 
 proc `=copy`(dst: var MapPin, src: MapPin) {.error.}
 proc `=dup`(src: MapPin): MapPin {.error.}
@@ -108,17 +120,20 @@ proc `=destroy`(f: SeismicFile) =
   # `f` is passed by reference and this is its last use, so its fields may
   # be moved out (and `TraceIndex` has only the generic `var` destructor).
   let pf = addr f
-  if f.map != nil and f.map.pins > 0:
-    # A prefetcher still reads `entries` and `codecs` through raw pointers:
-    # hand them to the map it keeps alive. A seq move keeps the payload's
-    # address, so nothing is copied and the pointers stay valid.
-    f.map.parkedEntries = move pf[].index.entries
-    f.map.parkedCodecs = move pf[].index.codecs
-    f.map.parkedKeys = move pf[].index.keys
+  if f.map != nil:
+    acquire(mapLock)
+    if f.map.pins > 0:
+      # A prefetcher still reads `entries` and `codecs` through raw pointers:
+      # hand them to the map it keeps alive. A seq move keeps the payload's
+      # address, so nothing is copied and the pointers stay valid.
+      f.map.parkedEntries = move pf[].index.entries
+      f.map.parkedCodecs = move pf[].index.codecs
+      f.map.parkedKeys = move pf[].index.keys
+    `=destroy`(f.map)
+    release(mapLock)
   `=destroy`(pf[].index)
   `=destroy`(f.path)
   `=destroy`(f.demuxPath)
-  `=destroy`(f.map)
 
 proc `=copy`(dst: var SeismicFile, src: SeismicFile) {.error.}
   # A copy would share the map, and outlive `close` with a dangling view.
@@ -136,10 +151,13 @@ proc requireOpen*(f: SeismicFile) {.inline.} =
   if not f.mapped: raiseClosed()
 
 proc pinMap*(f: SeismicFile): MapPin =
-  ## **Internal.** A pin on `f`'s map (an empty pin for a closed file).
+  ## **Internal.** A pin on `f`'s map (an empty pin for a closed file). Any
+  ## thread may pin a file and drop its pin while others do the same.
   if f.map != nil:
+    acquire(mapLock)
     inc f.map.pins
     result = MapPin(m: f.map)
+    release(mapLock)
 
 func multiplexed(ix: TraceIndex): bool =
   for r in ix.segdRecords:
@@ -270,6 +288,32 @@ proc openSeismicRw*(path: string): SeismicFile =
   ## would change only the demultiplexed copy.
   openMapped(path, false, false, true, "")
 
+proc parkAndDrop(f: var SeismicFile, next: sink MapRef) =
+  # Replaces the file's map by `next` (nil: none). When prefetchers pin the
+  # old map, they (and their chunks' `TraceRows`) read the index tables
+  # through raw pointers: the payloads of `entries`, `codecs` and `keys` move
+  # to the map the pins keep alive, and the file gets copies, so that
+  # nothing it frees or changes later is read by them. `next` has no pins
+  # yet, so this is the only moment to park them.
+  var old: MapRef
+  acquire(mapLock)
+  if f.map.pins > 0:
+    f.map.parkedEntries = move f.index.entries
+    f.map.parkedCodecs = move f.index.codecs
+    f.map.parkedKeys = move f.index.keys
+    old = f.map
+  f.map = next
+  release(mapLock)
+  if old != nil:
+    # Copied outside the lock (10 ms per 500 000 traces with keys); `old`
+    # keeps the parked tables alive meanwhile, whatever the pins do.
+    f.index.entries = old.parkedEntries
+    f.index.codecs = old.parkedCodecs
+    f.index.keys = old.parkedKeys
+    acquire(mapLock)
+    old = nil
+    release(mapLock)
+
 proc remapWritable*(f: var SeismicFile) =
   ## **Internal** (`openEditor(f)`; not exported by `parseSEG`). Maps `f.path`
   ## read-write in place of the file's read-only map and keeps its index.
@@ -288,34 +332,13 @@ proc remapWritable*(f: var SeismicFile) =
   if m.src.size != f.map.src.size:
     raise newException(ValueError, f.path & " changed size since it was opened (" &
       $f.map.src.size & " bytes, now " & $m.src.size & "); open it again")
-  if f.map.pins > 0:
-    # A prefetcher reads `entries`, `codecs` and `keys` through raw pointers
-    # (the keys through its chunks' `TraceRows`): the payloads move to the
-    # map it keeps alive, the file keeps copies. The new map has no pins, so
-    # neither `close` nor the destructor would park them later.
-    f.map.parkedEntries = move f.index.entries
-    f.map.parkedCodecs = move f.index.codecs
-    f.map.parkedKeys = move f.index.keys
-    f.index.entries = f.map.parkedEntries
-    f.index.codecs = f.map.parkedCodecs
-    f.index.keys = f.map.parkedKeys
-  f.map = m
+  f.parkAndDrop(m)
 
 proc close*(f: var SeismicFile) =
   ## Unmaps the file and deletes a demultiplexed copy (`demuxPath`). The
   ## index stays usable; range reads do not. A prefetcher still running on
   ## the file keeps the map until its own `close`. Idempotent.
-  if f.map != nil and f.map.pins > 0:
-    # Prefetchers (and their chunks' `TraceRows`) read the index tables
-    # through raw pointers: those buffers go to the map they keep alive, and
-    # the file keeps copies, so destroying it later frees nothing they read.
-    f.map.parkedEntries = move f.index.entries
-    f.map.parkedCodecs = move f.index.codecs
-    f.map.parkedKeys = move f.index.keys
-    f.index.entries = f.map.parkedEntries
-    f.index.codecs = f.map.parkedCodecs
-    f.index.keys = f.map.parkedKeys
-  f.map = nil
+  if f.map != nil: f.parkAndDrop(nil)
 
 func path*(f: SeismicFile): lent string {.inline.} =
   ## The file's path, as opened.

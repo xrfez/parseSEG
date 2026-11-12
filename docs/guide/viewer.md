@@ -329,9 +329,14 @@ f.close()
 - `quickFirst = true` makes the first chunk of the range and of each `seek` a quarter of
   `chunkTraces`, so the first rows after a jump arrive sooner (1024-trace chunks: 0.55 ms ->
   0.25-0.32 ms for IEEE, 1.4 -> 0.84 ms for IBM); the full-size chunks follow from there.
-- Call the prefetcher's procs from one thread. It keeps the file's map alive until its own
-  `close`, so the order in which the file and the prefetcher are closed does not matter.
-  The file's index must not change while it runs (`applySurvey`, `applyGeometry`).
+- Call a prefetcher's procs from the thread that made it. It keeps the file's map alive
+  until its own `close`, so that thread may close the file and the prefetcher in either
+  order. The file's index must not change while it runs (`applySurvey`, `applyGeometry`).
+- Several threads may each make, use and close their own prefetchers on one open file at
+  the same time: a background job (a stack, an export) beside the UI's read-ahead. While
+  another thread reads the file or has a prefetcher on it, do not change its index
+  (`ensureKeys`, a survey join, an editor), close it or let it go out of scope: stop the
+  job first.
 
 ### Recycle the chunk buffers
 

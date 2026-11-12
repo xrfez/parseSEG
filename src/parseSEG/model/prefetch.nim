@@ -62,7 +62,18 @@
 ## its chunks' `rows` show the keys as they were when the file was closed
 ## or handed over, not later edits. What remains a rule: do not change the
 ## file's index (`applySurvey`, `applyGeometry`, assigning to `f.index`)
-## while a prefetcher runs, and call the consumer procs from one thread.
+## while a prefetcher runs.
+##
+## Threads: a prefetcher belongs to one thread: call its consumer procs,
+## `close` included, from the thread that made it. Several threads may each
+## make, use and close prefetchers of their own on one open file at the same
+## time (a background job beside the UI's read-ahead), and read it with
+## `readTracesInto` meanwhile. While another thread reads the file or has a
+## prefetcher on it, no thread may change its index (`ensureKeys`,
+## `applySurvey`, `applyGeometry`, a `HeaderEditor`), close it, hand it to
+## an editor or let it go out of scope: closing a file before its
+## prefetchers is for the thread that opened it and the prefetchers it made
+## itself.
 
 import std/locks
 import ../common/diagnostics
