@@ -8,6 +8,7 @@
 when defined(posix):
   import std/posix
 import records
+import ../common/outputfile
 
 type
   DiskSource* = ref object of RecordSource
@@ -92,6 +93,9 @@ method writeTapeMarkImpl*(s: DiskSink) {.raises: [CatchableError].} =
   discard "disk files store no tape marks"
 
 method close*(s: DiskSink) {.raises: [CatchableError].} =
+  ## Flushes and closes the file. Raises `IOError` when the last bytes did
+  ## not reach it (the file is closed all the same).
   if s.f != nil:
-    close(s.f)
+    let f = s.f
     s.f = nil
+    closeChecked(f, s.name)

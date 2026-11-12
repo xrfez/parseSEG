@@ -20,6 +20,23 @@ when defined(posix):
 else:
   import std/tempfiles
 
+proc c_fflush(f: File): cint {.importc: "fflush", header: "<stdio.h>".}
+proc c_fclose(f: File): cint {.importc: "fclose", header: "<stdio.h>".}
+proc c_strerror(code: cint): cstring {.importc: "strerror", header: "<string.h>".}
+var cErrno {.importc: "errno", header: "<errno.h>".}: cint
+
+proc closeChecked*(f: File, name: string) {.raises: [IOError].} =
+  ## Flushes and closes the output file `f` (named `name` in the message),
+  ## which is closed either way; raises `IOError` when its buffered bytes
+  ## did not all reach the file (a full disk shows only here when the last
+  ## writes fit the buffer). Nim's `close` discards that result.
+  let flushed = c_fflush(f) == 0
+  let flushError = cErrno
+  let closed = c_fclose(f) == 0
+  if not (flushed and closed):
+    let code = if flushed: cErrno else: flushError
+    raise newException(IOError, "write failed (close): " & name & ": " & $c_strerror(code))
+
 proc createTempFor*(path: string): string {.raises: [IOError].} =
   ## Creates a new, empty file next to `path`, named `<path>.<random>.tmp`,
   ## and returns its name. Never opens an existing file: a name that exists

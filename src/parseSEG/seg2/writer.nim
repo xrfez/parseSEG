@@ -36,7 +36,7 @@
 ## the pointer subblock holds, too few sample bytes) raise `ValueError`.
 
 import std/strutils
-import ../common/[errors, diagnostics]
+import ../common/[errors, diagnostics, outputfile]
 import ./[headers, samples]
 export headers, diagnostics
 export samples except decodeSamplesRaw
@@ -224,7 +224,8 @@ proc writeTrace*[T: Seg2SampleType](w: var Seg2Writer, t: Seg2Trace, samples: op
 
 proc close*(w: var Seg2Writer) =
   ## Writes the trace count and pointers into the File Descriptor Block and
-  ## closes the file. The file is closed even when that fails (`IOError`).
+  ## closes the file. The file is closed even when that fails: `IOError`,
+  ## also when the last bytes did not reach the file (a full disk).
   ## A file without traces is refused (`SegFormatError`) unless lenient.
   if not w.open: return
   w.open = false
@@ -241,6 +242,7 @@ proc close*(w: var Seg2Writer) =
     w.file.setFilePos(Seg2FixedSize)
     if b.len > 0 and w.file.writeBytes(b, 0, b.len) != b.len:
       raise newException(IOError, "cannot write " & w.path)
-    w.file.flushFile()
-  finally:
+  except CatchableError:
     w.file.close()
+    raise
+  closeChecked(w.file, w.path)

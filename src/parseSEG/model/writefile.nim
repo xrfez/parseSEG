@@ -431,8 +431,10 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
       f.setFilePos(s.segyFile.tapeLabel.len + TextHeaderSize)
       if f.writeBytes(bytes, 0, bytes.len) != bytes.len:
         raise newException(IOError, "cannot write the binary header of " & s.tmp)
-    finally:
+    except IOError:
       f.close()
+      raise
+    closeChecked(f, s.tmp)
 
 # ------------------------------------------------------- SEG-Y from keys --
 
