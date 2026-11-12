@@ -405,6 +405,44 @@ block problems_are_diagnostics:
   doAssert d.log.has("multiple of 4 channels", sevWarning)
   doAssert d.records[0].traces.len == 3 and not d.log.isFatal
 
+block bytes_per_scan_below_the_scan_header:
+  # A Rev 0 record of format 0015 with no scan types, so no descriptor to
+  # check General Header #1's bytes per scan against: with 3 there, the
+  # 8-byte start of scan and timing word went into a 3-byte slot
+  # (IndexDefect, out of `openSeismic` too).
+  proc bare(bytesPerScan: int, scans: int): seq[byte] =
+    let g = SegdGeneralHeader1(fileNumber: 1, formatCode: 15, year: 99, julianDay: 1,
+      manufacturerCode: 1, baseScanInterval16: 32, unused20: bcd6(bytesPerScan), recordType: 8,
+      recordLength: 1)
+    result.add g.encoded
+    for i in 0 ..< scans:
+      result.add [0xFF'u8, 0xFF, 0xFF, 0x01, 0, 0, byte(i), 0]
+  for bps in [1, 3, 7]:
+    let path = tmp / ("stride" & $bps & ".sgd")
+    writeBytes(path, bare(bps, 8))
+    for headersOnly in [false, true]:
+      let d = readSegd(path, headersOnly = headersOnly)
+      doAssert d.log.isFatal and d.log.has("bytes per scan is " & $bps & ", less than",
+        sevFatal), $d.log
+    var f = openSeismic(path)
+    doAssert f.kind == skSegd and f.len == 0 and f.log.isFatal
+    f.close()
+  # With descriptors, too small a count is refused the same way.
+  var s = oneSet(24)
+  s.bytesPerScan = 5
+  writeBytes(tmp / "stride5.sgd", s.muxRecord)
+  let d = readSegd(tmp / "stride5.sgd")
+  doAssert d.log.has("bytes per scan is 5, less than", sevFatal), $d.log
+  # No scan types and whole scan headers: a record without traces.
+  writeBytes(tmp / "stride8.sgd", bare(8, 8))
+  for headersOnly in [false, true]:
+    let e = readSegd(tmp / "stride8.sgd", headersOnly = headersOnly)
+    doAssert not e.log.hasErrors and e.records.len == 1 and e.records[0].traces.len == 0, $e.log
+    doAssert e.records[0].record.multiplexed and e.log.has("0 scan types", sevWarning)
+  var g = openSeismic(tmp / "stride8.sgd")
+  doAssert g.kind == skSegd and g.len == 0 and g.recordCount == 1 and not g.log.hasErrors, $g.log
+  g.close()
+
 # ------------------------------------------------------- open and index --
 
 block open_seismic_demultiplexes_into_a_temp_copy:

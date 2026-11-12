@@ -614,6 +614,12 @@ proc muxStride(r: var SegdReader): int =
     r.note(sevWarning, dcBadValue, "General Header #1 bytes per scan is " &
       (if declared == 0: "0" else: "not BCD") & "; using the " & $result &
       " bytes the channel set descriptors give", rec.offset + 19, r.loc(field = "gh1.bytesPerScan"))
+  if result < ScanHeaderSize:
+    # No scan fits: every one starts with these 8 bytes. A record without
+    # scan types has no descriptor that would refuse the count below.
+    raiseUnlocatable(dcBadValue, "General Header #1 bytes per scan is " & $result &
+      ", less than the " & $ScanHeaderSize & "-byte start of scan and timing word, so the " &
+      "scans cannot be located", rec.offset + 19)
   for i, l in m.layouts:
     if l.bytesPerScan > result:
       raiseUnlocatable(dcInconsistent, "scan type " & $(i + 1) & " needs " & $l.bytesPerScan &
