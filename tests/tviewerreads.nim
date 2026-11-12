@@ -115,6 +115,50 @@ block window_errors:
   f.close()
   doAssertRaises(ValueError): discard f.readTracesInto(0..3, 0..9, t)
 
+block arguments_near_the_ends_of_int_raise_value_error:
+  # Lengths and sums of the arguments are never computed before the
+  # arguments are checked: no overflow, no hang.
+  var f = openSeismic(bo)
+  var t = newTensor[float32](4, 16)
+  var failed: seq[int]
+  doAssertRaises(ValueError): discard f.readTracesInto(0..3, 0 .. high(int), t)
+  doAssertRaises(ValueError): discard f.readTracesInto([0, 1, 2, 3], 0 .. high(int), t)
+  doAssertRaises(ValueError): discard f.readTracesInto(0..3, 0 .. high(int), t, failed)
+  doAssertRaises(ValueError): discard f.readTracesInto(0..3, 1 .. high(int), t)
+  doAssertRaises(ValueError): discard f.readTraces(0..3, 1000 .. high(int))
+  doAssertRaises(ValueError): discard f.readTraces(0..3, 0 .. high(int))
+  doAssertRaises(ValueError): discard f.readTraces([0, 1], 0 .. high(int) - 1)
+  doAssertRaises(ValueError): discard f.readTracesInto(low(int) + 1 .. 3, t)
+  doAssertRaises(ValueError): discard f.readTracesInto(low(int) + 1 .. 3, t, failed)
+  doAssertRaises(ValueError): discard f.readTracesInto(low(int) + 1 .. 3, 0..15, t)
+  doAssertRaises(ValueError): discard f.readTracesInto(low(int) + 1 .. 3, 0..15, t, failed)
+  doAssertRaises(ValueError): discard f.readTraces(low(int) + 1 .. 3)
+  doAssertRaises(ValueError): discard f.readTraces(low(int) + 1 .. 3, 0..15)
+  doAssertRaises(ValueError): discard f.readTracesInto(0..3, t, row = high(int))
+  doAssertRaises(ValueError): discard f.readTracesInto([0, 1], t, row = high(int))
+  doAssertRaises(ValueError): discard f.traceStatics(low(int) + 1 .. 3)
+  # A window of the tensor's width that ends at `high(int)` is a window past
+  # every trace's end: zero rows.
+  t[0, 0] = 1
+  doAssert f.readTracesInto(0..3, high(int) - 15 .. high(int), t) == 0 and t[0, 0] == 0
+  var wide = newTensor[float32](64, 16) # enough traces to be advised read-ahead
+  doAssert f.readTracesInto(0..63, high(int) - 15 .. high(int), wide) == 0
+  # A prefetcher's window `firstSample ..< firstSample + cols` must exist.
+  doAssertRaises(ValueError):
+    discard newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, cols = 64,
+      firstSample = high(int) - 10)
+  doAssertRaises(ValueError):
+    discard newPrefetcher[float32](f, 0 ..< f.len, cols = high(int)) # chunk bytes
+  var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 64, cols = 10,
+    firstSample = high(int) - 10)
+  var c: PrefetchChunk[float32]
+  doAssert p.next(c) and c.count == 64 and c.failed == 0 and c.samples[63, 9] == 0
+  p.close()
+  var q = newPrefetcher[float32](f, 0 ..< f.len, firstSample = high(int)) # cols = -1: none
+  doAssert q.next(c) and c.samples.shape[1] == 0
+  q.close()
+  f.close()
+
 sampleBlock damaged_trace_in_a_window:
   # The whole trace is checked, so a window of a trace past the end of the
   # file fails as the full read does.

@@ -348,8 +348,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   ## be closed meanwhile (the prefetcher keeps the map until its `close`),
   ## but its index must not change. Raises `ValueError` for traces outside
   ## the file (an empty range must still start in `0 .. f.len`), a closed or
-  ## tape file, a non-positive chunk size, depth or worker count, or a
-  ## negative `firstSample`.
+  ## tape file, a non-positive chunk size, depth or worker count, a
+  ## negative `firstSample`, or a window or chunk size beyond the `int` range.
   ##
   ## Each chunk's `rows` says which trace each row is (Phase 16). With
   ## `uniform`, a chunk never spans two channel sets or sample intervals
@@ -362,6 +362,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
   if chunkTraces <= 0 or depth <= 0 or cols < -1 or firstSample < 0 or workers <= 0:
     raiseArg("need chunkTraces > 0, depth > 0, cols >= -1, firstSample >= 0 and workers > 0")
+  if cols > high(int) - firstSample:
+    raiseArg("the sample window " & $firstSample & " + " & $cols & " lies outside the int range")
   checkSpan(traces, f.len)
   let first = traces.a
   let stop = if traces.b >= first: traces.b + 1 else: first
@@ -370,9 +372,14 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
     else: 0
   # No range (even after a seek) holds more traces than the file.
   let rows = max(1, min(chunkTraces, f.len))
+  if width > 0 and rows > high(int) div sizeof(T) div width:
+    raiseArg("chunks of " & $rows & " traces of " & $width & " samples are too large")
   let chunkBytes = rows * width * sizeof(T)
-  let depth = if chunkBytes == 0: depth
-              else: min(depth, max(workers + 1, maxRingBytes div chunkBytes))
+  # min(depth, max(workers + 1, fit)), without a sum that could overflow.
+  let fit = if chunkBytes == 0: depth else: maxRingBytes div chunkBytes
+  let depth = if fit > workers: min(depth, fit)
+              elif workers < depth: workers + 1
+              else: depth
   let sh = createShared(Shared[T])
   sh.slots = cast[ptr UncheckedArray[Slot[T]]](createShared(Slot[T], depth))
   sh.depth = depth

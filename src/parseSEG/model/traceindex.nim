@@ -762,7 +762,8 @@ proc checkSelection(f: SeismicFile, traces: openArray[int]) =
     f.requireTrace(i)
 
 proc checkRows[T](dst: Tensor[T], row, count: int) =
-  if not (dst.rank == 2 and dst.is_C_contiguous and row >= 0 and row + count <= dst.shape[0]):
+  # `row <= shape[0] - count`, not `row + count <= shape[0]`: the sum can overflow.
+  if not (dst.rank == 2 and dst.is_C_contiguous and row >= 0 and row <= dst.shape[0] - count):
     raise newException(ValueError,
       "need a row-major [traces, samples] tensor with room for the traces")
 
@@ -793,9 +794,9 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   ## are not in memory first asks the OS to read them all ahead (POSIX
   ## `madvise(MADV_WILLNEED)`), so a cold gather waits for the disk once
   ## rather than once per trace.
+  f.checkSelection(traces) # before its length is taken: that can overflow
   let count = traces.spanLen
   f.checkReadable(count)
-  f.checkSelection(traces)
   dst.checkRows(row, count)
   f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces.a + k
@@ -830,13 +831,28 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   var log: DiagLog
   f.readTracesInto(traces, dst, row, log)
 
-proc checkWindow[T](dst: Tensor[T], samples: Slice[int]) =
+proc windowCols(samples: Slice[int]): int =
+  # The column count of the sample window `samples`. `samples.len` is never
+  # taken before the bounds are known to be ordered: `0 .. high(int)` has no
+  # length that fits an `int`.
   if samples.a < 0 or samples.b < samples.a:
     raise newException(ValueError, "the sample window " & $samples &
       " must be a..b with 0 <= a <= b")
-  if dst.rank == 2 and dst.shape[1] != samples.len:
-    raise newException(ValueError, "the sample window " & $samples & " needs " &
-      $samples.len & " columns, the tensor has " & $dst.shape[1])
+  if samples.b - samples.a == high(int):
+    raise newException(ValueError, "the sample window " & $samples & " is too long")
+  samples.b - samples.a + 1
+
+proc checkWindow[T](dst: Tensor[T], samples: Slice[int]) =
+  let cols = windowCols(samples)
+  if dst.rank == 2 and dst.shape[1] != cols:
+    raise newException(ValueError, "the sample window " & $samples & " needs " & $cols &
+      " columns, the tensor has " & $dst.shape[1])
+
+proc checkTensorSize(rows, cols: int, T: typedesc) =
+  # A new `[rows, cols]` tensor of `T` must have a byte size that fits an `int`.
+  if cols > 0 and rows > high(int) div sizeof(T) div cols:
+    raise newException(ValueError, "a tensor of " & $rows & " traces of " & $cols &
+      " samples is too large")
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples: Slice[int],
     dst: var Tensor[T], row = 0, log: var DiagLog): int =
@@ -850,10 +866,10 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   ## is left zero, logged in `log`, and counted in the result. Raises
   ## `ValueError` for a window that is empty or starts below 0, a tensor of
   ## another width or without room, traces outside the file or a closed file.
-  let count = traces.spanLen
   dst.checkWindow(samples)
+  f.checkSelection(traces) # before its length is taken: that can overflow
+  let count = traces.spanLen
   f.checkReadable(count)
-  f.checkSelection(traces)
   dst.checkRows(row, count)
   f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces.a + k
@@ -898,9 +914,9 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   ## traces fail. Returns `failedRows.len`.
   failedRows.setLen 0 # cleared even when the arguments are rejected
   var log: DiagLog
+  f.checkSelection(traces) # before its length is taken: that can overflow
   let count = traces.spanLen
   f.checkReadable(count)
-  f.checkSelection(traces)
   dst.checkRows(row, count)
   f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces.a + k
@@ -928,10 +944,10 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   ## form without a window).
   failedRows.setLen 0 # cleared even when the arguments are rejected
   var log: DiagLog
-  let count = traces.spanLen
   dst.checkWindow(samples)
+  f.checkSelection(traces) # before its length is taken: that can overflow
+  let count = traces.spanLen
   f.checkReadable(count)
-  f.checkSelection(traces)
   dst.checkRows(row, count)
   f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces.a + k
@@ -974,7 +990,8 @@ proc readTraces*(f: SeismicFile, traces: Slice[int], log: var DiagLog,
   ## must still start in `0 .. f.len`) or a closed file.
   # Uninitialized: the decode writes every element (samples, zero padding,
   # or a zero row for a trace that cannot be decoded).
-  result = newTensorUninit[T](traces.spanLen, f.maxSamples(traces))
+  let cols = f.maxSamples(traces) # checks the range, before its length is taken
+  result = newTensorUninit[T](traces.spanLen, cols)
   discard f.readTracesInto(traces, result, 0, log)
 
 proc readTraces*(f: SeismicFile, traces: openArray[int], log: var DiagLog,
@@ -988,15 +1005,22 @@ proc readTraces*(f: SeismicFile, traces: Slice[int], samples: Slice[int], log: v
     T: typedesc[SampleType] = float32): Tensor[T] =
   ## Samples `samples` of `traces` as a new `[traces.len, samples.len]`
   ## tensor (zero past a trace's end); see the windowed `readTracesInto`. A
-  ## trace that cannot be decoded stays zero and is logged in `log`.
-  result = newTensorUninit[T](traces.spanLen, max(samples.len, 0)) # every element is written
+  ## trace that cannot be decoded stays zero and is logged in `log`. Raises
+  ## `ValueError` also for a window whose tensor would not fit an `int` of
+  ## bytes (`1000 .. high(int)`).
+  let cols = windowCols(samples)
+  f.checkSelection(traces)
+  checkTensorSize(traces.spanLen, cols, T)
+  result = newTensorUninit[T](traces.spanLen, cols) # every element is written
   discard f.readTracesInto(traces, samples, result, 0, log)
 
 proc readTraces*(f: SeismicFile, traces: openArray[int], samples: Slice[int],
     log: var DiagLog, T: typedesc[SampleType] = float32): Tensor[T] =
   ## The sample window of the selected traces, in list order; otherwise as
   ## the `Slice` form.
-  result = newTensorUninit[T](traces.len, max(samples.len, 0)) # every element is written
+  let cols = windowCols(samples)
+  checkTensorSize(traces.len, cols, T)
+  result = newTensorUninit[T](traces.len, cols) # every element is written
   discard f.readTracesInto(traces, samples, result, 0, log)
 
 proc raiseUndecodable(log: DiagLog) {.noinline, noreturn.} =

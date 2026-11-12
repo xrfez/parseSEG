@@ -90,6 +90,7 @@ proc traceStaticsInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[Tr
 
 proc traceStatics*(f: SeismicFile, traces: Slice[int]): seq[TraceStatics] =
   ## The statics of a range of traces (see `traceStaticsInto`).
+  checkSpan(traces, f.len) # before its length is taken: that can overflow
   result = newSeq[TraceStatics](spanLen(traces))
   f.traceStaticsInto(traces, result)
 
