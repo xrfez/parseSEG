@@ -882,23 +882,38 @@ proc readRev2TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
     r.note(sevWarning, dcBadValue, "trace header extension count " & $the &
       " exceeds 15", t.offset + 9, r.loc(t.index, field = "trace.traceHeaderExtensions"))
   t.ext1 = none(SegdTraceHeaderExt1)
+  var own = -1 # the sample count of Trace Header Extension #1; -1 without one
   if the >= 1:
     let e = r.readBlock[:SegdTraceHeaderExt1]()
     t.ext1 = some(e)
     if the > 1: r.input.readInto(t.extensions, SegdBlockSize * (the - 1))
-    t.numSamples = int(e.samplesPerTrace)
+    own = int(e.samplesPerTrace)
+  if own > 0:
+    t.numSamples = own
   elif t.channelSet >= 0:
     # No extension: the spec gives no rule; (TE - TF) / SI matches real data.
+    # The same for an extension whose count the writer left at 0: taken as a
+    # trace without samples, its samples would be read as the next header.
     template c: untyped = rec.scanTypes[t.scanType].descriptors[t.channelSet]
     let si = c.sampleIntervalMs(rec.gh1)
-    if si <= 0:
+    let window = if si > 0: int(round((c.endTimeMs - c.startTimeMs) / si)) else: -1
+    if own == 0:
+      t.numSamples = max(window, 0)
+      if window > 0:
+        r.note(sevWarning, dcInconsistent, "Trace Header Extension #1 gives 0 samples; " &
+          "using the " & $window & " of the channel set's window", t.offset + 20 + 7,
+          r.loc(t.index, t.channelSet, "ext1.samplesPerTrace"))
+    elif si <= 0:
       raiseUnlocatable(dcBadValue, "trace has no sample count and its sample interval is 0",
         t.offset)
-    t.numSamples = int(round((c.endTimeMs - c.startTimeMs) / si))
-    if t.numSamples < 0:
+    elif window < 0:
       raiseUnlocatable(dcBadValue, "channel set ends (" & $c.endTimeMs &
         " ms) before it starts (" & $c.startTimeMs & " ms), so the trace length is unknown",
         t.offset)
+    else:
+      t.numSamples = window
+  elif own == 0:
+    t.numSamples = 0
   else:
     raiseUnlocatable(dcInconsistent, "trace has no Trace Header Extension and no channel " &
       "set descriptor, so its length is unknown", t.offset)

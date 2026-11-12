@@ -114,7 +114,7 @@ The table gives each code's stable name (as `$` and NIF print it); the `DiagCode
 | `truncated` | The data ends inside an announced structure (cut copy, interrupted transfer) | Traces before the cut are fine; the affected trace reads as zeros. Re-copy the file if you can |
 | `badValue` | A field outside the spec's range (often harmless, e.g. a GH#3 source set number of 0) | `info`/`warning`: the value is kept as read. Decide per field whether your code relies on it |
 | `badBcd` | A BCD field holds a non-decimal nibble | The field reads as -2; fix it with the editor if it matters |
-| `inconsistent` | Two headers disagree (counts vs lengths, ...) | The message names the values that disagree; check the trace count against what you expect |
+| `inconsistent` | Two headers disagree (counts vs lengths, ...). Also a trace whose own sample count is 0 where the file gives one: it is sized from the SEG-Y binary header, or from its SEG-D channel set's window, in any revision | The message names the values that disagree; check the trace count against what you expect |
 | `byteOrder` | The byte order was inferred, not declared (common for little-endian Rev 0/1 SEG-Y) | `info`: nothing to do unless the samples look wrong |
 | `unsupportedRevision` | An unknown revision number | Parsed as the nearest known revision; check the summary |
 | `unsupportedFormat` | A sample format the library cannot decode | Those traces read as zero rows (`error`); headers are still indexed |

@@ -612,3 +612,47 @@ block segyreview2_partial_last_sample_is_zero:
   let at = 3600 + 240 + 8 + 240 # trace 1's samples
   doAssert b.len == at + 7
   doAssert b[at .. at + 5] == "\x11\x11\x11\x11\x11\x11" and b[at + 6] == '\0'
+
+block zero_sample_count_in_any_revision:
+  # Writers that rely on the binary header leave trace bytes 115-116 at 0.
+  # In a variable-length file of Rev 1 or later such traces were read as
+  # traces of 0 samples: their samples were taken for the next headers (3
+  # garbage traces and a fatal truncation, of 50 traces of 1000 samples).
+  # The binary header's count sizes them, as it always did for Rev 0.
+  let base = readFile(demoDir() / "survey.sgy") # Rev 2.1, fixed-length, 200 x 2001 samples
+  let whole = readSegy(demoDir() / "survey.sgy")
+  let first = int(whole.file.firstTraceOffset)
+  const traceBytes = 240 + 2001 * 4
+  for (major, minor) in [(0, 0), (1, 0), (2, 0), (2, 1)]:
+    var s = base
+    s[3500] = char(major)
+    s[3501] = char(minor)
+    s[3502] = '\0'
+    s[3503] = '\0' # fixed-length flag 0: each trace has its own count
+    for t in 0 ..< 200:
+      s[first + t * traceBytes + 114] = '\0'
+      s[first + t * traceBytes + 115] = '\0'
+    let path = tmp / ("ns0_rev" & $major & $minor & ".sgy")
+    if major == 0: s = s[0 ..< 3600] & s[first .. ^1] # Rev 0 has no extended records
+    writeFile(path, s)
+    let d = readSegy(path)
+    let what = $major & "." & $minor & " " & $d.log
+    doAssert d.traces.len == 200 and not d.log.hasErrors, what
+    var warned, counted = 0
+    for x in d.log:
+      if x.severity == sevWarning and x.loc.field == "trace.numSamples":
+        doAssert "0 samples; using the binary header's 2001" in x.msg
+        inc warned
+      elif x.severity == sevInfo and "195 more traces with 0 samples" in x.msg: inc counted
+    doAssert warned == 5 and counted == 1, what
+    for i in [0, 1, 199]:
+      doAssert d.traces[i].numSamples == 2001 and d.traces[i].sampleInterval == 2000, what
+      doAssert d.traces[i].samples == whole.traces[i].samples, what
+  # No count anywhere: the traces have no samples, as before.
+  var s = base
+  for at in [3220, 3221, 3268, 3269, 3270, 3271, 3502, 3503]: s[at] = '\0'
+  s[first + 114] = '\0'
+  s[first + 115] = '\0'
+  writeFile(tmp / "ns0_nowhere.sgy", s[0 ..< first + 240])
+  let d = readSegy(tmp / "ns0_nowhere.sgy")
+  doAssert d.traces.len == 1 and d.traces[0].numSamples == 0 and not d.log.isFatal, $d.log

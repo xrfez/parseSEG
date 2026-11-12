@@ -544,3 +544,50 @@ block a_long_run_of_table_of_contents_files:
   writeFile(path, one & one[0 ..< 300])
   let d = readSegd(path)
   doAssert d.records.len == 0 and d.log.isFatal and d.log[d.log.len - 1].code == dcTruncated
+
+block extension_sample_count_of_zero:
+  # Trace Header Extension #1 bytes 8-10 left at 0 by the writer: read as a
+  # trace without samples, the samples were taken for the next trace header
+  # and the walk ended in garbage. The channel set's window sizes the trace,
+  # as it does for a trace without extensions.
+  let recs = makeStream([sd8058, sd8058])
+  let path = tmp / "the_ns0.sgd"
+  discard recs.toDisk(path)
+  var b = readBytes(path)
+  var zeroed = 0
+  for rec in readSegd(path).records:
+    for t in rec.traces:
+      if t.ext1.isSome:
+        for i in 7..9: b[int(t.offset) + 20 + i] = 0
+        inc zeroed
+  doAssert zeroed == 6
+  writeBytes(path, b)
+  for headersOnly in [false, true]:
+    let d = readSegd(path, headersOnly = headersOnly)
+    doAssert d.records.len == 2 and not d.log.hasErrors, $d.log
+    var warned, counted = 0
+    for x in d.log:
+      if x.severity == sevWarning and x.loc.field == "ext1.samplesPerTrace":
+        doAssert "gives 0 samples; using the 52 of the channel set's window" in x.msg
+        inc warned
+      elif x.severity == sevInfo and "1 more warning diagnostics for ext1.samplesPerTrace" in x.msg:
+        inc counted
+    doAssert warned == 5 and counted == 1, $d.log
+    for r, rec in d.records:
+      doAssert rec.traces.len == 5
+      for k, t in rec.traces:
+        doAssert t.numSamples == 52
+        if not headersOnly: doAssert t.samples == recs.records[r].traces[k].samples
+        if k >= 2: doAssert t.ext1.get.samplesPerTrace == 0 # the header stays as read
+  # A window that gives no length leaves the trace without samples.
+  var c = makeStream([sd8058])
+  c.records[0].record.scanTypes[0].descriptors[1].endTime = 0
+  for t in c.records[0].traces.mitems:
+    if t.ext1.isSome:
+      t.ext1.get.samplesPerTrace = 0
+      t.numSamples = 0
+      t.samples.setLen 0
+  discard c.toDisk(tmp / "the_ns0_window0.sgd", SegdWriteOptions(lenient: true))
+  let e = readSegd(tmp / "the_ns0_window0.sgd")
+  doAssert e.records.len == 1 and e.records[0].traces.len == 5 and not e.log.isFatal, $e.log
+  doAssert e.records[0].traces[4].numSamples == 0 and e.records[0].traces[0].numSamples == 52

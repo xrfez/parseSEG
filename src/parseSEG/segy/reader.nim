@@ -26,6 +26,7 @@
 ## - Rev 0 ignores bytes 3503-3506; Rev 2 `firstTraceOffset` overrides the
 ##   extended header count;
 ## - fixed-length flag 1: every trace has the file's sample count;
+## - a trace whose own sample count is 0 has the binary header's (a warning);
 ## - Rev 2 additional trace headers (count from Ext1 bytes 157-158, else
 ##   binary 3507), Ext1 sample count and interval overrides;
 ## - traces end at the declared trace count, at an Ext1 "last trace in file"
@@ -108,7 +109,9 @@ type
     headersOnly: bool    ## Skip sample bytes (`SegyTrace.samples` stays empty).
     fixedMismatches: int
       ## Fixed-length traces whose own ns/dt disagree (logged up to `MaxRepeats`).
-    zeroSampleTraces: int ## Rev 0 traces sized from the binary header (logged up to `MaxRepeats`).
+    zeroSampleTraces: int
+      ## Traces with a sample count of 0, sized from the binary header (logged
+      ## up to `MaxRepeats`).
     walk: bool
       ## The index walk (`private/segywalk`): of the headers, decode only the
       ## fields this module reads.
@@ -497,9 +500,11 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
       r.log.report(sevWarning, dcInconsistent, "fixed-length file, but this trace has " &
         $traceNs & " samples at " & $traceDt & " (binary header: " & $t.numSamples & " at " &
         $t.sampleInterval & ")", t.offset + 114, r.loc(t.index, "trace.numSamples"))
-  elif f.revision.major == 0 and traceNs == 0 and f.binary.effectiveSamplesPerTrace != 0:
-    # Rev 0 sized traces by tape block, and some writers left bytes 115-116
-    # at 0 (segy_rev0.md §9.2): use the binary header's count.
+  elif traceNs == 0 and f.binary.effectiveSamplesPerTrace != 0:
+    # Rev 0 sized traces by tape block, and writers of every revision that
+    # rely on the binary header leave bytes 115-116 at 0 (segy_rev0.md
+    # §9.2): use the binary header's count. Taken as a trace without
+    # samples, the trace's samples would be read as the next headers.
     t.numSamples = int(f.binary.effectiveSamplesPerTrace)
     t.sampleInterval = if traceDt != 0: traceDt else: f.binary.effectiveSampleInterval
     inc r.zeroSampleTraces
