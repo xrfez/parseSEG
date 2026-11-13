@@ -156,7 +156,7 @@ sampleBlock range_read_of_damaged_trace_is_logged:
   var t = newTraceTensor[float32](1, 5)
   t[0, 0] = 7
   var log: DiagLog
-  doAssert f.readTracesInto(0..0, t, 0, log) == 1
+  doAssert f.readTracesInto(0..0, t, log) == 1
   doAssert t[0, 0] == 0 and log.len == 1 and log.count(sevError) == 1
   f.close()
   f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")

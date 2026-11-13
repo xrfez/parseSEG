@@ -11,7 +11,7 @@ proc work(p: ptr SeismicFile) {.thread.} =
   var log: DiagLog
   var keys: array[4, TraceKeys]
   for i in 0..<20000:
-    discard p[].readTracesInto((i mod 190) ..< (i mod 190) + 4, t, 0, log)
+    discard p[].readTracesInto((i mod 190) ..< (i mod 190) + 4, t, log)
     if i mod 16 == 0:
       # Keys on demand read the file's layout plan, shared and read-only.
       {.cast(gcsafe).}:

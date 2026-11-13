@@ -32,7 +32,7 @@ var first = 0
 while first < f.len:
   let last = min(first + Chunk, f.len) - 1
   let rows = last - first + 1
-  discard f.readTracesInto(first .. last, buf, 0, log)
+  discard f.readTracesInto(first .. last, buf, log)
   # Only rows 0 ..< rows hold this chunk: the last chunk may be short.
   energy += sum(buf[0 ..< rows, _] *. buf[0 ..< rows, _])
   first = last + 1
@@ -166,7 +166,7 @@ proc work(job: ptr Job) {.thread.} =
   var first = job.traces.a
   while first <= job.traces.b:
     let last = min(first + 31, job.traces.b)
-    job.failed += job.file[].readTracesInto(first .. last, buf, 0, log)
+    job.failed += job.file[].readTracesInto(first .. last, buf, log)
     job.sumAbs += sum(abs(buf[0 .. last - first, _].astype(float64)))
     first = last + 1
 

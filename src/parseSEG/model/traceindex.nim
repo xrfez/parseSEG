@@ -905,7 +905,7 @@ proc advise(f: SeismicFile, traces: openArray[int], cols, first: int) {.inline.}
       cast[ptr UncheckedArray[int]](addr traces[0]), 0, traces.len, cols, first)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
-    row = 0, log: var DiagLog): int =
+    log: var DiagLog, row = 0): int =
   ## Decodes `traces` into rows `row ..< row + traces.len` of `dst` (a
   ## row-major `[rows, samples]` tensor), each truncated or zero-padded to
   ## `dst.shape[1]`. A trace that cannot be decoded is left zero, logged in
@@ -925,7 +925,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   decodeLoop(f, count, trace, rowOf, dst.shape[1], 0, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
-    dst: var Tensor[T], row = 0, log: var DiagLog): int =
+    dst: var Tensor[T], log: var DiagLog, row = 0): int =
   ## Decodes the selected traces, in list order, into rows `row ..< row +
   ## traces.len` of `dst`: a gather, a component group, or a sort order (a
   ## sort is a list of trace indices; no data is moved). Otherwise as the
@@ -943,14 +943,14 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   ## As above, without a log: returns the number of traces that could not be
   ## decoded (left zero); pass a log to learn which and why.
   var log: DiagLog
-  f.readTracesInto(traces, dst, row, log)
+  f.readTracesInto(traces, dst, log, row)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     dst: var Tensor[T], row = 0): int =
   ## As above, without a log: returns the number of traces that could not be
   ## decoded (left zero).
   var log: DiagLog
-  f.readTracesInto(traces, dst, row, log)
+  f.readTracesInto(traces, dst, log, row)
 
 proc windowCols(samples: Slice[int]): int =
   # The column count of the sample window `samples`. `samples.len` is never
@@ -976,7 +976,7 @@ proc checkTensorSize(rows, cols: int, T: typedesc) =
       " samples is too large")
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples: Slice[int],
-    dst: var Tensor[T], row = 0, log: var DiagLog): int =
+    dst: var Tensor[T], log: var DiagLog, row = 0): int =
   ## Decodes samples `samples` (0-based, `a..b`) of each trace of `traces`
   ## into rows `row ..< row + traces.len` of `dst`, whose `shape[1]` must be
   ## `samples.len`: a viewer's visible time window. Only the window's bytes
@@ -998,7 +998,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   decodeLoop(f, count, trace, rowOf, dst.shape[1], samples.a, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
-    samples: Slice[int], dst: var Tensor[T], row = 0, log: var DiagLog): int =
+    samples: Slice[int], dst: var Tensor[T], log: var DiagLog, row = 0): int =
   ## The sample window of the selected traces, in list order (a gather, a
   ## sort order); otherwise as the `Slice` form.
   dst.checkWindow(samples)
@@ -1015,14 +1015,14 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   ## As above, without a log: returns the number of traces that could not be
   ## decoded (left zero).
   var log: DiagLog
-  f.readTracesInto(traces, samples, dst, row, log)
+  f.readTracesInto(traces, samples, dst, log, row)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     samples: Slice[int], dst: var Tensor[T], row = 0): int =
   ## As above, without a log: returns the number of traces that could not be
   ## decoded (left zero).
   var log: DiagLog
-  f.readTracesInto(traces, samples, dst, row, log)
+  f.readTracesInto(traces, samples, dst, log, row)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
     failedRows: var seq[int], row = 0): int =
@@ -1113,14 +1113,14 @@ proc readTraces*(f: SeismicFile, traces: Slice[int], log: var DiagLog,
   # or a zero row for a trace that cannot be decoded).
   let cols = f.maxSamples(traces) # checks the range, before its length is taken
   result = newTensorUninit[T](traces.spanLen, cols)
-  discard f.readTracesInto(traces, result, 0, log)
+  discard f.readTracesInto(traces, result, log)
 
 proc readTraces*(f: SeismicFile, traces: openArray[int], log: var DiagLog,
     T: typedesc[SampleType] = float32): Tensor[T] =
   ## The selected traces, in list order, as a new `[traces.len, maxSamples]`
   ## tensor; otherwise as the `Slice` form.
   result = newTensorUninit[T](traces.len, f.maxSamples(traces)) # every element is written
-  discard f.readTracesInto(traces, result, 0, log)
+  discard f.readTracesInto(traces, result, log)
 
 proc readTraces*(f: SeismicFile, traces: Slice[int], samples: Slice[int], log: var DiagLog,
     T: typedesc[SampleType] = float32): Tensor[T] =
@@ -1133,7 +1133,7 @@ proc readTraces*(f: SeismicFile, traces: Slice[int], samples: Slice[int], log: v
   f.checkSelection(traces)
   checkTensorSize(traces.spanLen, cols, T)
   result = newTensorUninit[T](traces.spanLen, cols) # every element is written
-  discard f.readTracesInto(traces, samples, result, 0, log)
+  discard f.readTracesInto(traces, samples, result, log)
 
 proc readTraces*(f: SeismicFile, traces: openArray[int], samples: Slice[int],
     log: var DiagLog, T: typedesc[SampleType] = float32): Tensor[T] =
@@ -1142,7 +1142,7 @@ proc readTraces*(f: SeismicFile, traces: openArray[int], samples: Slice[int],
   let cols = windowCols(samples)
   checkTensorSize(traces.len, cols, T)
   result = newTensorUninit[T](traces.len, cols) # every element is written
-  discard f.readTracesInto(traces, samples, result, 0, log)
+  discard f.readTracesInto(traces, samples, result, log)
 
 proc raiseUndecodable(log: DiagLog) {.noinline, noreturn.} =
   # The first decode error of `log`, with the count, as the exception.

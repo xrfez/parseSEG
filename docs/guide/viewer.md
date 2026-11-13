@@ -175,7 +175,7 @@ doAssert panel.shape == [50, 2001]
 var view = newTraceTensor[float32](64, 2001)
 var log: DiagLog
 for first in countup(0, 128, 64):            # the user scrolls right
-  let failed = f.readTracesInto(first ..< first + 64, view, 0, log)
+  let failed = f.readTracesInto(first ..< first + 64, view, log)
   doAssert failed == 0                        # undecodable traces would be zero rows
   echo "traces ", first, "..", first + 63, ": peak ", max(abs(view))
 

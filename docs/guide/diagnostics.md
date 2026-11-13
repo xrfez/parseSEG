@@ -98,7 +98,7 @@ A trace that is indexed but cannot be decoded (a sample format the library does 
 or samples past the end of the mapped file) is handled by the read call, and you choose the
 policy:
 
-- `readTraces(f, traces, log)` and `readTracesInto(f, traces, dst, row, log)`: read past it.
+- `readTraces(f, traces, log)` and `readTracesInto(f, traces, dst, log, row)`: read past it.
   The trace is a zero row, `readTracesInto` counts it in its result, and `log` gets one
   `error` entry with the trace index, byte offset and reason. A `Prefetcher` does the same
   per chunk (`c.failed`, `c.log`).
