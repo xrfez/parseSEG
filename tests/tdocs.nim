@@ -68,9 +68,7 @@ proc newRunDir(base: string): string =
 
 proc nimPaths(): string =
   ## The project's search paths, absolute, for a program outside the tree.
-  result = " --noNimblePath --path:" & quoteShell(root / "src") &
-    " --path:" & quoteShell(getCurrentCompilerExe().parentDir.parentDir / "dist" / "nimony" /
-      "src" / "lib")
+  result = " --noNimblePath --path:" & quoteShell(root / "src")
   for line in readFile(root / "nim.cfg").splitLines:
     let s = line.strip
     if s.startsWith("--path:"):

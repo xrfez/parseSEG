@@ -74,10 +74,11 @@ maps match, the most specific one wins. Ties raise a diagnostic.
 | `parseSEG vendormap list` | the maps found on the search path and which ones match a given file |
 
 ## Implementation notes
-- NIF I/O uses `nifbuilder`/`nifreader` from the Nim toolchain (`$nim/dist/nimony/src/lib`),
-  via `--path:"$nim/dist/nimony/src/lib"` in `config.nims`. There's no extra package. API
-  notes (verified on Nim 2.4): `extract(move b)` to take the builder's string;
-  `openFromBuffer(s, "")`; use `next(r, tok)` (the one-arg `next` is deprecated).
+- NIF I/O needs no package and nothing from the Nim toolchain. Maps are untrusted input,
+  so `vendor/maps` reads them with a small tokenizer of its own for the NIF subset they use
+  (iterative, bounded nesting, sizes and numbers, `ValueError` for anything else). The
+  scaffold writes NIF with `common/niftext`. The toolchain's NIF library is not used: its
+  reader can end the process on a damaged document.
 - The map loader compiles each map once into a flat field table (offset, length, decoder
   kind). Decoding is then a tight loop with no allocation per field, so it's cheap enough
   for the viewer.

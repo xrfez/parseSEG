@@ -57,7 +57,6 @@ import std/[math, tables, hashes, strutils]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader]
 import ../seg2/headers as seg2headers
-import ../common/years
 import ../private/segykeys
 import ./keytypes
 export keytypes
@@ -135,7 +134,7 @@ proc segdTime(rec: SegdRecord, t: SegdTrace): float64 =
         at + SegdBlockSize - 1))
       if ts.timeZeroOfData != 0: return timestampToUnix(ts.timeZeroOfData)
     if rec.gh3.timeZero != 0: return timestampToUnix(rec.gh3.timeZero)
-  if rec.gh1.year < 0: NaN else: generalHeaderUtc(rec.gh1, fullYear(rec.gh1.year) - rec.gh1.year)
+  generalHeaderUtc(rec.gh1)
 
 func knownSet(rec: SegdRecord, t: SegdTrace): bool =
   # The trace's channel set is one of the record's descriptors.

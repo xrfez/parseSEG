@@ -250,24 +250,29 @@ proc writeRecordHeaders*(w: var SegdWriter, rec: SegdRecord) =
   w.tracesWritten = 0
 
 func declaredSamples(rec: SegdRecord, t: SegdTrace, cs: Option[SegdChannelSetRef]): int =
-  # The sample count the reader will give the trace, -1 if none (also when
-  # a lenient record's scan type has another layout than the trace).
+  # The sample count the reader will give the trace (`readRev2TraceRest`,
+  # `readRev3TraceRest`), -1 if it finds none (also when a lenient record's
+  # scan type has another layout than the trace).
+  let own = case t.layout # Trace Header Extension #1's count; -1 without one
+    of slRev2: (if t.ext1.isSome: int(t.ext1.get.samplesPerTrace) else: -1)
+    of slRev3: (if t.ext1Rev3.isSome: int(t.ext1Rev3.get.numSamples) else: -1)
+  if own > 0 or (own == 0 and t.layout == slRev3): return own
+  if cs.isSome and rec.scanTypes[cs.get.scanType].layout != t.layout: return -1
   case t.layout
   of slRev2:
-    if t.ext1.isSome: return int(t.ext1.get.samplesPerTrace)
+    # The channel set's window, (TE − TF) / SI: for a trace without THE#1,
+    # and for one whose THE#1 count is 0 (then at least 0 samples).
+    var window = -1
+    if cs.isSome:
+      template c: untyped = rec.scanTypes[cs.get.scanType].descriptors[cs.get.channelSet]
+      let si = c.sampleIntervalMs(rec.gh1)
+      if si > 0: window = int(round((c.endTimeMs - c.startTimeMs) / si))
+    if own == 0: max(window, 0)
+    elif window >= 0: window
+    else: -1
   of slRev3:
-    if t.ext1Rev3.isSome: return int(t.ext1Rev3.get.numSamples)
-  if cs.isSome:
-    template s: untyped = rec.scanTypes[cs.get.scanType]
-    if s.layout == t.layout:
-      case s.layout
-      of slRev2:
-        template c: untyped = s.descriptors[cs.get.channelSet]
-        let si = c.sampleIntervalMs(rec.gh1)
-        if si > 0: return int(round((c.endTimeMs - c.startTimeMs) / si))
-      of slRev3:
-        return int(s.descriptorsRev3[cs.get.channelSet].numSamples)
-  -1
+    if cs.isSome: int(rec.scanTypes[cs.get.scanType].descriptorsRev3[cs.get.channelSet].numSamples)
+    else: -1
 
 proc checkTrace(w: var SegdWriter, t: SegdTrace) =
   if t.layout != w.record.layout:

@@ -579,6 +579,15 @@ block extension_sample_count_of_zero:
         doAssert t.numSamples == 52
         if not headersOnly: doAssert t.samples == recs.records[r].traces[k].samples
         if k >= 2: doAssert t.ext1.get.samplesPerTrace == 0 # the header stays as read
+  # The writer counts the samples as the reader does: the file writes back
+  # strictly, as it was read.
+  let back = readSegd(path)
+  discard back.toDisk(tmp / "the_ns0_back.sgd")
+  let again = readSegd(tmp / "the_ns0_back.sgd")
+  doAssert again.records.len == 2
+  for r, rec in again.records:
+    for k, t in rec.traces:
+      doAssert t.numSamples == 52 and t.samples == recs.records[r].traces[k].samples
   # A window that gives no length leaves the trace without samples.
   var c = makeStream([sd8058])
   c.records[0].record.scanTypes[0].descriptors[1].endTime = 0

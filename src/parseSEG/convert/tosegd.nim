@@ -83,7 +83,7 @@
 ## before Rev 3).
 
 import std/[math, os, strutils, times, tables]
-import ../common/[errors, diagnostics, endians, outputfile, years, progress, fieldlayout]
+import ../common/[errors, diagnostics, endians, outputfile, progress, fieldlayout]
 import ../io/[records, diskio]
 import ../segd/[headers, samples, reader, writer, rev3, blocks]
 import ../seg2/[reader as seg2reader]
@@ -343,7 +343,7 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
     c.note(rnTrailerWrapped, "the Rev 2 general trailer is carried as one user trailer " &
       "group (0xA0, \"" & WrapDescription.strip & "\")")
   var g3 = SegdGeneralHeader3(blockType: BlockTypeGeneralHeader3)
-  let utc = generalHeaderUtc(g1, fullYear(g1.year) - g1.year)
+  let utc = generalHeaderUtc(g1)
   if utc.isNaN:
     g3.relativeTimeMode = 1
     c.note(rnNoTimeZero, "General Header #1 has no valid date and time: GH#3 time zero is 0 " &
