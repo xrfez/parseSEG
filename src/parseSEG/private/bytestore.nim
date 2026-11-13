@@ -53,6 +53,9 @@ func truncToInt32*(x: float64): int32 {.importc: "(NI32)", nodecl.}
   ## `int32(x)` goes through int64, for which x86 before AVX-512 has no
   ## packed conversion.
 
+func truncToUint32*(x: float64): uint32 {.importc: "(NU32)", nodecl.}
+  ## `x`, within uint32's range, as a uint32: the C conversion itself.
+
 func roundAway*(x: float64): float64 {.inline, raises: [].} =
   ## `x` rounded to the nearest integer, halves away from zero: `round(x)`
   ## bit for bit (NaN and the infinities too), from `trunc`, which compilers

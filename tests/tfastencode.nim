@@ -100,6 +100,41 @@ block segd_encoders_match_the_reference:
             proc (s: openArray[float32], d: var openArray[byte]) = refEncodeSegd(f, s, d, twos),
             dataBytes(f, n))
 
+block segd_exponent_formats_over_their_whole_range:
+  # Values the formats hold, of every binary order from 2^-40 to full scale,
+  # with those that sit on an exponent step or round up to one: the exponent
+  # taken from the float's bits against the reference's search with `pow`.
+  for (f, most, least) in [(sd8015, 32767.0, -32767.0), (sd8022, 15360.0, -15360.0),
+      (sd8024, 16380.0, -16380.0), (sd8042, 3968.0, -3840.0), (sd8044, 4095.5, -4095.0)]:
+    var vals: seq[float64]
+    for e in -40 .. 15:
+      let step = pow(2.0, float64(e))
+      for m in [1.0, 1.0 - 1e-16, 1.0 + 3e-16, 0.99999, 0.999985, 0.96875, 0.9999, 0.75, 0.5,
+          1.5, 1.9999999, 1.99996, 1.9, 1.25, 1.0001]:
+        for sign in [1.0, -1.0]: vals.add sign * m * step
+    for _ in 0 ..< 60_000:
+      vals.add rng.rand(-1.0..1.0) * pow(2.0, float64(rng.rand(-30..15)))
+    for edge in [most, least, most - 0.25, least + 0.25, 0.0, -0.0, 4.9e-324, -1e-310]:
+      vals.add edge
+    var kept: seq[float64]
+    for v in vals:
+      if v <= most and v >= least: kept.add v
+    doAssert kept.len > 40_000
+    for twos in (if f == sd8015: @[false, true] else: @[false]):
+      for T in [0, 1]:
+        var a = newSeq[byte](dataBytes(f, kept.len))
+        var b = newSeq[byte](a.len)
+        if T == 0:
+          encodeSamples(f, kept, a, twos)
+          refEncodeSegd(f, kept, b, twos)
+        else:
+          var k32 = newSeq[float32](kept.len)
+          for i, v in kept: k32[i] = float32(v) # rounding cannot leave the range
+          encodeSamples(f, k32, a, twos)
+          refEncodeSegd(f, k32, b, twos)
+        doAssert a == b, "SEG-D " & $ord(f) & (if twos: " two's complement" else: "") &
+          (if T == 0: " f64" else: " f32")
+
 block seg2_encoders_match_the_reference:
   for f in Seg2SampleFormat:
     for order in [boLittle, boBig]:

@@ -257,10 +257,10 @@ proc toInt(x: float64, lo, hi: int64, i: int): int64 =
 
 proc encodePlain[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
     dst: var openArray[byte], twosComplement8015: bool) =
-  # One sample at a time through the checked accessors: the exponent
-  # formats, and every trace a kernel of `encodeSamples` flags, for its
-  # error (it names the first sample that does not fit) or its rare values
-  # (8048: subnormals, doubles beyond float32).
+  # One sample at a time through the checked accessors: every trace a
+  # kernel of `encodeSamples` flags, for its error (it names the first
+  # sample that does not fit) or its rare values (8048: subnormals, doubles
+  # beyond float32).
   let n = src.len
   case f
   of sd8015:
@@ -335,8 +335,49 @@ when defined(gcc):
 
 {.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
 
+func expParts(a: float64, k, maxExp, fracBits: int32, top: float64): tuple[e, mag: uint32,
+    bad: int] {.inline, raises: [].} =
+  # `expFraction` for the magnitude `a` in base 2^k, without its loop of
+  # `pow` calls (60 to 170 ns per sample; about 5 this way): the exponent
+  # comes from the float's own. With a < 2^x, the smallest base exponent
+  # whose fraction is below 1 is ceil(x / k); rounding the fraction to
+  # `fracBits` bits can carry it to 1, which costs one exponent more.
+  # Scaling by a power of two is exact, so the fraction is the one
+  # `expFraction` rounds. `bad`: beyond `top` at the largest exponent (or
+  # NaN), where `expFraction` raises.
+  let x = int32((cast[uint64](a) shr 52) and 0x7FF) - 1022 # 1025 for NaN and infinity
+  let full = float64(1'i32 shl fracBits)
+  template scaled(e: int32): float64 =
+    roundAway(a * cast[float64](uint64(1023 + fracBits - k * e) shl 52))
+  var e = if x <= 0: 0'i32 else: min((x + k - 1) div k, maxExp)
+  var m = scaled(e)
+  if e < maxExp and m >= full:
+    inc e
+    m = scaled(e)
+  let fits = if e == maxExp: m <= top else: m < full
+  (uint32(e), truncToUint32(if fits: m else: 0.0), ord(not fits))
+
+func quaternaryWord(x: float64, fracBits: int32, redo: var int): uint32 {.inline, raises: [].} =
+  # 8022 (4 fraction bits) and 8024 (12): sign, exponent of 4, one's
+  # complement fraction. Flags `redo` for a value out of range.
+  let mask = (1'u32 shl fracBits) - 1
+  let p = expParts(abs(x), 2, 7, fracBits, float64(mask))
+  redo = redo or p.bad
+  let neg = x < 0 and p.mag != 0
+  (uint32(ord(neg)) shl (fracBits + 3)) or (p.e shl fracBits) or
+    (if neg: (not p.mag) and mask else: p.mag)
+
+func hexadecimalWord(x: float64, fracBits: int32, redo: var int): uint32 {.inline, raises: [].} =
+  # 8042 (5 fraction bits) and 8044 (13): sign, exponent of 16, fraction
+  # magnitude. All ones (negative full scale) is not a code: the negative
+  # range ends one step earlier.
+  let full = 1'u32 shl fracBits
+  let p = expParts(abs(x), 4, 3, fracBits, float64(full - (if x < 0: 2 else: 1)))
+  redo = redo or p.bad
+  (uint32(ord(x < 0 and p.mag != 0)) shl (fracBits + 2)) or (p.e shl fracBits) or p.mag
+
 proc encodeKernel[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
-    dst: var openArray[byte]): bool {.raises: [].} =
+    dst: var openArray[byte], twosComplement8015: bool): bool {.raises: [].} =
   # The loops of `encodeSamples`, which has checked that `dst` holds the
   # `src.len > 0` samples: unchecked stores, the byte order a constant, as
   # the decoders. True when `encodePlain` must do the trace instead (then
@@ -391,8 +432,34 @@ proc encodeKernel[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
       w = w + (w and 1)
       w = w or (uint32(ord((w and 0xFF_FFFF'u32) == 0)) shl 20)
       storeNum(d, 4 * i, (if (b and 0x7FFF_FFFF'u32) == 0: 0'u32 else: w), boBig)
-  of sd8015, sd8022, sd8024, sd8042, sd8044:
-    redo = 1
+  of sd8015:
+    # Groups of 4 samples in 10 bytes: a word of 4 exponent nibbles, then 4
+    # fraction words; a last partial group is zero-filled.
+    for g in 0 ..< (n + 3) div 4:
+      var exps = 0'u32
+      for k in 0..3:
+        let i = 4 * g + k
+        var e, w = 0'u32
+        if i < n:
+          let x = float64(s[i])
+          let p = expParts(abs(x), 1, 15, 15,
+            if twosComplement8015 and x < 0: 32768.0 else: 32767.0)
+          redo = redo or p.bad
+          e = p.e
+          w = if x >= 0 or p.mag == 0: p.mag
+              elif twosComplement8015: 0x1_0000'u32 - p.mag
+              else: (not p.mag) and 0xFFFF'u32
+        exps = (exps shl 4) or e
+        storeNum(d, 10 * g + 2 + 2 * k, uint16(w and 0xFFFF'u32), boBig)
+      storeNum(d, 10 * g, uint16(exps), boBig)
+  of sd8022:
+    for i in 0..<n: d[i] = byte(quaternaryWord(float64(s[i]), 4, redo))
+  of sd8024:
+    for i in 0..<n: storeNum(d, 2 * i, uint16(quaternaryWord(float64(s[i]), 12, redo)), boBig)
+  of sd8042:
+    for i in 0..<n: d[i] = byte(hexadecimalWord(float64(s[i]), 5, redo))
+  of sd8044:
+    for i in 0..<n: storeNum(d, 2 * i, uint16(hexadecimalWord(float64(s[i]), 13, redo)), boBig)
   redo != 0
 
 proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
@@ -412,6 +479,7 @@ proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
   if dst.len < dataBytes(f, n):
     raise newException(ValueError, "the destination has " & $dst.len & " bytes, " &
       $dataBytes(f, n) & " needed for " & $n & " samples")
-  if n > 0 and encodeKernel(f, src, dst): encodePlain(f, src, dst, twosComplement8015)
+  if n > 0 and encodeKernel(f, src, dst, twosComplement8015):
+    encodePlain(f, src, dst, twosComplement8015)
 
 {.pop.}
