@@ -899,3 +899,154 @@ block p1_angle_unit_is_decided_once_per_file:
   f = parseP1(d)
   doAssert f.options.angleUnit == auDms and f.files[0].records[30].latitude.isNaN
   doAssert f.log.len == 1 and f.log.has("bad latitude", sevWarning), $f.log
+
+# ------------------------------------------------------- relation runs ---
+
+block relation_lookups_agree_with_a_scan_in_file_order:
+  # A record whose runs ascend without sharing a channel is searched; any
+  # other is scanned in file order (a channel two runs cover belongs to the
+  # earlier one). Both must give what a plain scan of the X rows gives.
+  type Row = tuple[fromCh, toCh, step: int, line, first, last: float64]
+  proc model(rows: seq[Row], multi: bool, channel: int): (bool, float64, float64, int) =
+    # The first row in file order that covers `channel`: found, line, point, component.
+    for r in rows:
+      let last = if multi: r.toCh + r.step - 1 else: r.toCh
+      if channel >= r.fromCh and channel <= last and
+          (multi or (channel - r.fromCh) mod r.step == 0):
+        let n = (r.toCh - r.fromCh) div r.step
+        let i = (channel - r.fromCh) div r.step
+        let p = if n == 0: r.first
+                else: r.first + float64(i) * (r.last - r.first) / float64(n)
+        return (true, r.line, round(p * 100) / 100,
+          if multi and r.step > 1: (channel - r.fromCh) mod r.step + 1 else: 0)
+  var seed = 12345'u32
+  proc next(n: int): int =
+    seed = seed * 1664525'u32 + 1013904223'u32
+    int(seed shr 8) mod n
+  for trial in 0 ..< 60:
+    var rows: seq[Row]
+    var ch = 1
+    let kind = trial mod 4 # 0, 1: ascending and disjoint; 2: shuffled; 3: overlapping
+    for j in 0 ..< 2 + next(12):
+      let step = if next(3) == 0: 1 + next(3) else: 1
+      let stations = 1 + next(9)
+      let first = 100.0 + float64(next(50))
+      let last = if next(4) == 0: first - float64(stations - 1) * 0.5
+                 else: first + float64(stations - 1)
+      let start = if kind == 3 and j > 0 and next(2) == 0: max(1, ch - 1 - next(4)) else: ch
+      rows.add (start, start + (stations - 1) * step, step, float64(10 + j), first, last)
+      ch = max(ch, start + stations * step) + next(3)
+    if kind == 2:
+      for j in countdown(rows.high, 1): swap rows[j], rows[next(j + 1)]
+    var f = SpsFile()
+    for r in rows:
+      var x = initSpsRelation()
+      (x.fieldRecord, x.fromChannel, x.toChannel, x.channelIncrement) =
+        (9'i64, int64(r.fromCh), int64(r.toCh), r.step)
+      (x.srcLine, x.srcPoint, x.srcIndex) = (1.0, 2.0, 1)
+      (x.rcvLine, x.fromReceiver, x.toReceiver, x.rcvIndex) = (r.line, r.first, r.last, 1)
+      f.relations.add x
+    for multi in [false, true]:
+      var g = SurveyGeometry(multiComponent: multi)
+      g.addSps(f)
+      var expected = 0
+      var listed: seq[int64]
+      for (c, rel) in g.relations(9): listed.add c
+      var want: seq[int64]
+      for j, r in rows: # the iterator goes run by run, in file order
+        for c in r.fromCh .. (if multi: r.toCh + r.step - 1 else: r.toCh):
+          if model(@[r], multi, c)[0]:
+            var earlier = false
+            for o in 0 ..< j:
+              if model(@[rows[o]], multi, c)[0]: earlier = true
+            if not earlier: want.add int64(c)
+      for c in 0 .. ch + 4:
+        let m = model(rows, multi, c)
+        let rel = g.relation(9, int64(c))
+        doAssert rel.isSome == m[0], $trial & " channel " & $c
+        if m[0]:
+          inc expected
+          doAssert rel.get.receiver == stationKey(m[1], m[2], 1) and rel.get.component == m[3],
+            $trial & " channel " & $c
+      doAssert g.expectedChannels(9) == expected, $trial & ": " & $g.expectedChannels(9)
+      doAssert listed == want, $trial
+      doAssert kind >= 2 or g.relationsDisjoint(9), $trial
+      for (c, rel) in g.relations(9): doAssert g.relation(9, c).get == rel
+
+block relation_runs_walk_a_record_station_by_station:
+  var g: SurveyGeometry
+  g.addSps(parseSps(joinSurvey.join("\n")))
+  # Record 151: channels 1-4 are receivers 100/104 down to 101, source 511/117.
+  var n = 0
+  for run in g.relationRuns(151):
+    inc n
+    doAssert run.fromChannel == 1 and run.toChannel == 4 and run.channelStep == 1
+    doAssert run.stations == 4 and run.components == 1
+    doAssert run.fixed == stationKey(511, 117, 1) and run.line == 100 and run.index == 1
+    doAssert run.firstPoint == 104 and run.lastPoint == 101 and run.pointStep == -1
+    doAssert run.station(0) == stationKey(100, 104, 1) and run.station(3) ==
+      stationKey(100, 101, 1)
+  doAssert n == 1 and g.relationsDisjoint(151) and g.relationsDisjoint(5)
+  for _ in g.relationRuns(5): doAssert false, "no such record"
+  # The runs give what the per-channel iterator gives, for every record of
+  # both domains, also multi-component and with fractional point steps.
+  var m = SurveyGeometry(multiComponent: true)
+  m.addSps(parseSps([H00,
+    x21("T1", 7, "1.00", "1.00", '1', 1, 7, '3', "100.00", "101.00", "102.00", '1'),
+    x21("T1", 7, "1.00", "1.00", '1', 10, 13, '1', "200.00", "50.50", "49.00", '2'),
+    x21("T1", 8, "1.00", "2.00", '1', 5, 5, '1', "200.00", "77.00", "77.00", '1')].join("\n")))
+  var o = initSurveyGeometry()
+  var ops = SpsFile()
+  ops.relations = g.receiverRelations()
+  o.addSps(ops)
+  for (s, domain) in [(g, rdSource), (m, rdSource), (o, rdReceiver)]:
+    for rec in s.records(domain):
+      doAssert s.relationsDisjoint(rec, domain)
+      var fromRuns, fromChannels: seq[(int64, StationRelation)]
+      for run in s.relationRuns(rec, domain):
+        for i in 0 ..< run.stations:
+          for c in 0 ..< run.components:
+            var rel = StationRelation(component: if run.components > 1: c + 1 else: 0)
+            if domain == rdSource: (rel.source, rel.receiver) = (run.fixed, run.station(i))
+            else: (rel.source, rel.receiver) = (run.station(i), run.fixed)
+            fromRuns.add (run.fromChannel + int64(i) * run.channelStep + int64(c), rel)
+      for (c, rel) in s.relations(rec, domain): fromChannels.add (c, rel)
+      doAssert fromRuns == fromChannels, $rec
+  var runs = 0
+  for run in m.relationRuns(7):
+    inc runs
+    if run.fromChannel == 1:
+      doAssert run.stations == 3 and run.components == 3 and run.toChannel == 9
+      doAssert run.pointStep == 0.5 and run.station(1) == stationKey(100, 101.5, 1)
+    else:
+      doAssert run.stations == 4 and run.pointStep == -0.5 and run.index == 2
+  doAssert runs == 2
+  # Overlapping runs are yielded as the file gives them, and the record says so.
+  var g3: SurveyGeometry
+  g3.addSps(parseSps([H00,
+    x21("T1", 5, "1.00", "1.00", '1', 1, 4, '1', "100.00", "101.00", "104.00", '1'),
+    x21("T1", 5, "1.00", "1.00", '1', 3, 6, '1', "200.00", "101.00", "104.00", '1')].join("\n")))
+  doAssert not g3.relationsDisjoint(5) and g3.expectedChannels(5) == 6
+  var covered = 0
+  for run in g3.relationRuns(5): covered += run.stations
+  doAssert covered == 8
+
+block a_record_of_thousands_of_rows:
+  # One X row per channel (some recorders write them so): lookups must not
+  # scan the record's earlier rows per channel.
+  var f = SpsFile()
+  for c in 1 .. 20_000:
+    var x = initSpsRelation()
+    (x.fieldRecord, x.fromChannel, x.toChannel) = (1'i64, int64(c), int64(c))
+    (x.srcLine, x.srcPoint, x.rcvLine) = (1.0, 2.0, 3.0)
+    (x.fromReceiver, x.toReceiver) = (float64(c), float64(c))
+    f.relations.add x
+  var g: SurveyGeometry
+  g.addSps(f)
+  doAssert g.log.len == 0 and g.relationCount == 20_000 and g.expectedChannels(1) == 20_000
+  var n = 0
+  for (c, rel) in g.relations(1):
+    inc n
+    doAssert rel.receiver.point == float64(c) and g.relation(1, c).get == rel
+  doAssert n == 20_000 and g.channelOf(1, stationKey(3, 777, 1)) == some(777'i64)
+  doAssert g.receiverRelations().len == 20_000

@@ -161,6 +161,12 @@ doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
 - `records(g)`, `relations(g, record)`, `expectedChannels`, `recordsAt(g, station)` (the
   records of a source station, or the gathers of a receiver) and `channelOf` enumerate and
   look up the relations, in either domain (`rdSource`, `rdReceiver`).
+- `relationRuns(g, record)` yields a record's relations run by run, as the survey file's X
+  (or O) records give them: a channel range on evenly spaced stations of one line, with the
+  fixed station (`RelationRun`; `station(run, i)` is its i-th station). Code that visits
+  every station of a survey (fold, patch description) walks the runs instead of asking per
+  channel: the pre-plot fold of a 5519-shot, 11-million-trace survey takes a quarter of a
+  second that way.
 - Line names that are not numbers (SPS 1.0, P1) are mapped with `g.mapLine(name, number)`,
   or by their trailing digits with `g.trailingDigits = true`.
 - `g.multiComponent` makes X records with a channel increment cover consecutive component
