@@ -1039,6 +1039,43 @@ block relation_runs_walk_a_record_station_by_station:
   for run in g3.relationRuns(5): covered += run.stations
   doAssert covered == 8
 
+block grid_units_from_the_header:
+  # H20 (description) and H201 (factor to metres): the unit of the grid
+  # coordinates, mapped to SEG-Y's measurement system (1 metres, 2 feet).
+  proc hdr(code, description, data: string): string =
+    "H" & code.alignLeft(3) & description.alignLeft(28) & data
+  proc unitOf(lines: varargs[string]): GridUnit =
+    parseSps((@[H00] & @lines).join("\n")).gridUnit
+  let usft = unitOf(hdr("20", "Description of grid units", "feet;"),
+    hdr("201", "Factor to meters", "0.3048006096;"))
+  doAssert usft.known and usft.name == "feet" and usft.metres == 0.3048006096
+  doAssert usft.measurementSystem == 2
+  doAssert unitOf(hdr("201", "Factor to meters", "0.3048;")).measurementSystem == 2
+  doAssert unitOf(hdr("20", "Description of grid units", "Metres;"),
+    hdr("201", "Factor to meters", "1.00000000;")).measurementSystem == 1
+  doAssert unitOf(hdr("20", "Description of grid units", "Metres;")).measurementSystem == 1
+  doAssert unitOf(hdr("20", "Description of grid units", "US survey feet")).measurementSystem == 2
+  doAssert unitOf(hdr("20", "Description of grid units", "yards;"),
+    hdr("201", "Factor to meters", "0.9144;")).measurementSystem == 0
+  let none = unitOf(hdr("20", "Description of grid units", "N/A;"),
+    hdr("201", "Factor to meters", "N/A;"))
+  doAssert not none.known and none.metres.isNaN and none.measurementSystem == 0
+  doAssert not unitOf(hdr("201", "Factor to meters", "-1;")).known
+  # The survey takes the first file's unit; another unit later is a warning.
+  var g = initSurveyGeometry()
+  g.addSps(parseSps(@[H00, hdr("20", "Description of grid units", "feet;"),
+    hdr("201", "Factor to meters", "0.3048006096;")].join("\n"), "a.sps"))
+  g.addSps(parseSps(@[H00, hdr("20", "Description of grid units", "feet;"),
+    hdr("201", "Factor to meters", "0.3048006096;")].join("\n"), "b.sps"))
+  doAssert g.log.len == 0, $g.log
+  g.addSps(parseSps(@[H00, hdr("20", "Description of grid units", "metres;"),
+    hdr("201", "Factor to meters", "1;")].join("\n"), "c.sps"))
+  doAssert g.gridUnit.name == "feet"
+  var warned = 0
+  for d in g.log:
+    if d.severity == sevWarning and "grid units 'metres'" in d.msg: inc warned
+  doAssert warned == 1, $g.log
+
 block a_range_that_stops_inside_a_station:
   # Multi-component X record 7: channels 1..10 by 4 (stations at channels 1,
   # 5 and 9; channel 10 is not a station's first). Every lookup relates the

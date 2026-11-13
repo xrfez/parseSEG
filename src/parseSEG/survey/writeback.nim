@@ -887,6 +887,17 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
       copyMem(addr map[e.offset], addr buf[0], buf.len)
     log.add p.log
     result = p.changes
+    # SEG-Y: the binary header says what the joined coordinates are in.
+    let system = g.gridUnit.measurementSystem
+    if f.kind == skSegy and system != 0 and f.index.segy.binary.measurementSystem != system:
+      const at = 3255 - 3201 # within the binary header
+      let start = f.index.segy.tapeLabel.len + TextHeaderSize
+      if start + 400 <= f.mappedSize:
+        let old = f.index.segy.binary.measurementSystem
+        putNum(map.toOpenArray(start, start + 399), at, system, f.index.segy.byteOrder)
+        log.report(sevInfo, dcValidation, "binary measurement system " & $old & " -> " &
+          $system & " (" & (if system == 1: "metres" else: "feet") & ", the survey's grid " &
+          "unit '" & g.gridUnit.name & "')", loc = Location(file: path))
     f.flush()
   finally:
     f.close()

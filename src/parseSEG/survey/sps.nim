@@ -95,6 +95,12 @@ type
     rcvIndex*: int
     raw*: string
 
+  GridUnit* = object
+    ## The unit of an SPS survey's grid coordinates (easting, northing): H20
+    ## and H201. Coordinates are never rescaled; this says what they are in.
+    name*: string          ## H20, as written (`feet`, `Metres`); "" when not given.
+    metres*: float64 = NaN ## H201: metres per grid unit; NaN when not given.
+
   SpsFile* = object
     ## The records of one or more SPS files, in file order per kind.
     name*: string         ## Path or name, for diagnostics.
@@ -151,6 +157,50 @@ func initSpsRelation*(): SpsRelation =
   SpsRelation(recordType: 'X', fieldRecord: MissingInt, recordIncrement: 1, instrumentCode: '1', srcLine: NaN,
     srcPoint: NaN, srcIndex: 1, fromChannel: MissingInt, toChannel: MissingInt,
     channelIncrement: 1, rcvLine: NaN, fromReceiver: NaN, toReceiver: NaN, rcvIndex: 1)
+
+func headerValue(data: string): string =
+  # An H record's value: up to the 2.1 terminator `;`, blanks trimmed; ""
+  # for `N/A`.
+  let i = data.find(';')
+  result = (if i >= 0: data[0 ..< i] else: data).strip
+  if cmpIgnoreCase(result, "N/A") == 0: result = ""
+
+func gridUnit*(f: SpsFile): GridUnit =
+  ## The grid unit the file's H20 (description) and H201 (factor to metres)
+  ## give: the first of each; a value that is `N/A` or not a positive number
+  ## is not given.
+  result = GridUnit()
+  var named, factored = false
+  for h in f.headers:
+    if h.code == "20" and not named:
+      named = true
+      result.name = headerValue(h.data)
+    elif h.code == "201" and not factored:
+      factored = true
+      try:
+        let v = parseFloat(headerValue(h.data))
+        if v > 0 and v < Inf: result.metres = v
+      except ValueError: discard
+
+func known*(u: GridUnit): bool {.inline.} =
+  ## The file gives a unit (a name or a positive factor).
+  u.name.len > 0 or u.metres > 0
+
+func measurementSystem*(u: GridUnit): int16 =
+  ## The SEG-Y measurement system (binary header 3255-3256) of the unit: 1
+  ## for metres, 2 for feet (international or US survey: H201 0.3048 or
+  ## 0.3048006096, or a name such as `feet`, `ft`, `US survey feet` without a
+  ## factor), 0 for anything else.
+  const feet = [0.3048, 1200.0 / 3937.0]
+  if u.metres > 0:
+    if abs(u.metres - 1) <= 1e-9: return 1
+    for f in feet:
+      if abs(u.metres - f) <= 1e-9: return 2
+    return 0
+  let n = u.name.toLowerAscii
+  if n in ["m", "meter", "meters", "metre", "metres"]: 1
+  elif n in ["ft", "foot", "feet"] or n.endsWith(" feet") or n.endsWith(" foot"): 2
+  else: 0
 
 # ------------------------------------------------------------- column maps --
 

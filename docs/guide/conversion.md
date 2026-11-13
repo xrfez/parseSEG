@@ -199,6 +199,10 @@ doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
 - A record whose last channel is not the first of a station (channels 1..10 by 4) relates
   its whole stations only (channels 1..12 multi-component, else 1, 5 and 9), in every
   lookup and in `relationRuns`; the file gets a warning.
+- `g.gridUnit` is the unit of the station coordinates, from the SPS header (H20 and H201;
+  `measurementSystem`: 1 metres, 2 feet). Coordinates are never rescaled, but SEG-Y written
+  with the geometry (`copyWithGeometry`, `convertWithGeometry`) says feet in its binary
+  header when the survey is in feet.
 - A host with its own coordinate database can fill the table directly:
   `g.addSource(line, point, index, x, y, z)` and `g.addReceiver(...)`.
 - `readSps`/`writeSps` and `readP1`/`writeP1` read and write the survey files themselves

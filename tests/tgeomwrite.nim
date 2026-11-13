@@ -41,6 +41,13 @@ proc sps(name: string, lines: varargs[string]): SurveyGeometry =
   result.addSps(path)
   doAssert not result.log.hasErrors, $result.log.len
 
+proc hdr(code, description, data: string): string =
+  ## An SPS H record: code in cols 2-4, description in 5-32, data from 33.
+  "H" & code.alignLeft(3) & description.alignLeft(28) & data
+
+let feet = [hdr("20", "Description of grid units", "feet;"),
+  hdr("201", "Factor to meters", "0.3048006096;")]
+
 proc bytesOf(path: string): string = readFile(path)
 
 proc copySample(name: string): string =
@@ -254,6 +261,12 @@ sampleBlock convert_with_geometry_from_segd:
   var k2 = openSeismic(dst2, keys = true)
   doAssert k2.traceKeys(0).rcvX.isNaN and k2.traceKeys(0).srcX == 500000
   k2.close()
+  doAssert readSegy(dst).file.binary.measurementSystem == 1 # no grid unit: metres
+  # A survey in feet: the converted file's binary header says feet.
+  let gf = sps("ef.sps", @feet & @[r21('R', "13", "104", '1', "500100.0", "6000000.0", "12.5")])
+  let dst3 = tmp / "63convft.sgy"
+  doAssert not convertWithGeometry(exampleDir / "63.sgd", dst3, gf).isFatal
+  doAssert readSegy(dst3).file.binary.measurementSystem == 2
 
 block convert_with_geometry_from_segy:
   let path = tmp / "f.sgy"
@@ -266,6 +279,29 @@ block convert_with_geometry_from_segy:
   doAssert k.traceKeys(3).rcvX == 500175 and k.traceKeys(3).srcX == 500000.5
   k.close()
   doAssert not fileExists(dst & ".tmp") and not fileExists(dst & ".tmp.geometry.nif")
+
+block grid_units_reach_the_segy_binary_header:
+  # An SPS survey in US survey feet: a copy or a conversion with its geometry
+  # says so in the SEG-Y binary header (3255-3256: 2 = feet); a survey in
+  # metres leaves the input's 1. Coordinates are never rescaled.
+  let path = tmp / "u.sgy"
+  segyFile(path) # measurement system 1
+  let g = sps("u.sps", @feet & @segySurvey)
+  doAssert g.gridUnit.name == "feet" and g.gridUnit.metres == 0.3048006096
+  doAssert g.gridUnit.measurementSystem == 2
+  let r = copyWithGeometry(path, tmp / "ucopy.sgy", g)
+  doAssert not r.log.hasErrors and r.log.has("binary measurement system 1 -> 2", sevInfo)
+  doAssert readSegy(tmp / "ucopy.sgy").file.binary.measurementSystem == 2
+  var k = openSeismic(tmp / "ucopy.sgy", keys = true)
+  doAssert k.traceKeys(3).rcvX == 500175 # as the survey gives it, in feet
+  k.close()
+  doAssert not convertWithGeometry(path, tmp / "uconv.sgy", g).isFatal
+  doAssert readSegy(tmp / "uconv.sgy").file.binary.measurementSystem == 2
+  let m = sps("um.sps", @[hdr("20", "Description of grid units", "Metres;"),
+    hdr("201", "Factor to meters", "1.00000000;")] & @segySurvey)
+  let rm = copyWithGeometry(path, tmp / "umcopy.sgy", m)
+  doAssert not rm.log.has("binary measurement system", sevInfo)
+  doAssert readSegy(tmp / "umcopy.sgy").file.binary.measurementSystem == 1
 
 block values_that_round_to_the_bytes_there_are_no_change:
   # Shotpoint 99.5 into a 4-byte espnum that already holds 100: the planned

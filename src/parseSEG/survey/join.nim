@@ -54,6 +54,7 @@ import ./[textrec, cards, sps, p1]
 import ../private/checks
 
 export keys
+export sps.GridUnit, sps.known, sps.measurementSystem # `SurveyGeometry.gridUnit`
 
 type
   RelationDomain* = enum
@@ -120,6 +121,10 @@ type
       ## only every k-th channel is in the run.
     tape*: string ## Only X records of this field tape ("" = all).
     lineNames*: Table[string, float64] ## Text line name → line number (see `mapLine`).
+    gridUnit*: GridUnit
+      ## The unit of the station coordinates: the first SPS file's that gives
+      ## one (H20, H201); a later file with another is a warning (nothing is
+      ## rescaled). Write-back records it in SEG-Y output (`measurementSystem`).
     trailingDigits*: bool ## Unmapped line names use their trailing digits.
     log: DiagLog ## See `log`.
 
@@ -417,6 +422,15 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, xDomain = rdSource) =
             "station (channels from " & $r.fromChannel & " by " & $r.channelIncrement &
             "); the run's last station starts at channel " & $(r.toChannel - partial), i)
         g.addRelation(domain, f.name, i, r, sl.get, rl.get)
+  let u = f.gridUnit
+  if u.known:
+    if not g.gridUnit.known:
+      g.gridUnit = u
+    elif u.measurementSystem != g.gridUnit.measurementSystem or
+        abs(u.metres - g.gridUnit.metres) > 1e-9 * g.gridUnit.metres:
+      g.note(sevWarning, f.name, "grid units '" & u.name & "' (" & $u.metres &
+        " m) differ from the survey's '" & g.gridUnit.name & "' (" & $g.gridUnit.metres &
+        " m); the coordinates are taken as they are", -1)
   cap.summarize(g.log, f.name)
 
 proc addP1*(g: var SurveyGeometry, f: P1File, elevation = false) =

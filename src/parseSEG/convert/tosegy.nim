@@ -721,8 +721,12 @@ proc initSegyFileFor(c: SegdToSegy, rec: SegdRecord, t: SegdTrace, srcName: stri
   let ns = t.numSamples
   let dt = wholeInterval(rec.sampleIntervalUs(t))
   let dtWhole = dt == round(dt) and dt <= 65535 and dt >= 0
+  # Metres, unless joined survey coordinates are in another unit (feet).
+  let joinedSystem =
+    if c.join.survey == nil: 0'i16 else: c.join.survey[].gridUnit.measurementSystem
   result.binary = SegyBinaryHeader(formatCode: int16(ord(c.outFmt)), segyMajor: rev.major,
-    segyMinor: rev.minor, fixedLengthTraces: 0, traceSorting: 1, measurementSystem: 1,
+    segyMinor: rev.minor, fixedLengthTraces: 0, traceSorting: 1,
+    measurementSystem: (if joinedSystem != 0: joinedSystem else: 1),
     samplesPerTrace: uint16(min(ns, 65535)),
     sampleInterval: uint16(if dtWhole or rev.major < 2: clamp(round(dt), 0, 65535) else: 0),
     dataTracesPerEnsemble: int16(min(rec.traceCount, 32767)))
