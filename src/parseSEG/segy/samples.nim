@@ -114,7 +114,8 @@ proc decodeSamplesRaw*[T: SampleType](f: SampleFormat, src: openArray[byte],
       when T is float64:
         for i in 0..<n: d[i] = ibmToFloat64(loadNum[uint32](s, 4*i, o))
       else:
-        for i in 0..<n: d[i] = ibmToFloat32(loadNum[uint32](s, 4*i, o))
+        template word(i: int): uint32 = loadNum[uint32](s, 4*i, o)
+        decodeIbm32(d, n, word) # 8 wide when the build targets AVX2
     of sfInt32:
       for i in 0..<n: d[i] = T(loadNum[int32](s, 4*i, o))
     of sfInt16:
