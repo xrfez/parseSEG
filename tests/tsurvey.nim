@@ -911,7 +911,10 @@ block relation_lookups_agree_with_a_scan_in_file_order:
   proc model(rows: seq[Row], multi: bool, channel: int): (bool, float64, float64, int) =
     # The first row in file order that covers `channel`: found, line, point, component.
     for r in rows:
-      let last = if multi: r.toCh + r.step - 1 else: r.toCh
+      # The last whole station: a range that does not end on one relates
+      # no channel after it.
+      let lastStation = r.fromCh + (r.toCh - r.fromCh) div r.step * r.step
+      let last = if multi: lastStation + r.step - 1 else: lastStation
       if channel >= r.fromCh and channel <= last and
           (multi or (channel - r.fromCh) mod r.step == 0):
         let n = (r.toCh - r.fromCh) div r.step
@@ -935,7 +938,11 @@ block relation_lookups_agree_with_a_scan_in_file_order:
       let last = if next(4) == 0: first - float64(stations - 1) * 0.5
                  else: first + float64(stations - 1)
       let start = if kind == 3 and j > 0 and next(2) == 0: max(1, ch - 1 - next(4)) else: ch
-      rows.add (start, start + (stations - 1) * step, step, float64(10 + j), first, last)
+      # Now and then a range that stops inside a station (the last channel
+      # is not a station's first).
+      let short = if step > 1 and stations > 1 and next(4) == 0: 1 + next(step - 1) else: 0
+      rows.add (start, start + (stations - 1) * step - short, step, float64(10 + j), first,
+        last)
       ch = max(ch, start + stations * step) + next(3)
     if kind == 2:
       for j in countdown(rows.high, 1): swap rows[j], rows[next(j + 1)]
@@ -955,7 +962,7 @@ block relation_lookups_agree_with_a_scan_in_file_order:
       for (c, rel) in g.relations(9): listed.add c
       var want: seq[int64]
       for j, r in rows: # the iterator goes run by run, in file order
-        for c in r.fromCh .. (if multi: r.toCh + r.step - 1 else: r.toCh):
+        for c in r.fromCh .. r.toCh + r.step - 1:
           if model(@[r], multi, c)[0]:
             var earlier = false
             for o in 0 ..< j:
@@ -1031,6 +1038,39 @@ block relation_runs_walk_a_record_station_by_station:
   var covered = 0
   for run in g3.relationRuns(5): covered += run.stations
   doAssert covered == 8
+
+block a_range_that_stops_inside_a_station:
+  # Multi-component X record 7: channels 1..10 by 4 (stations at channels 1,
+  # 5 and 9; channel 10 is not a station's first). Every lookup relates the
+  # three whole stations, channels 1..12, and nothing after; the file is
+  # warned about.
+  var m = SurveyGeometry(multiComponent: true)
+  m.addSps(parseSps([H00,
+    x21("T1", 7, "1.00", "1.00", '1', 1, 10, '4', "100.00", "101.00", "103.00", '1')].join("\n")))
+  var warned = 0
+  for d in m.log:
+    if d.severity == sevWarning and "not the first of a station" in d.msg: inc warned
+  doAssert warned == 1, $m.log
+  doAssert m.expectedChannels(7) == 12
+  var listed: seq[int64]
+  for (c, rel) in m.relations(7): listed.add c
+  var whole: seq[int64]
+  for c in 1'i64 .. 12'i64: whole.add c
+  doAssert listed == whole
+  doAssert m.relation(7, 12).get.receiver == stationKey(100, 103, 1)
+  doAssert m.relation(7, 13).isNone
+  var runs = 0
+  for run in m.relationRuns(7):
+    inc runs
+    doAssert run.stations == 3 and run.toChannel == 12 and run.lastPoint == 103
+  doAssert runs == 1
+  # Single-component: the stations at channels 1, 5 and 9 only.
+  var s: SurveyGeometry
+  s.addSps(parseSps([H00,
+    x21("T1", 7, "1.00", "1.00", '1', 1, 10, '4', "100.00", "101.00", "103.00", '1')].join("\n")))
+  listed.setLen 0
+  for (c, rel) in s.relations(7): listed.add c
+  doAssert listed == @[1'i64, 5, 9] and s.expectedChannels(7) == 3
 
 block a_record_of_thousands_of_rows:
   # One X row per channel (some recorders write them so): lookups must not

@@ -88,7 +88,9 @@ type
     ## of one line. Station `i` (0-based) is `station(run, i)`, at point
     ## `firstPoint + i * pointStep`. Its channel (for an O record: its trace
     ## in the gather) is `fromChannel + i * channelStep`, the first of
-    ## `components` consecutive channels.
+    ## `components` consecutive channels. A record whose last channel is not
+    ## a station's first ends with its last whole station, here and in every
+    ## lookup.
     fromChannel*: int64 ## The channel of the first station.
     toChannel*: int64   ## The last channel of the last station.
     channelStep*: int64 ## Channels from one station to the next.
@@ -277,7 +279,11 @@ func sameStation*(a, b: StationKey): bool =
     (x.index == 0 or y.index == 0 or x.index == y.index)
 
 func lastChannel(run: Run, multi: bool): int64 {.inline.} =
-  if multi: run.toChannel + run.step - 1 else: run.toChannel
+  # The last channel of the run's last whole station: a channel range that
+  # does not end on a station (`toChannel - fromChannel` not a multiple of
+  # the increment) relates no channel after it.
+  let last = run.fromChannel + (run.toChannel - run.fromChannel) div run.step * run.step
+  if multi: last + run.step - 1 else: last
 
 func covers(run: Run, channel: int64, multi: bool): bool {.inline.} =
   channel >= run.fromChannel and channel <= run.lastChannel(multi) and
@@ -338,8 +344,9 @@ proc add(rr: var RecordRuns, run: sink Run): bool =
       run.fromChannel <= rr.runs[^1].lastChannel(multi = true)):
     rr.scattered = true
     result = rr.runs.overlaps(run)
-  rr.channels[false] += (run.toChannel - run.fromChannel) div run.step + 1
-  rr.channels[true] += run.toChannel - run.fromChannel + run.step
+  let stations = (run.toChannel - run.fromChannel) div run.step + 1
+  rr.channels[false] += stations
+  rr.channels[true] += stations * run.step
   rr.runs.add run
 
 proc addRelation(g: var SurveyGeometry, domain: RelationDomain, file: string, i: int,
@@ -403,6 +410,12 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, xDomain = rdSource) =
         g.noteCapped(cap, "relpoint", sevWarning, f.name, r.recordType &
           " record with a non-numeric point; skipped", i)
       else:
+        let partial = (r.toChannel - r.fromChannel) mod r.channelIncrement
+        if partial != 0:
+          g.noteCapped(cap, "partial", sevWarning, f.name, r.recordType & " record " &
+            $r.fieldRecord & ": channel " & $r.toChannel & " is not the first of a " &
+            "station (channels from " & $r.fromChannel & " by " & $r.channelIncrement &
+            "); the run's last station starts at channel " & $(r.toChannel - partial), i)
         g.addRelation(domain, f.name, i, r, sl.get, rl.get)
   cap.summarize(g.log, f.name)
 
