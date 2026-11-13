@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.10.0"
+version       = "0.10.1"
 author        = "Joshua Fenner"
 description   = "Read, write, index and edit SEG-Y (Rev 0-2.1) and SEG-D (Rev 2.0-3.0) seismic data on disk and tape"
 license       = "MIT"
