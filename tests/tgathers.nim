@@ -1,6 +1,6 @@
 ## Gather detection and multi-component grouping (task 6.2).
 
-import std/[assertions, os, math]
+import std/[assertions, os, math, sets, random, sequtils]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, writer as segywriter, fields]
 import parseSEG/segd/[reader as segdreader, writer as segdwriter]
@@ -82,6 +82,78 @@ block segy_split_and_classify:
     @[gkOther]
   # NaN keys compare equal to each other: unknown records form one gather.
   doAssert segyIndex(0, [key(sx = 1, rx = 1), key(sx = 1, rx = 2)]).gathers.kinds == @[gkShot]
+
+proc refClassify(ix: TraceIndex, s: Slice[int]): (GatherKind, int, int) =
+  # The counting rule with a hash set of whole stations for sources and
+  # receivers, however few there are (as `classify` counted before it
+  # compared the first few stations directly and took one trace as it is).
+  func bits(x: float64): uint64 =
+    if x.isNaN: 0x7FF8_0000_0000_0000'u64 else: cast[uint64](x + 0.0)
+  var anySeismic = false
+  for i in s:
+    if ix.isSeismic(i): anySeismic = true
+  var src, rcv: HashSet[array[5, uint64]]
+  var components: set[uint8]
+  var n = 0
+  for i in s:
+    if ix.isSeismic(i) or not anySeismic:
+      let k = ix.keys[i]
+      if not (k.srcLine.isNaN and k.srcPoint.isNaN and k.srcX.isNaN and k.srcY.isNaN):
+        src.incl [bits(k.srcLine), bits(k.srcPoint), uint64(cast[uint16](k.srcIndex)),
+          bits(k.srcX), bits(k.srcY)]
+      if not (k.rcvLine.isNaN and k.rcvPoint.isNaN and k.rcvX.isNaN and k.rcvY.isNaN):
+        rcv.incl [bits(k.rcvLine), bits(k.rcvPoint), uint64(cast[uint16](k.rcvIndex)),
+          bits(k.rcvX), bits(k.rcvY)]
+      components.incl k.component
+      inc n
+  let kind =
+    if rcv.len == 0: gkUnknown
+    elif src.len <= 1 and rcv.len > 1: gkShot
+    elif rcv.len == 1 and src.len > 1: gkReceiver
+    elif rcv.len == 1: (if n == 1 or components.card == n: gkShot else: gkUnknown)
+    else: gkOther
+  (kind, src.len, rcv.len)
+
+block classify_counts_as_the_reference_does:
+  # One trace, a few stations (compared directly) and many (a hash set from
+  # the ninth on): the same kind and counts as the reference, for random
+  # stations with unknown parts, signed zeros, repeats and auxiliary traces.
+  var rng = initRand(606)
+  let pool = [NaN, 0.0, -0.0, 1.0, 2.0, 3.5]
+  proc pick(wide: bool): float64 =
+    if wide and rng.rand(2) > 0: float64(rng.rand(40)) else: pool[rng.rand(pool.high)]
+  var kinds: set[GatherKind]
+  var single, large = 0
+  for round in 0 ..< 3000:
+    let wide = round mod 3 == 0 # many distinct stations in a third of the rounds
+    var ks = newSeq[TraceKeys](rng.rand(1 .. 40))
+    for k in ks.mitems:
+      k = initTraceKeys()
+      k.record = 1
+      (k.srcLine, k.srcPoint, k.srcX, k.srcY) = (pick(false), pick(wide), pick(false), NaN)
+      (k.rcvLine, k.rcvPoint, k.rcvX, k.rcvY) = (pick(false), pick(wide), NaN, pick(false))
+      k.srcIndex = int16(rng.rand(1))
+      k.rcvIndex = int16(rng.rand(-1 .. 1))
+      k.component = uint8(rng.rand(3))
+      if rng.rand(5) == 0: k.status = tsAuxiliary
+    let ix = segyIndex(0, ks)
+    for trial in 0 ..< 6:
+      let a = rng.rand(ks.high)
+      let b = if trial == 0: a elif trial == 1: ks.high else: rng.rand(a .. ks.high)
+      let g = ix.classify((if trial == 1: 0 else: a) .. b)
+      let want = refClassify(ix, g.traces)
+      doAssert (g.kind, g.sources, g.receivers) == want, $round & " " & $g & " " & $want
+      kinds.incl g.kind
+      if g.traces.len == 1: inc single
+      if g.receivers > 8 or g.sources > 8: inc large
+  doAssert kinds == {gkUnknown, gkShot, gkReceiver, gkOther} and single > 3000 and large > 100
+  # A post-stack volume: one trace per ensemble, declared CMP.
+  var stack: seq[TraceKeys]
+  for i in 0 ..< 50: stack.add key(ensemble = float64(i + 1), sx = float64(i), rx = float64(i))
+  stack[7].rcvX = NaN # no receiver known
+  let gs = segyIndex(4, stack).gathers
+  doAssert gs.len == 50 and gs.kinds == newSeq[GatherKind](50).mapIt(gkCmp)
+  doAssert gs[3].sources == 1 and gs[3].receivers == 1 and gs[7].receivers == 0
 
 block component_groups_and_single_stations:
   # One station, one source: three components make a shot, three copies of
