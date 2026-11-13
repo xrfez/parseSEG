@@ -179,6 +179,8 @@ doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
   stays readable. An SPS file without a revision in H00 is read by its column layout, with a
   warning (`SpsOptions(revision: ...)` chooses); a P1 file's angles are read as DMS or grads
   for the whole file (`P1Options.angleUnit`, by default decided from its first records).
+  `readSps` keeps the text of every record for the byte-exact write-back;
+  `SpsOptions(keepRaw: false)` reads the values only (`g.addSps(path)` does).
 - A station that a survey file gives twice is reported in `g.log`; the later coordinates are
   used.
 

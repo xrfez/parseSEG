@@ -1050,3 +1050,101 @@ block a_record_of_thousands_of_rows:
     doAssert rel.receiver.point == float64(c) and g.relation(1, c).get == rel
   doAssert n == 20_000 and g.channelOf(1, stationKey(3, 777, 1)) == some(777'i64)
   doAssert g.receiverRelations().len == 20_000
+
+# ------------------------------------------------- lines and raw text ---
+
+block lines_are_cut_alike_at_any_chunk_boundary:
+  # The line splitter reads the stream in chunks of 1 MiB: every way a line
+  # can end (LF, CR LF, a lone CR, the end of the stream) must come out the
+  # same wherever the chunk boundary falls, and overlong lines are cut at
+  # `MaxLineBytes`. Checked against a splitter that looks at one byte at a
+  # time.
+  type Line = tuple[text: string, offset: int64, crlf, terminated, cut: bool]
+  proc reference(s: string): seq[Line] =
+    var line = ""
+    var start = 0
+    var i = 0
+    while i < s.len:
+      let c = s[i]
+      if c == '\n' or c == '\r':
+        let crlf = c == '\r' and i + 1 < s.len and s[i + 1] == '\n'
+        result.add (line, int64(start), crlf, true, false)
+        i += (if crlf: 2 else: 1)
+        (line, start) = ("", i)
+      else:
+        line.add c
+        inc i
+        if line.len >= MaxLineBytes:
+          result.add (line, int64(start), false, false, true)
+          (line, start) = ("", i)
+    if line.len > 0: result.add (line, int64(start), false, false, false)
+  var seed = 99'u32
+  proc next(n: int): int =
+    seed = seed * 1664525'u32 + 1013904223'u32
+    int(seed shr 8) mod n
+  for trial in 0 ..< 6:
+    var s = newStringOfCap(3 shl 20)
+    # Lines of a card or so, some empty, a few past the cut; every
+    # terminator. The first megabyte is shifted by `trial` bytes, so the
+    # chunk boundary falls on other bytes (and terminators) each time.
+    s.add repeat('p', trial)
+    while s.len < (2 shl 20) + 300_000:
+      let n = case next(40)
+        of 0: 0
+        of 1: MaxLineBytes + next(3) - 1
+        of 2: 2 * MaxLineBytes + 17
+        else: 60 + next(40)
+      for _ in 0 ..< n: s.add char(ord('a') + next(26))
+      case next(4)
+      of 0: s.add "\r\n"
+      of 1: s.add "\r"
+      else: s.add "\n"
+    if trial mod 2 == 0: s.add "last line without an end"
+    if trial == 3: s.add "\r" # a CR as the very last byte
+    let want = reference(s)
+    var got: seq[Line]
+    for r in textRecords(newStringStream(s), tlLines):
+      doAssert r.index == got.len
+      got.add (r.text, r.offset, r.crlf, r.terminated, r.cut)
+    doAssert got.len == want.len, $trial & ": " & $got.len & " lines, not " & $want.len
+    for i in 0 ..< want.len: doAssert got[i] == want[i], $trial & " line " & $i
+  var none = 0
+  for r in textRecords(newStringStream(""), tlLines): inc none
+  for r in textRecords(newStringStream("\n"), tlLines):
+    doAssert r.text.len == 0 and r.terminated
+    inc none
+  doAssert none == 1
+
+block sps_records_without_their_text:
+  # `keepRaw = false`: the same values, no record text; written records are
+  # encoded from the values.
+  let text = [H00, rcv1, rcv2, src1, x1, "C a comment", "EOF"].join("\r\n") & "\r\n"
+  let kept = parseSps(text)
+  let bare = parseSps(text, opts = SpsOptions(keepRaw: false))
+  doAssert kept.points[0].raw == rcv1 and kept.relations[0].raw == x1
+  doAssert bare.points.len == 3 and bare.relations.len == 1 and bare.log.len == 0
+  for i, p in bare.points:
+    doAssert p.raw.len == 0
+    var q = kept.points[i]
+    q.raw = ""
+    doAssert sameValues(p, q), $i
+  var r = kept.relations[0]
+  r.raw = ""
+  doAssert bare.relations[0].raw.len == 0 and sameValues(bare.relations[0], r)
+  doAssert bare.headers[0].raw == H00 and bare.comments == kept.comments
+  doAssert bare.order == kept.order and bare.others == kept.others
+  let back = parseSps(spsText(bare).text)
+  doAssert spsText(bare).log.len == 0 and back.points.len == 3
+  for i, p in back.points:
+    var (a, b) = (p, kept.points[i])
+    (a.raw, b.raw) = ("", "")
+    doAssert sameValues(a, b), $i
+  # The geometry reads a file that way.
+  let dir = getTempDir() / "tsurvey_raw"
+  createDir(dir)
+  writeFile(dir / "a.sps", text)
+  var g: SurveyGeometry
+  g.addSps(dir / "a.sps")
+  doAssert g.receiverCount == 2 and g.sourceCount == 1 and g.relationCount == 1
+  doAssert g.log.len == 0
+  removeDir(dir)

@@ -6,7 +6,7 @@
 ## integer; `Fw.d` has an implicit decimal point before the last `d` digits
 ## unless the field holds a `.`.
 
-import std/[options, strutils, math, streams, tables]
+import std/[options, strutils, math, streams, tables, parseutils]
 import ../common/[errors, diagnostics]
 import ./textrec
 
@@ -56,6 +56,55 @@ func colChar*(line: string, c: int): char {.inline.} =
   ## Column `c` (1-based), a blank past the end of the line.
   if c - 1 < line.len: line[c - 1] else: ' '
 
+func colChar*(line: openArray[char], c: int): char {.inline.} =
+  ## Column `c` (1-based) of a line given as a view, a blank past its end.
+  if c - 1 < line.len: line[c - 1] else: ' '
+
+func trimmed*(line: openArray[char], first, last: int): Slice[int] {.inline.} =
+  ## Columns `first..last` (1-based, inclusive) of `line` without the
+  ## whitespace around them (as `strip` takes it off), as 0-based indices:
+  ## `a > b` for a blank field or one past the end of the line. Nothing is
+  ## copied: the readers parse a field where it stands.
+  var a = first - 1
+  var b = min(last, line.len) - 1
+  while a <= b and line[a] in Whitespace: inc a
+  while b >= a and line[b] in Whitespace: dec b
+  a .. b
+
+func fieldText*(line: openArray[char], f: Slice[int]): string =
+  ## The characters of a `trimmed` field as a string ("" when blank).
+  result = newString(max(f.b - f.a + 1, 0))
+  if result.len > 0: copyMem(addr result[0], addr line[f.a], result.len)
+
+func fortranFloat*(line: openArray[char], f: Slice[int], decimals: int, v: var float64): bool =
+  ## `parseFortranFloat` for a `trimmed` field of `line`: false when it is
+  ## not a finite number; a blank field is NaN and true.
+  if f.a > f.b:
+    v = NaN
+    return true
+  if parseFloat(line.toOpenArray(f.a, f.b), v) != f.b - f.a + 1 or
+      v.classify in {fcNan, fcInf, fcNegInf}:
+    return false
+  if decimals > 0:
+    var written = false # an explicit point or exponent: taken as written
+    for i in f.a .. f.b:
+      if line[i] in {'.', 'e', 'E'}: written = true
+    if not written: v = v / pow(10.0, float64(decimals))
+  true
+
+func fortranInt*(line: openArray[char], f: Slice[int], v: var int64): bool =
+  ## `parseFortranInt` for a `trimmed` field of `line`: false when it is not
+  ## an integer; a blank field is `MissingInt` and true.
+  if f.a > f.b:
+    v = MissingInt
+    return true
+  try:
+    var n: BiggestInt
+    result = parseBiggestInt(line.toOpenArray(f.a, f.b), n) == f.b - f.a + 1
+    v = n
+  except ValueError: # out of range
+    result = false
+
 func isBlank*(s: string): bool =
   ## Only blanks (or empty).
   s.allCharsInSet({' '})
@@ -73,25 +122,16 @@ func parseFortranFloat*(field: string, decimals = 0): Option[float64] =
   ## they make the field invalid. A blank field is valid and NaN; none when
   ## the text is not a finite number (`inf`, `nan` and `1e999` are not
   ## numbers on a survey card).
-  let t = field.strip
-  if t.len == 0: return some(NaN)
-  try:
-    let v = parseFloat(t)
-    if v.classify in {fcNan, fcInf, fcNegInf}: none(float64)
-    else:
-      some(if decimals > 0 and '.' notin t and 'e' notin t and 'E' notin t:
-             v / pow(10.0, float64(decimals))
-           else: v)
-  except ValueError:
-    none(float64)
+  var v: float64
+  if fortranFloat(field, field.trimmed(1, field.len), decimals, v): some(v)
+  else: none(float64)
 
 func parseFortranInt*(field: string): Option[int64] =
   ## Parses a FORTRAN `Iw` field (sign allowed). A blank field is valid and
   ## `MissingInt`; none when the text is not an integer.
-  let t = field.strip
-  if t.len == 0: return some(MissingInt)
-  try: some(parseBiggestInt(t))
-  except ValueError: none(int64)
+  var v: int64
+  if fortranInt(field, field.trimmed(1, field.len), v): some(v)
+  else: none(int64)
 
 func formatFixed*(v: float64, width, decimals: int, implicit = false): string =
   ## `v` as an `Fw.d` field: `decimals` digits after an explicit point, or

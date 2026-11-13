@@ -439,8 +439,12 @@ proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions(),
     xDomain = relationDomainOf(path)) =
   ## Reads the SPS file (Rev 1.0 or 2.1) at `path` and adds it; its
   ## diagnostics go to `g.log`. `X` records of an `.ops` file are receiver
-  ## domain (O) by default. Raises `IOError` if it cannot be read.
-  let f = readSps(path, opts)
+  ## domain (O) by default. Raises `IOError` if it cannot be read. The
+  ## records are read without their text (`SpsOptions.keepRaw` is not used:
+  ## nothing is written back from here).
+  var o = opts
+  o.keepRaw = false
+  let f = readSps(path, o)
   g.addLog(f.log)
   g.addSps(f, xDomain)
 
