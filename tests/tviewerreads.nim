@@ -7,7 +7,7 @@
 import std/[algorithm, assertions, math, os, sequtils, strutils]
 import parseSEG
 import ./utils/testutils
-from parseSEG/model/traceindex import unsafeMemory, mappedSize
+from parseSEG/model/traceindex import unsafeMemory, mappedSize, mindex
 from parseSEG/private/pagehints import adviseWillNeed, isResident
 when defined(posix): import std/posix
 
@@ -163,7 +163,7 @@ sampleBlock damaged_trace_in_a_window:
   # The whole trace is checked, so a window of a trace past the end of the
   # file fails as the full read does.
   var f = openSeismic(exampleDir / "Sweep0.sgy")
-  f.index.entries[0].numSamples = 1_000_000
+  f.mindex.entries[0].numSamples = 1_000_000
   var log: DiagLog
   let w = f.readTraces(0..0, 0..1, log)
   doAssert log.len == 1 and log[0].code == dcTruncated and w[0, 0] == 0 and w[0, 1] == 0

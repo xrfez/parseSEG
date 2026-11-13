@@ -85,7 +85,7 @@ block umbrella_allowlists_match_api_md:
   const allowlisted = [
     ("traceindex", "model/traceindex.nim", @["MapPin", "pinMap", "openSeismicRw",
       "remapWritable", "requireOpen", "requireTrace", "requireKind", "unsafeMemory",
-      "mappedSize", "flush", "segyIntervalOf", "refreshKeys", "refreshSegyInterval"]),
+      "mappedSize", "flush", "segyIntervalOf", "refreshKeys", "refreshSegyInterval", "mindex"]),
     ("headerfields", "model/headerfields.nim", newSeq[string]()),
     ("edit", "model/edit.nim", @["logVar", "writeBytes", "batching", "flushPending"]),
     ("tosegy", "convert/tosegy.nim", @["GeometryJoin", "convertSegdToSegyJoined"]),

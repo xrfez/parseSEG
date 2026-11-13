@@ -12,6 +12,18 @@ proc raisesValue(body: proc ()) =
     doAssert false, "no ValueError"
   except ValueError: discard
 
+block index_is_read_only:
+  # `import parseSEG` gives the trace index read-only: keys and entries are
+  # read through `f.index`, and changed only by the procs that take the file
+  # (which keep the revision and the layout plan in step).
+  var f: SeismicFile
+  doAssert compiles(f.index.keys.len) and compiles(f.index.entries.len)
+  doAssert not compiles(f.index.keys.setLen(0))
+  doAssert not compiles(f.index.entries[0].numSamples = 1)
+  doAssert not compiles(f.index.segy.binary = f.index.segy.binary)
+  doAssert not declared(mindex) # the internal mutable form is not exported
+  doAssert compiles(f.applyGeometry(GeometryTable()))
+
 sampleBlock file_accessors:
   var f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy", keys = true)
   doAssert f.kind == skSegy and f.len == 200 and f.recordCount == 1 and f.maxSamples == 2001

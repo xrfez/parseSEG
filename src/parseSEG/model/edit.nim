@@ -256,10 +256,10 @@ proc refreshRecords(ed: var HeaderEditor) =
   for s in ed.staleRecords:
     let (a, z) = (int(s.blk.offset), int(s.blk.offset) + s.blk.size - 1)
     if s.blk.kind == hbSegdGh1:
-      ed.file.index.segdRecords[s.record].gh1 =
+      ed.file.mindex.segdRecords[s.record].gh1 =
         decodeBlock[SegdGeneralHeader1](mem.toOpenArray(a, z))
     else:
-      ed.file.index.segdRecords[s.record].sourceHeaders[s.blk.sourceIndex] =
+      ed.file.mindex.segdRecords[s.record].sourceHeaders[s.blk.sourceIndex] =
         decodeBlock[SegdGeneralHeaderN](mem.toOpenArray(a, z))
     if s.record != last and ed.file.hasKeys:
       for t in ed.file.index.recordTraces(s.record): ed.stale.add t
@@ -886,7 +886,7 @@ proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool 
   result = ed.setLocated(hsFile, 0, name, value, Location(file: ed.file.path), b) and
     ed.flushBatch() # the index copy is refreshed from the map
   if result:
-    ed.file.index.segy.binary = decodeBinaryHeader(ed.file.unsafeMemory.toOpenArray(int(b.offset),
+    ed.file.mindex.segy.binary = decodeBinaryHeader(ed.file.unsafeMemory.toOpenArray(int(b.offset),
       int(b.offset) + b.size - 1), b.order)
     if name in keyedBinaryFields:
       ed.refreshAllKeys()
@@ -930,7 +930,7 @@ proc reloadHeaders(ed: var HeaderEditor) =
   # The index's copies of the headers a journal can touch (the SEG-Y binary
   # header, SEG-D GH#1 and Rev 1/2 source headers) and the stored keys,
   # re-read from the map after a replay.
-  template ix: untyped = ed.file.index
+  template ix: untyped = ed.file.mindex
   let mem = ed.file.unsafeMemory
   let size = ed.file.mappedSize
   case ix.kind

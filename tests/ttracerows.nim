@@ -172,9 +172,9 @@ block joins_bump_the_revision_and_record_groups:
   doAssert f.keysRevision == 0 and f.index.joinedGroups(0) == {}
   var g: GeometryTable
   g.addReceiver(10, 104, 0, 1000, 2000)
-  doAssert f.index.applyGeometry(g) == 1
+  doAssert f.applyGeometry(g) == 1
   doAssert f.keysRevision == 1 and f.index.joinedGroups(0) == {jgReceiverXy}
-  doAssert f.index.applyGeometry(g) == 0 # nothing changed: no new revision
+  doAssert f.applyGeometry(g) == 0 # nothing changed: no new revision
   doAssert f.keysRevision == 1
   f.close()
   var s = openSeismic(demoDir() / "record.sgd", keys = true)

@@ -6,6 +6,7 @@
 
 import std/[assertions, options, os, strutils, math]
 import parseSEG
+from parseSEG/model/traceindex import mindex # the tests corrupt the index
 import parseSEG/survey/cards # column helpers (internal)
 import ./utils/testutils
 from parseSEG/private/coordscalar import chooseScalar
@@ -173,7 +174,7 @@ sampleBlock segy_rev2_station_header_via_layout:
     let path = tmp / "63b.sgy"
     copyFile(segy, path)
     var f = openSeismic(path, keys = true)
-    (f.index.keys[0].rcvLine, f.index.keys[0].rcvPoint) = (NaN, NaN)
+    (f.mindex.keys[0].rcvLine, f.mindex.keys[0].rcvPoint) = (NaN, NaN)
     doAssert f.applySurvey(g, overwrite = true) == 1
     var ed = openEditor(path)
     let w = ed.writeGeometry(f.index)
@@ -192,7 +193,7 @@ sampleBlock segd_rev2_the1_in_place:
   let g = sps("d.sps", r21('R', "14", "105.5", '1', "500100.0", "6000000.0", "12.5"),
     x21(63, "13", "99.5", 1, 1, "14", "105.5", "105.5"))
   var f = openSeismic(path, keys = true)
-  (f.index.keys[0].rcvLine, f.index.keys[0].rcvPoint) = (NaN, NaN)
+  (f.mindex.keys[0].rcvLine, f.mindex.keys[0].rcvPoint) = (NaN, NaN)
   doAssert f.applySurvey(g, overwrite = true) == 1
   var ed = openEditor(path)
   let w = ed.writeGeometry(f.index)

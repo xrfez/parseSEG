@@ -90,7 +90,9 @@ pilot), a sample interval and a time window. `f.channelSets` describes them;
 
 **The index.** `f.index` (`TraceIndex`) holds one `TraceEntry` per trace (header offset,
 header size, sample count, record, channel set, channel type) plus the file-level and
-record-level headers, already decoded. It is built once at open and stays in memory.
+record-level headers, already decoded. It is built once at open and stays in memory. It is
+read-only: the procs that take the file (`applySurvey`, `applyGeometry`, `ensureKeys`, the
+header editor) change it and keep the keys' revision in step.
 
 **Keys.** `openSeismic(path, keys = true)` also collects each trace's geometry as
 `TraceKeys`: source and receiver line, point, index and coordinates, elevations, midpoint,

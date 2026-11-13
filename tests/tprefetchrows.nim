@@ -7,6 +7,7 @@
 
 import std/[assertions, math, os, atomics]
 import parseSEG
+from parseSEG/model/traceindex import mindex # the tests corrupt the index
 import ./utils/testutils
 
 let tmp = scratchDir("parseseg_tprefetchrows")
@@ -51,7 +52,7 @@ block rows_agree_with_trace_at:
 
 block failed_rows_are_public:
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
-  for t in [3, 4, 9]: f.index.entries[t].numSamples = 1_000_000_000 # past the end
+  for t in [3, 4, 9]: f.mindex.entries[t].numSamples = 1_000_000_000 # past the end
   var p = newPrefetcher[float32](f, 0 ..< 12, chunkTraces = 6, cols = 8)
   var c: PrefetchChunk[float32]
   doAssert p.next(c) and c.failed == 2 and c.failedRows == @[3, 4]
@@ -66,7 +67,7 @@ block read_into_fills_failed_rows:
   # `readTracesInto` reports the failed rows as the
   # prefetcher does, into a caller's list that is cleared and reused.
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
-  for t in [3, 4, 9]: f.index.entries[t].numSamples = 1_000_000_000 # past the end
+  for t in [3, 4, 9]: f.mindex.entries[t].numSamples = 1_000_000_000 # past the end
   var dst = newTensor[float32](12, 8)
   var failed = @[99, 98, 97, 96, 95, 94, 93, 92]
   doAssert f.readTracesInto(0 ..< 12, dst, failed) == 3 and failed == @[3, 4, 9]
@@ -183,7 +184,7 @@ proc sumCmpX(worker: int, samples: ptr UncheckedArray[float32], rows, cols: int,
 
 block transform_runs_once_per_chunk_on_a_worker:
   var f = openSeismic(demoDir() / "survey.sgy", keys = true)
-  f.index.entries[50].numSamples = 1_000_000_000
+  f.mindex.entries[50].numSamples = 1_000_000_000
   let plain = f.readTraces(0 ..< 49, 0 ..< 16)
   var tally: Tally
   var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 16, cols = 16, workers = 4,

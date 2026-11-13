@@ -104,7 +104,7 @@ block joined_values_win_over_the_headers:
   var g: GeometryTable
   g.addReceiver(10, 104, 0, 1000, 2000)
   g.addReceiver(10, 105, 0, 3000, 4000)
-  doAssert f.index.applyGeometry(g) == 1
+  doAssert f.applyGeometry(g) == 1
   doAssert f.traceKeys(0).rcvX == 1000 and f.keysRevision == 1
   var ed = openEditor(move f)
   # The station is the file's own (not joined): the edit shows.

@@ -152,7 +152,7 @@ sampleBlock truncated_last_trace:
 sampleBlock range_read_of_damaged_trace_is_logged:
   # An entry pointing past the mapped bytes is logged and left zero.
   var f = openSeismic(exampleDir / "Sweep0.sgy")
-  f.index.entries[0].numSamples = 1_000_000
+  f.mindex.entries[0].numSamples = 1_000_000
   var t = newTraceTensor[float32](1, 5)
   t[0, 0] = 7
   var log: DiagLog
@@ -160,7 +160,7 @@ sampleBlock range_read_of_damaged_trace_is_logged:
   doAssert t[0, 0] == 0 and log.len == 1 and log.count(sevError) == 1
   f.close()
   f = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
-  f.index.entries[0].numSamples = 1_000_000
+  f.mindex.entries[0].numSamples = 1_000_000
   var t2 = newTraceTensor[float32](2, 5)
   doAssert f.readTracesInto(0..1, t2) == 1 # without a log: the count
   # readTraces: with a log, the trace is a zero row and a diagnostic; without

@@ -58,7 +58,7 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.keysRevision,
   traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,
   traceindex.copyBytes, traceindex.readTracesInto, traceindex.readTraces,
-  traceindex.applyGeometry, traceindex.saveIndex
+  traceindex.applyGeometry, traceindex.saveIndex, traceindex.index
 export headerfields.fieldNames, headerfields.fieldByName, headerfields.traceField,
   headerfields.recordField, headerfields.fileField, headerfields.findTraceField,
   headerfields.findRecordField, headerfields.findFileField, headerfields.blockKind,

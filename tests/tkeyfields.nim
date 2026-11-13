@@ -7,6 +7,7 @@
 
 import std/[assertions, math, os, strutils]
 import parseSEG
+from parseSEG/model/traceindex import mindex # the tests corrupt the index
 import ./utils/testutils
 
 let tmp = scratchDir("parseseg_tkeyfields")
@@ -251,7 +252,7 @@ proc keysOnDemandResolveTheLayoutOnce() =
   var g = release(ed)
   # A layout put in place of the file's: trace code and delay elsewhere.
   doAssert g.traceKeys([1])[0].traceCode == 2
-  g.index.segy.layout = merge(standardLayout(g.index.segy.revision), parseLayout(
+  g.mindex.segy.layout = merge(standardLayout(g.mindex.segy.revision), parseLayout(
     """<segy-layout><entry name="other" byte="29" type="int2"/>
        <entry name="other2" byte="109" type="int2"/></segy-layout>"""))
   let k = g.traceKeys([1])[0]

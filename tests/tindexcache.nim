@@ -10,6 +10,7 @@
 
 import std/[assertions, os, strutils, times]
 import parseSEG
+from parseSEG/model/traceindex import mindex # the tests corrupt the index
 import parseSEG/common/binstore
 import ./utils/testutils
 
@@ -253,13 +254,13 @@ block save_refusals:
   var f = openSeismic(p, keys = true)
   doAssertRaises(ValueError): f.saveIndex(p)
   # A join that changes no trace leaves the file's own index: it is saved.
-  doAssert f.index.applyGeometry(GeometryTable()) == 0
+  doAssert f.applyGeometry(GeometryTable()) == 0
   f.saveIndex(cache)
   # One that changes a trace's keys does not.
   var t: GeometryTable
   t.addReceiver(7, 8, 0, 1234.5, 6789.5)
-  (f.index.keys[0].rcvLine, f.index.keys[0].rcvPoint) = (7.0, 8.0)
-  doAssert f.index.applyGeometry(t, overwrite = true) == 1
+  (f.mindex.keys[0].rcvLine, f.mindex.keys[0].rcvPoint) = (7.0, 8.0)
+  doAssert f.applyGeometry(t, overwrite = true) == 1
   doAssertRaises(ValueError): f.saveIndex(cache)
   f.close()
   doAssertRaises(ValueError): f.saveIndex(cache)

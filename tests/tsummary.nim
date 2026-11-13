@@ -3,6 +3,7 @@
 
 import std/[assertions, math, os, strutils]
 import parseSEG
+from parseSEG/model/traceindex import mindex # the tests corrupt the index
 import ./utils/testutils
 
 let tmp = scratchDir("parseseg_tsummary")
@@ -202,15 +203,15 @@ block channel_sets_count_traces_in_any_order:
   var s = 7'u32
   for i in countdown(f.index.entries.len - 1, 1):
     s = s * 1664525'u32 + 1013904223'u32
-    swap(f.index.entries[i], f.index.entries[int(s shr 8) mod (i + 1)])
+    swap(f.mindex.entries[i], f.mindex.entries[int(s shr 8) mod (i + 1)])
   doAssert f.counted == whole
   # Traces that name no set, no scan type, a set or a record that is not there.
-  f.index.entries[0].channelSet = NoChannelSet
-  f.index.entries[1].scanType = -1
-  f.index.entries[2].channelSet = 77
-  f.index.entries[3].scanType = 9
-  f.index.entries[4].record = 400
-  f.index.entries[5].numSamples = 9999
+  f.mindex.entries[0].channelSet = NoChannelSet
+  f.mindex.entries[1].scanType = -1
+  f.mindex.entries[2].channelSet = 77
+  f.mindex.entries[3].scanType = 9
+  f.mindex.entries[4].record = 400
+  f.mindex.entries[5].numSamples = 9999
   doAssert f.counted == f.reference and f.counted != whole
   f.close()
   var y = openSeismic(demoDir() / "survey.sgy")

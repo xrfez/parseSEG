@@ -270,13 +270,13 @@ sampleBlock external_geometry_joins_on_stations:
   var g: GeometryTable
   g.addSource(13, 99.5, 1, 1000, 2000, 5)
   g.addReceiver(13, 104, 0, 1300, 2400) # index 0 matches any point index
-  doAssert f.index.applyGeometry(g) == 1
+  doAssert f.applyGeometry(g) == 1
   let k = f.index.keys[0]
   doAssert k.srcX == 1000 and k.srcZ == 5 and k.rcvX == 1300 and k.rcvZ.isNaN
   doAssert k.offset == 500 and k.cmpX == 1150 and k.cmpY == 2200
-  doAssert f.index.applyGeometry(g) == 0 # already filled, not overwritten
+  doAssert f.applyGeometry(g) == 0 # already filled, not overwritten
   g.addReceiver(13, 104, 1, 1000, 2000)  # an exact index wins over the wildcard
-  doAssert f.index.applyGeometry(g, overwrite = true) == 1
+  doAssert f.applyGeometry(g, overwrite = true) == 1
   doAssert f.index.keys[0].offset == 0 and f.index.keys[0].cmpX == 1000
   f.close()
   # SEG-Y: the header's CDP coordinates are the midpoint.

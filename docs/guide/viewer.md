@@ -283,7 +283,7 @@ f.ensureKeys()                             # the user opened the map view
 let drawn = f.keysRevision
 var g: GeometryTable
 g.addReceiver(10, 104, 0, 506000, 6008000)
-discard f.index.applyGeometry(g)            # a survey join changes the keys...
+discard f.applyGeometry(g)                  # a survey join changes the keys...
 doAssert f.keysRevision != drawn            # ...so the map is redrawn
 ```
 

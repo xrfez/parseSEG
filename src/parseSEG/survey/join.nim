@@ -718,13 +718,13 @@ proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, stats: var JoinStats,
   ## Fills the trace keys from the survey, in memory only: the file does not
   ## change. Returns the traces changed, and how they matched in `stats`.
   ## Raises `ValueError` for a file opened without `keys = true`.
-  f.index.applySurvey(g, stats, overwrite)
+  f.mindex.applySurvey(g, stats, overwrite)
 
 proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, overwrite = false): int =
   ## Fills the trace keys from the survey, in memory only: the file does not
   ## change. Returns the traces changed. Raises `ValueError` for a file opened
   ## without `keys = true`.
-  f.index.applySurvey(g, overwrite)
+  f.mindex.applySurvey(g, overwrite)
 
 func `$`*(s: JoinStats): string =
   ## One line: traces, changed, the matches that occurred, missing coordinates.

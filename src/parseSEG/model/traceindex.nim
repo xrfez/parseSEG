@@ -107,7 +107,7 @@ proc `=dup`(src: MapPin): MapPin {.error.}
 type
   SeismicFile* = object
     ## A memory-mapped disk file with its trace index.
-    index*: TraceIndex
+    idx: TraceIndex ## See `index`.
     gr: GeometryReader
       ## SEG-Y: the file's layout resolved for the keys, once, when the index
       ## is made (resolving it took 9 µs and 100 allocations per
@@ -122,6 +122,19 @@ type
     twos: bool        ## Opened with `twosComplement8015`.
     cached: bool      ## See `fromCache`.
 
+func index*(f: SeismicFile): lent TraceIndex {.inline.} =
+  ## The file's trace index, read-only: the entries, keys, the standard's
+  ## own headers (`f.index.segy`, `f.index.segdRecords`, `f.index.seg2`)
+  ## and the log. Change it through the procs that take the file
+  ## (`applySurvey`, `applyGeometry`, `ensureKeys`, the header editor), which
+  ## keep the keys, the revision and the layout plan in step.
+  f.idx
+
+proc mindex*(f: var SeismicFile): var TraceIndex {.inline.} =
+  ## The index, mutable, for parseSEG's own modules; `import parseSEG` does
+  ## not export it. A change through it bypasses the file's bookkeeping.
+  f.idx
+
 proc `=destroy`(f: SeismicFile) =
   # `f` is passed by reference and this is its last use, so its fields may
   # be moved out (and `TraceIndex` has only the generic `var` destructor).
@@ -132,12 +145,12 @@ proc `=destroy`(f: SeismicFile) =
       # A prefetcher still reads `entries` and `codecs` through raw pointers:
       # hand them to the map it keeps alive. A seq move keeps the payload's
       # address, so nothing is copied and the pointers stay valid.
-      f.map.parkedEntries = move pf[].index.entries
-      f.map.parkedCodecs = move pf[].index.codecs
-      f.map.parkedKeys = move pf[].index.keys
+      f.map.parkedEntries = move pf[].idx.entries
+      f.map.parkedCodecs = move pf[].idx.codecs
+      f.map.parkedKeys = move pf[].idx.keys
     `=destroy`(f.map)
     release(mapLock)
-  `=destroy`(pf[].index)
+  `=destroy`(pf[].idx)
   `=destroy`(pf[].gr)
   `=destroy`(f.path)
   `=destroy`(f.demuxPath)
@@ -198,16 +211,16 @@ proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: 
     "use the copy", 0, Location(file: f.path))
   f.map.src = openMemFileSource(tmp)
   f.demuxPath = tmp
-  f.index = buildIndex(f.map.src, skSegd, twosComplement8015, keys, progress)
-  log.add f.index.log
-  f.index.log = log
+  f.idx = buildIndex(f.map.src, skSegd, twosComplement8015, keys, progress)
+  log.add f.idx.log
+  f.idx.log = log
 
 proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode): string
   {.raises: [].}
 
 proc resolveLayout(f: var SeismicFile) =
   # The SEG-Y layout plan of the index just made (see `gr`).
-  if f.index.kind == skSegy and f.index.detected: f.gr = initGeometryReader(f.index.segy)
+  if f.idx.kind == skSegy and f.idx.detected: f.gr = initGeometryReader(f.idx.segy)
 
 proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
@@ -220,14 +233,14 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
   var why = ""
   if cache.len > 0:
     why = f.loadIndex(cache, keys, verify)
-    if why.len == 0 and forced != skUnknown and f.index.kind != forced:
+    if why.len == 0 and forced != skUnknown and f.idx.kind != forced:
       # The cache was saved from another reading of the file than the one
       # the caller names (`OpenOptions.kind`).
       why = "it holds the index of another standard than the one asked for"
-      f.index = TraceIndex()
+      f.idx = TraceIndex()
     if why.len == 0:
       f.cached = true
-      f.walkLog = f.index.log.len
+      f.walkLog = f.idx.log.len
       f.resolveLayout()
       var tk = initProgressTicker(progress, f.map.src.size)
       if not tk.finish(): raiseCancelled()
@@ -238,21 +251,21 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     elif n > 0: detectKind(f.map.src.memory.toOpenArray(0, n - 1))
     else: skUnknown
   if kind != skUnknown:
-    f.index = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify)
-    if kind == skSegd and f.index.multiplexed:
+    f.idx = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify)
+    if kind == skSegd and f.idx.multiplexed:
       if writable:
         raise newException(ValueError, path & " holds multiplexed SEG-D, which cannot be " &
           "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
           "--to=segd`, `convertSegdRevision`) and edit that")
       f.openDemultiplexed(twosComplement8015, keys, demuxDir, progress)
   else:
-    f.index.contiguous = true
-    f.index.log.report(sevFatal, dcUnsupportedFormat,
+    f.idx.contiguous = true
+    f.idx.log.report(sevFatal, dcUnsupportedFormat,
       "not a SEG-Y, SEG-D or SEG-2 file", 0, Location(file: path))
-  f.walkLog = f.index.log.len
+  f.walkLog = f.idx.log.len
   f.resolveLayout()
   if cache.len > 0:
-    f.index.log.report(sevInfo, dcIndexCache, "the index cache " & cache & " was not used (" &
+    f.idx.log.report(sevInfo, dcIndexCache, "the index cache " & cache & " was not used (" &
       why & "); the file was indexed", 0, Location(file: path))
   f
 
@@ -323,18 +336,18 @@ proc parkAndDrop(f: var SeismicFile, next: sink MapRef) =
   var old: MapRef
   acquire(mapLock)
   if f.map.pins > 0:
-    f.map.parkedEntries = move f.index.entries
-    f.map.parkedCodecs = move f.index.codecs
-    f.map.parkedKeys = move f.index.keys
+    f.map.parkedEntries = move f.idx.entries
+    f.map.parkedCodecs = move f.idx.codecs
+    f.map.parkedKeys = move f.idx.keys
     old = f.map
   f.map = next
   release(mapLock)
   if old != nil:
     # Copied outside the lock (10 ms per 500 000 traces with keys); `old`
     # keeps the parked tables alive meanwhile, whatever the pins do.
-    f.index.entries = old.parkedEntries
-    f.index.codecs = old.parkedCodecs
-    f.index.keys = old.parkedKeys
+    f.idx.entries = old.parkedEntries
+    f.idx.codecs = old.parkedCodecs
+    f.idx.keys = old.parkedKeys
     acquire(mapLock)
     old = nil
     release(mapLock)
@@ -381,25 +394,25 @@ func demuxPath*(f: SeismicFile): lent string {.inline.} =
 
 func len*(f: SeismicFile): int {.inline.} =
   ## The number of traces.
-  f.index.entries.len
+  f.idx.entries.len
 
 func kind*(f: SeismicFile): SeismicKind {.inline.} =
   ## SEG-Y, SEG-D or SEG-2; `skUnknown` when the file was not recognized.
-  if f.index.detected: f.index.kind else: skUnknown
+  if f.idx.detected: f.idx.kind else: skUnknown
 
 func log*(f: SeismicFile): lent DiagLog {.inline.} =
   ## Every problem found while indexing.
-  f.index.log
+  f.idx.log
 
 func recordCount*(f: SeismicFile): int =
   ## SEG-D records; 1 for SEG-Y and SEG-2; 0 for an unrecognized file.
-  if not f.index.detected: 0
-  elif f.index.kind == skSegd: f.index.segdRecords.len
+  if not f.idx.detected: 0
+  elif f.idx.kind == skSegd: f.idx.segdRecords.len
   else: 1
 
 func maxSamples*(f: SeismicFile): int {.inline.} =
   ## Samples in the longest trace.
-  f.index.maxSamples
+  f.idx.maxSamples
 
 proc requireTrace*(f: SeismicFile, trace: int) {.inline.} =
   ## **Internal.** Raises `ValueError` for a trace out of range. Not
@@ -419,18 +432,18 @@ func traceEntry*(f: SeismicFile, trace: int): TraceEntry =
   ## channel set, scan type and channel type. Raises `ValueError` for a trace
   ## out of range.
   f.requireTrace(trace)
-  f.index.entries[trace]
+  f.idx.entries[trace]
 
 func hasKeys*(f: SeismicFile): bool {.inline.} =
   ## The index holds per-trace geometry (`openSeismic(keys = true)`).
-  f.index.keys.len == f.index.entries.len
+  f.idx.keys.len == f.idx.entries.len
 
 func traceKeys*(f: SeismicFile, trace: int): TraceKeys =
   ## A trace's geometry (NaN or 0 where unknown). Raises `ValueError` for a
   ## trace out of range or a file opened without `keys`.
   f.requireTrace(trace)
   if not f.hasKeys: raise newException(ValueError, "open the file with keys = true")
-  f.index.keys[trace]
+  f.idx.keys[trace]
 
 proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   ## The SEG-2 Trace Descriptor Block of trace `trace` (fixed part and
@@ -440,7 +453,7 @@ proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   f.requireTrace(trace)
   f.requireOpen()
   var log: DiagLog # already reported by the index walk
-  readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.index.seg2, trace,
+  readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.idx.seg2, trace,
     log, f.path)
 
 func cardLines(text: string): string =
@@ -457,7 +470,7 @@ func textHeader*(f: SeismicFile): string =
   ## trailing newline. Works on a closed file. Raises `ValueError` for a file
   ## that is not SEG-Y.
   f.requireKind(skSegy)
-  cardLines(f.index.segy.text.text)
+  cardLines(f.idx.segy.text.text)
 
 proc extendedTextHeaders*(f: SeismicFile): seq[string] =
   ## SEG-Y Rev 1+: each extended textual header record after the binary
@@ -468,9 +481,9 @@ proc extendedTextHeaders*(f: SeismicFile): seq[string] =
   ## file that is not SEG-Y, or a closed one when the records were too large
   ## to keep in memory.
   f.requireKind(skSegy)
-  template ext: untyped = f.index.segy.extended
+  template ext: untyped = f.idx.segy.extended
   let n = ext.recordCount
-  let start = int64(f.index.segy.tapeLabel.len + TextHeaderSize + BinaryHeaderSize)
+  let start = int64(f.idx.segy.tapeLabel.len + TextHeaderSize + BinaryHeaderSize)
   if not ext.isComplete and n > 0:
     f.requireOpen()
     if start + int64(n * TextHeaderSize) > f.map.src.size:
@@ -534,12 +547,12 @@ type
     segd: array[SegdLayout, SegdTrace]
 
 proc initKeyReader(f: SeismicFile): KeyReader =
-  case f.index.kind
+  case f.idx.kind
   of skSegy:
-    result.useOwn = not f.gr.planFits(f.index.segy)
-    if result.useOwn: result.own = initGeometryReader(f.index.segy)
-    result.timeBasis = timeBasisOf(f.index.segy)
-    result.fixedUs = fixedIntervalUs(f.index.segy)
+    result.useOwn = not f.gr.planFits(f.idx.segy)
+    if result.useOwn: result.own = initGeometryReader(f.idx.segy)
+    result.timeBasis = timeBasisOf(f.idx.segy)
+    result.fixedUs = fixedIntervalUs(f.idx.segy)
   of skSegd: result.segd = [SegdTrace(layout: slRev2), SegdTrace(layout: slRev3)]
   else: discard
 
@@ -550,7 +563,7 @@ template segyPlan(f: SeismicFile, r: KeyReader): ptr GeometryReader =
 
 func segyPlanFits(f: SeismicFile): bool {.inline.} =
   # A SEG-Y file whose layout plan (`gr`) is still that of `index.segy`.
-  f.index.kind == skSegy and f.gr.planFits(f.index.segy)
+  f.idx.kind == skSegy and f.gr.planFits(f.idx.segy)
 
 proc raiseOutside(trace: int) {.noinline, noreturn.} =
   raise newException(ValueError, "the headers of trace " & $trace & " lie outside the file")
@@ -572,16 +585,16 @@ proc segyIntervalOf*(f: SeismicFile, trace: int): float64 =
   ## **Internal** (`headerfields.sampleIntervalUs`). The interval of SEG-Y
   ## trace `trace` from its mapped headers (as `TraceKeys.intervalUs`); NaN
   ## when they lie outside the file. The caller checks the trace and the map.
-  let fixed = fixedIntervalUs(f.index.segy)
+  let fixed = fixedIntervalUs(f.idx.segy)
   if not fixed.isNaN: return fixed
   var h: RawHeaders
-  if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.index.entries[trace], h): NaN
-  else: segyIntervalUs(h, f.index.segy.byteOrder, NaN)
+  if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.idx.entries[trace], h): NaN
+  else: segyIntervalUs(h, f.idx.segy.byteOrder, NaN)
 
 proc keysOf(f: SeismicFile, r: var KeyReader, mem: ptr UncheckedArray[byte], size: int64,
     trace: int): TraceKeys =
   # The keys of `trace` from its mapped headers, as the index walk makes them.
-  template ix: untyped = f.index
+  template ix: untyped = f.idx
   let e = ix.entries[trace]
   let a = int(e.offset)
   let hb = int(e.headerBytes)
@@ -625,7 +638,7 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
   if dst.len != count:
     raise newException(ValueError, "need " & $count & " keys, got " & $dst.len)
   if f.hasKeys:
-    for k in 0 ..< count: dst[k] = f.index.keys[traceAt(k)]
+    for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)]
   elif count > 0:
     f.requireOpen()
     let mem = f.unsafeMemory
@@ -633,12 +646,12 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
     if f.segyPlanFits:
       # SEG-Y with the file's own plan: no per-call reader to set up (100 ns
       # of a 400 ns call for one trace).
-      let timeBasis = timeBasisOf(f.index.segy)
-      let fixedUs = fixedIntervalUs(f.index.segy)
+      let timeBasis = timeBasisOf(f.idx.segy)
+      let fixedUs = fixedIntervalUs(f.idx.segy)
       for k in 0 ..< count:
         let trace = traceAt(k)
         var h: RawHeaders
-        if not mappedSegyHeaders(mem, size, f.index.entries[trace], h): raiseOutside(trace)
+        if not mappedSegyHeaders(mem, size, f.idx.entries[trace], h): raiseOutside(trace)
         dst[k] = segyKeys(f.gr, h, timeBasis, fixedUs)
     else:
       var r = initKeyReader(f)
@@ -692,10 +705,10 @@ proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
   var keys = newSeq[TraceKeys](n)
   for i in 0 ..< n:
     keys[i] = f.keysOf(r, mem, size, i)
-    if not tick.tick(f.index.entries[i].offset): raiseCancelled()
+    if not tick.tick(f.idx.entries[i].offset): raiseCancelled()
   if not tick.finish(): raiseCancelled()
-  f.index.keys = move keys
-  inc f.index.keysRevision
+  f.idx.keys = move keys
+  inc f.idx.keysRevision
 
 func keepJoined(k: var TraceKeys, old: TraceKeys, groups: set[JoinGroup]) =
   # The values a join wrote win over the headers (Phase 16, D2), group by
@@ -754,27 +767,27 @@ proc refreshKeys*(f: var SeismicFile, traces: openArray[int]): bool =
     var k: TraceKeys
     try: k = f.keysOf(r, mem, size, t)
     except ValueError: continue
-    k.keepJoined(f.index.keys[t], f.index.joinedGroups(t))
-    if not sameKeys(k, f.index.keys[t]):
-      f.index.keys[t] = k
+    k.keepJoined(f.idx.keys[t], f.idx.joinedGroups(t))
+    if not sameKeys(k, f.idx.keys[t]):
+      f.idx.keys[t] = k
       result = true
-  if result: inc f.index.keysRevision
+  if result: inc f.idx.keysRevision
 
 proc refreshSegyInterval*(f: var SeismicFile) =
   ## **Internal** (`HeaderEditor`). `index.segyIntervalUs` after an edit of
   ## an interval field: the binary header's for a fixed-length file, else the
   ## one every stored key agrees on (NaN when they differ); kept as it was
   ## for a file without stored keys whose traces give their own.
-  if f.index.kind != skSegy: return
-  let fixed = fixedIntervalUs(f.index.segy)
+  if f.idx.kind != skSegy: return
+  let fixed = fixedIntervalUs(f.idx.segy)
   if not fixed.isNaN:
-    f.index.segyIntervalUs = fixed
+    f.idx.segyIntervalUs = fixed
   elif f.hasKeys and f.len > 0:
-    let dt = f.index.keys[0].intervalUs
+    let dt = f.idx.keys[0].intervalUs
     var same = true
-    for k in f.index.keys:
+    for k in f.idx.keys:
       if k.intervalUs != dt: same = false
-    f.index.segyIntervalUs = if same: dt else: NaN
+    f.idx.segyIntervalUs = if same: dt else: NaN
 
 func keysRevision*(f: SeismicFile): int {.inline.} =
   ## 0 as opened; goes up whenever the stored keys change (`ensureKeys`,
@@ -784,13 +797,13 @@ func keysRevision*(f: SeismicFile): int {.inline.} =
   ## had stored keys read them in place and so see every later change; those
   ## made before `ensureKeys` have no keys and must be made again (see
   ## `ensureKeys`).
-  f.index.keysRevision
+  f.idx.keysRevision
 
 template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt: untyped) =
   if dst.len != count:
     raise newException(ValueError, "need " & $count & " values, got " & $dst.len)
   if f.hasKeys:
-    for k in 0 ..< count: dst[k] = f.index.keys[traceAt(k)].t0Ms
+    for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)].t0Ms
   elif count > 0:
     f.requireOpen()
     let mem = f.unsafeMemory
@@ -800,7 +813,7 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
       for k in 0 ..< count:
         let trace = traceAt(k)
         var h: RawHeaders
-        if not mappedSegyHeaders(mem, size, f.index.entries[trace], h): raiseOutside(trace)
+        if not mappedSegyHeaders(mem, size, f.idx.entries[trace], h): raiseOutside(trace)
         dst[k] = segyStartTimeMs(f.gr, h)
     else:
       var r = initKeyReader(f)
@@ -856,9 +869,9 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
   let size = f.mappedSize
   for k in 0..<count:
     let i = traceAt(k)
-    let e = f.index.entries[i]
+    let e = f.idx.entries[i]
     let p = rowAt(k)
-    let st = tryDecodeEntry(mem, size, e, f.index.codecs[e.record], p, cols, first)
+    let st = tryDecodeEntry(mem, size, e, f.idx.codecs[e.record], p, cols, first)
     if st != dsOk:
       for c in 0..<cols: p[c] = T(0)
       when failedRows isnot typeof(nil):
@@ -866,13 +879,13 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
       else:
         log.report(sevError, if st == dsTruncated: dcTruncated else: dcUnsupportedFormat,
           decodeMessages[st], e.offset, Location(file: f.path,
-            record: if f.index.kind == skSeg2: 0 else: int(e.record), trace: i))
+            record: if f.idx.kind == skSeg2: 0 else: int(e.record), trace: i))
       inc failed
   failed
 
 proc checkReadable(f: SeismicFile, count: int) =
   if count > 0: f.requireOpen()
-  if not f.index.contiguous:
+  if not f.idx.contiguous:
     raise newException(ValueError, "range reads need a plain disk file")
 
 proc checkSelection(f: SeismicFile, traces: Slice[int]) {.inline.} =
@@ -892,16 +905,16 @@ proc advise(f: SeismicFile, traces: Slice[int], cols, first: int) {.inline.} =
   # Read-ahead advice for a checked range (see `adviseTraces`).
   if traces.b - traces.a >= 0:
     adviseTraces(f.unsafeMemory, f.mappedSize,
-      cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0]),
-      cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0]),
+      cast[ptr UncheckedArray[TraceEntry]](addr f.idx.entries[0]),
+      cast[ptr UncheckedArray[TraceCodec]](addr f.idx.codecs[0]),
       nil, traces.a, traces.b + 1, cols, first)
 
 proc advise(f: SeismicFile, traces: openArray[int], cols, first: int) {.inline.} =
   # Read-ahead advice for a checked selection (see `adviseTraces`).
   if traces.len > 0:
     adviseTraces(f.unsafeMemory, f.mappedSize,
-      cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0]),
-      cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0]),
+      cast[ptr UncheckedArray[TraceEntry]](addr f.idx.entries[0]),
+      cast[ptr UncheckedArray[TraceCodec]](addr f.idx.codecs[0]),
       cast[ptr UncheckedArray[int]](addr traces[0]), 0, traces.len, cols, first)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
@@ -1095,13 +1108,13 @@ func maxSamples*(f: SeismicFile, traces: Slice[int]): int =
   ## `ValueError` for traces outside the file (an empty range must still
   ## start in `0 .. f.len`).
   f.checkSelection(traces)
-  for i in traces: result = max(result, int(f.index.entries[i].numSamples))
+  for i in traces: result = max(result, int(f.idx.entries[i].numSamples))
 
 func maxSamples*(f: SeismicFile, traces: openArray[int]): int =
   ## Largest sample count of the selected traces. Raises `ValueError` for a
   ## trace outside the file.
   f.checkSelection(traces)
-  for i in traces: result = max(result, int(f.index.entries[i].numSamples))
+  for i in traces: result = max(result, int(f.idx.entries[i].numSamples))
 
 proc readTraces*(f: SeismicFile, traces: Slice[int], log: var DiagLog,
     T: typedesc[SampleType] = float32): Tensor[T] =
@@ -1203,6 +1216,11 @@ proc applyGeometry*(ix: var TraceIndex, g: GeometryTable, overwrite = false): in
     ix.joined = true # only now: an index no join changed is still the file's own
     inc ix.keysRevision
 
+proc applyGeometry*(f: var SeismicFile, g: GeometryTable, overwrite = false): int =
+  ## `applyGeometry` on the file's index (its stored keys): the number of
+  ## traces changed. Raises `ValueError` for a file opened without keys.
+  f.idx.applyGeometry(g, overwrite)
+
 # ------------------------------------------------------------ index cache --
 # The file format is `private/indexcache`.
 
@@ -1214,7 +1232,7 @@ proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode
     {.raises: [].} =
   # Reads `f.index` from the cache `cache`: "" when done, else why not
   # (then `f.index` is unchanged).
-  readIndexCache(cache, f.cacheKey, keys, verify, f.index)
+  readIndexCache(cache, f.cacheKey, keys, verify, f.idx)
 
 proc saveIndex*(f: SeismicFile, path: string) =
   ## Writes `f`'s index to the index cache `path`, for `openSeismic(path,
@@ -1233,16 +1251,16 @@ proc saveIndex*(f: SeismicFile, path: string) =
   ## opened, or `path` naming the file itself; `IOError`/`OSError` if the
   ## cache cannot be written.
   f.requireOpen()
-  if not f.index.detected:
+  if not f.idx.detected:
     raise newException(ValueError, f.path & " is not a SEG-Y, SEG-D or SEG-2 file")
   if f.demuxPath.len > 0:
     raise newException(ValueError, f.path & " was indexed through a demultiplexed copy, " &
       "which is not cached")
-  if f.index.joined:
+  if f.idx.joined:
     raise newException(ValueError, "the trace keys were changed by applyGeometry or " &
       "applySurvey; save the index before joining geometry")
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(ValueError, "the index cache " & path & " is the seismic file itself")
   if stampOf(f.path) != f.stamp:
     raise newException(ValueError, f.path & " changed since it was opened; open it again")
-  writeIndexCache(path, f.cacheKey, f.index, f.walkLog, f.hasKeys)
+  writeIndexCache(path, f.cacheKey, f.idx, f.walkLog, f.hasKeys)

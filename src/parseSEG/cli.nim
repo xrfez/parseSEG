@@ -275,7 +275,7 @@ proc joinSurvey(a: Args, f: var SeismicFile): DiagLog =
   ## what was joined.
   let g = loadSurvey(a, result)
   var stats: JoinStats
-  discard f.index.applySurvey(g, stats, a.has("overwrite"))
+  discard f.applySurvey(g, stats, a.has("overwrite"))
   echo "survey:      ", g.table.sources.len, " sources, ", g.table.receivers.len,
     " receivers, ", g.relationCount, " X + ", g.relationCount(rdReceiver), " O relation runs"
   echo "joined:      ", stats
@@ -939,7 +939,7 @@ proc surveyApply(a: Args): int =
   let g = loadSurvey(a, log)
   let overwrite = a.has("overwrite")
   var stats: JoinStats
-  discard f.index.applySurvey(g, stats, overwrite)
+  discard f.applySurvey(g, stats, overwrite)
   echo "survey:      ", g.sourceCount, " sources, ", g.receiverCount, " receivers, ",
     g.relationCount, " X + ", g.relationCount(rdReceiver), " O relation runs"
   echo "joined:      ", stats

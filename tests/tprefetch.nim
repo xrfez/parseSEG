@@ -85,7 +85,7 @@ block subrange_seek_and_float64:
 
 block undecodable_traces_are_counted:
   var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
-  f.index.entries[3].numSamples = 1_000_000_000 # points past the end of the file
+  f.mindex.entries[3].numSamples = 1_000_000_000 # points past the end of the file
   var p = newPrefetcher[float32](f, 0 ..< 5, chunkTraces = 5, cols = 10)
   var c: PrefetchChunk[float32]
   doAssert p.next(c) and c.failed == 1
@@ -157,7 +157,7 @@ block failed_rows_are_logged:
   # A trace that cannot be decoded is a zero row, counted and logged in its
   # chunk with its trace index, record and offset.
   var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
-  f.index.entries[6].numSamples = 1_000_000 # its samples now lie past the end
+  f.mindex.entries[6].numSamples = 1_000_000 # its samples now lie past the end
   var p = newPrefetcher[float32](f, @[9, 6, 2], chunkTraces = 2, depth = 2, cols = 8)
   var c: PrefetchChunk[float32]
   doAssert p.next(c) and c.failed == 1 and c.log.len == 1
@@ -519,7 +519,7 @@ block workers_match_one_worker:
 block workers_with_failed_rows:
   # Undecodable rows are zero and logged alike on every worker.
   var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
-  for t in [3, 50, 51, 199]: f.index.entries[t].numSamples = 1_000_000_000
+  for t in [3, 50, 51, 199]: f.mindex.entries[t].numSamples = 1_000_000_000
   var one = newPrefetcher[float32](f, 0 ..< f.len, 7, 3, cols = 16)
   let a = one.drain
   one.close()
@@ -628,7 +628,7 @@ block quick_first_after_seek:
 
 block p6_b6_prefetch_of_zero_width_chunks:
   var f = openSeismic(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
-  for i in 0..<10: f.index.entries[i].numSamples = 0
+  for i in 0..<10: f.mindex.entries[i].numSamples = 0
   var p = newPrefetcher[float32](f, 0 ..< 10, chunkTraces = 7, depth = 2)
   var c: PrefetchChunk[float32]
   var n = 0

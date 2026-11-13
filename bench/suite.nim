@@ -544,7 +544,7 @@ proc write() =
     removeFile(journal)
     # Geometry write-back: shift every receiver by 1 m, write it.
     var f = openSeismic(copy, keys = true)
-    for k in f.index.keys.mitems:
+    for k in f.mindex.keys.mitems:
       if f.kind == skSegy:
         k.rcvX += 1
         k.rcvY += 1

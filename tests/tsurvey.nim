@@ -636,7 +636,7 @@ block a_join_that_changes_nothing_is_no_change:
   var f = openSeismic(dir / "record.sgd", keys = true)
   var stats: JoinStats
   doAssert f.applySurvey(initSurveyGeometry(), stats) == 0 and stats.changed == 0
-  doAssert f.index.applyGeometry(GeometryTable()) == 0
+  doAssert f.applyGeometry(GeometryTable()) == 0
   doAssert f.keysRevision == 0 and not f.index.joined
   f.saveIndex(dir / "record.idx") # an index no join changed is the file's own
   doAssert f.applySurvey(g, stats, overwrite = true) == 1 and stats.changed == 1
@@ -644,7 +644,7 @@ block a_join_that_changes_nothing_is_no_change:
   let joined = f.index.joinedGroups(0)
   for _ in 1 .. 2:
     doAssert f.applySurvey(g, stats, overwrite = true) == 0 and stats.changed == 0, $stats
-    doAssert stats.matches[jmStations] == 1 and f.index.applyGeometry(g.table, true) == 0
+    doAssert stats.matches[jmStations] == 1 and f.applyGeometry(g.table, true) == 0
     doAssert f.keysRevision == 1 and f.index.joinedGroups(0) == joined
   doAssertRaises(ValueError): f.saveIndex(dir / "record.idx")
   f.close()
