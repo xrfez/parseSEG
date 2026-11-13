@@ -123,6 +123,10 @@ let log = w.close()                                # writes to a temp file, rena
 doAssert not log.isFatal
 ```
 
+To write geometry joined from survey files (`applySurvey`) or edited in memory, which the
+input's headers do not hold, pass the trace's keys: `w.writeTrace(f, i, t, 0, f.index.keys[i])`
+(open the input with `keys = true`).
+
 ### Edit headers in place
 
 Edits are journaled and can be undone:
@@ -167,7 +171,7 @@ for r in segd.records:
 
 A map that fails to load is skipped with a warning in `log`. `parseSEG vendormap scaffold` writes a starting map for every area that no map decodes yet.
 
-To join survey geometry, see `readSps`, `SurveyGeometry`, `applySurvey` and `writeGeometry` in the [conversion guide](docs/guide/conversion.md).
+To join survey geometry, see `readSps`, `SurveyGeometry` (with its grid unit from the SPS header), `applySurvey` and `writeGeometry` in the [conversion guide](docs/guide/conversion.md).
 
 ## Command line tool
 
