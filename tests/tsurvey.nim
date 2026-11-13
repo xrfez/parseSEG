@@ -631,7 +631,8 @@ block a_join_that_changes_nothing_is_no_change:
   var g: SurveyGeometry
   g.addSps(parseSps([H00,
     r21('R', "10.00", "104.00", '1', "G1", "500100.0", "6000000.0", "12.5"),
-    r21('S', "20.00", "99.50", '1', "V6", "500000.0", "6000400.0", "10.0", " 19001150")].join("\n")))
+    r21('S', "20.00", "99.50", '1', "V6", "500000.0", "6000400.0", "10.0",
+      " 19001150")].join("\n")))
   var f = openSeismic(dir / "record.sgd", keys = true)
   var stats: JoinStats
   doAssert f.applySurvey(initSurveyGeometry(), stats) == 0 and stats.changed == 0
@@ -786,8 +787,8 @@ block a_built_sps_file_is_written:
   sel.points[0].raw = ""
   sel.revision = spsAuto # set by hand: still the 2.1 layout
   t = spsText(sel)
-  doAssert t.log.len == 0 and parseSps(t.text, opts = SpsOptions(revision: sps21)).points[0].point ==
-    534600
+  doAssert t.log.len == 0
+  doAssert parseSps(t.text, opts = SpsOptions(revision: sps21)).points[0].point == 534600
   var x = SpsFile()
   var r = initSpsRelation()
   (r.fieldRecord, r.fromChannel, r.toChannel) = (7'i64, 1'i64, 4'i64)

@@ -86,9 +86,9 @@ type
     ## One run of a record's relations (an X or O record of the survey
     ## file), as `relationRuns` yields it: `stations` evenly spaced stations
     ## of one line. Station `i` (0-based) is `station(run, i)`, at point
-    ## `firstPoint + i * pointStep`; its channel (the trace of a gather for
-    ## O) is `fromChannel + i * channelStep`, the first of `components`
-    ## consecutive channels.
+    ## `firstPoint + i * pointStep`. Its channel (for an O record: its trace
+    ## in the gather) is `fromChannel + i * channelStep`, the first of
+    ## `components` consecutive channels.
     fromChannel*: int64 ## The channel of the first station.
     toChannel*: int64   ## The last channel of the last station.
     channelStep*: int64 ## Channels from one station to the next.

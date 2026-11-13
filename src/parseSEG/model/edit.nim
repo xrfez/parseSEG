@@ -28,12 +28,13 @@
 ##   be rolled back.
 ##
 ## A refused edit returns false and leaves a diagnostic in `log` (the first
-## 1000 of a session; the rest are counted); it never raises. A journal entry that cannot be written or synced to disk refuses
-## its edit (and, in a batch, every edit not yet on the map): the map is
-## written only after its journal entry is safely on disk, and the entries
-## of refused edits are cut from the journal again (if that fails, the
-## editor refuses all further edits). Not available on
-## tape (there is no map); `contiguous` sources only.
+## 1000 of a session; the rest are counted); it never raises. A journal
+## entry that cannot be written or synced to disk refuses its edit (and, in
+## a batch, every edit not yet on the map): the map is written only after
+## its journal entry is safely on disk, and the entries of refused edits are
+## cut from the journal again (if that fails, the editor refuses all further
+## edits). Not available on tape (there is no map); `contiguous` sources
+## only.
 ##
 ## Fields are named `<block>.<field>`, with the field names of the header
 ## types:

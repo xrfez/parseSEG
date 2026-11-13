@@ -589,7 +589,8 @@ block current_fields_read_through_an_editor_that_is_not_var:
   if fileExists(path & ".edits.nif"): removeFile(path & ".edits.nif")
   proc peek(ed: HeaderEditor): (int64, int64) =
     # Compiles only when the readers take the editor by value.
-    (ed.currentTraceField(3, "trace.groupStatic").intVal, ed.currentFileField("binary.jobId").intVal)
+    (ed.currentTraceField(3, "trace.groupStatic").intVal,
+      ed.currentFileField("binary.jobId").intVal)
   var ed = openEditor(path)
   ed.beginBatch()
   doAssert ed.setTraceField(3, "trace.groupStatic", -7) and ed.setFileField("binary.jobId", 77)
