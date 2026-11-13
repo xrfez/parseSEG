@@ -73,7 +73,8 @@ export gathers, prefetch, headernif, summary, headerlist, sorting, writefile, tr
   statics
 
 import parseSEG/survey/[textrec, sps, p1, join, writeback]
-export textrec, sps, p1, join, writeback
+export textrec, sps, p1, join
+export writeback except KeysPlan, planKeys, finishKeys # internal: model/writefile
 
 import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
 export records, diskio, memsource, tapeimage, tapedevice

@@ -241,6 +241,13 @@ for input in ["survey.sgy", "shot.sgd", "line.sg2"]:
 
 Options and rules:
 
+- **Geometry held in memory.** The headers written are the input trace's as they lie in
+  the file. Keys joined from survey files (`applySurvey`, `applyGeometry`) or changed in
+  memory are not in them: pass the keys, `w.writeTrace(f, i, samples, f.index.keys[i])`
+  (or `buf, row, keys`), and their geometry is written into the headers as `writeGeometry`
+  writes it (SEG-Y through the layout, SEG-D THE#1 and Rev 3 position blocks, SEG-2
+  location and station strings). A value with no field in the trace is reported once by
+  `close`, with a count; `GeometryFields` (`fields = ...`) selects the values.
 - **Sample format.** `openSeismicWriter(path, f, segyFormat = st5)` (or `segdFormat = tf8048`,
   `seg2Format = s2t4`, for the input's standard) writes another format; the format code is
   the only header change (SEG-D Rev 3 also updates General Header #3's sizes). A value the

@@ -489,16 +489,20 @@ proc planSegy(p: var Planner, trace: int, k: TraceKeys, buf: var seq[byte]): set
     if stationDiffers(k.srcPoint, cur.srcPoint):
       up(nEspnum, k.srcPoint, vSrcStation, 'p')
       up(nSp, k.srcPoint, vSrcStation, 'p')
-    template station(n: Name, x: float64, w: Value, pt: char) =
-      let held = p.slotValue(buf, n)
-      if stationDiffers(x, held):
-        p.ups.add Update(name: n, value: x, what: w, part: pt, before: held)
-    station(nShtLine, k.srcLine, vSrcStation, 'l')
-    station(nShtPoint, k.srcPoint, vSrcStation, 'p')
-    station(nRecLine, k.rcvLine, vRcvStation, 'l')
-    station(nRecPoint, k.rcvPoint, vRcvStation, 'p')
-    if k.srcIndex != 0: station(nShtIndex, float64(k.srcIndex), vSrcStation, 'i')
-    if k.rcvIndex != 0: station(nRecIndex, float64(k.rcvIndex), vRcvStation, 'i')
+    # A part the headers already hold (as the keys read them, e.g. the
+    # point in espnum) is no change, and needs no other field.
+    template station(n: Name, x, held: float64, w: Value, pt: char) =
+      let slot = p.slotValue(buf, n)
+      if stationDiffers(x, held) and stationDiffers(x, slot):
+        p.ups.add Update(name: n, value: x, what: w, part: pt, before: slot)
+    station(nShtLine, k.srcLine, cur.srcLine, vSrcStation, 'l')
+    station(nShtPoint, k.srcPoint, cur.srcPoint, vSrcStation, 'p')
+    station(nRecLine, k.rcvLine, cur.rcvLine, vRcvStation, 'l')
+    station(nRecPoint, k.rcvPoint, cur.rcvPoint, vRcvStation, 'p')
+    if k.srcIndex != 0:
+      station(nShtIndex, float64(k.srcIndex), float64(cur.srcIndex), vSrcStation, 'i')
+    if k.rcvIndex != 0:
+      station(nRecIndex, float64(k.rcvIndex), float64(cur.rcvIndex), vRcvStation, 'i')
   if p.ups.len == 0: return
   for kind in ScaledKinds: p.writeScaledGroup(buf, trace, kind)
   for i in 0 ..< p.ups.len: p.writeUnscaled(buf, trace, i)
@@ -758,6 +762,40 @@ proc planTrace(p: var Planner, ix: TraceIndex, trace: int, k: TraceKeys,
   of skSegy: p.planSegy(trace, k, buf)
   of skSegd: p.planSegd(ix.segdRecords[ix.entries[trace].record], trace, k, buf)
   of skSeg2, skUnknown: {}
+
+# --------------------------------------------- keys into written traces --
+# **Internal**, for `model/writefile`'s `writeTrace(w, src, trace, samples,
+# keys)`: the same rules, trace by trace, into a copy of a template trace's
+# header bytes. The umbrella module does not export these.
+
+type
+  KeysPlan* = object
+    ## **Internal.** A planner kept by a writer for one template file.
+    p: Planner
+    ready: bool
+    path: string
+    fields: GeometryFields
+
+proc planKeys*(kp: var KeysPlan, src: SeismicFile, trace: int, k: TraceKeys,
+    buf: var seq[byte], fields: GeometryFields) =
+  ## **Internal.** Writes the geometry of `k` into `buf`, the header bytes of
+  ## trace `trace` of `src` (SEG-Y or SEG-D), as write-back writes it;
+  ## values without a slot or too large for theirs are counted for
+  ## `finishKeys`.
+  if not kp.ready or kp.path != src.path or kp.fields != fields:
+    if kp.ready: kp.p.summarize()
+    let log = move kp.p.log
+    kp = KeysPlan(p: initPlanner(src.index, src.path, fields), ready: true, path: src.path,
+      fields: fields)
+    kp.p.log = log
+  kp.p.count(kp.p.planTrace(src.index, trace, k, buf))
+
+proc finishKeys*(kp: var KeysPlan): DiagLog =
+  ## **Internal.** The reports of every `planKeys` call (values without a
+  ## slot, values refused, rounding), summarized once.
+  if kp.ready: kp.p.summarize()
+  result = move kp.p.log
+  kp.ready = false
 
 proc checkGeometryInput(f: SeismicFile, keys: openArray[TraceKeys]) =
   f.requireOpen()

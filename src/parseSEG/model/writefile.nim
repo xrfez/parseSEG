@@ -30,6 +30,12 @@
 ## trace, so the input trace serves as a template: a stacked trace with a
 ## source trace's headers and its own CDP, fold, offset and coordinates.
 ##
+## `writeTrace(w, src, trace, samples, keys)` writes the geometry of `keys`
+## into the template's headers first, where it differs from what they hold:
+## keys joined from survey files (`applySurvey`) or edited in memory are not
+## in the mapped headers. The slots are those of write-back (`writeGeometry`);
+## values with no slot are reported by `close`.
+##
 ## Without a template: `openSeismicWriter(path, SegyOutputOptions(...))`
 ## writes a new SEG-Y file whose file headers come from the options, and
 ## `writeTrace(w, keys, samples, overrides)` builds each trace's headers
@@ -66,6 +72,9 @@ import ../seg2/[reader as seg2reader, writer as seg2writer]
 import ../convert
 import std/strutils
 import ./[traceindex, fieldvalues, keytypes]
+from ./keys import traceKeys
+from ../survey/join import GeometryFields
+from ../survey/writeback import KeysPlan, planKeys, finishKeys
 import ../common/tensors
 import ../private/[tensorrows, fieldaccess, segyencode]
 import ../version
@@ -100,6 +109,11 @@ type
     ## Discards what it is given: `openSeismicWriter` validates the SEG-Y
     ## file headers with it before the first trace fixes the sample count.
 
+  Seg2NoSlot = enum
+    ## SEG-2 key values that have no string to go in (`writeTrace` with keys).
+    nsLine = "a source line other than the receiver line (SEG-2 has one LINE_ID)"
+    nsZ = "an elevation without its location's X/Y"
+
   WriterState = object
     kind: SeismicKind
     path, tmp: string     ## The output, and its temporary file ("" once gone).
@@ -126,6 +140,12 @@ type
     # SEG-2
     seg2: Seg2Writer
     seg2Format: Option[Seg2SampleFormat] ## none: each trace's own.
+    # Traces written with keys (`writeTrace(w, src, trace, samples, keys)`)
+    keysPlan: KeysPlan    ## Write-back's planner for the template file.
+    hdr: seq[byte]        ## A template trace's header bytes, reused.
+    seg2NoSlot: array[Seg2NoSlot, int]   ## SEG-2 key values without a string to go in.
+    seg2NoSlotFirst: array[Seg2NoSlot, int] ## The first trace of each.
+
 
   SeismicWriter* = object
     ## Writes traces "like" an input file; create with `openSeismicWriter`,
@@ -354,25 +374,47 @@ proc setFileCount(b: var SegyBinaryHeader, n: int) =
     b.extSamplesPerTrace = uint32(n)
   b.samplesPerTrace = if n > int(high(uint16)): 0'u16 else: uint16(n)
 
-proc loadSegyTrace(src: SeismicFile, trace: int, t: var SegyTrace) =
-  # Trace `trace`'s headers from the map, as the reader gives them.
+proc headerBytes(src: SeismicFile, trace: int, minimum: int): (int, int) =
+  # Where trace `trace`'s header bytes start in the map, and how many there
+  # are (at least `minimum`); `ValueError` when they lie outside the file.
   let e = src.index.entries[trace]
-  let mem = src.unsafeMemory
-  let a = int(e.offset)
-  let hb = int(e.headerBytes)
-  if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > src.mappedSize:
+  let n = max(int(e.headerBytes), minimum)
+  if e.offset < 0 or e.offset + n > src.mappedSize:
     refuse("the headers of trace " & $trace & " lie outside the file")
+  (int(e.offset), n)
+
+proc loadSegyTrace(src: SeismicFile, trace: int, h: openArray[byte], t: var SegyTrace) =
+  # Trace `trace`'s headers from `h` (its header bytes), as the reader
+  # gives them.
+  let e = src.index.entries[trace]
+  let hb = int(e.headerBytes)
   let order = src.index.segy.byteOrder
-  t.header = decodeTraceHeader(mem.toOpenArray(a, a + TraceHeaderSize - 1), order)
+  t.header = decodeTraceHeader(h.toOpenArray(0, TraceHeaderSize - 1), order)
   t.hasExt1 = hb >= 2 * TraceHeaderSize
   if t.hasExt1:
-    t.ext1 = decodeTraceHeaderExt1(
-      mem.toOpenArray(a + TraceHeaderSize, a + 2 * TraceHeaderSize - 1), order)
+    t.ext1 = decodeTraceHeaderExt1(h.toOpenArray(TraceHeaderSize, 2 * TraceHeaderSize - 1),
+      order)
   let extra = max(hb - 2 * TraceHeaderSize, 0)
   t.proprietary.setLen extra
-  if extra > 0: copyMem(addr t.proprietary[0], addr mem[a + 2 * TraceHeaderSize], extra)
+  if extra > 0: copyMem(addr t.proprietary[0], addr h[2 * TraceHeaderSize], extra)
   t.numSamples = int(e.numSamples)
   t.offset = e.offset
+
+template withTemplateHeaders(s: var WriterState, src: SeismicFile, trace, minimum: int,
+    keys: ptr TraceKeys, fields: GeometryFields, h, body: untyped) =
+  # Runs `body` with `h`, trace `trace`'s header bytes: in the map, or with
+  # `keys` a copy of them with the keys' geometry written in (write-back).
+  let (a, n) = src.headerBytes(trace, minimum)
+  if keys == nil:
+    let mem = src.unsafeMemory
+    template h: untyped = mem.toOpenArray(a, a + n - 1)
+    body
+  else:
+    s.hdr.setLen n
+    copyMem(addr s.hdr[0], addr src.unsafeMemory[a], n)
+    s.keysPlan.planKeys(src, trace, keys[], s.hdr, fields)
+    template h: untyped = s.hdr.toOpenArray(0, n - 1)
+    body
 
 proc noteCount(s: var WriterState, n: int) =
   # A trace of `n` samples was written.
@@ -394,7 +436,8 @@ proc overrideSegy(t: var SegyTrace, overrides: openArray[HeaderOverride]) =
     else: refuse(o.name & ": SEG-Y trace blocks are trace and ext1")
 
 proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
-    samples: openArray[T], overrides: openArray[HeaderOverride]) =
+    samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
+    fields: GeometryFields) =
   if s.segyFresh:
     # Its binary header (interval, Ext1 count) is made for traces from keys;
     # a template trace's headers would disagree with it.
@@ -402,7 +445,8 @@ proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
       "(writeTrace(w, keys, samples)), not template traces")
   let n = samples.len
   template t: untyped = s.segyTrace
-  loadSegyTrace(src, trace, t)
+  withTemplateHeaders(s, src, trace, TraceHeaderSize, keys, fields, h):
+    loadSegyTrace(src, trace, h, t)
   t.overrideSegy(overrides)
   # Also when the headers do not say what the reader took: a Rev 0 trace
   # may give 0 samples and leave the count to the binary header.
@@ -491,17 +535,15 @@ proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
 
 # ----------------------------------------------------------------- SEG-D --
 
-proc loadSegdTrace(src: SeismicFile, trace: int, rec: SegdRecord, first: int): SegdTrace =
-  # Trace `trace`'s headers from the map, as the reader gives them.
+proc loadSegdTrace(src: SeismicFile, trace: int, rec: SegdRecord,
+    mem: openArray[byte]): SegdTrace =
+  # Trace `trace`'s headers from `mem` (its header bytes), as the reader
+  # gives them.
   let e = src.index.entries[trace]
-  let mem = src.unsafeMemory
-  let a = int(e.offset)
   let hb = int(e.headerBytes)
-  if e.offset < 0 or e.offset + hb > src.mappedSize or hb < SegdTraceHeaderSize:
-    refuse("the headers of trace " & $trace & " lie outside the file")
   result = SegdTrace(layout: rec.layout)
-  result.header = decodeBlock[SegdTraceHeader](mem.toOpenArray(a, a + SegdTraceHeaderSize - 1))
-  let b1 = a + SegdTraceHeaderSize
+  result.header = decodeBlock[SegdTraceHeader](mem.toOpenArray(0, SegdTraceHeaderSize - 1))
+  let b1 = SegdTraceHeaderSize
   let extra = hb - SegdTraceHeaderSize - SegdBlockSize
   if extra >= 0:
     case rec.layout
@@ -518,7 +560,6 @@ proc loadSegdTrace(src: SeismicFile, trace: int, rec: SegdRecord, first: int): S
   result.scanType = int(e.scanType)
   result.channelSet = e.channelSetIndex
   result.numSamples = int(e.numSamples)
-  result.index = trace - first
 
 proc finishRecord(s: var WriterState) =
   if s.nextTrace != s.recLast + 1:
@@ -588,7 +629,8 @@ proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
     else: refuse(o.name & ": SEG-D trace blocks are trace and ext1")
 
 proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
-    samples: openArray[T], overrides: openArray[HeaderOverride]) =
+    samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
+    fields: GeometryFields) =
   if src.demuxPath.len > 0:
     refuse(src.path & " holds multiplexed SEG-D; convert it to a demultiplexed file first")
   let e = src.index.entries[trace]
@@ -596,8 +638,12 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     refuse("a SEG-D trace keeps its sample count (the channel set descriptors hold it): " &
       "trace " & $trace & " has " & $e.numSamples & ", " & $samples.len & " were given")
   let r = int(e.record)
+  if int(e.headerBytes) < SegdTraceHeaderSize:
+    refuse("the headers of trace " & $trace & " lie outside the file")
   # The overrides are checked before the record's headers can be written.
-  var t = loadSegdTrace(src, trace, src.index.segdRecords[r], trace)
+  var t: SegdTrace
+  withTemplateHeaders(s, src, trace, SegdTraceHeaderSize, keys, fields, h):
+    t = loadSegdTrace(src, trace, src.index.segdRecords[r], h)
   t.overrideSegd(overrides)
   if s.inRecord and s.recPath == src.path and s.recIndex == r:
     if trace != s.nextTrace:
@@ -621,9 +667,55 @@ proc closeSegd(s: var WriterState, log: var DiagLog) =
 
 # ----------------------------------------------------------------- SEG-2 --
 
+func seg2Number(v: float64): string =
+  # A SEG-2 number string: whole values without a fraction.
+  if v == round(v) and abs(v) < 1e15: $int64(v) else: $v
+
+proc seg2Geometry(s: var WriterState, src: SeismicFile, trace: int, t: var Seg2Trace,
+    k: TraceKeys, fields: GeometryFields) =
+  # The keys' geometry into the trace's strings, where it differs from what
+  # they hold: SOURCE_/RECEIVER_LOCATION (x y, and z less DATUM),
+  # SOURCE_/RECEIVER_STATION_NUMBER, and LINE_ID when both lines are one.
+  let cur = traceKeys(src.index.seg2, t)
+  let datum = block:
+    let d = t.number("DATUM")
+    if d.isSome: d.get
+    else:
+      let fd = src.index.seg2.number("DATUM")
+      if fd.isSome: fd.get else: 0.0
+  template known(v: float64): bool = not v.isNaN
+  template same(a, b: float64): bool = a == b or (a.isNaN and b.isNaN)
+  template noSlot(why: Seg2NoSlot) =
+    if s.seg2NoSlot[why] == 0: s.seg2NoSlotFirst[why] = trace
+    inc s.seg2NoSlot[why]
+  template location(key: string, x, y, z, cx, cy, cz: float64, writeXy: bool) =
+    let nx = if writeXy and known(x) and known(y): x else: cx
+    let ny = if writeXy and known(x) and known(y): y else: cy
+    let nz = if fields.elevations and known(z): z else: cz
+    if not (same(nx, cx) and same(ny, cy) and same(nz, cz)):
+      if known(nx) and known(ny):
+        t[key] = seg2Number(nx) & " " & seg2Number(ny) &
+          (if known(nz): " " & seg2Number(nz - datum) else: "")
+      else: noSlot(nsZ)
+  location("SOURCE_LOCATION", k.srcX, k.srcY, k.srcZ, cur.srcX, cur.srcY, cur.srcZ,
+    fields.sourceXy)
+  location("RECEIVER_LOCATION", k.rcvX, k.rcvY, k.rcvZ, cur.rcvX, cur.rcvY, cur.rcvZ,
+    fields.receiverXy)
+  if fields.stations:
+    if known(k.srcPoint) and not same(k.srcPoint, cur.srcPoint):
+      t["SOURCE_STATION_NUMBER"] = seg2Number(k.srcPoint)
+    if known(k.rcvPoint) and not same(k.rcvPoint, cur.rcvPoint):
+      t["RECEIVER_STATION_NUMBER"] = seg2Number(k.rcvPoint)
+    let line = if known(k.rcvLine): k.rcvLine else: k.srcLine
+    if known(line) and not same(line, cur.rcvLine):
+      if known(k.srcLine) and known(k.rcvLine) and k.srcLine != k.rcvLine: noSlot(nsLine)
+      else: t["LINE_ID"] = seg2Number(line)
+
 proc writeSeg2[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
-    samples: openArray[T], overrides: openArray[HeaderOverride]) =
+    samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
+    fields: GeometryFields) =
   var t = src.seg2Trace(trace)
+  if keys != nil: s.seg2Geometry(src, trace, t, keys[], fields)
   for o in overrides:
     let (blk, field) = splitName(o)
     if blk != "trace": refuse(o.name & ": the SEG-2 trace block is trace (trace.<KEYWORD>)")
@@ -633,6 +725,29 @@ proc writeSeg2[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   s.seg2.writeTrace(t, samples, twos)
 
 # ------------------------------------------------------------ public API --
+
+proc writeLike[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
+    samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
+    fields: GeometryFields) =
+  # Trace `trace` of `src` as the template; with `keys`, their geometry
+  # written into its headers first.
+  if not w.s.open: refuse("the writer is closed")
+  if src.kind != w.s.kind:
+    refuse("the output is " & $w.s.kind & ", " & src.path & " is " & $src.kind)
+  if not src.isOpen: refuse("the file " & src.path & " is closed")
+  discard src.traceEntry(trace) # ValueError out of range
+  try:
+    case w.s.kind
+    of skSegy: w.s.writeSegy(src, trace, samples, overrides, keys, fields)
+    of skSegd: w.s.writeSegd(src, trace, samples, overrides, keys, fields)
+    of skSeg2: w.s.writeSeg2(src, trace, samples, overrides, keys, fields)
+    of skUnknown: discard
+  except IOError:
+    # Part of the trace may be in the file: no later `close` may install it.
+    w.s.discardOutput()
+    raise
+  inc w.s.written
+
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride] = []) =
@@ -653,22 +768,7 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   ## the file (sample counts, channel set references, ...) cannot be
   ## overridden; an unknown field, a value that does not fit it or a missing
   ## block raises `ValueError` and nothing is written.
-  if not w.s.open: refuse("the writer is closed")
-  if src.kind != w.s.kind:
-    refuse("the output is " & $w.s.kind & ", " & src.path & " is " & $src.kind)
-  if not src.isOpen: refuse("the file " & src.path & " is closed")
-  discard src.traceEntry(trace) # ValueError out of range
-  try:
-    case w.s.kind
-    of skSegy: w.s.writeSegy(src, trace, samples, overrides)
-    of skSegd: w.s.writeSegd(src, trace, samples, overrides)
-    of skSeg2: w.s.writeSeg2(src, trace, samples, overrides)
-    of skUnknown: discard
-  except IOError:
-    # Part of the trace may be in the file: no later `close` may install it.
-    w.s.discardOutput()
-    raise
-  inc w.s.written
+  w.writeLike(src, trace, samples, overrides, nil, GeometryFields())
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
     x: Tensor[T], row: int, count = -1, overrides: openArray[HeaderOverride] = []) =
@@ -684,6 +784,48 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
     refuse($n & " samples were asked for, the tensor rows hold " & $x.shape[1])
   let p = rowPtr(x, row)
   w.writeTrace(src, trace, p.toOpenArray(0, n - 1), overrides)
+
+proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
+    samples: openArray[T], keys: TraceKeys, overrides: openArray[HeaderOverride] = [],
+    fields = GeometryFields()) =
+  ## `writeTrace` like trace `trace` of `src`, with the geometry of `keys`
+  ## written into its headers: the template trace's headers, then the
+  ## values of `keys` that differ from what they hold (NaN keys leave their
+  ## fields alone), then `overrides`. For processed traces whose keys were
+  ## joined (`applySurvey`) or edited in memory: the mapped headers do not
+  ## hold those. The values and their slots are write-back's
+  ## (`writeGeometry`, `GeometryFields` selects them):
+  ##
+  ## - SEG-Y through the layout: source and receiver X/Y, elevations,
+  ##   midpoint, offset, source point, stations where a Layout stanza names
+  ##   them, with the coordinate scalar chosen per trace;
+  ## - SEG-D: THE#1's receiver line, point and index; Rev 3 also the
+  ##   receiver's and the source's Position blocks and the Source
+  ##   Description block, where the trace header extensions hold them;
+  ## - SEG-2: `SOURCE_LOCATION` and `RECEIVER_LOCATION` (x y, and z less
+  ##   `DATUM`), `SOURCE_STATION_NUMBER`, `RECEIVER_STATION_NUMBER`, and
+  ##   `LINE_ID` when the source and receiver lines are one.
+  ##
+  ## A value with no slot in the trace, or too large for its slot, is not
+  ## written; `close`'s log reports each kind once, with a count (values
+  ## that do not fit are errors there). Otherwise as `writeTrace(w, src,
+  ## trace, samples, overrides)`, and the same exceptions.
+  w.writeLike(src, trace, samples, overrides, addr keys, fields)
+
+proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
+    x: Tensor[T], row: int, keys: TraceKeys, count = -1,
+    overrides: openArray[HeaderOverride] = [], fields = GeometryFields()) =
+  ## The keys form of `writeTrace` with the first `count` values of row
+  ## `row` of a row-major `[traces, samples]` tensor (-1: as many as the
+  ## input trace has).
+  if x.rank != 2 or not x.is_C_contiguous:
+    refuse("need a row-major [traces, samples] tensor")
+  if row notin 0 ..< x.shape[0]: refuse("row " & $row & " is outside the tensor")
+  let n = if count >= 0: count else: int(src.traceEntry(trace).numSamples)
+  if n > x.shape[1]:
+    refuse($n & " samples were asked for, the tensor rows hold " & $x.shape[1])
+  let p = rowPtr(x, row)
+  w.writeLike(src, trace, p.toOpenArray(0, n - 1), overrides, addr keys, fields)
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: openArray[T],
     overrides: openArray[HeaderOverride] = []) =
@@ -753,6 +895,13 @@ proc close*(w: var SeismicWriter): DiagLog =
       w.s.seg2.close()
       result.add w.s.seg2.log
     of skUnknown: discard
+    # Traces written with keys: the values that had no slot or did not fit.
+    result.add w.s.keysPlan.finishKeys()
+    for why in Seg2NoSlot:
+      if w.s.seg2NoSlot[why] > 0:
+        result.report(sevWarning, dcValidation, "not written: " & $why & ", in " &
+          $w.s.seg2NoSlot[why] & " traces (the first is trace " & $w.s.seg2NoSlotFirst[why] &
+          ")", loc = Location(file: w.s.path))
   except CatchableError:
     w.s.discardOutput()
     raise
