@@ -9,8 +9,14 @@ var f = openSeismic(path)
 proc work(p: ptr SeismicFile) {.thread.} =
   var t = newTensor[float32](4, p[].maxSamples)
   var log: DiagLog
+  var keys: array[4, TraceKeys]
   for i in 0..<20000:
     discard p[].readTracesInto((i mod 190) ..< (i mod 190) + 4, t, 0, log)
+    if i mod 16 == 0:
+      # Keys on demand read the file's layout plan, shared and read-only.
+      {.cast(gcsafe).}:
+        p[].traceKeysInto((i mod 190) ..< (i mod 190) + 4, keys)
+        doAssert keys[0].inline > 0 and p[].startTimeMs(i mod 190) == keys[0].t0Ms
 var th: array[8, Thread[ptr SeismicFile]]
 for i in 0..<th.len: createThread(th[i], work, addr f)
 joinThreads(th)

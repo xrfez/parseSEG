@@ -108,6 +108,12 @@ type
   SeismicFile* = object
     ## A memory-mapped disk file with its trace index.
     index*: TraceIndex
+    gr: GeometryReader
+      ## SEG-Y: the file's layout resolved for the keys, once, when the index
+      ## is made (resolving it took 9 µs and 100 allocations per
+      ## `traceKeysInto` or `startTimeMs` call). Read-only after that, so any
+      ## number of threads may read keys. A call checks that it still fits
+      ## `index.segy` (`planFits`) and resolves its own otherwise.
     path: string      ## See `path`.
     demuxPath: string ## See `demuxPath`.
     map: MapRef       ## nil once closed.
@@ -132,6 +138,7 @@ proc `=destroy`(f: SeismicFile) =
     `=destroy`(f.map)
     release(mapLock)
   `=destroy`(pf[].index)
+  `=destroy`(pf[].gr)
   `=destroy`(f.path)
   `=destroy`(f.demuxPath)
 
@@ -198,6 +205,10 @@ proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: 
 proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode): string
   {.raises: [].}
 
+proc resolveLayout(f: var SeismicFile) =
+  # The SEG-Y layout plan of the index just made (see `gr`).
+  if f.index.kind == skSegy and f.index.detected: f.gr = initGeometryReader(f.index.segy)
+
 proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled): SeismicFile =
   # `openSeismic` / `openSeismicRw`. Built in a local, so a raise (a
@@ -211,6 +222,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     if why.len == 0:
       f.cached = true
       f.walkLog = f.index.log.len
+      f.resolveLayout()
       var tk = initProgressTicker(progress, f.map.src.size)
       if not tk.finish(): raiseCancelled()
       return f
@@ -229,6 +241,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     f.index.log.report(sevFatal, dcUnsupportedFormat,
       "not a SEG-Y, SEG-D or SEG-2 file", 0, Location(file: path))
   f.walkLog = f.index.log.len
+  f.resolveLayout()
   if cache.len > 0:
     f.index.log.report(sevInfo, dcIndexCache, "the index cache " & cache & " was not used (" &
       why & "); the file was indexed", 0, Location(file: path))
@@ -500,12 +513,32 @@ proc flush*(f: SeismicFile) =
 type
   KeyReader = object
     # Per-call state of `traceKeysInto`: buffers reused across traces.
-    gr: GeometryReader
+    own: GeometryReader ## SEG-Y: a plan made for this call (`useOwn`).
+    useOwn: bool
+      ## The file's plan (`gr`) does not fit its SEG-Y description any more
+      ## (code replaced `index.segy` or the whole index): resolve it again.
+    timeBasis: int16 ## SEG-Y: the binary header's values now (an editor may change them).
+    fixedUs: float64
     segd: array[SegdLayout, SegdTrace]
 
 proc initKeyReader(f: SeismicFile): KeyReader =
-  if f.index.kind == skSegy: result.gr = initGeometryReader(f.index.segy)
-  result.segd = [SegdTrace(layout: slRev2), SegdTrace(layout: slRev3)]
+  case f.index.kind
+  of skSegy:
+    result.useOwn = not f.gr.planFits(f.index.segy)
+    if result.useOwn: result.own = initGeometryReader(f.index.segy)
+    result.timeBasis = timeBasisOf(f.index.segy)
+    result.fixedUs = fixedIntervalUs(f.index.segy)
+  of skSegd: result.segd = [SegdTrace(layout: slRev2), SegdTrace(layout: slRev3)]
+  else: discard
+
+template segyPlan(f: SeismicFile, r: KeyReader): ptr GeometryReader =
+  # The layout plan the call reads SEG-Y keys with; a pointer, as choosing
+  # between the two by value would copy the plan (30 allocations).
+  (if r.useOwn: addr r.own else: addr f.gr)
+
+func segyPlanFits(f: SeismicFile): bool {.inline.} =
+  # A SEG-Y file whose layout plan (`gr`) is still that of `index.segy`.
+  f.index.kind == skSegy and f.gr.planFits(f.index.segy)
 
 proc raiseOutside(trace: int) {.noinline, noreturn.} =
   raise newException(ValueError, "the headers of trace " & $trace & " lie outside the file")
@@ -544,7 +577,8 @@ proc keysOf(f: SeismicFile, r: var KeyReader, mem: ptr UncheckedArray[byte], siz
   of skSegy:
     var h: RawHeaders
     if not mappedSegyHeaders(mem, size, e, h): raiseOutside(trace)
-    segyKeys(r.gr, h) # straight from the mapped bytes: nothing decoded or copied
+    # Straight from the mapped bytes: nothing decoded or copied.
+    segyKeys(segyPlan(f, r)[], h, r.timeBasis, r.fixedUs)
   of skSegd:
     if e.offset < 0 or e.offset + hb > size or hb < SegdTraceHeaderSize: raiseOutside(trace)
     template rec: untyped = ix.segdRecords[e.record]
@@ -584,8 +618,19 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
     f.requireOpen()
     let mem = f.unsafeMemory
     let size = f.mappedSize
-    var r = initKeyReader(f)
-    for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k))
+    if f.segyPlanFits:
+      # SEG-Y with the file's own plan: no per-call reader to set up (100 ns
+      # of a 400 ns call for one trace).
+      let timeBasis = timeBasisOf(f.index.segy)
+      let fixedUs = fixedIntervalUs(f.index.segy)
+      for k in 0 ..< count:
+        let trace = traceAt(k)
+        var h: RawHeaders
+        if not mappedSegyHeaders(mem, size, f.index.entries[trace], h): raiseOutside(trace)
+        dst[k] = segyKeys(f.gr, h, timeBasis, fixedUs)
+    else:
+      var r = initKeyReader(f)
+      for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k))
 
 proc traceKeysInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[TraceKeys]) =
   ## The keys of each trace of `traces` into `dst` (`dst.len == traces.len`).
@@ -716,8 +761,16 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
     f.requireOpen()
     let mem = f.unsafeMemory
     let size = f.mappedSize
-    var r = initKeyReader(f)
-    for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k)).t0Ms
+    if f.segyPlanFits:
+      # SEG-Y: only the delay is read, not the whole key.
+      for k in 0 ..< count:
+        let trace = traceAt(k)
+        var h: RawHeaders
+        if not mappedSegyHeaders(mem, size, f.index.entries[trace], h): raiseOutside(trace)
+        dst[k] = segyStartTimeMs(f.gr, h)
+    else:
+      var r = initKeyReader(f)
+      for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k)).t0Ms
 
 proc startTimeMsInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[float64]) =
   ## The time of sample 0 (`TraceKeys.t0Ms`, ms) of each trace of `traces`

@@ -219,6 +219,49 @@ sampleBlock converted_63_has_its_fractional_source_point:
   doAssert c.traceKeys(0).srcPoint == 99.5 and c.traceKeys(0).srcLine.isNaN
   c.close()
 
+proc allocs(): int =
+  ## Allocations so far (`tkeyfields.nims` turns the counter on).
+  cast[tuple[allocs, deallocs: int]](getAllocStats()).allocs
+
+proc keysOnDemandResolveTheLayoutOnce() =
+  # The layout plan is made when the file is opened, not per call: a call
+  # for one trace allocated 70 times and took 6 to 9 µs. It still follows
+  # what an editor changes in the binary header, and a layout that code
+  # replaces in the index.
+  let p = tmp / "plan.sgy"
+  writeSegy(p, 2, fixed = true, binDt = 4000, segyCases)
+  var f = openSeismic(p)
+  var one: array[1, TraceKeys]
+  var t0: array[1, float64]
+  f.traceKeysInto([1], one) # warm
+  let a0 = allocs()
+  var sum = 0.0
+  for i in 0 ..< 1000:
+    f.traceKeysInto([i mod f.len], one)
+    f.startTimeMsInto([i mod f.len], t0)
+    sum += f.startTimeMs(i mod f.len) + one[0].intervalUs + t0[0]
+  when defined(nimAllocStats): doAssert allocs() - a0 == 0, $(allocs() - a0)
+  doAssert sum > 0 and one[0].intervalUs == 4000
+  # The binary header's interval of a fixed-length file, edited.
+  if fileExists(p & ".edits.nif"): removeFile(p & ".edits.nif")
+  var ed = openEditor(move f)
+  doAssert ed.setFileField("binary.sampleInterval", 1000), $ed.log
+  doAssert ed.file.traceKeys([1])[0].intervalUs == 1000
+  doAssert ed.file.traceKeys([1])[0].t0Ms == 250 and ed.file.startTimeMs(1) == 250
+  var g = release(ed)
+  # A layout put in place of the file's: trace code and delay elsewhere.
+  doAssert g.traceKeys([1])[0].traceCode == 2
+  g.index.segy.layout = merge(standardLayout(g.index.segy.revision), parseLayout(
+    """<segy-layout><entry name="other" byte="29" type="int2"/>
+       <entry name="other2" byte="109" type="int2"/></segy-layout>"""))
+  let k = g.traceKeys([1])[0]
+  doAssert k.traceCode == 0 and k.status == tsUnknown and k.t0Ms.isNaN, $k
+  doAssert g.startTimeMs(1).isNaN
+  g.close()
+
+block segy_keys_on_demand_resolve_the_layout_once:
+  keysOnDemandResolveTheLayoutOnce()
+
 # ------------------------------------------------------------------ SEG-D --
 
 proc rewriteSegd(src, dst: string, edit: proc (d: var SegdData)) =

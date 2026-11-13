@@ -69,6 +69,8 @@ type
     fixedUs: float64 ## The binary header's interval of a fixed-length file (Rev 1+), else NaN.
     major: int ## The revision whose rules apply.
     keyPlans: array[KeyField, seq[Resolved]]
+    layoutEntries: int ## Entries of the layout the plan was resolved from (`planFits`),
+    layoutAt: pointer  ## and where they were.
     stations: bool ## The layout names a station field (`kfShtLine .. kfRecIndex`).
     stdCode: bool ## `trctype` is where the standard puts it: bytes 29-30 are read.
     stdDelay: bool ## So are `delay` and its scalar: bytes 109-110 and 215-216 are read.
@@ -126,14 +128,23 @@ func isAt(rs: openArray[Resolved], pos: int, kind: LayoutType, sel = hsStd): boo
   # The name has one entry, the plain one at 0-based `pos`.
   rs.len == 1 and rs[0].entry.isAt(pos, kind, sel)
 
+func entriesAt(lay: TraceLayout): pointer {.inline.} =
+  if lay.entries.len > 0: cast[pointer](addr lay.entries[0]) else: nil
+
+func timeBasisOf*(f: SegyFile): int16 =
+  ## The file's time basis code: binary bytes 3511-3512 from Rev 2 on, else 0.
+  if f.revision.major >= 2: f.binary.timeBasisCode else: 0'i16
+
 func initGeometryPlan*(f: SegyFile): GeometryPlan =
   ## Resolves the file's layout (`initGeometryReader`).
-  let lay = f.layoutOf
+  template lay: untyped = f.layoutOf # in place: `planFits` compares where its entries are
   result.order = f.byteOrder
+  result.layoutEntries = lay.entries.len
+  result.layoutAt = entriesAt(lay)
   for g in GeometryField:
     result.plans[g] = resolveEntries(lay, $g)
   result.scalars = resolveScalars(lay)
-  if f.revision.major >= 2: result.timeBasis = f.binary.timeBasisCode
+  result.timeBasis = timeBasisOf(f)
   result.fixedUs = fixedIntervalUs(f)
   result.major = int(f.revision.major)
   for k in KeyField:
@@ -156,6 +167,18 @@ func initGeometryPlan*(f: SegyFile): GeometryPlan =
     plan(kfHour).isAt(160, ltInt2) and plan(kfMinute).isAt(162, ltInt2) and
     plan(kfSecond).isAt(164, ltInt2) and plan(kfTimebase).isAt(166, ltInt2) and
     (result.nanos or plan(kfNanosecs).len == 0)
+
+func planFits*(p: GeometryPlan, f: SegyFile): bool =
+  ## `p` was resolved from `f` as it is now, as far as a few compares can
+  ## tell (byte order, revision, the layout's entries being the same
+  ## sequence of the same length): a plan kept with a file is not used after
+  ## the file's description, or its layout, was replaced. Entries changed in
+  ## place are not noticed (nothing in the library does that; resolve again
+  ## after doing so). The binary header's time basis and fixed interval are
+  ## not compared: pass them to `segyKeys`.
+  let lay = addr f.layoutOf
+  p.order == f.byteOrder and p.major == int(f.revision.major) and
+    p.layoutEntries == lay.entries.len and p.layoutAt == entriesAt(lay[])
 
 func planTimeBasis*(p: GeometryPlan): int16 {.inline.} =
   ## The file's time basis code (`fields.timeBasis`).
@@ -310,7 +333,7 @@ func int16Of(x: float64, default: int): int {.inline.} =
   if x == trunc(x) and x >= -32768.0 and x <= 32767.0: int(x) else: default
 
 proc segyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
-    cache: var ScalarCache): float64 =
+    cache: var ScalarCache, timeBasis: int16): float64 =
   # The date and time fields (standard: trace bytes 157-168 and Ext1
   # 141-144) in their time basis.
   var year, day, hour, minute, second, code: int
@@ -332,7 +355,7 @@ proc segyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
     code = part(kfTimebase, 0)
     let x = keyValue(p, kfNanosecs, h, o, cache)
     if not x.isNaN: ns = x * 1e-9
-  let basis = if code != 0: code else: int(p.timeBasis)
+  let basis = if code != 0: code else: int(timeBasis)
   let s = civilSeconds(fullYear(year), day, hour, minute, second)
   case basis
   of 0, 2, 4: s + ns
@@ -362,11 +385,17 @@ proc t0In(h: RawHeaders, o: static ByteOrder, major: int): float64 {.inline.} =
   let delay = loadNum[int16](h.std, 108, o)
   if major >= 1: applyScalar(delay, loadNum[int16](h.std, 214, o)) else: float64(delay)
 
-proc segyStartTimeMs*(h: RawHeaders, order: ByteOrder, major: int): float64 =
+proc startTimeIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
+    cache: var ScalarCache): float64 {.inline.} =
+  # The delay recording time (standard: bytes 109-110 and the time scalar).
+  if p.stdDelay: t0In(h, o, p.major) else: keyValue(p, kfDelay, h, o, cache)
+
+proc segyStartTimeMs*(p: GeometryPlan, h: RawHeaders): float64 =
   ## The time of sample 0 of the SEG-Y trace with headers `h`, in ms
-  ## (`TraceKeys.t0Ms`), for a file of revision `major`.
-  eachOrder(order, o):
-    result = t0In(h, o, major)
+  ## (`TraceKeys.t0Ms`): the layout's delay recording time.
+  var cache: ScalarCache
+  eachOrder(p.order, o):
+    result = startTimeIn(p, h, o, cache)
 
 func segyStatus*(code: int16, major: int): TraceStatus =
   ## The status a SEG-Y trace identification code gives (`TraceStatus`).
@@ -408,7 +437,8 @@ proc stationsIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, cache: var 
   station(kfShtLine, kfShtPoint, kfShtIndex, k.srcLine, k.srcPoint, k.srcIndex)
   station(kfRecLine, kfRecPoint, kfRecIndex, k.rcvLine, k.rcvPoint, k.rcvIndex)
 
-proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder): TraceKeys =
+proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, timeBasis: int16,
+    fixedUs: float64): TraceKeys =
   var cache: ScalarCache
   let g = valuesIn(p, h, o, cache)
   result = initTraceKeys()
@@ -444,22 +474,29 @@ proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder): TraceKeys =
   if isComponentCode(base): result.component = uint8(base)
   result.traceCode = code
   result.status = segyStatus(code, p.major)
-  result.time = segyTime(p, h, o, cache)
-  # The delay recording time (standard: bytes 109-110 and the time scalar).
-  result.t0Ms = if p.stdDelay: t0In(h, o, p.major) else: keyValue(p, kfDelay, h, o, cache)
+  result.time = segyTime(p, h, o, cache, timeBasis)
+  result.t0Ms = startTimeIn(p, h, o, cache)
   # The sample interval is not a layout value: with the sample count it is
   # what the reader walks the file by, at bytes 115-118 (and Extension 1's),
   # whatever a stanza calls them (Inglewood retypes them as signed). The
   # sampled index, `sampleIntervalUs` and the writers read the same bytes,
   # and the key equals `sampleIntervalUs`.
-  result.intervalUs = intervalIn(h, o, p.fixedUs)
+  result.intervalUs = intervalIn(h, o, fixedUs)
   if not unset(g[gfIline]): result.inline = g[gfIline]
   if not unset(g[gfXline]): result.crossline = g[gfXline]
 
-proc segyKeys*(p: GeometryPlan, h: RawHeaders): TraceKeys =
-  ## The keys of the SEG-Y trace with headers `h` (`keys.traceKeys`).
+proc segyKeys*(p: GeometryPlan, h: RawHeaders, timeBasis: int16, fixedUs: float64): TraceKeys =
+  ## The keys of the SEG-Y trace with headers `h`, with the binary header's
+  ## time basis (`timeBasisOf`) and fixed interval (`fixedIntervalUs`) as
+  ## they are now: for a plan that is kept while the binary header may be
+  ## edited (`SeismicFile`).
   eachOrder(p.order, o):
-    result = keysIn(p, h, o)
+    result = keysIn(p, h, o, timeBasis, fixedUs)
+
+proc segyKeys*(p: GeometryPlan, h: RawHeaders): TraceKeys =
+  ## The keys of the SEG-Y trace with headers `h` (`keys.traceKeys`), with
+  ## the time basis and fixed interval the plan was made with.
+  segyKeys(p, h, p.timeBasis, p.fixedUs)
 
 {.pop.}
 
