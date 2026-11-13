@@ -10,7 +10,9 @@ written into the file in place, or written into a copy.
 `opts.target` names. It never raises: everything, I/O failures included, is in the returned
 `DiagLog`. The output goes to a new temporary file next to `dst` (`<dst>.<random>.tmp`)
 and is renamed when complete, so a failed or cancelled conversion leaves no partial file
-and an existing `dst` untouched. A `progress` hook (the last parameter) reports and cancels
+and an existing `dst` untouched. A full disk is such a failure (a fatal diagnostic), also
+when only the last flush fails; a `dst` that is a directory is refused before the input is
+read. A `progress` hook (the last parameter) reports and cancels
 long conversions ([processing.md](processing.md#batch-conversions-with-progress-and-cancel)).
 
 ```nim
@@ -42,8 +44,31 @@ What the options choose (`ConvertOptions`):
 | `seg2` | little-endian, keep format | SEG-2 output: `Seg2ConvertOptions(byteOrder, format)` |
 
 Losses are reported, never silent: each kind of information the target cannot hold is one
-info diagnostic; a sample value that does not fit the target format zeroes its trace with an
-error.
+info diagnostic; a sample value that does not fit the target format (NaN and the infinities
+too, in every format but the IEEE floats) zeroes its trace with an error; a trace the
+target revision cannot hold at all (more than 65535 samples, or a sample interval that is
+not a whole number up to 65535, before SEG-Y Rev 2) is skipped with an error.
+
+The trace keys survive a conversion to SEG-Y: the converters write them as
+`writeTrace(w, keys, samples)` does, so `openSeismic` reads the same `TraceKeys` from the
+output, among them a fractional source point (99.5), a start time that is negative,
+fractional or beyond 32.767 s (with the time scalar, from Rev 1), and the fraction of the
+recording time's second (Rev 2). Rev 0 holds less: whole numbers, whole milliseconds within
+±32767 and trace codes 1-8; what was rounded is noted, a start time that was clamped is a
+warning.
+
+A new SEG-Y revision changes what some header bytes mean, and `convertFile` rewrites
+those:
+
+- to a later revision, the bytes the input's revision leaves unassigned and the target
+  defines are cleared (Rev 0: binary header 3261-3600 and trace header 181-240; Rev 1:
+  binary header 3261-3300 and 3507-3532), so vendor data there is not read as a field;
+- to Rev 0, the time scalar is applied to the times of trace bytes 95-114, which become
+  whole milliseconds, and bytes 181-240 are cleared. A Layout stanza is lost with the
+  extended textual headers: that is a warning, because the fields it moved are then read
+  from their standard bytes;
+- before Rev 2, a sample count or interval held in the Rev 2 extended fields moves to the
+  16-bit ones; a fixed-length file whose count or interval does not fit them is refused.
 
 ### Between SEG-Y revisions, between SEG-D revisions, to and from SEG-2
 
@@ -205,7 +230,7 @@ doAssert not copied.log.hasErrors and copied.changes.traces == 0
 let convLog = convertWithGeometry("record.sgd", "record_geo.sgy", g)
 doAssert not convLog.isFatal
 var y = openSeismic("record_geo.sgy", keys = true)
-doAssert y.traceKeys(0).rcvX == 500100
+doAssert y.traceKeys(0).rcvX == 500100 and y.traceKeys(0).srcPoint == 99.5
 ```
 
 Where the values go: SEG-Y through the file's layout (source, group and CDP coordinates with

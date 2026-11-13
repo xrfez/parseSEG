@@ -204,6 +204,11 @@ changed. `close` writes the final counts and renames the output into place: unti
 output is a temporary file, and a writer dropped without `close` leaves nothing behind. The
 same code works for SEG-Y, SEG-D and SEG-2.
 
+Failures raise, and a failed output never appears under its name: `close` returns the
+writer's warnings and raises for everything else (a full disk shows at the latest there, as
+`IOError`), and a `writeTrace` that raised `IOError` has already discarded the output and
+closed the writer.
+
 ```nim
 import std/os
 import parseSEG
@@ -221,8 +226,7 @@ for input in ["survey.sgy", "shot.sgd", "line.sg2"]:
     buf.apply_inline(2 * x)                     # the "processing": a gain of 2
     for i in first .. last: w.writeTrace(f, i, buf, i - first)  # row i - first
     first = last + 1
-  let log = w.close()
-  doAssert not log.isFatal
+  for d in w.close(): echo d                    # warnings; a failure raises
 
   var g = openSeismic(output)
   let (a, b) = (f.readTraces(0 ..< f.len, float64), g.readTraces(0 ..< g.len, float64))
@@ -235,13 +239,17 @@ Options and rules:
 - **Sample format.** `openSeismicWriter(path, f, segyFormat = st5)` (or `segdFormat = tf8048`,
   `seg2Format = s2t4`, for the input's standard) writes another format; the format code is
   the only header change (SEG-D Rev 3 also updates General Header #3's sizes). A value the
-  format cannot hold (an integer overflow, NaN in an integer format) raises
-  `SegFormatError` and writes nothing.
+  format cannot hold raises `SegFormatError` and writes nothing; nothing is clamped. That
+  is a value beyond the range of an integer format or of the SEG-D exponent formats (8015
+  ends at ±32767, 8022 at ±15360, 8024 at ±16380, 8042 at 3968, 8044 at 4095.5), and NaN or
+  an infinity in every format but the IEEE floats (SEG-Y 5 and 6, SEG-D 8058 and 8080,
+  SEG-2 4 and 5). SEG-D 8015 packs four samples into ten bytes, so it is refused for
+  traces whose sample count is not a multiple of 4.
 - **Sample count.** A SEG-Y or SEG-2 trace may get more or fewer samples than it had (the
-  tensor form takes `samples = n`: the first `n` of the row). The trace header follows, and
-  so does the SEG-Y binary header when every trace has the same count. A fixed-length SEG-Y
-  file needs one count for all traces. A SEG-D trace keeps its count: its channel set
-  descriptor holds it.
+  tensor form takes `count = n`: the first `n` of the row). The trace header follows, and
+  the SEG-Y binary header gets the count of the traces written (the largest when they
+  differ). A fixed-length SEG-Y file needs one count for all traces. A SEG-D trace keeps
+  its count: its channel set descriptor holds it.
 - **Which traces.** SEG-Y and SEG-2 traces can be written in any order and any subset (a
   declared Rev 2 trace count becomes the number written). SEG-D records are written
   whole, each record's traces in input order: a record ends when a trace of another record
@@ -249,7 +257,8 @@ Options and rules:
   Multiplexed SEG-D is refused: convert it to a demultiplexed file first.
 - **Errors.** Caller mistakes raise `ValueError` and write nothing: a trace out of range,
   another standard, a closed file, a broken SEG-D rule. Spec-invalid output raises
-  `SegFormatError`, as with the per-standard writers.
+  `SegFormatError`, as with the per-standard writers. An output path that is a directory
+  is refused when the writer opens (`IOError`).
 
 ```nim
 import parseSEG
@@ -258,7 +267,7 @@ import parseSEG
 var f = openSeismic("survey.sgy")
 var w = openSeismicWriter("survey_1000.sgy", like = f)
 let x = f.readTraces(0 ..< f.len)
-for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = 1000)
+for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = 1000)
 discard w.close()
 var g = openSeismic("survey_1000.sgy")
 doAssert g.maxSamples == 1000 and g.fileField("binary.samplesPerTrace").intVal == 1000
@@ -334,8 +343,10 @@ var b = openSeismic("survey_f32.sgy")
 doAssert b.summary.formatCode == 5 and b.readTraces(0 ..< b.len) == a.readTraces(0 ..< a.len)
 ```
 
-`encodeSamples` raises `SegFormatError` when a value does not fit an integer format (and
-for NaN in one).
+`encodeSamples` raises `SegFormatError` for a value the format cannot hold: out of range
+or NaN in an integer format, NaN or an infinity in IBM float (format 1). It raises
+`ValueError` when the destination is too short. A disk sink's `close` raises `IOError`
+when the last bytes did not reach the file.
 
 ### Derived traces from a template trace
 
@@ -365,7 +376,15 @@ binary header's trace sorting and measurement system) takes traces built from `T
 (record, channel, CDP, offset, source point, coordinates, elevations, midpoint, start time
 with a time scalar, interval, recording time, inline and crossline), which `openSeismic`
 reads back as the same keys; overrides then set the rest (the fold, say). The first trace
-sets the binary header's interval and count.
+sets the binary header's interval; its count is that of the traces written (the largest
+when they differ).
+
+An interval within 1e-9 of a whole number of microseconds is written as that number (1001 µs
+kept as 1.001 ms and multiplied back is 1000.9999999999999). Rev 0 and Rev 1 hold whole
+intervals up to 65535 µs only, and Rev 0 has fewer fields: the start time is a whole
+millisecond within ±32767 (a later one is refused, as a fractional interval is), a
+fractional source point is rounded, and the midpoint, inline and crossline are not written
+(the midpoint reads back as halfway between source and receiver).
 
 ```nim
 import parseSEG

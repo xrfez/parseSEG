@@ -287,6 +287,7 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
     c.fileStrings(f, fdb)
     fdb.strings.sortStrings()
   var w = openSeg2Writer(path, fdb, Seg2WriteOptions(lenient: f.kind == skSeg2))
+  var complete = false
   try:
     var vals, back: seq[float64]
     var data: seq[byte]
@@ -313,10 +314,12 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
         if ok:
           t.numSamples = uint32(vals.len)
           data.setLen dataBytes(fmt, vals.len)
+          # Format-3 mantissas as a SEG-2 input was read (its convention).
+          let twos = f.kind == skSeg2 and codec.twosComplement8015
           try:
-            encodeSamples(fmt, vals, data, fdb.order)
+            encodeSamples(fmt, vals, data, fdb.order, twos)
             back.setLen vals.len
-            decodeSamples(fmt, data, back, fdb.order)
+            decodeSamples(fmt, data, back, fdb.order, twos)
             for k in 0..<vals.len:
               if back[k] != vals[k] and not (back[k].isNaN and vals[k].isNaN):
                 c.inexactTrace(i)
@@ -328,8 +331,10 @@ proc writeSeg2From(c: var Seg2Conv, f: SeismicFile, path: string, opts: Seg2Conv
           w.writeTrace(t, data)
     c.reportInexact("the SEG-2 target format")
     if not c.tk.finish(): raiseCancelled()
+    complete = true
   finally:
-    w.close()
+    # A failed or cancelled conversion's file is removed: no pointers to write.
+    if complete: w.close() else: w.abandon()
     c.log.add w.log
 
 proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions(),
@@ -342,7 +347,7 @@ proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions(),
   ## (see `convertFile`); when it cancels, the result holds a fatal
   ## `dcCancelled` diagnostic and nothing is written.
   var c = Seg2Conv(loc: Location(file: dstPath))
-  if sameAsInput(srcPath, dstPath, result): return
+  if sameAsInput(srcPath, dstPath, result) or isDirectory(dstPath, result): return
   var f: SeismicFile
   try:
     f = openSeismic(srcPath, keys = true, progress = progressPhase(progress, 0, 2))

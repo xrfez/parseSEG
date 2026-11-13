@@ -8,6 +8,7 @@
 when defined(posix):
   import std/posix
 import records
+import ../common/outputfile
 
 type
   DiskSource* = ref object of RecordSource
@@ -17,7 +18,17 @@ type
 
   DiskSink* = ref object of RecordSink
     ## Writes records back to back into a disk file; tape marks are dropped.
+    ## Records are collected in a buffer of `SinkBufferSize` bytes and written
+    ## when it is full and on `close`, so the file is complete only then.
     f: File
+    buf: seq[byte] ## Records not yet written (allocated by the first one).
+    used: int      ## Bytes of `buf` in use.
+    failed: bool   ## A write failed: bytes are missing, so every later call raises.
+
+const SinkBufferSize* = 1 shl 20
+  ## Bytes a `DiskSink` collects before it writes them. One write per record
+  ## cost two system calls per trace (stdio's own buffer is 4 KiB): 0.96 s
+  ## of system time per GB of 8 kB traces, against 0.13 s in 1 MiB writes.
 
 proc openDiskSource*(path: string): DiskSource =
   ## Opens `path` for reading. Raises `IOError` if it cannot be opened.
@@ -83,15 +94,53 @@ proc openDiskSink*(path: string): DiskSink =
     raise newException(IOError, "cannot open for writing: " & path)
   DiskSink(f: f, name: path)
 
-method writeRecordImpl*(s: DiskSink; data: openArray[byte]) {.raises: [CatchableError].} =
-  if data.len > 0 and writeBuffer(s.f, addr data[0], data.len) != data.len:
+proc put(s: DiskSink, p: pointer, n: int) {.raises: [IOError].} =
+  # Writes `n` bytes to the file; a failure marks the sink for good.
+  var written = 0
+  try:
+    written = writeBuffer(s.f, p, n)
+  except IOError as e:
+    s.failed = true
+    raise newException(IOError, "write failed: " & s.name & ": " & e.msg)
+  if written != n:
+    s.failed = true
     raise newException(IOError, "write failed: " & s.name)
+
+proc flushBuffer(s: DiskSink) {.raises: [IOError].} =
+  if s.used > 0:
+    let n = s.used
+    s.used = 0
+    s.put(addr s.buf[0], n)
+
+method writeRecordImpl*(s: DiskSink; data: openArray[byte]) {.raises: [CatchableError].} =
+  if s.failed:
+    raise newException(IOError, "an earlier write failed: " & s.name & " is incomplete")
+  if data.len > 0:
+    if s.used + data.len > SinkBufferSize: s.flushBuffer()
+    if data.len >= SinkBufferSize:
+      s.put(addr data[0], data.len) # as large as the buffer: no copy
+    else:
+      if s.buf.len == 0: s.buf = newSeqUninit[byte](SinkBufferSize)
+      copyMem(addr s.buf[s.used], addr data[0], data.len)
+      s.used += data.len
   s.offset += data.len
 
 method writeTapeMarkImpl*(s: DiskSink) {.raises: [CatchableError].} =
   discard "disk files store no tape marks"
 
 method close*(s: DiskSink) {.raises: [CatchableError].} =
+  ## Writes the buffered records and closes the file. Raises `IOError` when
+  ## bytes did not reach it, now or in an earlier write (the file is closed
+  ## all the same).
   if s.f != nil:
-    close(s.f)
+    let f = s.f
+    try:
+      if not s.failed: s.flushBuffer()
+    except IOError:
+      discard # reported below: the sink is marked
     s.f = nil
+    s.buf = @[]
+    if s.failed:
+      close(f)
+      raise newException(IOError, "write failed: " & s.name & " is incomplete")
+    closeChecked(f, s.name)

@@ -59,6 +59,49 @@ func float32ToIbm*(x: float32): uint32 =
       inc e16
     result = sign or (uint32(e16 + 64) shl 24) or frac
 
+func normalToIbm*(bits: uint32): uint32 {.inline, raises: [].} =
+  ## `float32ToIbm` of the normal float32 with the bits `bits` (not zero,
+  ## subnormal, infinite or NaN), in integer arithmetic: the sample
+  ## encoders' kernel (17 ns per sample through frexp, ldexp and round, 0.4
+  ## this way). With the value 0.1mmm... x 2^(e - 126), the base-16 exponent
+  ## is ceil((e - 126) / 4) and the 24-bit mantissa moves right by the 0..3
+  ## bits that takes, rounded half up, as `round` does for a magnitude. A
+  ## carry cannot happen: the mantissa is below 2^24 and loses bits whenever
+  ## it is rounded.
+  let t = ((bits shr 23) and 0xFF) + 133 # excess-64 exponent x 4, plus 3 - shift
+  let shift = 3 - (t and 3)
+  let mant = (bits and 0x7F_FFFF'u32) or 0x80_0000'u32
+  (bits and 0x8000_0000'u32) or ((t shr 2) shl 24) or
+    ((mant + ((1'u32 shl shift) shr 1)) shr shift)
+
+func float64ToIbm*(x: float64, bits: var uint32, fractionBits = 24): bool =
+  ## Converts an IEEE double of any magnitude to IBM float bits in `bits`,
+  ## the fraction rounded to nearest at `fractionBits` bits (24; 23 leaves
+  ## the last fraction bit 0, as SEG-D format 8048 has it). False, with
+  ## `bits` unchanged, for NaN, an infinity and a magnitude beyond the
+  ## largest the format holds (about 7.237e75); a magnitude below the
+  ## smallest gives 0. The sample encoders use it for the doubles beyond
+  ## float32's range: within it they write `float32ToIbm(float32(x))`.
+  case classify(x)
+  of fcNan, fcInf, fcNegInf:
+    result = false
+  of fcZero, fcNegZero:
+    bits = 0
+    result = true
+  of fcNormal, fcSubnormal:
+    # As `float32ToIbm`, on the double itself.
+    let (m, e) = frexp(abs(x))
+    var e16 = (e + 3 + 4096) div 4 - 1024 # ceil(e / 4)
+    var frac = uint32(round(ldexp(m, cint(fractionBits - (4 * e16 - e))))) shl
+      (24 - fractionBits)
+    if frac == 0x0100_0000'u32: # rounding carried out
+      frac = frac shr 4
+      inc e16
+    result = e16 <= 63
+    if e16 < -64: bits = 0
+    elif result:
+      bits = (if x < 0: 0x8000_0000'u32 else: 0'u32) or (uint32(e16 + 64) shl 24) or frac
+
 func ibmF32*(b: openArray[byte], pos: int): float32 {.inline.} =
   ## Reads an IBM float at byte offset `pos`.
   ibmToFloat32(beU32(b, pos))

@@ -148,6 +148,25 @@ block scaled_segd:
       if a.isRev3: doAssert b.trailerRev3 == a.trailerRev3
       else: doAssert b.trailer == a.trailer
 
+block segd_8015_read_as_twos_complement_is_written_like_that:
+  # The reader's `twosComplement8015` is the file's convention: written
+  # "like" it, the samples read back the same (they were one LSB off on
+  # every negative sample).
+  var o = ConvertOptions(target: skSegd)
+  o.segd.format = tf8015
+  let src = convert(inova, "inova_8015.sgd", o)
+  var f = openSeismic(src, opts = OpenOptions(twosComplement8015: true))
+  let x = f.readTraces(0 ..< f.len, float64)
+  let dst = tmp / "inova_8015_like.sgd"
+  var w = openSeismicWriter(dst, like = f)
+  for i in 0 ..< f.len: w.writeTrace(f, i, x, i)
+  discard w.close()
+  var g = openSeismic(dst, opts = OpenOptions(twosComplement8015: true))
+  doAssert g.len == f.len and g.readTraces(0 ..< g.len, float64) == x
+  doAssert readFile(dst) == readFile(src)
+  g.close()
+  f.close()
+
 block scaled_seg2:
   for (src, fmt, tol) in [(boSg2, s2tKeep, 1e-6), (boSg2, s2t5, 1e-15), (inovaSg2, s2tKeep, 0.0),
       (inovaSg2, s2t4, 1e-6)]:
@@ -169,7 +188,7 @@ block changed_sample_counts_segy:
     let dst = tmp / ("half_" & src.extractFilename)
     var w = openSeismicWriter(dst, f)
     let x = f.readTraces(0 ..< f.len, float64)
-    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = n)
+    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = n)
     discard w.close()
     var g = openSeismic(dst)
     doAssert g.len == f.len and g.maxSamples == n and not g.log.isFatal, $g.log
@@ -178,25 +197,27 @@ block changed_sample_counts_segy:
     for i in 0 ..< g.len: doAssert g.traceField(i, "trace.numSamples").intVal == n
     if f.index.segy.binary.extSamplesPerTrace != 0:
       doAssert g.fileField("binary.extSamplesPerTrace").intVal == n
-  block mixed_counts_keep_the_binary_count:
+  block mixed_counts_write_the_largest_in_the_binary_header:
+    # (The binary header kept the input's count, whatever was written.)
     var f = openSeismic(boVar)
-    let n = f.maxSamples
+    let n = f.maxSamples div 2
     let dst = tmp / "mixed.sgy"
     var w = openSeismicWriter(dst, f)
     let x = f.readTraces(0 ..< f.len)
-    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = n - i mod 2)
+    for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = n - i mod 2)
     discard w.close()
     var g = openSeismic(dst)
     doAssert g.fileField("binary.samplesPerTrace").intVal == n
+    doAssert g.maxSamples == n
     doAssert g.traceField(1, "trace.numSamples").intVal == n - 1
     doAssert g.readTraces(1..1)[0, 0 ..< n - 1] == x[1, 0 ..< n - 1]
   block fixed_length_needs_one_count:
     var f = openSeismic(bo)
     var w = openSeismicWriter(tmp / "fixed.sgy", f)
     let x = f.readTraces(0..1)
-    w.writeTrace(f, 0, x, 0, samples = 100)
-    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, samples = 99)
-    w.writeTrace(f, 1, x, 1, samples = 100)
+    w.writeTrace(f, 0, x, 0, count = 100)
+    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, count = 99)
+    w.writeTrace(f, 1, x, 1, count = 100)
     discard w.close()
     var g = openSeismic(tmp / "fixed.sgy")
     doAssert g.len == 2 and g.maxSamples == 100
@@ -215,7 +236,7 @@ block changed_sample_counts_seg2:
   var f = openSeismic(boSg2)
   var w = openSeismicWriter(tmp / "half.sg2", f)
   let x = f.readTraces(0 ..< f.len)
-  for i in 0 ..< f.len: w.writeTrace(f, i, x, i, samples = 10 + i)
+  for i in 0 ..< f.len: w.writeTrace(f, i, x, i, count = 10 + i)
   discard w.close()
   var g = openSeismic(tmp / "half.sg2")
   doAssert g.len == f.len and g.maxSamples == 10 + f.len - 1
@@ -245,7 +266,7 @@ block segd_record_rule:
     doAssertRaises(ValueError): w.writeTrace(f, 2, x, 2)    # trace 1 is next
     doAssertRaises(ValueError): w.writeTrace(f, 0, x, 0)    # nor again
     doAssertRaises(ValueError): w.writeTrace(f, 5, x, 5)    # record 0 is incomplete
-    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, samples = 10) # count changes
+    doAssertRaises(ValueError): w.writeTrace(f, 1, x, 1, count = 10) # count changes
     w.writeTrace(f, 1, x, 1)                                # the writer is still usable
     doAssertRaises(ValueError): discard w.close()           # record 0 is incomplete
     doAssert not fileExists(tmp / "bad.sgd")
@@ -263,6 +284,13 @@ block refusals:
   doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgy", sy, segdFormat = tf8058)
   doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgy", r1, segyFormat = st6)
   doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgd", sd, segdFormat = tf8080)
+  block: # 8015 packs 4 samples in 10 bytes: shot.sgd's traces have 4001
+    var odd = openSeismic(demoDir() / "shot.sgd")
+    doAssert odd.maxSamples mod 4 != 0
+    doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgd", odd, segdFormat = tf8015)
+    var w8015 = openSeismicWriter(tmp / "a.sgd", sd, segdFormat = tf8015) # 1000 samples: fine
+    doAssertRaises(ValueError): w8015.writeTrace(odd, 0, odd.readTraces(0..0), 0)
+    odd.close()
   doAssertRaises(ValueError): discard openSeismicWriter(bo, sy)       # the input itself
   doAssertRaises(IOError): discard openSeismicWriter(tmp / "no" / "dir.sgy", sy)
   var w = openSeismicWriter(tmp / "r.sgy", sy, segyFormat = st3)
@@ -270,7 +298,7 @@ block refusals:
   doAssertRaises(ValueError): w.writeTrace(s2, 0, x, 0)
   doAssertRaises(ValueError): w.writeTrace(sy, sy.len, x, 0)          # out of range
   doAssertRaises(ValueError): w.writeTrace(sy, 0, x, 1)               # no such row
-  doAssertRaises(ValueError): w.writeTrace(sy, 0, x, 0, samples = 5000) # row too short
+  doAssertRaises(ValueError): w.writeTrace(sy, 0, x, 0, count = 5000) # row too short
   doAssertRaises(SegFormatError): # int16 overflow
     w.writeTrace(sy, 0, 1e9'f32 * ones[float32](1, sy.maxSamples), 0)
   doAssert w.len == 0

@@ -20,6 +20,7 @@
 
 import std/[math, options]
 import ../common/[endians, errors]
+import ../private/bytestore
 export options
 
 type
@@ -163,21 +164,12 @@ proc float20Parts(x: float64, i: int): (int, int) =
     if abs(m) <= 32767: return (e, int(m))
   raiseFormat("sample " & $i & " = " & $x & " exceeds format 3's range (32767 * 2^15)")
 
-proc encodeSamples*[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[T],
-    dst: var openArray[byte], order: ByteOrder, twosComplement = false) =
-  ## Encodes `src` as format `f`, stored in `order`, into the start of `dst`
-  ## (at least `dataBytes(f, src.len)` bytes). Integer formats round to
-  ## nearest; format 3 picks per sample the smallest exponent that holds the
-  ## rounded mantissa (so integers up to 32767 are exact), with one's
-  ## complement mantissas unless `twosComplement`, and zero-fills a last
-  ## partial group. Raises `SegFormatError` for a value the format cannot
-  ## hold (NaN or out of range in an integer format or format 3) and
-  ## `ValueError` when `dst` is too short.
+proc encodePlain[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[T],
+    dst: var openArray[byte], order: ByteOrder, twosComplement: bool) =
+  # One sample at a time through the checked accessors: format 3, and every
+  # trace a kernel of `encodeSamples` flags, for its error (it names the
+  # first sample that does not fit).
   let n = src.len
-  let need = dataBytes(f, n)
-  if dst.len < need:
-    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " & $need &
-      " needed for " & $n & " samples")
   template loop(o: static ByteOrder) =
     case f
     of s2Int16:
@@ -202,3 +194,75 @@ proc encodeSamples*[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[T],
           putNum(dst, 10 * g + 2 + 2 * k, w, o)
         putNum(dst, 10 * g, e, o)
   if order == boLittle: loop(boLittle) else: loop(boBig)
+
+when defined(gcc):
+  # The integer kernels round and clamp without a branch; gcc vectorizes
+  # them only when it need not keep the floating-point exception flags as
+  # the scalar code would raise them (its default). The values do not
+  # depend on it. This C file only.
+  {.localPassC: "-fno-trapping-math".}
+
+{.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+
+proc encodeKernel[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[T],
+    dst: var openArray[byte], order: ByteOrder): bool {.raises: [].} =
+  # The loops of `encodeSamples`, which has checked that `dst` holds the
+  # `src.len > 0` samples: unchecked stores, the byte order a constant, as
+  # the decoders. True when `encodePlain` must do the trace instead (then
+  # `dst` holds clamped values). It raises nothing, so the compiler puts no
+  # error check into the loops.
+  let n = src.len
+  let s = cast[ptr UncheckedArray[T]](addr src[0])
+  let d = cast[ByteBuf](addr dst[0])
+  var redo = 0 # or-ed flags, no branch per sample
+  template loop(o: static ByteOrder) =
+    template ints(I: typedesc, put: untyped) =
+      # Rounded to nearest, halves away from zero. A value outside `I` (or
+      # NaN) is only flagged here, and stored clamped.
+      const a = float64(low(I))
+      const b = float64(high(I))
+      for i {.inject.} in 0..<n:
+        let r = roundAway(float64(s[i]))
+        redo = redo or (ord(not (r >= a)) or ord(not (r <= b)))
+        let k {.inject.} = I(truncToInt32(max(a, min(r, b))))
+        put
+    case f
+    of s2Int16:
+      ints(int16):
+        storeNum(d, 2 * i, k, o)
+    of s2Int32:
+      ints(int32):
+        storeNum(d, 4 * i, k, o)
+    of s2Float32:
+      when T is float32 and o == hostOrder:
+        copyMem(d, s, 4 * n)
+      else:
+        for i in 0..<n: storeNum(d, 4 * i, float32(s[i]), o)
+    of s2Float64:
+      when T is float64 and o == hostOrder:
+        copyMem(d, s, 8 * n)
+      else:
+        for i in 0..<n: storeNum(d, 8 * i, float64(s[i]), o)
+    of s2Float20:
+      redo = 1
+  if order == boLittle: loop(boLittle) else: loop(boBig)
+  redo != 0
+
+proc encodeSamples*[T: Seg2SampleType](f: Seg2SampleFormat, src: openArray[T],
+    dst: var openArray[byte], order: ByteOrder, twosComplement = false) =
+  ## Encodes `src` as format `f`, stored in `order`, into the start of `dst`
+  ## (at least `dataBytes(f, src.len)` bytes). Integer formats round to
+  ## nearest; format 3 picks per sample the smallest exponent that holds the
+  ## rounded mantissa (so integers up to 32767 are exact), with one's
+  ## complement mantissas unless `twosComplement`, and zero-fills a last
+  ## partial group. Raises `SegFormatError` for a value the format cannot
+  ## hold (NaN or out of range in an integer format or format 3) and
+  ## `ValueError` when `dst` is too short.
+  let n = src.len
+  let need = dataBytes(f, n)
+  if dst.len < need:
+    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " & $need &
+      " needed for " & $n & " samples")
+  if n > 0 and encodeKernel(f, src, dst, order): encodePlain(f, src, dst, order, twosComplement)
+
+{.pop.}

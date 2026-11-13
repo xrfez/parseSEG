@@ -78,6 +78,31 @@ block quantization_is_stable:
       doAssert abs(ys[i] - xs[i]) <= abs(xs[i]) * rel + absTol + 1e-12,
         $f & " " & $xs[i] & " " & $ys[i]
 
+block twos_complement_8015_encodes_what_it_decodes:
+  # Some field systems write 8015 fractions as two's complement. Read that
+  # way and written back that way, every word is the same (the one's
+  # complement encoder was one LSB off on each negative sample). Exponents
+  # 1, 2, 0, 15 with fractions 0.5, -16385/32768, -1/32768 and the largest.
+  let g = [0x12'u8, 0x0F, 0x40, 0x00, 0xBF, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF]
+  var v = newSeq[float64](4)
+  decodeSamples(sd8015, g, v, twosComplement8015 = true)
+  var b = newSeq[byte](10)
+  encodeSamples(sd8015, v, b, twosComplement8015 = true)
+  doAssert b == @g
+  encodeSamples(sd8015, v, b)
+  doAssert b != @g
+  var rng = initRand(7)
+  var xs = newSeq[float64](64)
+  for i in 0 ..< xs.len: xs[i] = rng.rand(-1000.0 .. 1000.0)
+  var words = newSeq[byte](dataBytes(sd8015, xs.len))
+  encodeSamples(sd8015, xs, words, twosComplement8015 = true)
+  var ys = newSeq[float64](xs.len)
+  decodeSamples(sd8015, words, ys, twosComplement8015 = true)
+  for i in 0 ..< xs.len: doAssert abs(ys[i] - xs[i]) <= abs(xs[i]) / 32768 + 1e-12
+  var again = newSeq[byte](words.len)
+  encodeSamples(sd8015, ys, again, twosComplement8015 = true)
+  doAssert again == words
+
 block rev31_little_endian:
   # The 90xx formats are the 80xx ones with their bytes reversed.
   doAssert toSegdFormat(9058) == some(sd9058) and sd9058.isLittleEndian
@@ -105,6 +130,45 @@ block refusals:
   encodeSamples(sd8058, [NaN], b) # IEEE holds NaN
   var one = [0.0]
   doAssertRaises SegTruncatedError: decodeSamples(sd8058, [1'u8, 2], one)
+  # A destination that is too short is the caller's error.
+  doAssertRaises ValueError: encodeSamples(sd8058, [1.0, 2.0], b.toOpenArray(0, 6))
+  doAssertRaises ValueError: encodeSamples(sd8015, [1.0], b.toOpenArray(0, 8))
+
+block values_beyond_a_formats_range_are_refused:
+  # Every format refuses what it cannot hold, as the integer formats do
+  # (the exponent formats and 8048 clamped at full scale without a word).
+  var b = newSeq[byte](16)
+  var v = [0.0]
+  for (f, most) in [(sd8015, 32767.0), (sd8022, 15360.0), (sd8024, 16380.0), (sd8042, 3968.0),
+      (sd8044, 4095.5), (sd8048, 7.2370047e75)]:
+    encodeSamples(f, [most], b)
+    decodeSamples(f, b, v)
+    doAssert abs(v[0] - most) <= most * 1e-7, $f & " " & $v[0]
+    for bad in [most * 1.07, -most * 1.07, Inf, NegInf, NaN]:
+      doAssertRaises SegFormatError: encodeSamples(f, [bad], b)
+  doAssertRaises SegFormatError: encodeSamples(sd8048, [1e300], b)
+  doAssertRaises SegFormatError: encodeSamples(sd8048, [float32(Inf)], b)
+  # The most negative values. 8015 in one's complement mirrors the positive
+  # range; two's complement has one more step.
+  encodeSamples(sd8015, [-32767.0], b)
+  decodeSamples(sd8015, b, v)
+  doAssert v[0] == -32767
+  doAssertRaises SegFormatError: encodeSamples(sd8015, [-32768.0], b)
+  encodeSamples(sd8015, [-32768.0], b, twosComplement8015 = true)
+  decodeSamples(sd8015, b, v, twosComplement8015 = true)
+  doAssert v[0] == -32768
+  doAssertRaises SegFormatError: encodeSamples(sd8015, [-32769.0], b, twosComplement8015 = true)
+  # 8042 and 8044: all ones (negative full scale) is not a valid code, so
+  # the negative range ends one step earlier.
+  for (f, most) in [(sd8042, -3840.0), (sd8044, -4095.0)]:
+    encodeSamples(f, [most], b)
+    decodeSamples(f, b, v)
+    doAssert v[0] == most, $f & " " & $v[0]
+    doAssertRaises SegFormatError: encodeSamples(f, [-3968.0 - (if f == sd8044: 127.5 else: 0)], b)
+  # 8048 takes a double beyond float32's range.
+  encodeSamples(sd8048, [1e39], b)
+  decodeSamples(sd8048, b, v)
+  doAssert abs(v[0] - 1e39) < 1e33
 
 sampleBlock sample_63_into_tensor:
   let s = readFile(exampleDir / "63.sgd")
@@ -116,16 +180,3 @@ sampleBlock sample_63_into_tensor:
   var back = newSeq[byte](4000)
   t.encodeTrace(0, sd8058, back, 1000)
   doAssert back == raw[340 .. ^1]
-
-block review_clamps:
-  var b = newSeq[byte](8)
-  encodeSamples(sd8048, [1e300, 7.2370051e75], b)
-  var v = newSeq[float64](2)
-  decodeSamples(sd8048, b, v)
-  doAssert v[0] > 7.2e75 and v[1] > 7.2e75 # full scale, not 1/16 of it
-  encodeSamples(sd8042, [-1e9], b)
-  doAssert b[0] != 0xFF # the all-ones code is invalid
-  encodeSamples(sd8044, [-1e9], b)
-  doAssert not (b[0] == 0xFF and b[1] == 0xFF)
-  decodeSamples(sd8044, b, v.toOpenArray(0, 0))
-  doAssert v[0] < -4000.0

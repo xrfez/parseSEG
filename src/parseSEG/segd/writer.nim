@@ -19,7 +19,9 @@
 ## Validation: output the reader could not decode as intended (counts that
 ## disagree with the blocks present, a trace whose size or extension count
 ## disagrees with its headers, an undefined format) is refused with
-## `SegFormatError` unless `lenient`; then it is logged as a warning.
+## `SegFormatError` unless `lenient`; then it is logged as a warning. Calls
+## out of order (a trace without a record, a record inside a record, ...)
+## raise `ValueError`.
 
 import std/math
 import ../common/[errors, diagnostics, endians]
@@ -60,6 +62,10 @@ proc problem(w: var SegdWriter, msg: string, field = "", trace = -1) =
   else:
     w.log.report(sevError, dcValidation, msg, loc = loc)
     raiseFormat("refusing to write SEG-D the reader would misread: " & msg)
+
+proc misuse(msg: string) {.noinline, noreturn.} =
+  # A call out of order: the caller's error.
+  raise newException(ValueError, msg)
 
 proc padToBlock(w: var SegdWriter) =
   # FIXREC: zero-fill the rest of the current block.
@@ -211,8 +217,8 @@ proc checkRecord(w: var SegdWriter, rec: SegdRecord) =
 proc writeRecordHeaders*(w: var SegdWriter, rec: SegdRecord) =
   ## Validates `rec` and writes its general headers, scan type headers,
   ## extended and external headers. Then write its traces and call
-  ## `endRecord`.
-  doAssert not w.inRecord, "call endRecord before starting another record"
+  ## `endRecord`. Raises `ValueError` while a record is in progress.
+  if w.inRecord: misuse("call endRecord before starting another record")
   w.checkRecord(rec)
   var hdr: seq[byte]
   hdr.add rec.gh1.encoded
@@ -294,8 +300,9 @@ proc checkTrace(w: var SegdWriter, t: SegdTrace) =
       $dataBytes(w.record.format.get, t.numSamples) & " expected", "trace.samples", t.index)
 
 proc writeTrace*(w: var SegdWriter, t: SegdTrace) =
-  ## Validates and writes one trace of the current record.
-  doAssert w.inRecord, "call writeRecordHeaders first"
+  ## Validates and writes one trace of the current record. Raises
+  ## `ValueError` without a record in progress.
+  if not w.inRecord: misuse("call writeRecordHeaders first")
   w.checkTrace(t)
   # FIXREC (owner decision): a trace does not cross a block boundary when it
   # fits in one block; the rest of the current block is zero-padded instead.
@@ -323,9 +330,10 @@ proc setRev3Trailer*(w: var SegdWriter, trailer: sink seq[byte]) =
   ## Rev 3: replaces the general trailer (`trailerRev3`) of the record in
   ## progress, for a trailer known only after its traces. GH#2 and GH#3 were
   ## written with the record headers, so it must have the size they announce
-  ## (`endRecord` checks).
-  doAssert w.inRecord and w.record.isRev3,
-    "setRev3Trailer needs a Rev 3 record in progress"
+  ## (`endRecord` checks). Raises `ValueError` without a Rev 3 record in
+  ## progress.
+  if not (w.inRecord and w.record.isRev3):
+    misuse("setRev3Trailer needs a Rev 3 record in progress")
   w.record.trailerRev3 = trailer
 
 proc endRev2Record(w: var SegdWriter, trailer: openArray[SegdTrailerBlock]) =
@@ -358,8 +366,8 @@ proc endRecord*(w: var SegdWriter, trailer: openArray[SegdTrailerBlock] = []) =
   ## sizes), writes the general trailer (Rev 0-2: `trailer`, or the record's
   ## own when empty; Rev 3: `trailerRev3`, set with `setRev3Trailer`;
   ## `trailer` is ignored), pads a FIXREC block and writes a tape mark if
-  ## `tapeMarkPerRecord`.
-  doAssert w.inRecord, "no record in progress"
+  ## `tapeMarkPerRecord`. Raises `ValueError` without a record in progress.
+  if not w.inRecord: misuse("no record in progress")
   if w.tracesWritten != w.record.traceCount:
     w.problem("the channel set descriptors announce " & $w.record.traceCount & " traces, " &
       $w.tracesWritten & " were written",
@@ -392,8 +400,9 @@ proc computeRev3Sizes*(rec: var SegdRecord, traces: openArray[SegdTrace]) =
 
 proc close*(w: var SegdWriter) =
   ## Marks the end of data: two tape marks (one if a record just ended with
-  ## one). Disk sinks ignore tape marks. The sink stays open.
-  doAssert not w.inRecord, "call endRecord before close"
+  ## one). Disk sinks ignore tape marks. The sink stays open. Raises
+  ## `ValueError` while a record is in progress.
+  if w.inRecord: misuse("call endRecord before close")
   w.sink.writeTapeMark(if w.lastWasMark: 1 else: 2)
 
 proc writeSegd*(sink: RecordSink, d: SegdData, opts = SegdWriteOptions()): DiagLog =

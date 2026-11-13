@@ -157,6 +157,30 @@ block refused:
   bad.intervalUs = 70_000
   doAssertRaises(ValueError): w.writeTrace(bad, [1'f32]) # over 65535 µs before Rev 2
   doAssertRaises(ValueError): w.writeTrace(k, newSeq[float32](70_000)) # needs Ext1
+  block rev0_delay:
+    # Rev 0 has no time scalar: its delay is a whole ms in an int16. A start
+    # time beyond that is refused, as an interval the revision cannot hold
+    # is (it was written as 32767).
+    var w0 = openSeismicWriter(tmp / "r0.sgy", SegyOutputOptions(revision: SegyRevision()))
+    var late = k
+    late.t0Ms = 40_000
+    doAssertRaises(ValueError): w0.writeTrace(late, [1'f32])
+    late.t0Ms = -32768.4
+    doAssertRaises(ValueError): w0.writeTrace(late, [1'f32])
+    late.t0Ms = 32767.4 # rounds into the field
+    w0.writeTrace(late, [1'f32])
+    # The midpoint has no Rev 0 field: bytes 181-188 stay unassigned, and
+    # readers derive it from the source and receiver again.
+    var mid = k
+    (mid.srcX, mid.srcY, mid.rcvX, mid.rcvY) = (100.0, 200.0, 300.0, 400.0)
+    (mid.cmpX, mid.cmpY) = (1234.0, 5678.0)
+    w0.writeTrace(mid, [1'f32])
+    discard w0.close()
+    var g0 = openSeismic(tmp / "r0.sgy", keys = true)
+    doAssert g0.traceKeys(0).t0Ms == 32767
+    doAssert g0.traceKeys(1).cmpX == 200 and g0.traceKeys(1).cmpY == 300
+    doAssert g0.traceField(1, "trace.cdpX").toFloat == 0
+    g0.close()
   doAssertRaises(ValueError): w.writeTrace(k, [1'f32], [headerOverride("trace.nope", 1)])
   doAssert w.len == 0
   w.writeTrace(k, [1'f32])
@@ -215,3 +239,68 @@ block like_segy_input:
   doAssert g.len == 1 and int(g.traceEntry(0).numSamples) == n
   g.close()
   f.close()
+
+block like_a_rev0_input_whose_traces_leave_their_count_to_the_binary_header:
+  # The reader takes the binary header's count for a Rev 0 trace that gives
+  # 0 samples; written like it, each trace must say its own.
+  let src = tmp / "rev0_ns0.sgy"
+  block:
+    var w = openSeismicWriter(src, SegyOutputOptions(revision: SegyRevision(major: 0, minor: 0)))
+    var k = initTraceKeys()
+    k.intervalUs = 2000
+    var x = newSeq[float32](100)
+    for i in 0 ..< 100: x[i] = float32(i)
+    for t in 0 ..< 3: w.writeTrace(k, x)
+    discard w.close()
+  var b = readFile(src)
+  for t in 0 ..< 3: (b[3600 + t * 640 + 114], b[3600 + t * 640 + 115]) = ('\0', '\0')
+  writeFile(src, b)
+  var f = openSeismic(src)
+  doAssert f.len == 3 and f.maxSamples == 100
+  let x = f.readTraces(0 ..< f.len)
+  let dst = tmp / "rev0_ns0_like.sgy"
+  var w = openSeismicWriter(dst, like = f)
+  for i in 0 ..< f.len: w.writeTrace(f, i, x, i)
+  discard w.close()
+  var g = openSeismic(dst)
+  doAssert g.len == 3 and g.maxSamples == 100 and g.readTraces(0 ..< g.len) == x
+  doAssert g.traceField(2, "trace.numSamples").toFloat == 100
+  g.close()
+  f.close()
+
+block whole_intervals_with_float_noise:
+  # An interval kept in ms and handed back as ms × 1000 is not always the
+  # whole number it was: 1001 µs comes back as 1000.9999999999999, as do
+  # 1471 other values up to 65535. They are written as the whole numbers.
+  for rev in [SegyRevision(major: 0, minor: 0), SegyRevision(major: 1, minor: 0),
+      SegyRevision(major: 2, minor: 1)]:
+    let dst = tmp / ("noise_r" & $rev.major & ".sgy")
+    var w = openSeismicWriter(dst, SegyOutputOptions(revision: rev))
+    var k = initTraceKeys()
+    var noisy: seq[int]
+    for us in 1 .. 65535:
+      k.intervalUs = (float64(us) / 1000) * 1000
+      if k.intervalUs != float64(us):
+        noisy.add us
+        w.writeTrace(k, [0'f32])
+    doAssert noisy.len > 1000 and noisy[0] == 1001
+    discard w.close()
+    var g = openSeismic(dst, keys = true)
+    doAssert g.len == noisy.len
+    doAssert g.fileField("binary.sampleInterval").toFloat == 1001
+    for i, us in noisy:
+      doAssert g.traceKeys(i).intervalUs == float64(us), $rev & ": " & $us
+      doAssert g.traceField(i, "trace.sampleInterval").toFloat == float64(us)
+    g.close()
+  # An interval that really has a fraction is another matter.
+  var k = initTraceKeys()
+  k.intervalUs = 1000.999
+  var w1 = openSeismicWriter(tmp / "frac_r1.sgy",
+    SegyOutputOptions(revision: SegyRevision(major: 1, minor: 0)))
+  doAssertRaises(ValueError): w1.writeTrace(k, [0'f32])
+  var w2 = openSeismicWriter(tmp / "frac_r2.sgy", SegyOutputOptions())
+  w2.writeTrace(k, [0'f32])
+  discard w2.close()
+  var g = openSeismic(tmp / "frac_r2.sgy", keys = true)
+  doAssert g.traceKeys(0).intervalUs == 1000.999
+  g.close()

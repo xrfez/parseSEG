@@ -7,13 +7,15 @@
 ## `encodeChecked` gives the same bytes, verdict and raises in one pass: each
 ## sample's encoded word is decoded on the spot (float64 targets need no
 ## check, float32 one compare, integers a rounding compare; a value an
-## integer format cannot hold sends the trace to `encodeExact` for its error).
+## integer format or IBM float cannot hold sends the trace to `encodeExact`
+## for its error).
 ## `copyFloatWords` moves IEEE float samples between byte orders without the
 ## float64 round trip, with the same bytes as that round trip.
 
 import std/math
 import ../common/[endians, ibmfloat, errors]
 import ../segy/samples
+import ./bytestore
 
 proc encodeExact*(fmt: SampleFormat, vals: openArray[float64], dst: var seq[byte],
     order: ByteOrder, scratch: var seq[float64]): bool =
@@ -43,36 +45,6 @@ template eachOrder(order: ByteOrder, o: untyped, body: untyped) =
 
 {.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
 
-func toStored[T: uint16 | uint32 | uint64](x: T, order: static ByteOrder): T {.inline.} =
-  # Native `x` as host-order bits of its bytes stored in `order` (and back:
-  # each reordering is its own inverse).
-  const lowBytes = when T is uint32: 0x00FF_00FF'u32 else: 0x00FF_00FF_00FF_00FF'u64
-  template pairs(y: T): T =
-    when T is uint16: swapBytes(y) else: ((y and lowBytes) shl 8) or ((y shr 8) and lowBytes)
-  when order == hostOrder: x
-  elif order == boPairSwapped:
-    when hostOrder == boLittle: pairs(swapBytes(x)) else: pairs(x)
-  else: swapBytes(x)
-
-func storeNum[T: SomeNumber](p: ByteBuf, pos: int, v: T, order: static ByteOrder) {.inline.} =
-  # Writes `v` in `order` at `pos`, unchecked (the store side of `loadNum`).
-  when sizeof(T) == 1:
-    p[pos] = cast[uint8](v)
-  else:
-    type U = (when sizeof(T) == 2: uint16 elif sizeof(T) == 4: uint32 else: uint64)
-    var u = toStored(cast[U](v), order)
-    copyMem(addr p[pos], addr u, sizeof(U))
-
-func storeU24(p: ByteBuf, pos: int, v: uint32, order: static ByteOrder) {.inline.} =
-  when order == boLittle:
-    p[pos] = uint8(v and 0xFF)
-    p[pos + 1] = uint8((v shr 8) and 0xFF)
-    p[pos + 2] = uint8((v shr 16) and 0xFF)
-  else:
-    p[pos] = uint8((v shr 16) and 0xFF)
-    p[pos + 1] = uint8((v shr 8) and 0xFF)
-    p[pos + 2] = uint8(v and 0xFF)
-
 proc encodeChecked*(fmt: SampleFormat, vals: openArray[float64], dst: var seq[byte],
     order: ByteOrder, scratch: var seq[float64]): bool =
   ## `encodeExact` in one pass, with the same bytes in `dst`, result and
@@ -97,9 +69,10 @@ proc encodeChecked*(fmt: SampleFormat, vals: openArray[float64], dst: var seq[by
     const a = float64(lo)
     const b = float64(hi)
     for i {.inject.} in 0..<n:
-      let r = round(v[i])
+      let r = roundAway(v[i]) # `round`, without the library call
       outside = outside or ord(not (r >= a and r <= b))
-      let k {.inject.} = I(max(a, min(r, b))) # in range: no undefined conversion
+      let c = max(a, min(r, b)) # in range: no undefined conversion
+      let k {.inject.} = when I is uint32: uint32(c) else: I(truncToInt32(c))
       put
       lost = lost or ord(float64(k) != v[i])
   eachOrder(order, o):
@@ -113,7 +86,14 @@ proc encodeChecked*(fmt: SampleFormat, vals: openArray[float64], dst: var seq[by
         lost = lost or (ord(float64(f) != v[i]) and ord(v[i] == v[i])) # NaN stays NaN
     of sfIbm32:
       for i in 0..<n:
-        let w = float32ToIbm(float32(v[i]))
+        let f = float32(v[i])
+        # NaN, an infinity or a double beyond float32: `encodeExact` raises
+        # or encodes the double itself, as `encodeSamples` does.
+        outside = outside or ord(f - f != 0)
+        let bits = cast[uint32](f)
+        let e = (bits shr 23) and 0xFF
+        # The integer kernel for normal values (17 ns per sample otherwise).
+        let w = if e != 0 and e != 255: normalToIbm(bits) else: float32ToIbm(f)
         storeNum(d, 4*i, w, o)
         lost = lost or differs(ibmToFloat64(w), v[i])
     of sfInt32:
@@ -140,8 +120,8 @@ proc encodeChecked*(fmt: SampleFormat, vals: openArray[float64], dst: var seq[by
           storeU24(d, 3*i, cast[uint32](k) and 0xFF_FFFF'u32, o)
     of sfUInt24:
       when o != boPairSwapped:
-        ints(uint32, 0, 0xFF_FFFF):
-          storeU24(d, 3*i, k, o)
+        ints(int32, 0, 0xFF_FFFF):
+          storeU24(d, 3*i, cast[uint32](k), o)
     of sfFixedGain, sfInt64, sfUInt64: discard # sent to encodeExact above
   if outside != 0: return encodeExact(fmt, vals, dst, order, scratch) # raises
   lost == 0

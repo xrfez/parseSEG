@@ -20,10 +20,11 @@
 ##   `seg2Format`; "keep" by default);
 ## - SEG-Y and SEG-2: the sample count, which may differ from the input's.
 ##   SEG-Y updates the trace header (Trace Header Extension 1 when it holds
-##   the count or the count exceeds 65535) and, when every trace written has
-##   the same count, the binary header's; a fixed-length file needs one count
-##   for all traces. The Rev 2 trace count (binary bytes 3513-3520), when the
-##   input declares one, becomes the number written.
+##   the count or the count exceeds 65535) and the binary header, which gets
+##   the count of the traces written (the largest when they differ); a
+##   fixed-length file needs one count for all traces. The Rev 2 trace
+##   count (binary bytes 3513-3520), when the input declares one, becomes
+##   the number written.
 ##
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
@@ -47,14 +48,15 @@
 ##
 ## The output goes to a temporary file next to `path`, renamed when `close`
 ## succeeds. A writer dropped without `close`, or whose `close` raises,
-## leaves no output file. The per-standard writers validate as usual:
-## spec-invalid output raises `SegFormatError` (see `segy/writer`,
-## `segd/writer`, `seg2/writer`); a value the format cannot hold raises
-## `SegFormatError` from the encoder and writes nothing. Caller errors (a
-## trace out of range, another standard, a closed file, a broken SEG-D
-## record rule) raise `ValueError`.
+## leaves no output file; nor does one whose `writeTrace` raised `IOError`
+## (a full disk): it is closed, and its `close` raises `ValueError`. The
+## per-standard writers validate as usual: spec-invalid output raises
+## `SegFormatError` (see `segy/writer`, `segd/writer`, `seg2/writer`); a
+## value the format cannot hold raises `SegFormatError` from the encoder
+## and writes nothing. Caller errors (a trace out of range, another
+## standard, a closed file, a broken SEG-D record rule) raise `ValueError`.
 
-import std/[importutils, math, options, os, times]
+import std/[math, options, os]
 import ../common/[diagnostics, endians, outputfile, seismickind]
 import ../io/[records, diskio]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
@@ -65,7 +67,7 @@ import ../convert
 import std/strutils
 import ./[traceindex, fieldvalues, keytypes]
 import ../common/tensors
-import ../private/[tensorrows, fieldaccess, segyencode, segykeys]
+import ../private/[tensorrows, fieldaccess, segyencode]
 import ../version
 
 type
@@ -110,6 +112,7 @@ type
     segyStarted: bool     ## `segy` is open on `sink` (from the first trace).
     segyFixed: bool       ## Fixed-length traces (Rev 1+, binary 3503 = 1).
     segyCount: int        ## The sample count of every trace so far; -1 none, -2 mixed.
+    segyMax: int          ## The largest sample count so far.
     segyNumTraces: uint64 ## The input's declared Rev 2 trace count.
     segyTrace: SegyTrace  ## Reused.
     segyFresh: bool       ## Opened from `SegyOutputOptions`: the first trace sets the interval.
@@ -157,30 +160,23 @@ method writeRecordImpl(s: NullSink; data: openArray[byte]) {.raises: [].} =
 
 method writeTapeMarkImpl(s: NullSink) {.raises: [].} = discard
 
-proc releaseOutput(s: WriterState) {.raises: [].} =
-  # Closes what is still open and removes the temporary file, mutating
-  # nothing: `=destroy` calls it, `discardOutput` adds the bookkeeping.
+proc discardOutput(s: var WriterState) {.raises: [].} =
+  # Closes what is still open and removes the temporary file; once.
   if s.sink != nil:
     try: s.sink.close()
     except CatchableError: discard
-  privateAccess(Seg2Writer)
-  if s.seg2.open: s.seg2.file.close() # the output is dropped: no pointers to write
+    s.sink = nil
+  s.seg2.abandon() # the output is dropped: no pointers to write
   if s.tmp.len > 0: discard tryRemoveFile(s.tmp)
-
-proc discardOutput(s: var WriterState) {.raises: [].} =
-  # `releaseOutput`, then marks it all gone so that it runs once.
-  s.releaseOutput()
-  s.open = false
-  s.sink = nil
-  privateAccess(Seg2Writer)
-  s.seg2.open = false
   s.tmp = ""
+  s.open = false
 
 proc `=destroy`(w: SeismicWriter) =
-  if w.s.open: w.s.releaseOutput()
-  # A plain object field has only the generic `=destroy(var T)`; the
-  # address is taken for that call alone, nothing is mutated before it.
-  `=destroy`((addr w.s)[])
+  # `discardOutput` and the field's generic `=destroy` take `var`: the
+  # address gives that view of the writer being destroyed.
+  let s = addr w.s
+  if s.open: s[].discardOutput()
+  `=destroy`(s[])
 
 proc `=copy`(dst: var SeismicWriter, src: SeismicWriter) {.error.}
   # A copy would share the temporary file and finish it twice.
@@ -229,6 +225,14 @@ proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat) =
   s.segyFile = f
   s.sink = openDiskSink(s.tmp)
 
+proc checkGroups(src: SeismicFile, first, last: int) =
+  # 8015 packs 4 samples into 10 bytes, and a SEG-D trace keeps its count:
+  # a trace of another length cannot go into that format.
+  for i in first..last:
+    if src.index.entries[i].numSamples mod 4 != 0:
+      refuse("SEG-D format 8015 holds samples in groups of 4; trace " & $i & " of " & src.path &
+        " has " & $src.index.entries[i].numSamples)
+
 proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
   if format != tfKeep:
     let fmt = segdSampleFormats[ord(format) - 1]
@@ -236,6 +240,7 @@ proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
       if not fmt.definedIn(rec.revision):
         refuse("SEG-D format " & $format & " is not defined in Rev " & $rec.revision &
           " (record " & $rec.index & ")")
+    if fmt == sd8015: checkGroups(like, 0, like.len - 1)
     s.segdFormat = some(fmt)
   s.sink = openDiskSink(s.tmp)
   s.segd = openSegdWriter(s.sink, SegdWriteOptions(), like.index.segdLabel)
@@ -248,7 +253,8 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## `seg2Format` (for `like`'s standard only) names one. Only `like`'s
   ## index is used, so it may be closed. Raises `ValueError` for an unrecognized or
   ## multiplexed SEG-D `like`, a format for another standard or one the
-  ## revision lacks, or `path` being `like`'s file; `SegFormatError` for
+  ## revision lacks, SEG-D 8015 for traces whose sample count is not a
+  ## multiple of 4, or `path` being `like`'s file; `SegFormatError` for
   ## file headers the writer refuses; `IOError` when the output cannot be
   ## created.
   let kind = like.kind
@@ -287,9 +293,9 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
   ## A writer of a new SEG-Y file at `path`, with file headers from `opts`
   ## rather than an input file, for traces built from `TraceKeys`
   ## (`writeTrace(w, keys, samples)`): e.g. a stack of SEG-D or SEG-2 data.
-  ## The binary header's sample interval and count are the first trace's
-  ## (the count is rewritten by `close` when every trace has the same
-  ## other count); traces are variable-length. Rev 2 traces carry Trace
+  ## The binary header's sample interval is the first trace's and its count
+  ## the largest of the traces written (set by `close`); traces are
+  ## variable-length. Rev 2 traces carry Trace
   ## Header Extension 1. Raises `ValueError` for a format the revision lacks
   ## (8-byte and 3-byte formats need Rev 2), a 3-byte format pair-swapped,
   ## a byte order other than big-endian before Rev 2, or a revision other
@@ -336,12 +342,9 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
 
 proc setTraceCount(t: var SegyTrace, n: int) =
   # The trace headers' sample count.
-  if t.hasExt1 and (t.ext1.extNumSamples != 0 or n > int(high(uint16))):
-    t.ext1.extNumSamples = uint32(n)
-  elif n > int(high(uint16)):
+  if not t.setSampleCount(n):
     refuse("a trace of " & $n & " samples needs Trace Header Extension 1 (SEG-Y Rev 2), " &
       "which this trace lacks")
-  t.header.numSamples = if n > int(high(uint16)): 0'u16 else: uint16(n)
 
 proc setFileCount(b: var SegyBinaryHeader, n: int) =
   # The binary header's samples per trace.
@@ -371,6 +374,11 @@ proc loadSegyTrace(src: SeismicFile, trace: int, t: var SegyTrace) =
   t.numSamples = int(e.numSamples)
   t.offset = e.offset
 
+proc noteCount(s: var WriterState, n: int) =
+  # A trace of `n` samples was written.
+  s.segyCount = if s.segyCount == -1 or s.segyCount == n: n else: -2
+  s.segyMax = max(s.segyMax, n)
+
 proc startSegy(s: var WriterState) =
   s.segy = openSegyWriter(s.sink, s.segyFile, initSegyWriteOptions(s.segyFile))
   s.segyStarted = true
@@ -396,7 +404,9 @@ proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   template t: untyped = s.segyTrace
   loadSegyTrace(src, trace, t)
   t.overrideSegy(overrides)
-  if n != t.numSamples: t.setTraceCount(n)
+  # Also when the headers do not say what the reader took: a Rev 0 trace
+  # may give 0 samples and leave the count to the binary header.
+  if n != t.numSamples or (not s.segyFixed and declaredSamples(t) != n): t.setTraceCount(n)
   if s.segyFixed:
     if not s.segyStarted: s.segyFile.binary.setFileCount(n)
     elif n != s.segyCount:
@@ -409,7 +419,7 @@ proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   t.index = s.written
   if not s.segyStarted: s.startSegy()
   s.segy.writeTrace(t)
-  s.segyCount = if s.segyCount == -1 or s.segyCount == n: n else: -2
+  s.noteCount(n)
 
 proc closeSegy(s: var WriterState, log: var DiagLog) =
   if not s.segyStarted: s.startSegy()
@@ -417,10 +427,11 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
   log.add s.segy.log
   s.sink.close()
   s.sink = nil
-  # The binary header's counts, now known.
+  # The binary header's counts, now known: the samples of every trace
+  # written, the largest when they differ.
   var b = s.segyFile.binary
-  if s.segyCount >= 0 and uint32(s.segyCount) != b.effectiveSamplesPerTrace:
-    b.setFileCount(s.segyCount)
+  if s.segyCount != -1 and uint32(s.segyMax) != b.effectiveSamplesPerTrace:
+    b.setFileCount(s.segyMax)
   if s.segyNumTraces != 0: b.numTraces = uint64(s.written)
   if b != s.segyFile.binary:
     var bytes = newSeq[byte](BinaryHeaderSize)
@@ -431,109 +442,17 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
       f.setFilePos(s.segyFile.tapeLabel.len + TextHeaderSize)
       if f.writeBytes(bytes, 0, bytes.len) != bytes.len:
         raise newException(IOError, "cannot write the binary header of " & s.tmp)
-    finally:
+    except IOError:
       f.close()
+      raise
+    closeChecked(f, s.tmp)
 
 # ------------------------------------------------------- SEG-Y from keys --
-
-func timeScalarFor(ms: float64): int16 =
-  # The time scalar (bytes 215-216) that holds `ms` in the int16 delay most
-  # exactly: whole ms (to 1 ns: float noise such as 4.0000000001 is whole)
-  # as 1, so readers that ignore the scalar still read it; else the finest
-  # of -10, -100, -1000 that fits; 10, 100, 1000 for delays past 32767 ms.
-  if abs(ms - round(ms)) < 1e-6 and abs(round(ms)) <= 32767: return 1
-  for s in [-1000'i16, -100, -10]:
-    if abs(round(ms * float64(-s))) <= 32767: return s
-  if abs(ms) <= 32767: return 1
-  for s in [10'i16, 100, 1000]:
-    if abs(round(ms / float64(s))) <= 32767: return s
-  1000
-
-proc keysTrace(t: var SegyTrace, k: TraceKeys, n: int, seqNo: int, rev: SegyRevision,
-    ext1: bool) =
-  # Trace headers holding `k` in the standard layout of `rev` (see `writeTrace`).
-  t.header = SegyTraceHeader(traceSeqLine: int32(min(seqNo, int(high(int32)))),
-    traceSeqFile: int32(min(seqNo, int(high(int32)))))
-  template h: untyped = t.header
-  if not k.record.isNaN: h.fieldRecord = clampI32(k.record)
-  if not k.channel.isNaN: h.traceNumberInField = clampI32(k.channel)
-  if not k.ensemble.isNaN: h.ensembleNumber = clampI32(k.ensemble)
-  h.traceIdCode =
-    # The stored code when it says what the status says (a status changed
-    # in the keys, e.g. a trace killed, wins over the input's code).
-    # `component` is not used: for SEG-D, SEG-2 and survey keys it is a
-    # group index or sensor type, not a SEG-Y code (a SEG-Y input's code is
-    # in `traceCode`).
-    if k.traceCode != 0 and segyStatus(k.traceCode, int(rev.major)) == k.status: k.traceCode
-    else:
-      case k.status
-      of tsLive: 1
-      of tsDead: 2
-      of tsUnknown, tsAuxiliary: 0
-  if not k.srcPoint.isNaN:
-    # Readers take the energy source point when non-zero, else the scaled
-    # shotpoint (Rev 1): a fractional point goes in the second alone.
-    let whole = k.srcPoint == round(k.srcPoint)
-    if whole or rev.major == 0: h.energySourcePoint = clampI32(k.srcPoint)
-    if rev.major >= 1:
-      h.shotpointScalar = if whole: 1 else: -100
-      h.shotpointNumber = scaled(k.srcPoint, h.shotpointScalar)
-  h.setGeometry(k)
-  if not k.t0Ms.isNaN:
-    if rev.major >= 1:
-      h.timeScalar = timeScalarFor(k.t0Ms)
-      h.delayRecordingTime = scaled(k.t0Ms, h.timeScalar).clamp(-32768, 32767).int16
-    else:
-      h.delayRecordingTime = clampI16(k.t0Ms)
-  let dt = k.intervalUs
-  let whole = dt == round(dt) and dt <= 65535
-  h.sampleInterval = uint16(if whole or rev.major < 2: clamp(round(dt), 0, 65535) else: 0)
-  h.numSamples = if n > int(high(uint16)): 0'u16 else: uint16(n)
-  if rev.major >= 1:
-    if not k.inline.isNaN: h.inlineNumber = clampI32(k.inline)
-    if not k.crossline.isNaN: h.crosslineNumber = clampI32(k.crossline)
-  var nanos = 0'i32
-  if not k.time.isNaN and k.time > -62135596800.0 and k.time < 253402300800.0:
-    let whole = floor(k.time)
-    let d = fromUnix(int64(whole)).utc
-    h.year = int16(d.year)
-    h.dayOfYear = int16(d.yearday + 1)
-    h.hour = int16(d.hour)
-    h.minute = int16(d.minute)
-    h.second = int16(d.second)
-    h.timeBasisCode = 4 # UTC
-    nanos = int32(min(round((k.time - whole) * 1e9), 999_999_999.0))
-  t.hasExt1 = ext1
-  t.proprietary.setLen 0
-  if ext1:
-    t.ext1 = initTraceHeaderExt1()
-    template x: untyped = t.ext1
-    x.numAddlTraceHeaders = 1
-    x.extTraceSeqLine = uint64(seqNo)
-    x.extTraceSeqFile = uint64(seqNo)
-    if not k.record.isNaN: x.extFieldRecord = int64(clamp(round(k.record), -9.2e18, 9.2e18))
-    if not k.ensemble.isNaN: x.extEnsembleNumber = int64(clamp(round(k.ensemble), -9.2e18, 9.2e18))
-    if n > int(high(uint16)): x.extNumSamples = uint32(n)
-    if h.sampleInterval == 0: x.extSampleInterval = dt
-    x.nanoseconds = nanos
-    template f64(dst: untyped, v: float64) =
-      if not v.isNaN: dst = v
-    f64(x.extSourceX, k.srcX)
-    f64(x.extSourceY, k.srcY)
-    f64(x.extGroupX, k.rcvX)
-    f64(x.extGroupY, k.rcvY)
-    f64(x.extCdpX, k.cmpX)
-    f64(x.extCdpY, k.cmpY)
-    f64(x.extOffset, k.offset)
-    f64(x.extReceiverElevation, k.rcvZ)
-    f64(x.extSourceSurfaceElevation, k.srcZ)
-  elif n > int(high(uint16)):
-    refuse("a trace of " & $n & " samples needs Trace Header Extension 1 (SEG-Y Rev 2)")
 
 proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: openArray[T],
     overrides: openArray[HeaderOverride]) =
   let n = samples.len
-  let dt = k.intervalUs
+  let dt = wholeInterval(k.intervalUs) # 1000.9999999999999 is 1001 (ms × 1000)
   if dt.isNaN or dt <= 0 or dt > 4.0e9:
     refuse("the keys give no usable sample interval (intervalUs " & $dt & ")")
   let rev = s.segyFile.revision
@@ -541,10 +460,15 @@ proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
     refuse("SEG-Y Rev " & $rev & " holds whole-microsecond intervals, not " & $dt)
   if rev.major < 2 and dt > 65535:
     refuse("SEG-Y Rev " & $rev & " holds intervals up to 65535 µs, not " & $dt)
+  if rev.major == 0 and abs(round(k.t0Ms)) > 32767:
+    refuse("SEG-Y Rev 0 holds start times of up to ±32767 ms (it has no time scalar), not " &
+      $k.t0Ms)
   template b: untyped = s.segyFile.binary
   let ext1 = rev.major >= 2 and b.maxAddlTraceHeaders > 0
+  if n > int(high(uint16)) and not ext1:
+    refuse("a trace of " & $n & " samples needs Trace Header Extension 1 (SEG-Y Rev 2)")
   template t: untyped = s.segyTrace
-  t.keysTrace(k, n, s.written + 1, rev, ext1)
+  t.keysToHeaders(k, n, s.written + 1, rev, ext1)
   t.overrideSegy(overrides)
   if s.segyFixed:
     if not s.segyStarted: b.setFileCount(n)
@@ -563,7 +487,7 @@ proc writeSegyKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   t.index = s.written
   if not s.segyStarted: s.startSegy()
   s.segy.writeTrace(t)
-  s.segyCount = if s.segyCount == -1 or s.segyCount == n: n else: -2
+  s.noteCount(n)
 
 # ----------------------------------------------------------------- SEG-D --
 
@@ -623,6 +547,8 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace: int) =
       " (record " & $r & ")")
   var last = trace
   while last + 1 < entries.len and int(entries[last + 1].record) == r: inc last
+  # A chosen 8015 (the input's own is written as it is): `src` need not be `like`.
+  if fOut == sd8015 and rec.format.get != sd8015: checkGroups(src, trace, last)
   if s.inRecord: s.finishRecord()
   if fOut != rec.format.get:
     rec.gh1.formatCode = ord(fOut)
@@ -681,7 +607,8 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     s.startRecord(src, trace)
   t.index = trace - s.recFirst
   t.samples = newSeq[byte](dataBytes(s.recFormat, samples.len))
-  encodeSamples(s.recFormat, samples, t.samples)
+  # 8015 fractions as the input was read: its convention is the file's.
+  encodeSamples(s.recFormat, samples, t.samples, src.index.codecs[r].twosComplement8015)
   s.segd.writeTrace(t)
   s.nextTrace = trace + 1
 
@@ -717,7 +644,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   ## output cannot take, a broken SEG-D rule, or a SEG-Y writer opened from
   ## `SegyOutputOptions` (it takes traces from keys) (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold or output the
-  ## writer refuses; `IOError` on a write failure.
+  ## writer refuses; `IOError` on a write failure, which discards the
+  ## output and closes the writer (the file may hold part of the trace).
   ##
   ## `overrides` change header fields of the written trace (trace `trace`
   ## is then a template): e.g. a stacked trace written with a source trace's
@@ -730,23 +658,28 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
     refuse("the output is " & $w.s.kind & ", " & src.path & " is " & $src.kind)
   if not src.isOpen: refuse("the file " & src.path & " is closed")
   discard src.traceEntry(trace) # ValueError out of range
-  case w.s.kind
-  of skSegy: w.s.writeSegy(src, trace, samples, overrides)
-  of skSegd: w.s.writeSegd(src, trace, samples, overrides)
-  of skSeg2: w.s.writeSeg2(src, trace, samples, overrides)
-  of skUnknown: discard
+  try:
+    case w.s.kind
+    of skSegy: w.s.writeSegy(src, trace, samples, overrides)
+    of skSegd: w.s.writeSegd(src, trace, samples, overrides)
+    of skSeg2: w.s.writeSeg2(src, trace, samples, overrides)
+    of skUnknown: discard
+  except IOError:
+    # Part of the trace may be in the file: no later `close` may install it.
+    w.s.discardOutput()
+    raise
   inc w.s.written
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
-    x: Tensor[T], row: int, samples = -1, overrides: openArray[HeaderOverride] = []) =
-  ## `writeTrace` with the first `samples` values of row `row` of a
+    x: Tensor[T], row: int, count = -1, overrides: openArray[HeaderOverride] = []) =
+  ## `writeTrace` with the first `count` values of row `row` of a
   ## row-major `[traces, samples]` tensor (e.g. from `readTraces`); -1
   ## takes as many as the input trace has. Raises `ValueError` also for
   ## another tensor shape, a row outside it or a row too short.
   if x.rank != 2 or not x.is_C_contiguous:
     refuse("need a row-major [traces, samples] tensor")
   if row notin 0 ..< x.shape[0]: refuse("row " & $row & " is outside the tensor")
-  let n = if samples >= 0: samples else: int(src.traceEntry(trace).numSamples)
+  let n = if count >= 0: count else: int(src.traceEntry(trace).numSamples)
   if n > x.shape[1]:
     refuse($n & " samples were asked for, the tensor rows hold " & $x.shape[1])
   let p = rowPtr(x, row)
@@ -767,38 +700,50 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   points and channels, as 0 for elevations, the record, the ensemble
   ##   and the offset; a point at exactly (0, 0) reads back NaN); values
   ##   are rounded where the field is an integer, coordinates and
-  ##   elevations get the finest scalar that fits (Rev 2: also unscaled in Trace Header Extension 1, with the
-  ##   offset, record, ensemble, a fractional interval and the time's
-  ##   nanoseconds); `t0Ms` gets the finest time scalar that holds it
-  ##   (Rev 0: whole ms);
+  ##   elevations get the finest scalar that fits (Rev 2: also unscaled in
+  ##   Trace Header Extension 1, with the offset, record, ensemble, a
+  ##   fractional interval and the time's nanoseconds); `t0Ms` gets the
+  ##   finest time scalar that holds it;
+  ## - Rev 0 has fewer fields: `t0Ms` is a whole ms (rounded) in an int16, a
+  ##   fractional source point is rounded, and the midpoint, `inline` and
+  ##   `crossline` are not written (bytes 181-240 are unassigned there; the
+  ##   midpoint reads back as halfway between source and receiver);
   ## - the trace identification code is `traceCode` when non-zero and its
   ##   status in the output's revision is `status` (so a status changed in
   ##   the keys wins), else 1 (live), 2 (dead) or 0 (unknown; also
   ##   auxiliary, which SEG-Y has no general code for). `component` is not
   ##   written as a code: outside SEG-Y it is a group index or sensor type;
-  ## - `time` is written in UTC (time basis 4).
+  ## - `time` is written in UTC (time basis 4);
+  ## - an `intervalUs` within 1e-9 of a whole number is that number (1001 µs
+  ##   kept as 1.001 ms and multiplied back is 1000.9999999999999).
   ##
   ## A file `like` an input whose Layout stanza moves these fields reads
   ## them elsewhere: write from keys into `SegyOutputOptions` files. Raises
   ## `ValueError` for a closed or non-SEG-Y writer, keys without a positive
   ## interval (`intervalUs`), a fractional interval or one over 65535 µs
-  ## before Rev 2, a count
+  ## before Rev 2, a `t0Ms` beyond ±32767 ms in Rev 0, a count
   ## the output cannot take, or a bad override (nothing is written then);
   ## `SegFormatError` for a value the format cannot hold; `IOError` on a
-  ## write failure.
+  ## write failure, which discards the output and closes the writer.
   if not w.s.open: refuse("the writer is closed")
   if w.s.kind != skSegy: refuse("traces from keys are written to SEG-Y, the output is " & $w.s.kind)
-  w.s.writeSegyKeys(keys, samples, overrides)
+  try:
+    w.s.writeSegyKeys(keys, samples, overrides)
+  except IOError:
+    w.s.discardOutput() # as above: the file may be torn
+    raise
   inc w.s.written
 
 proc close*(w: var SeismicWriter): DiagLog =
   ## Finishes the output: ends the SEG-D record in progress, writes the
   ## SEG-Y trailer and final counts or the SEG-2 trace pointers, and renames
   ## the temporary file to the output path. Returns the writer's
-  ## diagnostics (warnings; a fatal one when the rename failed). On a raise
-  ## (`ValueError` for an incomplete SEG-D record, `SegFormatError` for
-  ## output the writer refuses, e.g. a SEG-2 file without traces, `IOError`)
-  ## the output is discarded. Raises `ValueError` when already closed.
+  ## diagnostics: warnings only, since every failure raises and discards
+  ## the output (`ValueError` for an incomplete SEG-D record,
+  ## `SegFormatError` for output the writer refuses, e.g. a SEG-2 file
+  ## without traces, `IOError` when the last bytes cannot be written or the
+  ## file cannot be moved into place). Raises `ValueError` when already
+  ## closed.
   if not w.s.open: refuse("the writer is closed")
   try:
     case w.s.kind
@@ -812,5 +757,8 @@ proc close*(w: var SeismicWriter): DiagLog =
     w.s.discardOutput()
     raise
   w.s.open = false
-  finishOutput(w.s.tmp, w.s.path, keep = true, result)
+  var moved: DiagLog
+  finishOutput(w.s.tmp, w.s.path, keep = true, moved) # removes what it cannot move
   w.s.tmp = ""
+  for d in moved:
+    if d.severity == sevFatal: raise newException(IOError, d.msg & ": " & w.s.path)
