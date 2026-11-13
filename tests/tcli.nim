@@ -316,26 +316,25 @@ sampleBlock survey:
   discard fails(2, "keys", s63, "--overwrite")        # needs --sps or --p1
 
 sampleBlock survey_apply:
-  # 63.sgd converted to SEG-Y: its keys have no stations (the layout's fields
-  # are not read into them), so the join fills them by record and channel,
-  # and SEG-Y has fields for the coordinates.
+  # 63.sgd converted to SEG-Y keeps its stations (the source point with its
+  # scalar, and the lines and points in the fields its Layout stanza names),
+  # so the join matches by them, and SEG-Y has fields for the coordinates.
   let sps = tmp / "t.sps" # from the survey block: record 63 -> stations 13/99.5, 13/104
   let path = tmp / "63cli.sgy"
   discard ok("convert", s63, path)
   let original = readFile(path)
   let dry = ok("survey-apply", path, "--sps=" & sps)
-  doAssert "would change" in dry and "by record number 1" in dry, dry
+  doAssert "would change" in dry and "by stations 1" in dry, dry
   doAssert "receiver X/Y:1 traces" in dry and "rcv station: 0 traces" in dry, dry # 13/104 already
   doAssert readFile(path) == original, "a dry run writes nothing"
   let inPlace = ok("survey-apply", path, "--sps=" & sps, "--in-place")
   doAssert "changed in place" in inPlace and "journal:" in inPlace
-  doAssert "\t500000\t6000400\t-\t-\t500100\t6000000\t412" in ok("keys", path) # stations: layout
+  doAssert "\t13\t99.50\t500000\t6000400\t13\t104\t500100\t6000000\t412" in ok("keys", path)
   discard ok("journal", "rollback", path, path & ".edits.nif")
   doAssert readFile(path) == original
   let copy = tmp / "63geo.sgy"
-  # The join refines the header's source point (espnum 100) to the survey's
-  # 99.5, which the file already holds: sp 9950 with sp_scal -100, and 13 /
-  # 99.5 in the layout's station fields. No byte changes, so nothing counts.
+  # The header already holds the survey's stations (13 / 99.5 and 13 / 104):
+  # no byte changes, so nothing counts.
   let c = ok("survey-apply", path, "--sps=" & sps, "-o", copy, "--values=stations")
   doAssert "changed in " & copy in c and "src station: 0 traces" in c, c
   doAssert "rounded" notin c, c # sp holds 99.5 exactly, and nothing was written

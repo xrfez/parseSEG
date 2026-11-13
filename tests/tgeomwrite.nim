@@ -145,24 +145,44 @@ block segy_scalar_choice_overflow_and_precision:
 
 sampleBlock segy_rev2_station_header_via_layout:
   # SEG-D 63.sgd converted to SEG-Y Rev 2.1 carries line/point in the
-  # PSEGD001 header its Layout stanza describes. Its keys have no stations
-  # (the layout's fields are not read into them), so the join fills them by
-  # record number and channel.
+  # PSEGD001 header its Layout stanza describes, and its keys read them
+  # (receiver 13 / 104). A join matches by those stations and never
+  # replaces them, whatever the X record says of the channel (14 / 105).
   let segy = tmp / "63.sgy"
   doAssert not convertFile(exampleDir / "63.sgd", segy).isFatal
   let g = sps("c.sps", r21('R', "13", "104", '1', "500100.0", "6000000.0", "12.5"),
+    r21('R', "14", "105", '1', "500200.0", "6000000.0", "12.5"),
     x21(63, "13", "99.5", 1, 1, "14", "105", "105"))
-  var f = openSeismic(segy, keys = true)
-  var stats: JoinStats
-  doAssert f.applySurvey(g, stats, overwrite = true) == 1 and stats.matches[jmRecord] == 1
-  let dst = tmp / "63geo.sgy"
-  let r = copyWithGeometry(segy, dst, g, overwrite = true)
-  doAssert not r.log.hasErrors, $r.log.len
-  doAssert r.changes.receiverStations == 1, $r.changes
-  let d = readSegy(dst)
-  doAssert d.file.fieldValue(d.traces[0], "rec_line") == some(14.0)
-  doAssert d.file.fieldValue(d.traces[0], "rec_point") == some(105.0)
-  f.close()
+  block:
+    var f = openSeismic(segy, keys = true)
+    var stats: JoinStats
+    doAssert f.applySurvey(g, stats, overwrite = true) == 1 and stats.matches[jmStations] == 1
+    doAssert f.traceKeys(0).rcvLine == 13 and f.traceKeys(0).rcvPoint == 104
+    f.close()
+    let dst = tmp / "63geo.sgy"
+    let r = copyWithGeometry(segy, dst, g, overwrite = true)
+    doAssert not r.log.hasErrors, $r.log.len
+    doAssert r.changes.receiverStations == 0 and r.changes.receiverXy == 1, $r.changes
+    let d = readSegy(dst)
+    doAssert d.file.fieldValue(d.traces[0], "rec_line") == some(13.0)
+    doAssert d.file.fieldValue(d.traces[0], "rec_point") == some(104.0)
+  block:
+    # A header without its receiver station (cleared in the keys) gets the
+    # one the X record gives via the source station, written through the
+    # fields the Layout stanza names.
+    let path = tmp / "63b.sgy"
+    copyFile(segy, path)
+    var f = openSeismic(path, keys = true)
+    (f.index.keys[0].rcvLine, f.index.keys[0].rcvPoint) = (NaN, NaN)
+    doAssert f.applySurvey(g, overwrite = true) == 1
+    var ed = openEditor(path)
+    let w = ed.writeGeometry(f.index)
+    ed.close()
+    f.close()
+    doAssert w.receiverStations == 1, $w
+    let d = readSegy(path)
+    doAssert d.file.fieldValue(d.traces[0], "rec_line") == some(14.0)
+    doAssert d.file.fieldValue(d.traces[0], "rec_point") == some(105.0)
 
 sampleBlock segd_rev2_the1_in_place:
   # As above: a header without its receiver station (cleared in the keys)
