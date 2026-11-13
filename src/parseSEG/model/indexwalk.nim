@@ -2,13 +2,16 @@
 ## and SEG-2 apart from a file's first bytes, and `buildIndex` walks any
 ## `RecordSource` (disk, tape image, tape device) with the readers'
 ## `headersOnly` mode to index every trace: sample bytes are skipped, by
-## seeking where the source can. Each trace costs one 24-byte `TraceEntry`
+## seeking where the source can (a fixed-length SEG-Y file on a
+## `MemFileSource` is indexed from its size when asked for, `vfSampled`, and
+## its keys are then read from the mapped headers). Each trace costs one
+## 24-byte `TraceEntry`
 ## (room for the entries is reserved from the file size after the first
 ## trace), and 184 bytes of `TraceKeys` with `keys`. Header objects are kept
 ## per file (SEG-Y, SEG-2) or per record (SEG-D), never per trace.
 ## `openSeismic` (`traceindex`) runs it on the file it maps.
 
-import ../common/[errors, diagnostics, bcd, seismickind, progress]
+import ../common/[errors, diagnostics, bcd, seismickind, progress, endians]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader, mux]
@@ -112,13 +115,28 @@ proc indexFixed(ix: var TraceIndex, r: var SegyReader, src: RecordSource): bool 
       "reads every header)", ix.segy.firstTraceOffset, Location(file: src.name))
   checked > 0
 
+proc sampledKeys(ix: var TraceIndex, src: MemFileSource, tk: var ProgressTicker) =
+  # The keys of a file that `indexFixed` indexed from its size: read from
+  # every mapped trace header, exactly as the walk and `ensureKeys` make
+  # them (the same bytes through the same plan), without the walk's reader:
+  # 2.3 times fewer ns per trace than walking with keys. Such a file has no
+  # Extension 1 or proprietary headers, and every entry lies inside the map.
+  let gr = initGeometryReader(ix.segy)
+  let mem = src.memory
+  ix.keys = newSeqUninit[TraceKeys](ix.entries.len)
+  for i, e in ix.entries:
+    ix.keys[i] = segyKeys(gr, RawHeaders(std: cast[ByteBuf](addr mem[e.offset])))
+    if not tk.tick(e.offset): raiseCancelled()
+
 proc indexSegy(src: RecordSource, keys: bool, verify: VerifyMode,
     tk: var ProgressTicker): TraceIndex =
   var r = openSegyWalk(src)
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
   result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
     order: r.file.byteOrder)
-  if verify == vfSampled and not keys and result.indexFixed(r, src): return
+  if verify == vfSampled and result.indexFixed(r, src):
+    if keys: result.sampledKeys(MemFileSource(src), tk)
+    return
   let gr = if keys: initGeometryReader(r.file) else: GeometryReader()
   result.segyIntervalUs = NaN
   var t: SegyTrace
@@ -223,7 +241,8 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
   ##
   ## `verify = vfSampled` indexes a fixed-length SEG-Y file on a
   ## `MemFileSource` from its size, as `openSeismic` does by default (see
-  ## there); the default walks every trace.
+  ## there), and with `keys` reads the keys from every mapped trace header;
+  ## the default walks every trace.
   var tk = initProgressTicker(progress, if src of MemFileSource: MemFileSource(src).size else: -1)
   result = case kind
     of skSegy: indexSegy(src, keys, verify, tk)

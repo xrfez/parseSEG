@@ -1,10 +1,11 @@
 ## The sampled index of fixed-length SEG-Y (15.3-10): `openSeismic`'s default
 ## `verify = vfSampled` gives the same index as the full walk (`vfFull`) for
 ## every sample file and a set of conversions (all fields, through a binary
-## snapshot; the log differs only by the `dcIndexSampled` info). A sampled
-## header that disagrees, a file that does not end after its last trace,
-## `keys`, `vfFull` and `buildIndex`'s default all walk. A cache saved from a
-## sampled open does not serve `vfFull`.
+## snapshot; the log differs only by the `dcIndexSampled` info), with and
+## without keys (the keys of a sampled open are read from the mapped
+## headers). A sampled header that disagrees, a file that does not end after
+## its last trace, `vfFull` and `buildIndex`'s default all walk. A cache
+## saved from a sampled open does not serve `vfFull`.
 
 import std/[assertions, os, strutils]
 import parseSEG
@@ -85,6 +86,15 @@ block sampled_equals_full_walk:
         doAssert a.readTraces(0 ..< n) == b.readTraces(0 ..< n), what
         doAssert $a.traceKeys(0 ..< n) == $b.traceKeys(0 ..< n), what
       b.close()
+      # With keys: a sampled open reads them from the mapped headers, the
+      # walk from the headers it reads. The same index, keys included.
+      var ka = openSeismic(p, keys = true)
+      var kb = openSeismic(p, keys = true, opts = OpenOptions(verify: vfFull))
+      doAssert ka.log.sampled == a.log.sampled and not kb.log.sampled, what
+      doAssert ka.hasKeys and kb.hasKeys and ka.index.keys.len == a.len, what
+      doAssert snapshot(ka.index) == snapshot(kb.index), what & ": the keys differ"
+      ka.close()
+      kb.close()
     a.close()
   doAssert nSampled >= 6, $nSampled & " files sampled"
 
@@ -146,10 +156,31 @@ block size_that_does_not_fit_walks:
   doAssert not c.log.sampled and c.log.has("expected 8004 bytes", sevFatal), $c.log
   c.close()
 
-block keys_vfFull_and_buildIndex_walk:
+block vfFull_and_buildIndex_walk:
   var k = openSeismic(bo, keys = true)
-  doAssert not k.log.sampled and k.hasKeys
+  doAssert k.log.sampled and k.hasKeys # keys no longer make the open walk
   k.close()
+  # The key pass reports progress and can be cancelled.
+  var calls = 0
+  var p = openSeismic(bo, keys = true, progress = proc (done, total: int64): bool =
+    inc calls
+    doAssert done <= total
+    true)
+  doAssert calls >= 1 and p.hasKeys
+  p.close()
+  doAssertRaises(SegCancelledError):
+    discard openSeismic(bo, keys = true, progress = proc (done, total: int64): bool = false)
+  # A header that is not sampled and disagrees: its warning needs the walk,
+  # with keys as without.
+  let q = tmp / "mismatch1k.sgy"
+  patchNs(tmp / "bo_rev1.sgy", q, 1)
+  var ms = openSeismic(q, keys = true)
+  var mw = openSeismic(q, keys = true, opts = OpenOptions(verify: vfFull))
+  doAssert ms.log.sampled and not ms.log.has("fixed-length file", sevWarning)
+  doAssert mw.log.has("fixed-length file", sevWarning)
+  doAssert $ms.traceKeys(0 ..< ms.len) == $mw.traceKeys(0 ..< mw.len)
+  ms.close()
+  mw.close()
   var f = openSeismic(bo, opts = OpenOptions(verify: vfFull))
   doAssert not f.log.sampled
   f.close()
@@ -158,8 +189,12 @@ block keys_vfFull_and_buildIndex_walk:
   m.close()
   let m2 = openMemFileSource(bo)
   let ix = buildIndex(m2, skSegy, verify = vfSampled)
-  doAssert ix.log.sampled and ix.len == 200
+  doAssert ix.log.sampled and ix.len == 200 and ix.keys.len == 0
   m2.close()
+  let m3 = openMemFileSource(bo)
+  let kx = buildIndex(m3, skSegy, keys = true, verify = vfSampled)
+  doAssert kx.log.sampled and kx.keys.len == 200 and kx.keys[5].inline == 1001
+  m3.close()
 
 block sampled_cache_and_vfFull:
   let p = tmp / "cached.sgy"

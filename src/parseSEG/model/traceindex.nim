@@ -271,10 +271,13 @@ proc openSeismic*(path: string, keys = false, progress: Progress = nil,
   ## count and interval; the log then has an info
   ## diagnostic (`dcIndexSampled`) with the number checked. The entries are
   ## the walk's, but the per-trace warnings of headers not sampled (a
-  ## fixed-length mismatch) are not made. When any sampled header disagrees,
-  ## and for Rev 2 additional headers or trailer records, a trace count or
-  ## file size that does not fit, `keys`, and every other file, the headers
-  ## are walked. `vfFull` always walks them.
+  ## fixed-length mismatch) are not made. With `keys`, the keys are then
+  ## read from every trace header in one pass over the map: the same keys as
+  ## the walk makes (the same header bytes), again without the walk's
+  ## per-trace warnings, and `progress` reports that pass. When any sampled
+  ## header disagrees, and for Rev 2 additional headers or trailer records,
+  ## a trace count or file size that does not fit, and every other file, the
+  ## headers are walked. `vfFull` always walks them.
   ##
   ## `cache` names an index cache that `saveIndex` wrote: when it was saved
   ## for this file as it is now (path, size, modification time, its first

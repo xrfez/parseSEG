@@ -105,10 +105,11 @@ block cached_index_equals_rebuilt:
         k.saveIndex(kc)
         var nk = reopen(p, kc)
         doAssert nk.fromCache and (not nk.hasKeys or nk.len == 0), what
-        # Keys walk every header: the log is that of a full walk.
-        var full = openSeismic(p, opts = OpenOptions(verify: vfFull))
-        sameIndex(nk, full, what & " from a keys cache")
-        full.close()
+        # Keys no longer make the open walk: the index and its log are those
+        # of the default open (sampled for a fixed-length SEG-Y file).
+        var plain = openSeismic(p)
+        sameIndex(nk, plain, what & " from a keys cache")
+        plain.close()
         nk.close()
         k.close()
       c.close()
