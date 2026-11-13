@@ -49,12 +49,12 @@
 ## The output goes to a temporary file next to `path`, renamed when `close`
 ## succeeds. A writer dropped without `close`, or whose `close` raises,
 ## leaves no output file; nor does one whose `writeTrace` raised `IOError`
-## (a full disk): it is closed, and its `close` raises `ValueError`. The per-standard writers validate as usual:
-## spec-invalid output raises `SegFormatError` (see `segy/writer`,
-## `segd/writer`, `seg2/writer`); a value the format cannot hold raises
-## `SegFormatError` from the encoder and writes nothing. Caller errors (a
-## trace out of range, another standard, a closed file, a broken SEG-D
-## record rule) raise `ValueError`.
+## (a full disk): it is closed, and its `close` raises `ValueError`. The
+## per-standard writers validate as usual: spec-invalid output raises
+## `SegFormatError` (see `segy/writer`, `segd/writer`, `seg2/writer`); a
+## value the format cannot hold raises `SegFormatError` from the encoder
+## and writes nothing. Caller errors (a trace out of range, another
+## standard, a closed file, a broken SEG-D record rule) raise `ValueError`.
 
 import std/[math, options, os]
 import ../common/[diagnostics, endians, outputfile, seismickind]
