@@ -387,8 +387,9 @@ func baseScanIntervalUs*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): fl
 
 func recordLengthUs*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2Rev3): float64 =
   ## GH#1's BCD RR.R × 1.024 s (as in Rev 2; `segd_rev3_0_b.md` §3.1), or
-  ## GH#2's µs when it is `FFF`.
+  ## GH#2's µs when it is `FFF`. NaN when GH#1's field is not valid BCD.
   if g1.recordLength == BcdAllF: float64(g2.extRecordLength)
+  elif g1.recordLength < 0: NaN
   else: float64(g1.recordLength) * 102_400.0
 
 func traceNumber*(t: SegdTraceHeader, e: SegdTraceHeaderExt1Rev3): int64 =
@@ -473,15 +474,24 @@ func gpsMinusUtc*(ts: int64): int =
   ## GPS − UTC in whole seconds at timestamp `ts` (18 since 2017).
   int(leapsBefore(int64(floor(timestampToUnix(ts)))) - 9)
 
-func generalHeaderUtc*(g1: SegdGeneralHeader1, century = 2000): float64 =
-  ## UTC POSIX seconds of GH#1's BCD date and time (1-second resolution;
-  ## two-digit year in `century`). NaN when a field is not valid BCD.
+func generalHeaderUtc*(g1: SegdGeneralHeader1, century: int): float64 =
+  ## UTC POSIX seconds of GH#1's BCD date and time (1-second resolution),
+  ## with its two-digit year in `century` (1900, 2000). NaN when a field is
+  ## not valid BCD or is out of range.
   if g1.year notin 0..99 or g1.julianDay notin 1..366 or g1.hour notin 0..23 or
       g1.minute notin 0..59 or g1.second notin 0..60:
     return NaN
   let jan1 = daysFromCivil(century + g1.year, 1, 1) * 86400
   float64(jan1 + int64(g1.julianDay - 1) * 86400 + int64(g1.hour) * 3600 +
     int64(g1.minute) * 60 + int64(g1.second))
+
+func generalHeaderUtc*(g1: SegdGeneralHeader1): float64 =
+  ## UTC POSIX seconds of GH#1's BCD date and time (1-second resolution),
+  ## with its two-digit year read as 1950-2049: 50-99 are 19xx and 0-49
+  ## 20xx, as the trace keys and the converters read it. NaN when a field is
+  ## not valid BCD or is out of range. For another reading of the year, give
+  ## the century.
+  if g1.year in 0..99: generalHeaderUtc(g1, fullYear(g1.year) - g1.year) else: NaN
 
 # ---------------------------------------------------------------------------
 # Table of Contents file (optional, Rev 3): a 448-byte header and 128-byte

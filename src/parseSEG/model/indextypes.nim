@@ -27,6 +27,10 @@ type
       ## Where a multiplexed SEG-D file's demultiplexed copy goes; "" for the
       ## OS temp directory.
     twosComplement8015*: bool ## Read SEG-2 format-3 mantissas as two's complement.
+    kind*: SeismicKind = skUnknown
+      ## The standard to read the file as, without detecting it: for a file
+      ## `detectKind` does not recognize, or takes for another standard.
+      ## `skUnknown`, the default, detects.
 
   TraceEntry* = object
     ## Where one trace lives (24 bytes).

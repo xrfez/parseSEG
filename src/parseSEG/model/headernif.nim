@@ -71,10 +71,7 @@ type
     refused*: int      ## Edits the editor refused or dropped (see the log).
     log*: DiagLog
 
-const
-  MaxDepth = 64
-  MaxString = 1 shl 20
-  MaxLoggedErrors = 50 ## Entry errors logged one by one; the rest are counted.
+const MaxLoggedErrors = 50 ## Entry errors logged one by one; the rest are counted.
 
 func sameValue(a, b: FieldValue): bool =
   ## Equal values; floats by bit pattern (so -0.0 differs from 0.0), every
@@ -223,128 +220,16 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
     raise
   moveFile(tmp, path)
 
-# -------------------------------------------------------------- tokenizer --
-
-type
-  TokKind = enum tkOpen, tkClose, tkIdent, tkInt, tkFloat, tkStr, tkEof
-  Tok = object
-    kind: TokKind
-    s: string  ## Tag, identifier or decoded string.
-    i: int64
-    f: float64
-  NifIn = object
-    f: File
-    buf: string
-    pos: int
-    line: int
-    eof: bool
-    path: string
-
-proc docError(n: NifIn, msg: string) {.noinline, noreturn.} =
-  raiseFormat(n.path & " line " & $n.line & ": " & msg)
-
-proc fill(n: var NifIn): bool =
-  # True when at least one byte is available.
-  if n.pos < n.buf.len: return true
-  if n.eof: return false
-  n.buf.setLen 64 * 1024
-  let got = n.f.readBuffer(addr n.buf[0], n.buf.len)
-  n.buf.setLen got
-  n.pos = 0
-  if got == 0: n.eof = true
-  got > 0
-
-proc peek(n: var NifIn): char =
-  if n.fill: n.buf[n.pos] else: '\0'
-
-proc take(n: var NifIn): char =
-  if not n.fill: n.docError("unexpected end of the document")
-  result = n.buf[n.pos]
-  inc n.pos
-  if result == '\n': inc n.line
-
-const
-  IdentStart = {'A'..'Z', 'a'..'z', '_'}
-  IdentChars = IdentStart + {'0'..'9', '.'}
-
-proc next(n: var NifIn): Tok =
-  while true:
-    if not n.fill: return Tok(kind: tkEof)
-    let c = n.peek
-    if c in Whitespace: discard n.take
-    elif c == ';':
-      while n.fill and n.peek != '\n': discard n.take
-    else: break
-  let c = n.take
-  case c
-  of '(':
-    result = Tok(kind: tkOpen)
-    while n.fill and n.peek in IdentChars:
-      result.s.add n.take
-      if result.s.len > 256: n.docError("tag too long")
-    if n.fill and n.peek == '@': n.docError("line information is not supported")
-  of ')': result = Tok(kind: tkClose)
-  of '"':
-    result = Tok(kind: tkStr)
-    while true:
-      let d = n.take
-      if d == '"': break
-      if d == '\\':
-        var h = ""
-        h.add n.take
-        h.add n.take
-        if h[0] notin HexDigits or h[1] notin HexDigits: n.docError("bad string escape \\" & h)
-        result.s.add char(parseHexInt(h))
-      else: result.s.add d
-      if result.s.len > MaxString: n.docError("string longer than 1 MB")
-  of '-', '+', '0'..'9':
-    var t = $c
-    while n.fill and n.peek in {'0'..'9', '.', 'e', 'E', '+', '-'}:
-      t.add n.take
-      if t.len > 64: n.docError("number too long")
-    if n.fill and n.peek == '@': n.docError("line information is not supported")
-    if t.contains({'.', 'e', 'E'}):
-      try: result = Tok(kind: tkFloat, f: parseFloat(t))
-      except ValueError: n.docError("bad number " & t)
-    else:
-      try: result = Tok(kind: tkInt, i: parseBiggestInt(t))
-      except ValueError: n.docError("bad or out-of-range integer " & t)
-  else:
-    if c notin IdentStart: n.docError("unexpected character " & escape($c))
-    result = Tok(kind: tkIdent, s: $c)
-    while n.fill and n.peek in IdentChars:
-      result.s.add n.take
-      if result.s.len > 256: n.docError("identifier too long")
-    if n.fill and n.peek == '@': n.docError("line information is not supported")
-
-proc skipTree(n: var NifIn, depth: int) =
-  # After a tkOpen: skips to its matching tkClose.
-  var d = 1
-  while d > 0:
-    let t = n.next
-    case t.kind
-    of tkOpen:
-      inc d
-      if depth + d > MaxDepth: n.docError("nesting deeper than " & $MaxDepth)
-    of tkClose: dec d
-    of tkEof: n.docError("unexpected end of the document")
-    else: discard
-
-proc expectClose(n: var NifIn, what: string) =
-  if n.next.kind != tkClose: n.docError("expected ')' after " & what)
-
-proc expectInt(n: var NifIn, what: string): int64 =
-  let t = n.next
-  if t.kind != tkInt: n.docError("expected " & what)
-  t.i
+# --------------------------------------------------------------- document --
+# Read with the strict tokenizer of `common/niftext`, streamed from the file.
 
 proc value(n: var NifIn): FieldValue =
   let t = n.next
   case t.kind
-  of tkInt: toFieldValue(t.i)
-  of tkFloat: toFieldValue(t.f)
-  of tkStr: toFieldValue(t.s)
-  of tkOpen:
+  of ntInt: toFieldValue(t.i)
+  of ntFloat: toFieldValue(t.f)
+  of ntStr: toFieldValue(t.s)
+  of ntOpen:
     let v = case t.s
       of "nan": NaN
       of "inf": Inf
@@ -362,21 +247,21 @@ iterator entries(n: var NifIn, facts: var DocFacts): (HeaderScope, int64, string
   ## Every `(f ...)` of the document, with its scope, index and name; `facts`
   ## holds `(standard)`, `(traces)`, `(records)` once read.
   var t = n.next
-  while t.kind == tkOpen and t.s.startsWith("."): # directives
+  while t.kind == ntOpen and t.s.startsWith("."): # directives
     n.skipTree(1)
     t = n.next
-  if t.kind != tkOpen or t.s != "headers": n.docError("expected (headers")
+  if t.kind != ntOpen or t.s != "headers": n.docError("expected (headers")
   facts = DocFacts(traces: -1, records: -1)
   var done = false
   while not done:
     t = n.next
     case t.kind
-    of tkClose: done = true
-    of tkOpen:
+    of ntClose: done = true
+    of ntOpen:
       case t.s
       of "standard":
         let x = n.next
-        if x.kind != tkIdent: n.docError("expected segy, segd or seg2")
+        if x.kind != ntIdent: n.docError("expected segy, segd or seg2")
         facts.standard = x.s
         n.expectClose("(standard")
       of "traces":
@@ -392,34 +277,34 @@ iterator entries(n: var NifIn, facts: var DocFacts): (HeaderScope, int64, string
         while inScope:
           let b = n.next
           case b.kind
-          of tkClose: inScope = false
-          of tkOpen:
+          of ntClose: inScope = false
+          of ntOpen:
             if b.s == "block":
               let bn = n.next
-              if bn.kind != tkIdent: n.docError("expected a block name")
+              if bn.kind != ntIdent: n.docError("expected a block name")
               var inBlock = true
               while inBlock:
                 let e = n.next
                 case e.kind
-                of tkClose: inBlock = false
-                of tkOpen:
+                of ntClose: inBlock = false
+                of ntOpen:
                   if e.s == "f":
                     let fname = n.next
-                    if fname.kind != tkIdent: n.docError("expected a field name")
+                    if fname.kind != ntIdent: n.docError("expected a field name")
                     let v = n.value
                     n.expectClose("a field value")
                     yield (scope, index, bn.s & "." & fname.s, v)
                   else:
                     n.skipTree(4) # (raw ...) and anything newer
-                of tkEof: n.docError("unexpected end of the document")
+                of ntEof: n.docError("unexpected end of the document")
                 else: n.docError("unexpected token in (block")
             else:
               n.skipTree(3)
-          of tkEof: n.docError("unexpected end of the document")
+          of ntEof: n.docError("unexpected end of the document")
           else: n.docError("unexpected token in (" & t.s)
       else:
         n.skipTree(2)
-    of tkEof: n.docError("unexpected end of the document")
+    of ntEof: n.docError("unexpected end of the document")
     else: n.docError("unexpected token in (headers")
 
 # ----------------------------------------------------------------- import --
@@ -491,8 +376,9 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
   if not opts.dryRun:
     for (p, what) in [(path, "input"), (nifPath, "document")]:
       if sameFileAs(journal, p): fatal("the journal is the " & what & " file", journal)
-  var n = NifIn(path: nifPath, line: 1)
-  if not open(n.f, nifPath, fmRead): fatal("cannot read the document")
+  var n: NifIn
+  try: n = openNifIn(nifPath)
+  except IOError: fatal("cannot read the document")
   var entryErrors = 0
   var dropped = 0 # accepted edits a failed journal sync dropped
   var seen = 0    # `ed.edits` when last looked at
@@ -572,7 +458,7 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
   except CatchableError as e:
     result.log.report(sevFatal, dcValidation, e.msg, loc = Location(file: nifPath))
   finally:
-    n.f.close()
+    n.close()
   if dropped > 0:
     result.applied -= dropped
     result.refused += dropped
@@ -587,8 +473,8 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
 func validName(name: string): bool =
   # `<block>.<field>`, both NIF identifiers.
   let dot = name.find('.')
-  dot > 0 and dot < name.len - 1 and name.rfind('.') == dot and name[0] in IdentStart and
-    name[dot + 1] in IdentStart and name.allCharsInSet(IdentChars)
+  dot > 0 and dot < name.len - 1 and name.rfind('.') == dot and name[0] in NifIdentStart and
+    name[dot + 1] in NifIdentStart and name.allCharsInSet(NifIdentChars)
 
 proc checkChange(scope: HeaderScope, index: int, name: string) =
   if not validName(name):

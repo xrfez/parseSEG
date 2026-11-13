@@ -41,13 +41,25 @@ import ../private/[checks, fieldaccess]
 
 export fieldvalues
 
-proc fieldNames*(kind: HeaderBlock): seq[string] =
-  ## The named fields of block kind `kind`, in layout order (raw byte fields
-  ## excluded; none for `hbRaw`).
+func namesOf(kind: HeaderBlock): seq[string] =
+  # The named fields of a block kind, from its header type.
   withBlockType(kind):
     var h: BlockT
     for n, f in fieldPairs(h):
       when isNamedField(f): result.add n
+
+const blockFieldNames = block:
+  # Every kind's list, made once at compile time.
+  var t: array[HeaderBlock, seq[string]]
+  for k in HeaderBlock: t[k] = namesOf(k)
+  t
+
+func fieldNames*(kind: HeaderBlock): lent seq[string] =
+  ## The named fields of block kind `kind`, in layout order (raw byte fields
+  ## excluded; none for `hbRaw`). The list is a constant, lent to the
+  ## caller: a call allocates nothing, and assigning the result to a `var`
+  ## copies it.
+  blockFieldNames[kind]
 
 proc fieldByName*[T](h: T, name: string): Option[FieldValue] {.inline.} =
   ## The value of layout field `name` of the decoded header `h`; none if `h`

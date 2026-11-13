@@ -352,25 +352,34 @@ func sampleIntervalUs*(rec: SegdRecord, t: SegdTrace): float64 {.inline.} =
   ## The trace's sample interval in µs (see above).
   rec.sampleIntervalUs(t.scanType, t.channelSet)
 
-func startTimeMs*(rec: SegdRecord, t: SegdTrace): float64 =
-  ## The start time of the trace's channel set in ms; 0 when it is unknown.
-  if t.channelSet < 0: return 0.0
-  template s: untyped = rec.scanTypes[t.scanType]
+func startTimeMs*(rec: SegdRecord, scanType, channelSet: int): float64 =
+  ## The start time of a channel set in ms; 0 when `channelSet` is -1.
+  if channelSet < 0: return 0.0
+  template s: untyped = rec.scanTypes[scanType]
   case s.layout
-  of slRev2: s.descriptors[t.channelSet].startTimeMs
-  of slRev3: float64(s.descriptorsRev3[t.channelSet].startTime) / 1000
+  of slRev2: s.descriptors[channelSet].startTimeMs
+  of slRev3: float64(s.descriptorsRev3[channelSet].startTime) / 1000
 
-func descaleFactor*(rec: SegdRecord, t: SegdTrace): float64 =
-  ## Millivolts per recorded unit of the trace's channel set: 2^MP factor
-  ## (Rev 1/2) or the descale multiplier (Rev 3; 1 when it is 0 or NaN).
-  ## 1 when the channel set is unknown.
-  if t.channelSet < 0: return 1.0
-  template s: untyped = rec.scanTypes[t.scanType]
+func startTimeMs*(rec: SegdRecord, t: SegdTrace): float64 {.inline.} =
+  ## The start time of the trace's channel set in ms; 0 when it is unknown.
+  rec.startTimeMs(t.scanType, t.channelSet)
+
+func descaleFactor*(rec: SegdRecord, scanType, channelSet: int): float64 =
+  ## Millivolts per recorded unit of a channel set: 2^MP factor (Rev 1/2) or
+  ## the descale multiplier (Rev 3; 1 when it is 0 or NaN). 1 when
+  ## `channelSet` is -1.
+  if channelSet < 0: return 1.0
+  template s: untyped = rec.scanTypes[scanType]
   case s.layout
-  of slRev2: pow(2.0, s.descriptors[t.channelSet].mpFactor)
+  of slRev2: pow(2.0, s.descriptors[channelSet].mpFactor)
   of slRev3:
-    let m = float64(s.descriptorsRev3[t.channelSet].descaleMultiplier)
+    let m = float64(s.descriptorsRev3[channelSet].descaleMultiplier)
     if m == 0 or m.isNaN: 1.0 else: m
+
+func descaleFactor*(rec: SegdRecord, t: SegdTrace): float64 {.inline.} =
+  ## Millivolts per recorded unit of the trace's channel set (see above);
+  ## 1 when the channel set is unknown.
+  rec.descaleFactor(t.scanType, t.channelSet)
 
 # ------------------------------------------------------------ bookkeeping --
 
@@ -498,7 +507,10 @@ proc openSegd*(src: RecordSource, twosComplement8015 = false,
     maxHeaderBytes: DefaultMaxHeaderBytes, maxTraceBytes: DefaultMaxTraceBytes,
     headersOnly: headersOnly)
   if headersOnly: result.input.cursor.preferSmallReads()
-  if not result.log.tryRecord(Location(file: src.name, field: "label"), result.readLabel()):
+  # A failure here, and wherever the reader stops on one (`nextRecord`,
+  # `readTrace`), ends the read: always a fatal entry.
+  if not result.log.tryRecordFatal(Location(file: src.name, field: "label"),
+      result.readLabel()):
     result.done = true
 
 # ---------------------------------------------------------------- headers --
@@ -614,6 +626,12 @@ proc muxStride(r: var SegdReader): int =
     r.note(sevWarning, dcBadValue, "General Header #1 bytes per scan is " &
       (if declared == 0: "0" else: "not BCD") & "; using the " & $result &
       " bytes the channel set descriptors give", rec.offset + 19, r.loc(field = "gh1.bytesPerScan"))
+  if result < ScanHeaderSize:
+    # No scan fits: every one starts with these 8 bytes. A record without
+    # scan types has no descriptor that would refuse the count below.
+    raiseUnlocatable(dcBadValue, "General Header #1 bytes per scan is " & $result &
+      ", less than the " & $ScanHeaderSize & "-byte start of scan and timing word, so the " &
+      "scans cannot be located", rec.offset + 19)
   for i, l in m.layouts:
     if l.bytesPerScan > result:
       raiseUnlocatable(dcInconsistent, "scan type " & $(i + 1) & " needs " & $l.bytesPerScan &
@@ -876,23 +894,38 @@ proc readRev2TraceRest(r: var SegdReader, t: var SegdTrace, the: int) =
     r.note(sevWarning, dcBadValue, "trace header extension count " & $the &
       " exceeds 15", t.offset + 9, r.loc(t.index, field = "trace.traceHeaderExtensions"))
   t.ext1 = none(SegdTraceHeaderExt1)
+  var own = -1 # the sample count of Trace Header Extension #1; -1 without one
   if the >= 1:
     let e = r.readBlock[:SegdTraceHeaderExt1]()
     t.ext1 = some(e)
     if the > 1: r.input.readInto(t.extensions, SegdBlockSize * (the - 1))
-    t.numSamples = int(e.samplesPerTrace)
+    own = int(e.samplesPerTrace)
+  if own > 0:
+    t.numSamples = own
   elif t.channelSet >= 0:
     # No extension: the spec gives no rule; (TE - TF) / SI matches real data.
+    # The same for an extension whose count the writer left at 0: taken as a
+    # trace without samples, its samples would be read as the next header.
     template c: untyped = rec.scanTypes[t.scanType].descriptors[t.channelSet]
     let si = c.sampleIntervalMs(rec.gh1)
-    if si <= 0:
+    let window = if si > 0: int(round((c.endTimeMs - c.startTimeMs) / si)) else: -1
+    if own == 0:
+      t.numSamples = max(window, 0)
+      if window > 0:
+        r.note(sevWarning, dcInconsistent, "Trace Header Extension #1 gives 0 samples; " &
+          "using the " & $window & " of the channel set's window", t.offset + 20 + 7,
+          r.loc(t.index, t.channelSet, "ext1.samplesPerTrace"))
+    elif si <= 0:
       raiseUnlocatable(dcBadValue, "trace has no sample count and its sample interval is 0",
         t.offset)
-    t.numSamples = int(round((c.endTimeMs - c.startTimeMs) / si))
-    if t.numSamples < 0:
+    elif window < 0:
       raiseUnlocatable(dcBadValue, "channel set ends (" & $c.endTimeMs &
         " ms) before it starts (" & $c.startTimeMs & " ms), so the trace length is unknown",
         t.offset)
+    else:
+      t.numSamples = window
+  elif own == 0:
+    t.numSamples = 0
   else:
     raiseUnlocatable(dcInconsistent, "trace has no Trace Header Extension and no channel " &
       "set descriptor, so its length is unknown", t.offset)
@@ -1024,10 +1057,10 @@ proc readTrace*(r: var SegdReader, t: var SegdTrace): bool =
     return false
   if r.tracesRead >= r.record.traceCount:
     r.inRecord = false
-    discard r.log.tryRecord(r.loc(field = "trailer"), r.readRecordTrailer())
-    if r.log.isFatal: r.stop()
+    # A trailer that cannot be read leaves the next record unlocated.
+    if not r.log.tryRecordFatal(r.loc(field = "trailer"), r.readRecordTrailer()): r.stop()
     return false
-  let ok = r.log.tryRecord(r.loc(r.tracesRead)):
+  let ok = r.log.tryRecordFatal(r.loc(r.tracesRead)):
     if r.record.multiplexed: r.readMuxTrace(t) else: r.readTraceBody(t)
   if ok:
     result = true
@@ -1062,19 +1095,24 @@ proc nextRecord*(r: var SegdReader): bool =
     while r.readTrace(t): discard
   if r.done:
     return false
-  var ok = r.log.tryRecord(Location(file: r.name, record: r.records)):
-    while r.input.stoppedAt == rkTapeMark: r.input.skipTapeMark()
-  if not ok or not r.input.atData:
-    r.stop()
-    return false
-  var peek: array[13, byte]
-  let got = r.input.readAvail(peek)
-  r.input.unread(peek.toOpenArray(0, got - 1))
-  if isTocFile(peek):
-    if not r.log.tryRecord(Location(file: r.name, field: "toc"), r.readToc()):
+  # To the next record, over tape marks and Table of Contents files: in a
+  # loop, since a call per TOC file overflowed the stack on a run of them
+  # (50000 files of 448 bytes).
+  var toc = true
+  while toc:
+    var more = false
+    let ok = r.log.tryRecordFatal(Location(file: r.name, record: r.records)):
+      while r.input.stoppedAt == rkTapeMark: r.input.skipTapeMark()
+      more = r.input.atData
+      if more:
+        var peek: array[13, byte]
+        let got = r.input.readAvail(peek)
+        r.input.unread(peek.toOpenArray(0, got - 1))
+        toc = isTocFile(peek.toOpenArray(0, got - 1))
+    if not ok or not more or
+        (toc and not r.log.tryRecordFatal(Location(file: r.name, field: "toc"), r.readToc())):
       r.stop()
       return false
-    return r.nextRecord()
   let index = r.records
   inc r.records
   r.tracesRead = 0
@@ -1082,7 +1120,7 @@ proc nextRecord*(r: var SegdReader): bool =
   r.lastChannelSet = SegdChannelSetRef(scanType: -1, channelSet: -1)
   r.mux = MuxBody()
   r.record = SegdRecord(index: index) # not the previous record if GH#1 cannot be read
-  if r.log.tryRecord(r.loc(), r.readRecordHeaders(index)):
+  if r.log.tryRecordFatal(r.loc(), r.readRecordHeaders(index)):
     r.inRecord = true
     result = true
   else:

@@ -23,11 +23,7 @@
 ## omitted when unknown.
 
 import std/strutils
-import "$nim/dist/nimony/src/lib/nifbuilder", "$nim/dist/nimony/src/lib/nifreader",
-  "$nim/dist/nimony/src/lib/nifcore", "$nim/dist/nimony/src/lib/stringviews"
-  # The NIF reader/builder ship with the Nim toolchain (2.4+); imported by path
-  # so dependent projects need no --path switch.
-import errors, diagcodes
+import errors, diagcodes, niftext
 
 export diagcodes
 
@@ -123,10 +119,12 @@ func isFatal*(log: DiagLog): bool {.inline.} =
 
 # ---------------------------------------------------------------- boundary --
 
-proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError) =
+proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError;
+    fatal = false) =
   ## Converts a caught exception into a diagnostic. Truncation, unlocatable
   ## data and I/O failures are fatal; format violations are errors; anything
-  ## else is an internal error.
+  ## else is an internal error. With `fatal`, for a failure that ends the
+  ## operation, the entry is fatal whatever was raised.
   let offset = if e of SegError: (ref SegError)(e).offset else: -1'i64
   let (severity, code) =
     if e of SegTruncatedError: (sevFatal, dcTruncated)
@@ -135,7 +133,7 @@ proc recordException*(log: var DiagLog; loc: Location; e: ref CatchableError) =
     elif e of SegFormatError: (sevError, dcBadValue)
     elif e of IOError or e of OSError: (sevFatal, dcIo)
     else: (sevError, dcInternal)
-  log.report(severity, code, e.msg, offset, loc)
+  log.report(if fatal: sevFatal else: severity, code, e.msg, offset, loc)
 
 proc raiseUnlocatable*(code: DiagCode, msg: string, offset: int64 = -1) {.noinline, noreturn.} =
   ## Raises `SegUnlocatableError`: the reader cannot locate the rest of the
@@ -146,7 +144,8 @@ template tryRecord*(log: var DiagLog; loc: Location; body: untyped): bool =
   ## Runs `body`; if it raises a `CatchableError`, records it in `log` (see
   ## `recordException`) and evaluates to false. Evaluates to true on success.
   ## Use at the record/trace boundary so one bad part never aborts the read;
-  ## stop reading when `log.isFatal`.
+  ## stop reading when `log.isFatal`. Where any failure ends the read, use
+  ## `tryRecordFatal`.
   block:
     var ok = false
     try:
@@ -156,115 +155,109 @@ template tryRecord*(log: var DiagLog; loc: Location; body: untyped): bool =
       recordException(log, loc, e)
     ok
 
+template tryRecordFatal*(log: var DiagLog; loc: Location; body: untyped): bool =
+  ## `tryRecord` for a boundary where a failure ends the read: whatever
+  ## `body` raises is recorded as `fatal` (`recordException` with `fatal`),
+  ## so a read that stopped early always has `isFatal`. Stop reading when it
+  ## evaluates to false.
+  block:
+    var ok = false
+    try:
+      body
+      ok = true
+    except CatchableError as e:
+      recordException(log, loc, e, fatal = true)
+    ok
+
 # --------------------------------------------------------------------- NIF --
+# Written and read with `niftext`, not the toolchain's NIF library: that one
+# ends the process on a damaged document (its reader calls `quit`), and
+# importing it ties the library to a Nim install that ships `dist/nimony`.
 
-const NifVendor = "parseSEG"
-
-proc addInt(b: var Builder; tag: string; value: int64) =
-  if value >= 0:
-    b.withTree tag:
-      b.addIntLit value
-
-proc addNif(b: var Builder; log: DiagLog) =
-  b.addHeader(vendor = NifVendor)
-  b.withTree "diagnostics":
-    for d in log.entries:
-      b.withTree "diag":
-        b.addIdent $d.severity
-        b.addIdent $d.code
-        b.addStrLit d.msg
-        if d.loc.file.len > 0:
-          b.withTree "file":
-            b.addStrLit d.loc.file
-        b.addInt "offset", d.offset
-        b.addInt "record", d.loc.record
-        b.addInt "channelSet", d.loc.channelSet
-        b.addInt "trace", d.loc.trace
-        b.addInt "blockIndex", d.loc.blockIndex
-        if d.loc.field.len > 0:
-          b.withTree "field":
-            b.addStrLit d.loc.field
+const
+  NifVendor = "parseSEG"
+  DocName = "diagnostics NIF" # what parse errors call the document
 
 proc toNif*(log: DiagLog): string =
   ## Serializes `log` as a NIF document.
-  var b = nifbuilder.open(64 + 96 * log.len)
-  b.addNif log
-  result = extract(move b)
+  result = newStringOfCap(64 + 96 * log.len)
+  result.add "(.nif27)\n(.vendor " & nifString(NifVendor) & ")\n(diagnostics"
+  template child(tag: string, value: int64) =
+    if value >= 0: result.add "\n  (" & tag & " " & $value & ")"
+  template child(tag: string, value: string) =
+    if value.len > 0: result.add "\n  (" & tag & " " & nifString(value) & ")"
+  for d in log.entries:
+    result.add "\n (diag " & $d.severity & " " & $d.code & " " & nifString(d.msg)
+    child "file", d.loc.file
+    child "offset", d.offset
+    child "record", d.loc.record
+    child "channelSet", d.loc.channelSet
+    child "trace", d.loc.trace
+    child "blockIndex", d.loc.blockIndex
+    child "field", d.loc.field
+    result.add ')'
+  result.add ')'
 
 proc writeNif*(log: DiagLog; filename: string) =
   ## Writes `log` as a NIF file. Raises `IOError` if the file cannot be written.
   writeFile(filename, log.toNif)
 
-proc parseError(r: Reader; what: string) {.noinline, noreturn.} =
-  raiseFormat("diagnostics NIF line " & $r.line & ": " & what)
-
-proc expect(r: var Reader; t: var ExpandedToken; kind: NifKind; what: string) =
-  next(r, t)
-  if t.tk != kind: parseError(r, "expected " & what)
-
-proc expectTag(r: var Reader; t: var ExpandedToken; tag: string) =
-  next(r, t)
-  if t.tk != ParLe or t.data != tag: parseError(r, "expected (" & tag)
-
-proc parseEnumToken[T: enum](r: var Reader; t: var ExpandedToken; what: string): T =
-  r.expect(t, Ident, what)
-  let s = r.decodeStr(t)
+proc enumIdent[T: enum](n: var NifIn; what: string): T =
+  let t = n.next
+  if t.kind != ntIdent: n.docError("expected " & what)
   try:
-    result = parseEnum[T](s)
+    result = parseEnum[T](t.s)
   except ValueError:
-    parseError(r, "unknown " & what & " '" & s & "'")
+    n.docError("unknown " & what & " '" & t.s & "'")
 
-proc parseDiag(r: var Reader; t: var ExpandedToken): Diagnostic =
+proc index(n: var NifIn; tag: string): int =
+  # The integer of a location child; one that does not fit `int` (a 32-bit
+  # build) is malformed, not a `RangeDefect`.
+  let v = n.expectInt("an integer in (" & tag)
+  if v < int64(low(int)) or v > int64(high(int)): n.docError("(" & tag & " is out of range")
+  int(v)
+
+proc parseDiag(n: var NifIn): Diagnostic =
+  # After `(diag`: severity, code, then the message and the children in any order.
   result = Diagnostic()
-  result.severity = parseEnumToken[Severity](r, t, "severity")
-  result.code = parseEnumToken[DiagCode](r, t, "code")
+  result.severity = enumIdent[Severity](n, "severity")
+  result.code = enumIdent[DiagCode](n, "code")
   var done = false
   while not done:
-    next(r, t)
-    case t.tk
-    of ParRi:
-      done = true
-    of StrLit:
-      result.msg = r.decodeStr(t)
-    of ParLe:
-      let tag = r.decodeStr(t)
-      if tag == "field" or tag == "file":
-        r.expect(t, StrLit, "string")
-        if tag == "field": result.loc.field = r.decodeStr(t)
-        else: result.loc.file = r.decodeStr(t)
-      else:
-        r.expect(t, IntLit, "integer")
-        let v = decodeInt(t)
-        case tag
-        of "offset": result.offset = v
-        of "record": result.loc.record = int v
-        of "channelSet": result.loc.channelSet = int v
-        of "trace": result.loc.trace = int v
-        of "blockIndex": result.loc.blockIndex = int v
-        else: parseError(r, "unknown tag (" & tag)
-      r.expect(t, ParRi, "')'")
-    else:
-      parseError(r, "unexpected token in (diag")
+    let t = n.next
+    case t.kind
+    of ntClose: done = true
+    of ntStr: result.msg = t.s
+    of ntOpen:
+      case t.s
+      of "file": result.loc.file = n.expectStr("a string in (file")
+      of "field": result.loc.field = n.expectStr("a string in (field")
+      of "offset": result.offset = n.expectInt("an integer in (offset")
+      of "record": result.loc.record = n.index(t.s)
+      of "channelSet": result.loc.channelSet = n.index(t.s)
+      of "trace": result.loc.trace = n.index(t.s)
+      of "blockIndex": result.loc.blockIndex = n.index(t.s)
+      else: n.docError("unknown tag (" & t.s)
+      n.expectClose("(" & t.s)
+    else: n.docError("unexpected token in (diag")
 
 proc parseDiagnostics*(nif: string): DiagLog =
   ## Parses a NIF document written by `toNif`. Raises `SegFormatError` if it
-  ## is malformed.
+  ## is malformed (the message gives the line), whatever its bytes are:
+  ## documents are untrusted input.
   result = DiagLog()
-  var r = openFromBuffer(nif, "")
-  var t = default(ExpandedToken)
-  r.expectTag(t, "diagnostics")
+  var n = initNifIn(nif, DocName)
+  var t = n.next
+  while t.kind == ntOpen and t.s.startsWith("."): # directives: (.nif27), (.vendor ...)
+    n.skipTree(1)
+    t = n.next
+  if t.kind != ntOpen or t.s != "diagnostics": n.docError("expected (diagnostics")
   var done = false
   while not done:
-    next(r, t)
-    case t.tk
-    of ParRi:
-      done = true
-    of ParLe:
-      if t.data != "diag": parseError(r, "expected (diag")
-      result.add parseDiag(r, t)
-    else:
-      parseError(r, "expected (diag or ')'")
-  r.close()
+    t = n.next
+    if t.kind == ntClose: done = true
+    elif t.kind == ntOpen and t.s == "diag": result.add parseDiag(n)
+    else: n.docError("expected (diag or ')'")
 
 proc readDiagnostics*(filename: string): DiagLog =
   ## Reads a NIF diagnostics file. Raises `IOError` if it cannot be read and

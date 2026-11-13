@@ -91,9 +91,12 @@ method rewind*(t: WindowsTape) {.raises: [CatchableError].} =
 
 method spaceFiles*(t: WindowsTape; count: int) {.raises: [CatchableError].} =
   if count != 0:
+    # The two halves of the 64-bit count, as bit patterns: `DWORD` is int32
+    # here, and a range conversion raised RangeDefect on a backward space
+    # (the low half of a small negative count is 0x8000_0000 or more).
     let c = int64(count)
-    t.check(setTapePosition(t.h, TapeSpaceFilemarks, 0, DWORD(c and 0xFFFF_FFFF),
-      DWORD(c shr 32), 0), "space filemarks")
+    t.check(setTapePosition(t.h, TapeSpaceFilemarks, 0, cast[DWORD](uint32(c and 0xFFFF_FFFF)),
+      cast[DWORD](uint32((c shr 32) and 0xFFFF_FFFF)), 0), "space filemarks")
 
 method status*(t: WindowsTape): TapeStatus {.raises: [CatchableError].} =
   let s = getTapeStatus(t.h)

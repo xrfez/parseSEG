@@ -26,6 +26,7 @@
 ## - Rev 0 ignores bytes 3503-3506; Rev 2 `firstTraceOffset` overrides the
 ##   extended header count;
 ## - fixed-length flag 1: every trace has the file's sample count;
+## - a trace whose own sample count is 0 has the binary header's (a warning);
 ## - Rev 2 additional trace headers (count from Ext1 bytes 157-158, else
 ##   binary 3507), Ext1 sample count and interval overrides;
 ## - traces end at the declared trace count, at an Ext1 "last trace in file"
@@ -108,7 +109,9 @@ type
     headersOnly: bool    ## Skip sample bytes (`SegyTrace.samples` stays empty).
     fixedMismatches: int
       ## Fixed-length traces whose own ns/dt disagree (logged up to `MaxRepeats`).
-    zeroSampleTraces: int ## Rev 0 traces sized from the binary header (logged up to `MaxRepeats`).
+    zeroSampleTraces: int
+      ## Traces with a sample count of 0, sized from the binary header (logged
+      ## up to `MaxRepeats`).
     walk: bool
       ## The index walk (`private/segywalk`): of the headers, decode only the
       ## fields this module reads.
@@ -129,6 +132,7 @@ func looksLikeTapeLabel(b: openArray[byte]): bool =
   b[0] in {0x20'u8, 0x30'u8..0x39'u8} and b[4] == 0x53 and b[5] == 0x59
 
 func startsWithC(b: openArray[byte]): bool {.inline.} = b[0] == 0xC3 or b[0] == 0x43
+  # The first card of a textual header: `C` in EBCDIC or ASCII.
 
 func loc(r: SegyReader, trace = -1, field = ""): Location {.inline.} =
   Location(file: r.name, record: 0, trace: trace, field: field)
@@ -194,6 +198,21 @@ proc reportIssues(r: var SegyReader, h: ExtendedTextHeader, start: int64, field:
       "retention limit; stanzas and User Data are indexed but not held in memory",
       start, r.loc(field = field))
 
+proc labelBeforePlainText(r: var SegyReader, text: openArray[byte]): bool =
+  # After 128 bytes that look like a tape label and 3200 that are not card
+  # text: a label all the same when a binary header follows them and none
+  # sits at stream offset 3200, where it would be had the textual header
+  # started at byte 0. So a label is kept before a textual header that is
+  # blank, zero-filled or free text.
+  var bin = newSeq[byte](BinaryHeaderSize)
+  let got = r.readAvail(bin)
+  r.unread(bin.toOpenArray(0, got - 1))
+  if got == BinaryHeaderSize and looksLikeBinaryHeader(bin):
+    var unlabelled = newSeqOfCap[byte](BinaryHeaderSize)
+    unlabelled.add text.toOpenArray(TextHeaderSize - TapeLabelSize, TextHeaderSize - 1)
+    unlabelled.add bin.toOpenArray(0, BinaryHeaderSize - TapeLabelSize - 1)
+    result = not looksLikeBinaryHeader(unlabelled)
+
 proc readFileHeaders(r: var SegyReader) =
   # Fills r.file as it goes, so whatever was read survives a later failure.
   template f: untyped = r.file
@@ -201,7 +220,7 @@ proc readFileHeaders(r: var SegyReader) =
   var textBytes: seq[byte]
   if looksLikeTapeLabel(head):
     textBytes = r.readBlock(TextHeaderSize)
-    if startsWithC(textBytes):
+    if startsWithC(textBytes) or r.labelBeforePlainText(textBytes):
       f.tapeLabel = head
     else:
       # Not a label after all: the textual header started at byte 0.
@@ -213,6 +232,12 @@ proc readFileHeaders(r: var SegyReader) =
     textBytes.add r.readBlock(TextHeaderSize - TapeLabelSize)
   let labelLen = f.tapeLabel.len
   f.text = decodeTextHeader(textBytes)
+  if not startsWithC(textBytes):
+    # Blank, zero-filled or free text: common enough, and read all the same,
+    # but only the binary header then says that this is SEG-Y.
+    r.log.report(sevInfo, dcBadValue, "the textual header is not card text (it does not " &
+      "start with C); the file is read by its binary header",
+      if r.byteStream: int64(labelLen) else: -1, r.loc(field = "text"))
 
   let binOffset = r.offset
   let bin = r.readBlock(BinaryHeaderSize)
@@ -345,7 +370,8 @@ proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
       result.mediumSize = getFileSize(src.name)
     except CatchableError:
       discard # not a plain file (e.g. a pipe): no size limit
-  if not result.log.tryRecord(result.loc(), result.readFileHeaders()):
+  # A failure here, and in `readTrace`, ends the read: always a fatal entry.
+  if not result.log.tryRecordFatal(result.loc(), result.readFileHeaders()):
     result.done = true
   if result.log.isFatal: result.done = true
 
@@ -464,7 +490,7 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
       r.lastTraceSeen = true
 
   let traceNs = if extNs != 0: int(extNs) else: int(t.header.numSamples)
-  let traceDt = if extDt != 0: extDt else: float64(t.header.sampleInterval)
+  let traceDt = if usableExtInterval(extDt): extDt else: float64(t.header.sampleInterval)
   if f.revision.major >= 1 and f.binary.fixedLengthTraces == 1:
     t.numSamples = int(f.binary.effectiveSamplesPerTrace)
     t.sampleInterval = f.binary.effectiveSampleInterval
@@ -475,9 +501,11 @@ proc readTraceBody(r: var SegyReader, t: var SegyTrace) =
       r.log.report(sevWarning, dcInconsistent, "fixed-length file, but this trace has " &
         $traceNs & " samples at " & $traceDt & " (binary header: " & $t.numSamples & " at " &
         $t.sampleInterval & ")", t.offset + 114, r.loc(t.index, "trace.numSamples"))
-  elif f.revision.major == 0 and traceNs == 0 and f.binary.effectiveSamplesPerTrace != 0:
-    # Rev 0 sized traces by tape block, and some writers left bytes 115-116
-    # at 0 (segy_rev0.md §9.2): use the binary header's count.
+  elif traceNs == 0 and f.binary.effectiveSamplesPerTrace != 0:
+    # Rev 0 sized traces by tape block, and writers of every revision that
+    # rely on the binary header leave bytes 115-116 at 0 (segy_rev0.md
+    # §9.2): use the binary header's count. Taken as a trace without
+    # samples, the trace's samples would be read as the next headers.
     t.numSamples = int(f.binary.effectiveSamplesPerTrace)
     t.sampleInterval = if traceDt != 0: traceDt else: f.binary.effectiveSampleInterval
     inc r.zeroSampleTraces
@@ -517,7 +545,7 @@ proc readTrace*(r: var SegyReader, t: var SegyTrace): bool =
   if r.done:
     return false
   var more = false
-  let ok = r.log.tryRecord(r.loc(r.tracesRead)):
+  let ok = r.log.tryRecordFatal(r.loc(r.tracesRead)):
     more = r.nextTrace(t)
   if ok and more:
     result = true

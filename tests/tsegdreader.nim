@@ -2,7 +2,7 @@
 ## multi-record streams in every format, disk and tape images, RECORD and
 ## FIXREC structures, damaged input.
 
-import std/[assertions, os, strutils]
+import std/[assertions, math, os, strutils, times]
 import parseSEG/common/errors
 import parseSEG/io/[records, diskio, tapeimage]
 import parseSEG/segd/[reader, writer]
@@ -493,3 +493,156 @@ sampleBlock channel_set_hint_matches_the_search:
           inc traces
       doAssert traces > 0, name
     finally: src.close()
+
+proc tocFile(entries = 0): string =
+  ## A Table of Contents file: the 448-byte header and `entries` blank entries.
+  result = alignLeft("SEGD TOC FILE", 13) & alignLeft("SD3.0", 6) & alignLeft("T1", 12)
+  result = alignLeft(result, 438) & align($entries, 10) & spaces(128 * entries)
+
+block table_of_contents_files_between_records:
+  # One or several TOC files before, between and after the records.
+  let recs = makeStream([sd8058, sd8024])
+  discard recs.toDisk(tmp / "toc_recs.sgd")
+  let whole = readFile(tmp / "toc_recs.sgd")
+  discard makeStream([sd8058]).toDisk(tmp / "toc_first.sgd")
+  let first = readFile(tmp / "toc_first.sgd")
+  let second = whole[first.len .. ^1]
+  doAssert whole[0 ..< first.len] == first
+  let path = tmp / "toc_runs.sgd"
+  writeFile(path, tocFile() & tocFile(2) & first & tocFile() & tocFile() & tocFile(1) & second &
+    tocFile())
+  let src = openDiskSource(path)
+  var r = openSegd(src)
+  var files: seq[int64]
+  var traces = 0
+  while r.nextRecord():
+    files.add r.record.fileNumber
+    var t: SegdTrace
+    while r.readTrace(t): inc traces
+  src.close()
+  doAssert r.log.len == 0, $r.log
+  doAssert files == @[100'i64, 101] and traces == 2 * recs.records[0].traces.len
+  doAssert r.toc.len == 6 and r.toc[1].entries.len == 2 and r.toc[4].entries.len == 1
+  sameRecords(readSegd(path), recs)
+
+block a_long_run_of_table_of_contents_files:
+  # `nextRecord` called itself once per TOC file: 50000 of them (22 MB)
+  # overflowed the stack. They are read in a loop now.
+  const n = 50_000
+  let path = tmp / "toc_many.sgd"
+  let one = tocFile()
+  var s = newStringOfCap(one.len * n)
+  for i in 0 ..< n: s.add one
+  writeFile(path, s)
+  let src = openDiskSource(path)
+  var r = openSegd(src, headersOnly = true)
+  doAssert not r.nextRecord() and r.isDone
+  src.close()
+  doAssert r.toc.len == n and r.log.len == 0
+  removeFile(path)
+  # A TOC file cut short ends the read with a fatal entry.
+  writeFile(path, one & one[0 ..< 300])
+  let d = readSegd(path)
+  doAssert d.records.len == 0 and d.log.isFatal and d.log[d.log.len - 1].code == dcTruncated
+
+block extension_sample_count_of_zero:
+  # Trace Header Extension #1 bytes 8-10 left at 0 by the writer: read as a
+  # trace without samples, the samples were taken for the next trace header
+  # and the walk ended in garbage. The channel set's window sizes the trace,
+  # as it does for a trace without extensions.
+  let recs = makeStream([sd8058, sd8058])
+  let path = tmp / "the_ns0.sgd"
+  discard recs.toDisk(path)
+  var b = readBytes(path)
+  var zeroed = 0
+  for rec in readSegd(path).records:
+    for t in rec.traces:
+      if t.ext1.isSome:
+        for i in 7..9: b[int(t.offset) + 20 + i] = 0
+        inc zeroed
+  doAssert zeroed == 6
+  writeBytes(path, b)
+  for headersOnly in [false, true]:
+    let d = readSegd(path, headersOnly = headersOnly)
+    doAssert d.records.len == 2 and not d.log.hasErrors, $d.log
+    var warned, counted = 0
+    for x in d.log:
+      if x.severity == sevWarning and x.loc.field == "ext1.samplesPerTrace":
+        doAssert "gives 0 samples; using the 52 of the channel set's window" in x.msg
+        inc warned
+      elif x.severity == sevInfo and "1 more warning diagnostics for ext1.samplesPerTrace" in x.msg:
+        inc counted
+    doAssert warned == 5 and counted == 1, $d.log
+    for r, rec in d.records:
+      doAssert rec.traces.len == 5
+      for k, t in rec.traces:
+        doAssert t.numSamples == 52
+        if not headersOnly: doAssert t.samples == recs.records[r].traces[k].samples
+        if k >= 2: doAssert t.ext1.get.samplesPerTrace == 0 # the header stays as read
+  # A window that gives no length leaves the trace without samples.
+  var c = makeStream([sd8058])
+  c.records[0].record.scanTypes[0].descriptors[1].endTime = 0
+  for t in c.records[0].traces.mitems:
+    if t.ext1.isSome:
+      t.ext1.get.samplesPerTrace = 0
+      t.numSamples = 0
+      t.samples.setLen 0
+  discard c.toDisk(tmp / "the_ns0_window0.sgd", SegdWriteOptions(lenient: true))
+  let e = readSegd(tmp / "the_ns0_window0.sgd")
+  doAssert e.records.len == 1 and e.records[0].traces.len == 5 and not e.log.isFatal, $e.log
+  doAssert e.records[0].traces[4].numSamples == 0 and e.records[0].traces[0].numSamples == 52
+
+block channel_set_values_without_a_trace:
+  # `descaleFactor` and `startTimeMs` by scan type and channel set, as
+  # `sampleIntervalUs` and `channelType` have them: what code holding only
+  # an index entry (record, scan type, channel set) needs.
+  var d = makeStream([sd8058])
+  d.records[0].record.scanTypes[0].descriptors[1].startTime = 4 # 8 ms
+  let rec = d.records[0].record
+  doAssert rec.descaleFactor(0, 0) == pow(2.0, -2.5) and rec.descaleFactor(0, 1) == 1.0
+  doAssert rec.startTimeMs(0, 0) == 0.0 and rec.startTimeMs(0, 1) == 8.0
+  doAssert rec.descaleFactor(0, -1) == 1.0 and rec.startTimeMs(0, -1) == 0.0
+  doAssert rec.descaleFactor(-1, -1) == 1.0 and rec.startTimeMs(-1, -1) == 0.0
+  discard d.toDisk(tmp / "sets_rev2.sgd", SegdWriteOptions(lenient: true))
+  for path in [tmp / "sets_rev2.sgd", demoDir() / "shot.sgd", demoDir() / "record.sgd"]:
+    let e = readSegd(path)
+    var traces = 0
+    for r in e.records:
+      for t in r.traces:
+        doAssert r.record.descaleFactor(t) == r.record.descaleFactor(t.scanType, t.channelSet)
+        doAssert r.record.startTimeMs(t) == r.record.startTimeMs(t.scanType, t.channelSet)
+        inc traces
+    doAssert traces > 0, path
+  # Rev 3: the descale multiplier and the start time in µs.
+  let shot = readSegd(demoDir() / "shot.sgd").records[0].record
+  for cs in 0 ..< shot.scanTypes[0].channelSetCount:
+    template c: untyped = shot.scanTypes[0].descriptorsRev3[cs]
+    let m = float64(c.descaleMultiplier)
+    doAssert shot.descaleFactor(0, cs) == (if m == 0 or m.isNaN: 1.0 else: m)
+    doAssert shot.startTimeMs(0, cs) == float64(c.startTime) / 1000
+
+block general_header_time_reads_the_two_digit_year_like_the_library:
+  # GH#1 has a two-digit year. `generalHeaderUtc(g1)` put it in 2000-2099,
+  # so a 1999 record was dated 2099, while the trace keys and the
+  # converters read 50-99 as 19xx. The default is that pivot now.
+  proc utc(year, day: int): float64 =
+    float64(dateTime(year, mJan, 1, zone = utc()).toTime.toUnix + (day - 1) * 86400)
+  var g1 = SegdGeneralHeader1(year: 99, julianDay: 1)
+  doAssert generalHeaderUtc(g1) == 915_148_800.0 and utc(1999, 1) == 915_148_800.0
+  g1 = SegdGeneralHeader1(year: 50, julianDay: 32, hour: 1, minute: 2, second: 3)
+  doAssert generalHeaderUtc(g1) == utc(1950, 32) + 3723
+  g1.year = 49
+  doAssert generalHeaderUtc(g1) == utc(2049, 32) + 3723
+  g1.year = 0
+  doAssert generalHeaderUtc(g1) == utc(2000, 32) + 3723
+  # The century can still be given.
+  g1.year = 99
+  doAssert generalHeaderUtc(g1, 2000) == utc(2099, 32) + 3723
+  doAssert generalHeaderUtc(g1, century = 1900) == utc(1999, 32) + 3723
+  doAssert generalHeaderUtc(g1) == generalHeaderUtc(g1, 1900)
+  # Fields that are not valid BCD or out of range: no time.
+  for bad in [SegdGeneralHeader1(year: BcdInvalid, julianDay: 1),
+      SegdGeneralHeader1(year: BcdAllF, julianDay: 1), SegdGeneralHeader1(year: 26),
+      SegdGeneralHeader1(year: 26, julianDay: 367), SegdGeneralHeader1(year: 26, julianDay: 1,
+      hour: 24), SegdGeneralHeader1(year: 26, julianDay: 1, minute: 60)]:
+    doAssert generalHeaderUtc(bad).isNaN and generalHeaderUtc(bad, 2000).isNaN

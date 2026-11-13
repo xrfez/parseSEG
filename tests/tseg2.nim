@@ -840,4 +840,54 @@ block r13_r1_4_no_record_written_is_fatal:
   doAssert log.isFatal and log.has("nothing was converted", sevFatal), $log
   doAssert not fileExists(dst) and tmpFiles(r13).len == 0
 
+block malformed_date_and_time_strings:
+  # ACQUISITION_DATE and ACQUISITION_TIME are free text: numbers past 19
+  # digits raised ValueError out of `openSeismic(keys = true)`, and an hour
+  # near high(int) overflowed (OverflowDefect) before its range was checked.
+  proc time(date, clock: string): Option[float64] =
+    var f = initSeg2File()
+    f["ACQUISITION_DATE"] = date
+    if clock.len > 0: f["ACQUISITION_TIME"] = clock
+    f.acquisitionTime
+  doAssert time("09/11/2026", "10:15:00") == some(1_794_219_300.0)
+  doAssert time("09/NOV/2026", "") == some(1_794_182_400.0)
+  doAssert time(" 9-11-2026 ", " 7:05 ") == some(1_794_182_400.0 + 7 * 3600 + 5 * 60)
+  for clock in ["9223372036854775807:00", "99999999999999999999:00", "00:99999999999999999999",
+      "2562047788015215:30", "10:15:nan", "10:15:inf", "10:15:-1", "24:00", "10:60", "-1:30",
+      "+1:30", ":30", "10:", "10", "1:2:3:4", "12345:00", "ten:15"]:
+    doAssert time("09/11/2026", clock).isNone, clock
+  for date in ["99999999999999999999/11/2026", "09/99999999999999999999/2026",
+      "09/11/99999999999999999999", "09/11/20260", "32/11/2026", "31/02/2026", "09/13/2026",
+      "00/11/2026", "09/11/0000", "-9/11/2026", "+9/11/2026", "9//2026", "/11/2026", "09/11",
+      "09/XYZ/2026", "nine/11/2026"]:
+    doAssert time(date, "10:15:00").isNone, date
+  # Through the index walk with keys: no time, no exception.
+  let path = tmp / "badtime.sg2"
+  for (date, clock) in [("09/11/2026", "9223372036854775807:00"),
+      ("09/11/2026", "99999999999999999999:00"), ("99999999999999999999/11/2026", "10:15")]:
+    var fdb = initSeg2File()
+    fdb.traceCount = 1
+    fdb["ACQUISITION_DATE"] = date
+    fdb["ACQUISITION_TIME"] = clock
+    var w = openSeg2Writer(path, fdb)
+    var t = Seg2Trace(formatCode: 4)
+    t["SAMPLE_INTERVAL"] = "0.0005"
+    w.writeTrace(t, [1.0, 2.0, 3.0, 4.0])
+    w.close()
+    var f = openSeismic(path, keys = true)
+    doAssert f.len == 1 and not f.log.hasErrors and f.traceKeys(0).time.isNaN, date & " " & clock
+    f.close()
+
+block integers_of_values_that_are_no_integers:
+  # NaN, the infinities and values past int64 are not integral (converting
+  # them is undefined behaviour in C).
+  var t = Seg2Trace(formatCode: 4)
+  for (text, want) in [("12", some(12'i64)), ("-3", some(-3'i64)), ("40000", some(40000'i64)),
+      ("1E3", some(1000'i64)), ("9007199254740992", some(9007199254740992'i64)),
+      ("nan", none(int64)), ("inf", none(int64)), ("-inf", none(int64)),
+      ("1e300", none(int64)), ("-1e300", none(int64)), ("9.3e18", none(int64)),
+      ("1.5", none(int64)), ("x", none(int64))]:
+    t["CHANNEL_NUMBER"] = text
+    doAssert t.channelNumber == want, text
+
 echo "tseg2: ok"

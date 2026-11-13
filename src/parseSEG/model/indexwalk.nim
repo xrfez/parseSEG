@@ -55,6 +55,20 @@ func looksLikeSegy(head: openArray[byte], at: int): bool =
     if printable(head[i], ebcdic): inc n
   n >= 3200 * 6 div 10
 
+func segyBinaryAt(head: openArray[byte], at: int): bool =
+  # A plausible binary header behind a 3200-byte textual header at `at`,
+  # whatever that header holds (blanks, zeros, free text). The last resort
+  # of `detectKind`: it takes 0.04 % of random heads (76 of 200000, the odds
+  # of a defined format code), and none of the SEG-D and SEG-2 files tried.
+  head.len >= at + TextHeaderSize + BinaryHeaderSize and looksLikeBinaryHeader(
+    head.toOpenArray(at + TextHeaderSize, at + TextHeaderSize + BinaryHeaderSize - 1))
+
+func hasSegyTapeLabel(head: openArray[byte]): bool =
+  # As the SEG-Y reader takes a tape label: a storage unit sequence number
+  # (digits or blanks) and "SY" in bytes 5-6.
+  head.len >= 6 and head[0] in {0x20'u8, 0x30'u8..0x39'u8} and head[4] == 0x53 and
+    head[5] == 0x59
+
 func detectKind*(head: openArray[byte]): SeismicKind =
   ## Guesses the standard from the first bytes of a stream (pass at least
   ## 3728). SEG-2: the File Descriptor Block ID (`55 3A` or `3A 55`) and the
@@ -64,14 +78,20 @@ func detectKind*(head: openArray[byte]): SeismicKind =
   ## textual header starting with `C` that is mostly printable EBCDIC or
   ## ASCII, possibly after a 128-byte tape label. Otherwise SEG-D if the bytes
   ## are a plausible General Header #1 (a SEG-D file number 43xx starts with
-  ## ASCII `C`, but its next 3200 bytes are not text). `skUnknown` if nothing
-  ## fits.
+  ## ASCII `C`, but its next 3200 bytes are not text). Last, SEG-Y whose
+  ## textual header is not card text (blank, zero-filled, free text, a
+  ## lower-case `c`): when the 400 bytes behind it, at 3200 or behind a tape
+  ## label at 3328, are a plausible binary header (`looksLikeBinaryHeader`).
+  ## `skUnknown` if nothing fits; `OpenOptions.kind` opens such a file as
+  ## the standard the caller knows it to be.
   if isSeg2(head): skSeg2
   elif isStorageUnitLabel(head) or isTocFile(head): skSegd
   elif looksLikeSegy(head, 0) or (head.len >= 6 and head[4] == 0x53 and head[5] == 0x59 and
       looksLikeSegy(head, 128)):
     skSegy
   elif looksLikeSegdGh1(head): skSegd
+  elif segyBinaryAt(head, 0) or (hasSegyTapeLabel(head) and segyBinaryAt(head, TapeLabelSize)):
+    skSegy
   else: skUnknown
 
 # ------------------------------------------------------------------ walk --

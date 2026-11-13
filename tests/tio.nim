@@ -126,14 +126,43 @@ block tape_image_e11_unpadded:
   src.close
 
 block tape_image_gap_and_end_of_medium:
+  # SIMH erase gaps (sim_tape.h): the word 0xFFFFFFFE marks a gap (MTR_GAP).
+  # 0xFFFEFFFF (MTR_FHGAP) is no marker of its own: it is the second half of
+  # one gap marker and the first half of the next, where a gap was
+  # overwritten off the 4-byte grid; 2 bytes are passed and the read is
+  # aligned again. This test once had 0xFFFEFFFF as a 4-byte gap in front of
+  # a record, which no SIMH image holds: the module took it for the gap
+  # marker and refused the real one as a record of class 0xF.
+  const gap = "\xFE\xFF\xFF\xFF"
+  proc rec(s: string): string =
+    let n = char(s.len) & "\x00\x00\x00"
+    n & s & n
   let path = tmp / "gap.tap"
-  writeFile path, "\xFF\xFF\xFE\xFF" & "\x02\x00\x00\x00ab\x02\x00\x00\x00" &
-    "\xFF\xFF\xFF\xFF" & "garbage after end of medium"
-  let src = openTapeImageSource(path)
+  writeFile path, gap & gap & rec("ab") & gap & rec("cd") & "\xFF\xFF" & gap & gap &
+    rec("ef") & "\x00\x00\x00\x00" & "\xFF\xFF" & gap & "\xFF\xFF\xFF\xFF" &
+    "garbage after end of medium"
+  var src = openTapeImageSource(path)
   var buf: seq[byte]
   doAssert src.readRecord(buf) == rkData and buf == @[byte 'a', byte 'b']
-  doAssert src.dataOffset == 8
-  doAssert src.readRecord(buf) == rkEndOfData
+  doAssert src.dataOffset == 12
+  doAssert src.readRecord(buf) == rkData and buf == @[byte 'c', byte 'd']
+  doAssert src.dataOffset == 26
+  doAssert src.readRecord(buf) == rkData and buf == @[byte 'e', byte 'f']
+  doAssert src.dataOffset == 46 and src.offset == 52 # 2 + 4 + 4 gap bytes, then the header
+  doAssert src.readRecord(buf) == rkTapeMark
+  doAssert src.readRecord(buf) == rkEndOfData and src.offset == 66
+  src.close
+  # A gap, whole or half, up to the end of the image.
+  for tail in [gap, gap & gap, "\xFF\xFF" & gap]:
+    writeFile path, rec("ab") & tail
+    src = openTapeImageSource(path)
+    doAssert src.drain == @[(rkData, 2), (rkEndOfData, 0)]
+    src.close
+  # Half a marker at the end is a cut image.
+  writeFile path, rec("ab") & gap & "\xFF\xFF"
+  src = openTapeImageSource(path)
+  doAssert src.readRecord(buf) == rkData
+  doAssertRaises SegTruncatedError: discard src.readRecord(buf)
   src.close
 
 block tape_image_corruption:
@@ -147,16 +176,24 @@ block tape_image_corruption:
   except SegTruncatedError as e:
     doAssert e.offset == 4
   src.close
-  writeFile path, "\x02\x00\x00\x00ab\x03\x00\x00\x00"
-  src = openTapeImageSource(path)
-  doAssertRaises SegFormatError:
-    discard src.readRecord(buf)
-  src.close
-  writeFile path, "\x02\x00\x00\x80ab\x02\x00\x00\x80"
-  src = openTapeImageSource(path)
-  doAssertRaises SegFormatError:
-    discard src.readRecord(buf)
-  src.close
+  # A trailer word that differs from the header word, and a record class
+  # other than 0: where the next record starts is unknown, so both are
+  # unlocatable (fatal at a reader's boundary) with the tape layout code.
+  for (image, offset) in [("\x02\x00\x00\x00ab\x03\x00\x00\x00", 6),
+      ("\x02\x00\x00\x80ab\x02\x00\x00\x80", 0)]:
+    writeFile path, image
+    src = openTapeImageSource(path)
+    try:
+      discard src.readRecord(buf)
+      doAssert false, "a damaged record must raise"
+    except SegUnlocatableError as e:
+      doAssert e.diagCode == dcTapeLayout and e.offset == offset
+    src.close
+    var log = DiagLog()
+    src = openTapeImageSource(path)
+    doAssert not log.tryRecord(Location(file: path), (discard src.readRecord(buf)))
+    doAssert log.isFatal and log[0].code == dcTapeLayout
+    src.close
   let sink = openTapeImageSink(path)
   doAssertRaises SegFormatError:
     sink.writeRecord newSeq[byte]()

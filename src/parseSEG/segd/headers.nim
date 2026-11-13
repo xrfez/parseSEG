@@ -189,8 +189,10 @@ func externalHeaderBlocks*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2): int 
   else: g1.externalHeaderBlocks
 
 func recordLengthMs*(g1: SegdGeneralHeader1, g2: SegdGeneralHeader2): float64 =
-  ## Record length in ms (0 = indeterminate).
+  ## Record length in ms (0 = indeterminate): GH#1's BCD RR.R × 1.024 s, or
+  ## GH#2's ms when it is `FFF`. NaN when GH#1's field is not valid BCD.
   if g1.recordLength == BcdAllF: float64(g2.extRecordLength)
+  elif g1.recordLength < 0: NaN
   else: float64(g1.recordLength) * 102.4
 
 func mpFactor*(c: SegdChannelSetDescriptor): float64 =

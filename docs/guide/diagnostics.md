@@ -87,7 +87,10 @@ doAssert log.len == 0 and data.shape == [199, 2001]
 ```
 
 `isFatal` on an index log means "the walk stopped early", not "the file is unusable": decide
-from `f.len` and the entry's location whether what was indexed is enough.
+from `f.len` and the entry's location whether what was indexed is enough. It holds the other
+way round too: whatever makes a walk or a streaming read stop where it cannot go on (a
+failed read, a damaged tape image, a record it cannot locate) leaves a `fatal` entry, so
+without one the reader came to the end it was looking for.
 
 ### Traces that cannot be decoded
 
@@ -114,14 +117,14 @@ The table gives each code's stable name (as `$` and NIF print it); the `DiagCode
 | `truncated` | The data ends inside an announced structure (cut copy, interrupted transfer) | Traces before the cut are fine; the affected trace reads as zeros. Re-copy the file if you can |
 | `badValue` | A field outside the spec's range (often harmless, e.g. a GH#3 source set number of 0) | `info`/`warning`: the value is kept as read. Decide per field whether your code relies on it |
 | `badBcd` | A BCD field holds a non-decimal nibble | The field reads as -2; fix it with the editor if it matters |
-| `inconsistent` | Two headers disagree (counts vs lengths, ...) | The message names the values that disagree; check the trace count against what you expect |
+| `inconsistent` | Two headers disagree (counts vs lengths, ...). Also a trace whose own sample count is 0 where the file gives one: it is sized from the SEG-Y binary header, or from its SEG-D channel set's window, in any revision | The message names the values that disagree; check the trace count against what you expect |
 | `byteOrder` | The byte order was inferred, not declared (common for little-endian Rev 0/1 SEG-Y) | `info`: nothing to do unless the samples look wrong |
 | `unsupportedRevision` | An unknown revision number | Parsed as the nearest known revision; check the summary |
 | `unsupportedFormat` | A sample format the library cannot decode | Those traces read as zero rows (`error`); headers are still indexed |
 | `unknownBlock` | A header block type the standard does not define | Kept raw (listed as `hbRaw`); nothing is lost |
 | `vendorBlock` | A vendor block with no registered decoder | Kept raw; add a vendor map (`docs/design/vendor_maps.md`) to decode it |
 | `vendorMap` | A vendor map is malformed or does not fit | Fix the map; the block stays raw |
-| `tapeLayout` | Tape marks, labels or block sizes off the spec | Usually harmless on disk copies of tapes |
+| `tapeLayout` | Tape marks, labels or block sizes off the spec; a tape image (`.tap`) with a record it cannot frame (a bad record class, a trailer word that differs from its header) | `warning`: usually harmless on disk copies of tapes. `fatal`: the image is damaged there, and the read has what came before |
 | `validation` | A writer or converter found something the target cannot hold or forbids; also conversion loss notes (`info`) | `error`: nothing was written unless `lenient`. `info`: read the note, it says what was dropped |
 | `multiplexed` | The file holds multiplexed SEG-D, demultiplexed into a temporary copy | `warning`: reads and keys use the copy (`f.demuxPath`); edits need a demultiplexed file |
 | `cancelled` | A `Progress` hook returned false during a conversion (`dcCancelled`; opening and exporting raise `SegCancelledError` instead) | `fatal`: nothing was written; run it again to finish |
@@ -155,4 +158,18 @@ f.log.writeNif("record.diagnostics.nif")
 echo readFile("record.diagnostics.nif")
 let back = readDiagnostics("record.diagnostics.nif")
 doAssert back.len == f.log.len and back.count(sevInfo) == 2
+```
+
+A log file is input like any other: `readDiagnostics` raises `IOError` when the file cannot
+be read, and it and `parseDiagnostics` raise `SegFormatError`, with the line, for a document
+that is damaged or is not a diagnostics log.
+
+```nim
+import parseSEG
+
+try:
+  discard parseDiagnostics("(.nif27)\n(diagnostics\n (diag warning badValue \"cut sho")
+  doAssert false
+except SegFormatError as e:
+  echo "not a diagnostics log: ", e.msg
 ```

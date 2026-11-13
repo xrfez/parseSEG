@@ -170,6 +170,80 @@ sampleBlock segd_mixed_records:
   let cs = f.channelSets
   doAssert cs.len == 2 and cs[1].record == 1 and cs[1].traceCount == 1
 
+block channel_sets_count_traces_in_any_order:
+  # `channelSets` counts runs of traces of one channel set. The counts are
+  # those of counting trace by trace, also when a set's traces are not
+  # consecutive, name no set, or name one the record does not have.
+  proc reference(f: SeismicFile): seq[(int, int, int, int, int)] =
+    for r in 0 ..< f.index.segdRecords.len:
+      for st in 0 ..< f.index.segdRecords[r].scanTypes.len:
+        for cs in 0 ..< f.index.segdRecords[r].scanTypes[st].channelSetCount:
+          var n, longest = 0
+          for e in f.index.entries:
+            if int(e.record) == r and int(e.scanType) == st and e.channelSetIndex == cs:
+              inc n
+              longest = max(longest, int(e.numSamples))
+          result.add (r, st, cs, n, longest)
+  proc counted(f: SeismicFile): seq[(int, int, int, int, int)] =
+    for c in f.channelSets:
+      result.add (c.record, c.scanType, c.channelSet, c.traceCount, c.samplesPerTrace)
+  let path = tmp / "sets.sgd"
+  let shot = readFile(demoDir() / "shot.sgd")
+  writeFile(path, shot & readFile(demoDir() / "record.sgd") & shot & shot)
+  var f = openSeismic(path)
+  doAssert f.recordCount == 4 and f.len == 16
+  let whole = f.counted
+  doAssert whole == f.reference and whole.len == f.channelSets.len
+  var total = 0
+  for c in whole: total += c[3]
+  doAssert total == 16
+  doAssert f.channelSets[^1].record == 3 and f.channelSets[^1].samplesPerTrace == 4001
+  # The same traces in another order: nothing changes.
+  var s = 7'u32
+  for i in countdown(f.index.entries.len - 1, 1):
+    s = s * 1664525'u32 + 1013904223'u32
+    swap(f.index.entries[i], f.index.entries[int(s shr 8) mod (i + 1)])
+  doAssert f.counted == whole
+  # Traces that name no set, no scan type, a set or a record that is not there.
+  f.index.entries[0].channelSet = NoChannelSet
+  f.index.entries[1].scanType = -1
+  f.index.entries[2].channelSet = 77
+  f.index.entries[3].scanType = 9
+  f.index.entries[4].record = 400
+  f.index.entries[5].numSamples = 9999
+  doAssert f.counted == f.reference and f.counted != whole
+  f.close()
+  var y = openSeismic(demoDir() / "survey.sgy")
+  doAssert y.channelSets.len == 0
+  y.close()
+
+block record_length_of_an_invalid_bcd_field:
+  # General Header #1 bytes 26-27 hold the record length as three BCD
+  # digits. A non-decimal digit there decodes as BcdInvalid (-2), which the
+  # summary scaled like a length: -204.8 ms. Unknown is NaN.
+  doAssert recordLengthMs(SegdGeneralHeader1(recordLength: BcdInvalid),
+    SegdGeneralHeader2()).isNaN
+  doAssert recordLengthUs(SegdGeneralHeader1(recordLength: BcdInvalid),
+    SegdGeneralHeader2Rev3()).isNaN
+  doAssert recordLengthMs(SegdGeneralHeader1(recordLength: 20), SegdGeneralHeader2()) == 2048
+  doAssert recordLengthMs(SegdGeneralHeader1(recordLength: BcdAllF),
+    SegdGeneralHeader2(extRecordLength: 3000)) == 3000
+  doAssert recordLengthUs(SegdGeneralHeader1(recordLength: BcdAllF),
+    SegdGeneralHeader2Rev3(extRecordLength: 4_000_000)) == 4_000_000
+  for name in ["record.sgd", "shot.sgd"]: # Rev 2.0 and Rev 3.0
+    var b = readBytes(demoDir() / name)
+    var f = openSeismic(demoDir() / name)
+    doAssert f.summary.recordLengthMs > 0, name
+    f.close()
+    b[25] = (b[25] and 0xF0) or 0x0A
+    b[26] = 0x00
+    writeBytes(tmp / ("badlen_" & name), b)
+    f = openSeismic(tmp / ("badlen_" & name))
+    doAssert f.recordCount == 1 and f.log.has("recordLength holds a non-decimal digit",
+      sevWarning), $f.log
+    doAssert f.summary.recordLengthMs.isNaN, name & " " & $f.summary.recordLengthMs
+    f.close()
+
 block unknown_file:
   let junk = tmp / "junk.bin"
   writeFile(junk, repeat('\0', 5000))
