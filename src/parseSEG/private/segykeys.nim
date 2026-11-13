@@ -59,6 +59,12 @@ type
 
   Scalars = array[ScalarKind, seq[RawEntry]] ## The entries of each scalar name.
 
+  DirectKind = enum
+    ## Whether the `GeometryField` values can be loaded from fixed bytes.
+    dkNo   ## No: every value through the layout's entries.
+    dkRev0 ## The standard layout of Rev 0: no fields in bytes 181-202.
+    dkRev1 ## The standard layout of Rev 1 and later.
+
   GeometryPlan* = object
     ## A file's layout resolved for `geometryValues` and `segyKeys`
     ## (`fields.GeometryReader` is this type).
@@ -76,6 +82,11 @@ type
     stdDelay: bool ## So are `delay` and its scalar: bytes 109-110 and 215-216 are read.
     stdTime: bool ## So are the date and time fields: bytes 157-168 are read.
     nanos: bool ## The layout has Extension 1's `nanosecs` (bytes 141-144).
+    direct: DirectKind
+      ## The geometry names are where the standard puts them (`valuesDirect`).
+    ext1Entries: bool
+      ## Some of them also have Extension 1 entries: a trace with Extension 1
+      ## goes through the layout.
 
   FieldPlan* = object
     ## One name's entries (`fieldValue`).
@@ -131,6 +142,41 @@ func isAt(rs: openArray[Resolved], pos: int, kind: LayoutType, sel = hsStd): boo
 func entriesAt(lay: TraceLayout): pointer {.inline.} =
   if lay.entries.len > 0: cast[pointer](addr lay.entries[0]) else: nil
 
+const
+  # The standard header's geometry names: 0-based position and type
+  # (`layout.rev2Entries`). The last five came with Rev 1.
+  stdGeometry: array[GeometryField, tuple[pos: int, kind: LayoutType]] = [
+    gfFfid: (8, ltInt4), gfChan: (12, ltInt4), gfEspnum: (16, ltInt4), gfCdp: (20, ltInt4),
+    gfCdptrc: (24, ltInt4), gfIline: (188, ltInt4), gfXline: (192, ltInt4),
+    gfOffset: (36, ltInt4), gfShtX: (72, ltCoor4), gfShtY: (76, ltCoor4),
+    gfRecX: (80, ltCoor4), gfRecY: (84, ltCoor4), gfCdpX: (180, ltCoor4),
+    gfCdpY: (184, ltCoor4), gfRelev: (40, ltElev4), gfSelev: (44, ltElev4),
+    gfSdepth: (48, ltElev4), gfCoorunit: (88, ltInt2), gfSp: (196, ltSpNum4)]
+  rev1Geometry = {gfIline, gfXline, gfCdpX, gfCdpY, gfSp}
+
+func directKind(p: GeometryPlan, ext1Entries: var bool): DirectKind =
+  # `dkRev0`/`dkRev1` when every geometry name has its one standard-header
+  # entry, the plain one at its standard place, and at most Extension 1
+  # entries beside it (which a trace without Extension 1 does not have),
+  # with the scalars at theirs. The Rev 1 names: all there, or none.
+  template plain(es: seq[RawEntry], pos: int): bool = es.len == 1 and es[0].isAt(pos, ltInt2)
+  if not (plain(p.scalars[skCoor], 70) and plain(p.scalars[skElev], 68)): return dkNo
+  var late = 0
+  for g in GeometryField:
+    var std = 0
+    for r in p.plans[g]:
+      case r.entry.sel
+      of hsStd:
+        if not r.entry.isAt(stdGeometry[g].pos, stdGeometry[g].kind): return dkNo
+        inc std
+      of hsExt1: ext1Entries = true
+      of hsProprietary: return dkNo
+    if std > 1 or (std == 0 and (g notin rev1Geometry or p.plans[g].len > 0)): return dkNo
+    if g in rev1Geometry: late += std
+  if late == 0: dkRev0
+  elif late == rev1Geometry.card and plain(p.scalars[skSpNum], 200): dkRev1
+  else: dkNo
+
 func timeBasisOf*(f: SegyFile): int16 =
   ## The file's time basis code: binary bytes 3511-3512 from Rev 2 on, else 0.
   if f.revision.major >= 2: f.binary.timeBasisCode else: 0'i16
@@ -167,6 +213,7 @@ func initGeometryPlan*(f: SegyFile): GeometryPlan =
     plan(kfHour).isAt(160, ltInt2) and plan(kfMinute).isAt(162, ltInt2) and
     plan(kfSecond).isAt(164, ltInt2) and plan(kfTimebase).isAt(166, ltInt2) and
     (result.nanos or plan(kfNanosecs).len == 0)
+  result.direct = directKind(result, result.ext1Entries)
 
 func planFits*(p: GeometryPlan, f: SegyFile): bool =
   ## `p` was resolved from `f` as it is now, as far as a few compares can
@@ -295,12 +342,47 @@ proc valuesIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
     var x: float64
     result[g] = if evalResolved(p.plans[g], p.scalars, h, o, cache, x): x else: NaN
 
+proc valuesDirect(p: GeometryPlan, h: RawHeaders, o: static ByteOrder): array[GeometryField,
+    float64] =
+  # `valuesIn` for the standard layout (`p.direct`) and a trace it covers:
+  # the same values loaded from their fixed bytes, each scalar read once.
+  # The entry walk cost 355 ns per trace of keys, this 60.
+  template i32(g: GeometryField): float64 = float64(loadNum[int32](h.std, stdGeometry[g].pos, o))
+  let co = loadNum[int16](h.std, 70, o)
+  let ed = loadNum[int16](h.std, 68, o)
+  for g in [gfFfid, gfChan, gfEspnum, gfCdp, gfCdptrc, gfOffset]: result[g] = i32(g)
+  for g in [gfShtX, gfShtY, gfRecX, gfRecY]: result[g] = applyScalar(i32(g), co)
+  for g in [gfRelev, gfSelev, gfSdepth]: result[g] = applyScalar(i32(g), ed)
+  result[gfCoorunit] = float64(loadNum[int16](h.std, stdGeometry[gfCoorunit].pos, o))
+  if p.direct == dkRev1:
+    result[gfIline] = i32(gfIline)
+    result[gfXline] = i32(gfXline)
+    result[gfCdpX] = applyScalar(i32(gfCdpX), co)
+    result[gfCdpY] = applyScalar(i32(gfCdpY), co)
+    result[gfSp] = applyScalar(i32(gfSp), loadNum[int16](h.std, 200, o))
+  else:
+    for g in rev1Geometry: result[g] = NaN
+
+template isDirect(p: GeometryPlan, h: RawHeaders): bool =
+  p.direct != dkNo and (h.ext1 == nil or not p.ext1Entries)
+
 proc geometryValues*(p: GeometryPlan, h: RawHeaders): array[GeometryField, float64] =
   ## The values of `GeometryField` for the trace with headers `h` (NaN where
   ## no entry applies), scaled.
   var cache: ScalarCache
   eachOrder(p.order, o):
-    result = valuesIn(p, h, o, cache)
+    result = if isDirect(p, h): valuesDirect(p, h, o) else: valuesIn(p, h, o, cache)
+
+func usesDirectLoads*(p: GeometryPlan): bool {.inline.} =
+  ## The plan's layout is the standard one: traces (those without Extension
+  ## 1, when the layout has Extension 1 entries) are read with direct loads.
+  p.direct != dkNo
+
+func withoutDirect*(p: GeometryPlan): GeometryPlan =
+  ## `p` reading every value through the layout's entries, also where the
+  ## layout is the standard one: what the tests compare the direct loads to.
+  result = p
+  result.direct = dkNo
 
 # ----------------------------------------------------------- SEG-Y keys --
 
@@ -440,7 +522,7 @@ proc stationsIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, cache: var 
 proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, timeBasis: int16,
     fixedUs: float64): TraceKeys =
   var cache: ScalarCache
-  let g = valuesIn(p, h, o, cache)
+  let g = if isDirect(p, h): valuesDirect(p, h, o) else: valuesIn(p, h, o, cache)
   result = initTraceKeys()
   result.record = g[gfFfid]
   result.ensemble = g[gfCdp]

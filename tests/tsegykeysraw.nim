@@ -9,6 +9,7 @@ import std/[assertions, math, options, os, random, strutils, times]
 import parseSEG
 import parseSEG/common/[endians, ibmfloat, years]
 import parseSEG/io/memsource
+import parseSEG/model/traceindex
 import parseSEG/private/[segykeys, segywalk]
 import ./utils/testutils
 
@@ -322,6 +323,72 @@ block fields_a_layout_stanza_moved:
   doAssert gone.traceCode == 0 and gone.status == tsUnknown and gone.t0Ms.isNaN
   doAssert gone.time.isNaN and gone.channel.isNaN and gone.inline == 9
   doAssert gone.intervalUs == standard.intervalUs # read where the reader reads it
+
+func sameValues(a, b: array[GeometryField, float64]): bool =
+  result = true
+  for g in GeometryField:
+    if not same(a[g], b[g]): return false
+
+block direct_loads_equal_the_layout_walk:
+  # A standard layout is read with direct loads from fixed bytes instead of
+  # an entry walk per name. Both must give the same values and keys, bit for
+  # bit: random headers in every byte order and revision, then every trace
+  # of the demo, sample and (when present) bench files.
+  for order in [boBig, boLittle, boPairSwapped]:
+    for rev in [0'u8, 1, 2]:
+      var f = SegyFile(byteOrder: order, revision: SegyRevision(major: rev))
+      f.layout = standardLayout(f.revision)
+      f.binary.timeBasisCode = 4
+      let gr = initGeometryReader(f)
+      doAssert gr.usesDirectLoads, $rev
+      let walk = gr.withoutDirect
+      doAssert not walk.usesDirectLoads
+      for n in 0 ..< 2000:
+        var std, ext1: array[TraceHeaderSize, byte]
+        randomHeader(std)
+        randomHeader(ext1)
+        let raw = RawHeaders(std: cast[ByteBuf](addr std[0]),
+          ext1: if n mod 3 == 0: cast[ByteBuf](addr ext1[0]) else: nil)
+        doAssert sameValues(geometryValues(gr, raw), geometryValues(walk, raw)), $order
+        doAssert sameKeys(segyKeys(gr, raw), segyKeys(walk, raw)), $order & " rev " & $rev
+  # One name moved, a scalar moved, a proprietary entry: not the standard layout.
+  for xml in ["""<segy-layout><entry name="ffid" byte="233" type="int4"/></segy-layout>""",
+      """<segy-layout><entry name="co_scal" byte="233" type="int2"/></segy-layout>""",
+      """<segy-layout><entry name="other" byte="71" type="int2"/></segy-layout>""",
+      """<segy-layout><entry name="offset" byte="37" type="int4" if-non-zero="1"/>
+         </segy-layout>""",
+      """<segy-layout><extension name="PROP0001"><entry name="cdp" byte="1" type="int4"/>
+         </extension></segy-layout>"""]:
+    var f = SegyFile(byteOrder: boBig, revision: SegyRevision(major: 1))
+    f.layout = merge(standardLayout(f.revision), parseLayout(xml))
+    doAssert not initGeometryReader(f).usesDirectLoads, xml
+  var files = @[demoDir() / "survey.sgy"]
+  if haveSamples:
+    for name in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy"]: files.add exampleDir / name
+  let benchDir = currentSourcePath().parentDir.parentDir / "bench" / "data"
+  for path in walkFiles(benchDir / "*.sgy"): files.add path
+  var direct, traces = 0
+  for path in files:
+    var sf = openSeismic(path)
+    let gr = initGeometryReader(sf.index.segy)
+    let walk = gr.withoutDirect
+    if gr.usesDirectLoads: inc direct
+    let mem = sf.unsafeMemory
+    for i in 0 ..< sf.len:
+      let e = sf.index.entries[i]
+      let a = int(e.offset)
+      let hb = int(e.headerBytes)
+      let raw = RawHeaders(std: cast[ByteBuf](addr mem[a]),
+        ext1: if hb >= 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + TraceHeaderSize]) else: nil,
+        prop: if hb > 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + 2 * TraceHeaderSize])
+              else: nil,
+        propLen: max(hb - 2 * TraceHeaderSize, 0))
+      doAssert sameKeys(segyKeys(gr, raw), segyKeys(walk, raw)), path & " trace " & $i
+      inc traces
+    sf.close()
+  doAssert traces >= 200
+  # Sweep0.sgy is plain Rev 0; the two with a Layout stanza are not direct.
+  if haveSamples: doAssert direct >= 1, $direct
 
 sampleBlock sample_files:
   # Every trace of the sample SEG-Y files: the reference, the public calls,
