@@ -11,6 +11,7 @@
 
 import std/streams
 import ../common/[ebcdic, diagnostics]
+import ./linespans
 
 type
   TextLayout* = enum
@@ -59,55 +60,16 @@ iterator textRecords*(s: Stream, layout: TextLayout): TextRecord =
   var rec = TextRecord()
   case layout
   of tlLines:
-    var buf = newString(65536)
-    var bufLen, pos = 0
-    var bufStart = int64(s.getPosition) # stream offset of buf[0]
-    var line = ""
-    var lineStart = bufStart
-    var pendingCr = false # a CR ended the last chunk; LF may follow
-    template fill(): bool =
-      bufStart += int64(bufLen)
-      bufLen = max(s.readData(buf[0].addr, buf.len), 0)
-      pos = 0
-      bufLen > 0
-    template emit(isCrlf, isTerminated, isCut: bool) =
-      rec.text = line
-      rec.offset = lineStart
-      rec.crlf = isCrlf
-      rec.terminated = isTerminated
-      rec.cut = isCut
+    var buf: string
+    for span in lineSpans(s, buf, MaxLineBytes):
+      rec.text.setLen(span.hi - span.lo + 1)
+      if rec.text.len > 0: copyMem(addr rec.text[0], addr buf[span.lo], rec.text.len)
+      rec.offset = span.offset
+      rec.index = span.index
+      rec.crlf = span.crlf
+      rec.terminated = span.terminated
+      rec.cut = span.cut
       yield rec
-      inc rec.index
-      line.setLen(0)
-    var more = fill()
-    while more:
-      while pos < bufLen:
-        let c = buf[pos]
-        if pendingCr:
-          pendingCr = false
-          if c == '\n':
-            inc pos
-            emit(true, true, false)
-            lineStart = bufStart + int64(pos)
-          else:
-            emit(false, true, false) # a lone CR
-            lineStart = bufStart + int64(pos)
-        elif c == '\n':
-          inc pos
-          emit(false, true, false)
-          lineStart = bufStart + int64(pos)
-        elif c == '\r':
-          inc pos
-          pendingCr = true
-        else:
-          line.add c
-          inc pos
-          if line.len >= MaxLineBytes:
-            emit(false, false, true)
-            lineStart = bufStart + int64(pos)
-      more = fill()
-    if pendingCr: emit(false, true, false)
-    elif line.len > 0: emit(false, false, false)
   of tlFixed80, tlEbcdic80:
     var buf = newString(CardWidth)
     while true:

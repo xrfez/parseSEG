@@ -259,10 +259,58 @@ block values_that_round_to_the_bytes_there_are_no_change:
     receiverXy: false, elevations: false, midpoints: false, offsets: false))
   doAssert not r.log.isFatal and not r.log.hasErrors, $r.log.len
   doAssert r.changes.traces == 0 and r.changes.sourceStations == 0, $r.changes
+  doAssert not r.log.has("rounded", sevWarning), "nothing was written, so nothing was rounded"
   var f = openSeismic(path, keys = true)
   doAssert f.applySurvey(g) == 1
   doAssert f.geometryChanges(GeometryFields(sourceXy: false, receiverXy: false,
     elevations: false, midpoints: false, offsets: false)).traces == 0
+  f.close()
+
+block counts_and_rounding_describe_what_was_written:
+  # The source point 99.5 beside coordinates that do change. Per kind, a
+  # value counts when the header holds another value afterwards, and
+  # "rounded" is reported only when no field of the point holds it exactly.
+  let g = sps("n.sps", r21('S', "20", "99.5", '1', "500000.0", "6000400.0", "10.0"),
+    r21('R', "10", "101", '1', "500100.25", "6000000.75", "12.5"),
+    x21(10, "20", "99.5", 1, 1, "10", "101", "101"))
+  proc written(rev: int, espnum: int32): (GeometryChanges, DiagLog) =
+    let path = tmp / ("n" & $rev & "_" & $espnum & ".sgy")
+    segyFile(path, rev = rev, traces = 1, espnum = espnum)
+    var f = openSeismic(path, keys = true)
+    doAssert f.applySurvey(g) == 1
+    var log: DiagLog
+    let plan = f.geometryChanges(GeometryFields(), log)
+    var ed = openEditor(move f)
+    result = (ed.writeGeometry(), ed.log)
+    ed.close()
+    doAssert result[0] == plan and not result[1].hasErrors, $result[0]
+    doAssert log.has("source station: rounded", sevWarning) ==
+      result[1].has("source station: rounded", sevWarning)
+  # Rev 0 has espnum only, and it holds 100 already: the coordinates are
+  # written, the source station is not, and nothing was rounded.
+  var (c, log) = written(0, 100)
+  doAssert c.traces == 1 and c.sourceXy == 1 and c.receiverXy == 1 and c.sourceStations == 0, $c
+  doAssert not log.has("source station: rounded", sevWarning), $log
+  # Rev 0, espnum unset: 100 is written for 99.5, the only field there is.
+  (c, log) = written(0, 0)
+  doAssert c.sourceStations == 1 and
+    log.has("source station: rounded to what the field holds in 1 traces", sevWarning), $log
+  # Rev 1 has the scaled shotpoint too: espnum takes 100, sp holds 99.5.
+  (c, log) = written(1, 0)
+  doAssert c.sourceStations == 1 and not log.has("source station: rounded", sevWarning), $log
+  # Rev 1 with espnum 100 already: only sp changes (0 to 99.5).
+  (c, log) = written(1, 100)
+  doAssert c.sourceStations == 1 and not log.has("source station: rounded", sevWarning), $log
+  # Receiver X and Y both round at the finest scalar: one trace, not two.
+  let fine = sps("n2.sps", r21('R', "10", "101", '1', "123.12345", "7.54321", ""),
+    x21(10, "20", "205", 1, 1, "10", "101", "101"))
+  let path = tmp / "n2.sgy"
+  segyFile(path, traces = 1)
+  var f = openSeismic(path, keys = true)
+  discard f.applySurvey(fine)
+  var flog: DiagLog
+  doAssert f.geometryChanges(GeometryFields(stations: false), flog).receiverXy == 1
+  doAssert flog.has("receiver X/Y: rounded to what the field holds in 1 traces", sevWarning), $flog
   f.close()
 
 block refusals:

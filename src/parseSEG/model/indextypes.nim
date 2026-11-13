@@ -64,9 +64,16 @@ type
       ## SEG-D 8015 (and SEG-2 format 3) mantissas read as two's complement.
 
   JoinGroup* = enum
-    ## Groups of `TraceKeys` fields that a join can change.
-    jgCoordinates ## Source and receiver X/Y/Z, the offset and the midpoint.
-    jgStations    ## Source and receiver line, point and point index, and the component.
+    ## The `TraceKeys` values a join can change, in the groups it changes
+    ## them by (a `set[JoinGroup]` is one byte).
+    jgSourceXy        ## `srcX`, `srcY`.
+    jgReceiverXy      ## `rcvX`, `rcvY`.
+    jgSourceZ         ## `srcZ`.
+    jgReceiverZ       ## `rcvZ`.
+    jgDerived         ## `offset`, `cmpX`, `cmpY`: derived from the two ends.
+    jgSourceStation   ## `srcLine`, `srcPoint`, `srcIndex`.
+    jgReceiverStation ## `rcvLine`, `rcvPoint`, `rcvIndex`.
+    jgComponent       ## `component`.
 
   TraceIndex* = object
     ## Every trace's location plus the file-level headers.
@@ -101,7 +108,8 @@ type
     joinedTraces*: seq[set[JoinGroup]]
       ## Per trace, the groups of keys a join (`applyGeometry`, `applySurvey`)
       ## changed; empty until a join changes one. A `HeaderEditor` keeps these
-      ## values when it refreshes a trace's keys from its edited headers.
+      ## values when it refreshes a trace's keys from its edited headers; the
+      ## trace's other keys follow the headers.
     keysRevision*: int
       ## 0 as opened; goes up whenever `keys` change (`ensureKeys`,
       ## `applyGeometry`, `applySurvey`, `HeaderEditor` writes). Data derived
@@ -111,12 +119,42 @@ const NoChannelSet* = 0xFFFF'u16
   ## `TraceEntry.channelSet` of a trace without a known channel set. The
   ## reader allows at most 65535 sets per scan type, so index 65535 is free.
 
-static: doAssert sizeof(TraceEntry) == 24
+static:
+  doAssert sizeof(TraceEntry) == 24
+  doAssert sizeof(set[JoinGroup]) == 1
+
+func changedGroups*(before, after: TraceKeys): set[JoinGroup] =
+  ## The groups in which `after` differs from `before` (two unknown values,
+  ## NaN, are the same): what a join changed in a trace's keys, for
+  ## `markJoined`.
+  func same(x, y: float64): bool {.inline.} = x == y or (x.isNaN and y.isNaN)
+  result = {}
+  template a: untyped = before
+  template b: untyped = after
+  if not (same(a.srcX, b.srcX) and same(a.srcY, b.srcY)): result.incl jgSourceXy
+  if not (same(a.rcvX, b.rcvX) and same(a.rcvY, b.rcvY)): result.incl jgReceiverXy
+  if not same(a.srcZ, b.srcZ): result.incl jgSourceZ
+  if not same(a.rcvZ, b.rcvZ): result.incl jgReceiverZ
+  if not (same(a.offset, b.offset) and same(a.cmpX, b.cmpX) and same(a.cmpY, b.cmpY)):
+    result.incl jgDerived
+  if not (same(a.srcLine, b.srcLine) and same(a.srcPoint, b.srcPoint) and
+      a.srcIndex == b.srcIndex):
+    result.incl jgSourceStation
+  if not (same(a.rcvLine, b.rcvLine) and same(a.rcvPoint, b.rcvPoint) and
+      a.rcvIndex == b.rcvIndex):
+    result.incl jgReceiverStation
+  if a.component != b.component: result.incl jgComponent
 
 proc markJoined*(ix: var TraceIndex, trace: int, groups: set[JoinGroup]) =
   ## Records that a join changed the `groups` of trace `trace`'s keys
-  ## (`joinedTraces`), for code that joins geometry itself. It does not bump
-  ## `keysRevision`: the joining code does, once per join that changed keys.
+  ## (`joinedTraces`), for code that joins geometry itself; `changedGroups`
+  ## gives them from the keys before and after. Mark only what the join
+  ## changed: a `HeaderEditor` keeps the marked values over the trace's
+  ## headers, and lets the rest follow them. An offset and midpoint marked
+  ## `jgDerived` beside only one joined end (or none) are derived again from
+  ## the coordinates when the other end's header coordinates are edited. It
+  ## does not bump `keysRevision`: the joining code does, once per join that
+  ## changed keys.
   if groups == {}: return
   if ix.joinedTraces.len != ix.keys.len: ix.joinedTraces.setLen ix.keys.len
   ix.joinedTraces[trace].incl groups

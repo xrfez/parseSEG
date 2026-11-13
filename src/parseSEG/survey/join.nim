@@ -24,9 +24,14 @@
 ## 4. no station: the relation of the trace's record and channel (X, then O).
 ##
 ## A relation is used only when it agrees with every station the header has.
-## A station is known when both its line and its point are; a header with
-## only one of them (e.g. a SEG-Y shotpoint without a line) has it filled
-## whole.
+## A station is known when both its line and its point are. A header with
+## only one of them (e.g. a SEG-Y shotpoint without a line) has the station
+## filled whole, when the relation agrees with the part the header has: the
+## same value to 1/100, or the relation's as a whole number (an integer
+## header field holds point 99.5 as 100; the survey's 99.5 then replaces it).
+## A relation that contradicts the part (header shotpoint 2345, relation
+## 13/99.5) is a conflict (`jmConflict`): nothing is filled, as for a whole
+## station.
 ## `applySurvey` then takes coordinates from the table by station
 ## (`keys.applyGeometry`), then the offset and midpoint. Auxiliary traces are
 ## left alone. The channel → station step (2-4) assumes the recorder numbers
@@ -34,7 +39,9 @@
 ## channel numbers are never used.
 ##
 ## Relations are stored as runs (one per X/O record), never expanded per
-## channel.
+## channel. `relationRuns` yields them (a channel range on evenly spaced
+## stations of one line), for code that walks a record station by station
+## instead of asking per channel.
 ##
 ## Line names that are not numbers (SPS 1.0, P1) go through the geometry's
 ## `lineNames` (a caller-supplied name → number map, see `mapLine`), then
@@ -54,13 +61,46 @@ type
     rdSource = "source"     ## X: a source's field record; channels → receivers.
     rdReceiver = "receiver" ## O: a receiver's gather; traces → sources.
 
-  RelationRun = object
+  Run = object
     fieldTape: string
     fromChannel, toChannel: int64
     step: int64
     fixed: StationKey          # X: the source; O: the receiver
     line, first, last: float64 # X: receiver line and points; O: source line and points
     index: int16               # point index of `line`'s stations
+
+  RecordRuns = object
+    ## The runs of one record, in file order.
+    runs: seq[Run]
+    scattered: bool
+      ## A run does not start after the channels of the one before it (its
+      ## multi-component extent, the wider one). Lookups then scan in file
+      ## order and give a channel to the first run covering it. Otherwise the
+      ## runs ascend and share no channel, with or without `multiComponent`:
+      ## a lookup is a binary search and nothing needs an earlier-run scan.
+    channels: array[bool, int64]
+      ## Channels the runs cover, without and with `multiComponent`; the
+      ## record's channel count unless `scattered`.
+
+  RelationRun* = object
+    ## One run of a record's relations (an X or O record of the survey
+    ## file), as `relationRuns` yields it: `stations` evenly spaced stations
+    ## of one line. Station `i` (0-based) is `station(run, i)`, at point
+    ## `firstPoint + i * pointStep`. Its channel (for an O record: its trace
+    ## in the gather) is `fromChannel + i * channelStep`, the first of
+    ## `components` consecutive channels.
+    fromChannel*: int64 ## The channel of the first station.
+    toChannel*: int64   ## The last channel of the last station.
+    channelStep*: int64 ## Channels from one station to the next.
+    stations*: int      ## Stations in the run.
+    components*: int
+      ## Channels per station: 1, or `channelStep` in a multi-component
+      ## survey (`SurveyGeometry.multiComponent`).
+    fixed*: StationKey  ## X: the record's source; O: the gather's receiver.
+    line*: float64      ## The line of the run's stations (X: receivers; O: sources).
+    firstPoint*, lastPoint*: float64 ## The points of the first and the last station.
+    pointStep*: float64 ## Point increment per station: negative when descending, 0 for one.
+    index*: int16       ## The point index of the run's stations.
 
   StationRecord = object
     index: int16
@@ -69,7 +109,7 @@ type
   SurveyGeometry* = object
     ## Station coordinates and channel relations from survey files.
     table*: GeometryTable
-    runs: array[RelationDomain, Table[int64, seq[RelationRun]]]
+    runs: array[RelationDomain, Table[int64, RecordRuns]]
     byStation: array[RelationDomain, Table[StationKey, seq[StationRecord]]]
       # (line, point, index 0) of a run's fixed station → its records
     multiComponent*: bool
@@ -104,7 +144,9 @@ type
     jmReceiver = "via the receiver"    ## Source from the O gathers of the receiver station.
     jmRecord = "by record number"      ## Record and channel (no station, or checked by one).
     jmAmbiguous = "ambiguous"          ## The station's records disagree on the channel.
-    jmConflict = "conflicting"         ## The record's relation contradicts a header station.
+    jmConflict = "conflicting"
+      ## The relation contradicts a header station, or the line or point the
+      ## header has of one.
     jmUnmatched = "unmatched"          ## No relation found.
     jmAuxiliary = "auxiliary"          ## Not seismic: left alone.
 
@@ -124,7 +166,7 @@ func log*(g: SurveyGeometry): lent DiagLog {.inline.} =
 
 func relationCount*(g: SurveyGeometry, domain = rdSource): int =
   ## The number of relation runs (X records, or O records) loaded.
-  for runs in g.runs[domain].values: result += runs.len
+  for rr in g.runs[domain].values: result += rr.runs.len
 
 func initSurveyGeometry*(): SurveyGeometry =
   ## An empty geometry: no stations, no relations.
@@ -176,6 +218,44 @@ func idx(i: int): int16 {.inline.} =
 proc note(g: var SurveyGeometry, sev: Severity, file, msg: string, record = -1) =
   g.log.report(sev, dcBadValue, msg, loc = Location(file: file, record: record))
 
+template noteCapped(g: var SurveyGeometry, cap: var RepeatCap, kind: string, sev: Severity,
+    file, msg: string, record = -1) =
+  # `note` for the first few problems of `kind` in one file (`msg` is built
+  # only for those); `cap.summarize` counts the rest.
+  if cap.admit(dcBadValue, kind): g.note(sev, file, msg, record)
+
+func sameCoordinates(a, b: Coordinates): bool =
+  func same(x, y: float64): bool {.inline.} = x == y or (x.isNaN and y.isNaN)
+  same(a.x, b.x) and same(a.y, b.y) and same(a.z, b.z)
+
+func stationsOf(t: var GeometryTable, kind: SpsPointKind): var Table[StationKey, Coordinates] =
+  if kind == pkSource: return t.sources
+  t.receivers
+
+proc addStation(g: var SurveyGeometry, cap: var RepeatCap, kind: SpsPointKind, file: string,
+    record: int, line, point: float64, index: int16, c: Coordinates) =
+  # Adds or replaces a station. One given before is reported: the later
+  # coordinates are used, and nothing else would say that two records name
+  # one station.
+  let key = stationKey(line, point, index)
+  var known = false
+  var same = false
+  g.table.stationsOf(kind).withValue(key, held):
+    known = true
+    same = sameCoordinates(held[], c)
+    held[] = c
+  do:
+    g.table.stationsOf(kind)[key] = c
+  if known:
+    let what = (if kind == pkSource: "source " else: "receiver ") & $key.line & "/" &
+      $key.point & "/" & $key.index
+    if same:
+      g.noteCapped(cap, "again", sevInfo, file, what & " is given again with the same " &
+        "coordinates", record)
+    else:
+      g.noteCapped(cap, "moved", sevWarning, file, what & " is given again with other " &
+        "coordinates; the later ones are used", record)
+
 proc lineOf(g: var SurveyGeometry, unresolved: var HashSet[string], file, name: string,
     v: float64, rec = -1): Option[float64] =
   # `resolveLine`, with one warning per unresolved line name.
@@ -196,21 +276,23 @@ func sameStation*(a, b: StationKey): bool =
   x.line == y.line and x.point == y.point and
     (x.index == 0 or y.index == 0 or x.index == y.index)
 
-func lastChannel(run: RelationRun, multi: bool): int64 {.inline.} =
+func lastChannel(run: Run, multi: bool): int64 {.inline.} =
   if multi: run.toChannel + run.step - 1 else: run.toChannel
 
-func covers(run: RelationRun, channel: int64, multi: bool): bool {.inline.} =
+func covers(run: Run, channel: int64, multi: bool): bool {.inline.} =
   channel >= run.fromChannel and channel <= run.lastChannel(multi) and
     (multi or (channel - run.fromChannel) mod run.step == 0)
 
-func at(run: RelationRun, channel: int64, multi: bool, domain: RelationDomain): StationRelation =
+func pointAt(first, last: float64, i, n: int64): float64 {.inline.} =
+  # The point of station `i` of a run of `n + 1` evenly spaced stations.
+  if n == 0: first else: first + float64(i) * (last - first) / float64(n)
+
+func at(run: Run, channel: int64, multi: bool, domain: RelationDomain): StationRelation =
   ## The relation of a channel `run` covers.
   let d = channel - run.fromChannel
   let i = d div run.step
   let n = (run.toChannel - run.fromChannel) div run.step
-  let p = if n == 0: run.first
-          else: run.first + float64(i) * (run.last - run.first) / float64(n)
-  let moving = stationKey(run.line, p, run.index)
+  let moving = stationKey(run.line, pointAt(run.first, run.last, i, n), run.index)
   result.component = if multi and run.step > 1: int(d mod run.step) + 1 else: 0
   if domain == rdSource: (result.source, result.receiver) = (run.fixed, moving)
   else: (result.source, result.receiver) = (moving, run.fixed)
@@ -218,25 +300,62 @@ func at(run: RelationRun, channel: int64, multi: bool, domain: RelationDomain): 
 func sameRelation(a, b: StationRelation): bool =
   a.source == b.source and a.receiver == b.receiver and a.component == b.component
 
-func overlaps(runs: seq[RelationRun], run: RelationRun): bool =
+func overlaps(runs: seq[Run], run: Run): bool =
   for o in runs:
     if run.fromChannel <= o.toChannel and o.fromChannel <= run.toChannel: return true
+
+func find(rr: RecordRuns, channel: int64, multi: bool): int =
+  # The run that has `channel`: the first in file order covering it; -1 if
+  # none does.
+  result = -1
+  if rr.scattered:
+    for j, run in rr.runs:
+      if run.covers(channel, multi): return j
+  else:
+    # Ascending and disjoint: only the last run starting at or before the
+    # channel can cover it.
+    var (lo, hi) = (0, rr.runs.len)
+    while lo < hi:
+      let mid = (lo + hi) shr 1
+      if rr.runs[mid].fromChannel <= channel: lo = mid + 1 else: hi = mid
+    if lo > 0 and rr.runs[lo - 1].covers(channel, multi): result = lo - 1
+
+func owns(rr: RecordRuns, j: int, channel: int64, multi: bool): bool {.inline.} =
+  # Run `j` covers `channel`, and no earlier run does.
+  if not rr.runs[j].covers(channel, multi): return false
+  if rr.scattered:
+    for o in 0 ..< j:
+      if rr.runs[o].covers(channel, multi): return false
+  true
+
+proc add(rr: var RecordRuns, run: sink Run): bool =
+  # Appends a run; true when it overlaps an earlier one. Whether the runs
+  # still ascend without sharing a channel is noted here, once, so that
+  # lookups need not find out per channel: a record of thousands of X rows
+  # was scanned from its first row for every channel.
+  result = false
+  if rr.runs.len > 0 and (rr.scattered or
+      run.fromChannel <= rr.runs[^1].lastChannel(multi = true)):
+    rr.scattered = true
+    result = rr.runs.overlaps(run)
+  rr.channels[false] += (run.toChannel - run.fromChannel) div run.step + 1
+  rr.channels[true] += run.toChannel - run.fromChannel + run.step
+  rr.runs.add run
 
 proc addRelation(g: var SurveyGeometry, domain: RelationDomain, file: string, i: int,
     r: SpsRelation, fixedLine, line: float64) =
   # In both domains the record's source columns hold the fixed station and
   # its receiver columns the run of moving stations.
-  let run = RelationRun(fieldTape: r.fieldTape, fromChannel: r.fromChannel,
-    toChannel: r.toChannel, step: r.channelIncrement,
-    fixed: stationKey(fixedLine, r.srcPoint, idx(r.srcIndex)), line: line,
-    first: r.fromReceiver, last: r.toReceiver, index: idx(r.rcvIndex))
-  if r.fieldRecord in g.runs[domain] and g.runs[domain][r.fieldRecord].overlaps(run):
+  let fixed = stationKey(fixedLine, r.srcPoint, idx(r.srcIndex))
+  if g.runs[domain].mgetOrPut(r.fieldRecord, RecordRuns()).add Run(fieldTape: r.fieldTape,
+      fromChannel: r.fromChannel, toChannel: r.toChannel, step: r.channelIncrement,
+      fixed: fixed, line: line, first: r.fromReceiver, last: r.toReceiver,
+      index: idx(r.rcvIndex)):
     g.note(sevWarning, file, (if domain == rdSource: "field record " else: "gather ") &
-      $r.fieldRecord & ": channels " & $run.fromChannel & ".." & $run.toChannel &
+      $r.fieldRecord & ": channels " & $r.fromChannel & ".." & $r.toChannel &
       " overlap an earlier record (different tapes or line sequences?); the earlier one wins", i)
-  g.runs[domain].mgetOrPut(r.fieldRecord, @[]).add run
-  let entry = StationRecord(index: run.fixed.index, record: r.fieldRecord)
-  let key = run.fixed.anyIndex
+  let entry = StationRecord(index: fixed.index, record: r.fieldRecord)
+  let key = fixed.anyIndex
   if key notin g.byStation[domain] or entry notin g.byStation[domain][key]:
     g.byStation[domain].mgetOrPut(key, @[]).add entry
 
@@ -251,36 +370,41 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, xDomain = rdSource) =
   ## `rdReceiver` for an O file written with `X` records, e.g. `.ops`).
   ## Grid coordinates are taken as they are (units of H20); z is the surface
   ## elevation. Records whose line or point cannot be made numeric are
-  ## skipped, with one warning per line name.
+  ## skipped, with one warning per line name. A station given before (in
+  ## this file or an earlier one) is replaced and reported: a warning when
+  ## its coordinates differ, an info when they are the same. `g.log` gets
+  ## the first few reports of each kind per file, then a count.
   var unresolved: HashSet[string]
+  var cap: RepeatCap
   for i, p in f.points:
     let l = g.lineOf(unresolved, f.name, p.lineName, p.line, i)
     if l.isNone: discard
     elif p.point.isNaN:
-      g.note(sevInfo, f.name, "point '" & p.pointName & "' on line " & p.lineName &
-        " is not a number; skipped")
+      g.noteCapped(cap, "point", sevInfo, f.name, "point '" & p.pointName & "' on line " &
+        p.lineName & " is not a number; skipped", i)
     elif p.easting.isNaN or p.northing.isNaN:
       discard # no coordinates: nothing to add
-    elif p.kind == pkSource:
-      g.table.addSource(l.get, p.point, idx(p.index), p.easting, p.northing, p.elevation)
     else:
-      g.table.addReceiver(l.get, p.point, idx(p.index), p.easting, p.northing, p.elevation)
+      g.addStation(cap, p.kind, f.name, i, l.get, p.point, idx(p.index),
+        Coordinates(x: p.easting, y: p.northing, z: p.elevation))
   for i, r in f.relations:
     let domain = if r.recordType == 'O': rdReceiver else: xDomain
     if g.tape.len > 0 and r.fieldTape != g.tape: discard
     elif r.fieldRecord == MissingInt or r.fromChannel == MissingInt or
         r.toChannel == MissingInt or r.channelIncrement < 1 or r.toChannel < r.fromChannel:
-      g.note(sevWarning, f.name, r.recordType & " record without a usable record or channel " &
-        "range; skipped", i)
+      g.noteCapped(cap, "range", sevWarning, f.name, r.recordType &
+        " record without a usable record or channel range; skipped", i)
     else:
       let sl = g.lineOf(unresolved, f.name, r.srcLineName, r.srcLine, i)
       let rl = if sl.isSome: g.lineOf(unresolved, f.name, r.rcvLineName, r.rcvLine, i)
                else: none(float64)
       if rl.isNone: discard
       elif r.srcPoint.isNaN or r.fromReceiver.isNaN or r.toReceiver.isNaN:
-        g.note(sevWarning, f.name, r.recordType & " record with a non-numeric point; skipped", i)
+        g.noteCapped(cap, "relpoint", sevWarning, f.name, r.recordType &
+          " record with a non-numeric point; skipped", i)
       else:
         g.addRelation(domain, f.name, i, r, sl.get, rl.get)
+  cap.summarize(g.log, f.name)
 
 proc addP1*(g: var SurveyGeometry, f: P1File, elevation = false) =
   ## Adds the shotpoints of the P1 logical files in `f` as sources. The
@@ -315,8 +439,12 @@ proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions(),
     xDomain = relationDomainOf(path)) =
   ## Reads the SPS file (Rev 1.0 or 2.1) at `path` and adds it; its
   ## diagnostics go to `g.log`. `X` records of an `.ops` file are receiver
-  ## domain (O) by default. Raises `IOError` if it cannot be read.
-  let f = readSps(path, opts)
+  ## domain (O) by default. Raises `IOError` if it cannot be read. The
+  ## records are read without their text (`SpsOptions.keepRaw` is not used:
+  ## nothing is written back from here).
+  var o = opts
+  o.keepRaw = false
+  let f = readSps(path, o)
   g.addLog(f.log)
   g.addSps(f, xDomain)
 
@@ -336,12 +464,14 @@ proc relation*(g: SurveyGeometry, record, channel: int64,
     domain = rdSource): Option[StationRelation] =
   ## The stations channel `channel` of field record `record` (X, `rdSource`)
   ## or trace `channel` of gather `record` (O, `rdReceiver`) was recorded
-  ## from; none if no run covers it.
+  ## from; none if no run covers it. A binary search of the record's runs
+  ## when they ascend without overlap (`relationsDisjoint`), else a scan in
+  ## file order (the first run covering the channel has it).
   if record notin g.runs[domain]: return none(StationRelation)
-  for run in g.runs[domain][record]:
-    if run.covers(channel, g.multiComponent):
-      return some(run.at(channel, g.multiComponent, domain))
-  none(StationRelation)
+  let rr = addr g.runs[domain][record]
+  let j = rr[].find(channel, g.multiComponent)
+  if j < 0: none(StationRelation)
+  else: some(rr.runs[j].at(channel, g.multiComponent, domain))
 
 iterator records*(g: SurveyGeometry, domain = rdSource): int64 =
   ## The field records (X) or gathers (O) that have relations, ascending.
@@ -354,25 +484,66 @@ iterator relations*(g: SurveyGeometry, record: int64,
     domain = rdSource): tuple[channel: int64, relation: StationRelation] =
   ## Every channel of `record` with its stations, run by run in file order;
   ## a channel two runs cover is yielded once, for the earlier run (as
-  ## `relation` does).
+  ## `relation` does). `relationRuns` gives the same run by run, without
+  ## the per-channel work.
   if record in g.runs[domain]:
-    let runs = g.runs[domain][record]
+    let rr = addr g.runs[domain][record]
     let multi = g.multiComponent
-    for j, run in runs:
-      var c = run.fromChannel
-      while c <= run.lastChannel(multi):
-        if run.covers(c, multi):
-          var earlier = false
-          for o in 0 ..< j:
-            if runs[o].covers(c, multi):
-              earlier = true
-              break
-          if not earlier: yield (c, run.at(c, multi, domain))
+    for j in 0 ..< rr.runs.len:
+      var c = rr.runs[j].fromChannel
+      while c <= rr.runs[j].lastChannel(multi):
+        if rr[].owns(j, c, multi): yield (c, rr.runs[j].at(c, multi, domain))
         inc c
+
+func relationsDisjoint*(g: SurveyGeometry, record: int64, domain = rdSource): bool =
+  ## Whether the runs of `record` ascend by channel and no two share one
+  ## (also true for a record without relations). Then `relationRuns` gives
+  ## every channel of the record exactly once; otherwise some of its runs
+  ## overlap or are out of order, and only `relations` and `relation` say
+  ## which run a shared channel belongs to (the earlier one).
+  record notin g.runs[domain] or not g.runs[domain][record].scattered
+
+func station*(run: RelationRun, i: int): StationKey =
+  ## Station `i` (0-based, below `run.stations`) of the run: exactly the
+  ## station `relations` gives for its channels (line and point rounded as
+  ## `stationKey` does).
+  stationKey(run.line, pointAt(run.firstPoint, run.lastPoint, int64(i),
+    int64(run.stations - 1)), run.index)
+
+iterator relationRuns*(g: SurveyGeometry, record: int64, domain = rdSource): RelationRun =
+  ## The relation runs of field record `record` (X, `rdSource`) or gather
+  ## `record` (O, `rdReceiver`), in file order; nothing for a record without
+  ## relations. One run is one X or O record of the survey file: a range of
+  ## channels on evenly spaced stations of one line (see `RelationRun`), so
+  ## a consumer can walk a record station by station along each line (fold,
+  ## patch description, completeness) instead of asking per channel.
+  ##
+  ## Runs are yielded as the file gives them. When `relationsDisjoint` is
+  ## false for the record, two runs may cover the same channel; use
+  ## `relations` for such a record if that matters.
+  if record in g.runs[domain]:
+    let rr = addr g.runs[domain][record]
+    let multi = g.multiComponent
+    for j in 0 ..< rr.runs.len:
+      template run: untyped = rr.runs[j]
+      let n = (run.toChannel - run.fromChannel) div run.step
+      let components = if multi: run.step else: 1'i64
+      yield RelationRun(fromChannel: run.fromChannel,
+        toChannel: run.fromChannel + n * run.step + components - 1,
+        channelStep: run.step, stations: int(n) + 1, components: int(components),
+        fixed: run.fixed, line: run.line,
+        firstPoint: run.first, lastPoint: run.last,
+        pointStep: (if n == 0: 0.0 else: (run.last - run.first) / float64(n)),
+        index: run.index)
 
 proc expectedChannels*(g: SurveyGeometry, record: int64, domain = rdSource): int =
   ## The number of channels (X) or traces (O) `record` has relations for.
-  for _ in g.relations(record, domain): inc result
+  if record in g.runs[domain]:
+    let rr = addr g.runs[domain][record]
+    if rr.scattered:
+      for _ in g.relations(record, domain): inc result
+    else:
+      result = int(rr.channels[g.multiComponent])
 
 proc recordsAt*(g: SurveyGeometry, station: StationKey, domain = rdSource): seq[int64] =
   ## The field records of a source station (X, `rdSource`) or the gathers of
@@ -393,7 +564,7 @@ proc channelOf*(g: SurveyGeometry, record: int64, station: StationKey,
   ## does not list the station.
   if record notin g.runs[domain]: return none(int64)
   let st = stationKey(station.line, station.point, station.index)
-  for run in g.runs[domain][record]:
+  for run in g.runs[domain][record].runs:
     if run.line == st.line and (st.index == 0 or run.index == 0 or st.index == run.index):
       let n = (run.toChannel - run.fromChannel) div run.step
       let i = if n == 0: 0'i64
@@ -432,11 +603,25 @@ proc viaStation(g: SurveyGeometry, domain: RelationDomain, station: StationKey,
         result = vsFound
       elif not sameRelation(rel, r.get): return vsAmbiguous
 
+func partAgrees(header, relation: float64): bool {.inline.} =
+  # A line or point the header has agrees with the relation's when it is the
+  # same to 1/100 (`stationKey`) or the relation's as a whole number: an
+  # integer field (the SEG-Y energy source point) holds 99.5 as 100.
+  header.isNaN or round(header * 100) == round(relation * 100) or header == round(relation)
+
+func contradicts(line, point: float64, index: int16, st: StationKey): bool =
+  # The parts the header has of a station it does not know whole (a line or
+  # a point, a point index other than 0) against the relation's station.
+  not (partAgrees(line, st.line) and partAgrees(point, st.point) and
+    (index == 0 or st.index == 0 or index == st.index))
+
 proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
   ## Fills the source and receiver stations (line, point, index) and the
   ## component a trace's header lacks, from the relations, by the rules in
-  ## the module documentation. Stations the header has are never changed.
-  ## Auxiliary traces are left alone.
+  ## the module documentation. Stations the header has are never changed; a
+  ## relation that contradicts the line or the point a header has of a
+  ## station is a conflict and fills nothing. Auxiliary traces are left
+  ## alone.
   if k.status == tsAuxiliary: return jmAuxiliary
   let hasSrc = not (k.srcLine.isNaN or k.srcPoint.isNaN)
   let hasRcv = not (k.rcvLine.isNaN or k.rcvPoint.isNaN)
@@ -469,6 +654,9 @@ proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
     if r.isNone: return jmUnmatched
     rel = r.get
     result = jmRecord
+  if (not hasSrc and contradicts(k.srcLine, k.srcPoint, k.srcIndex, rel.source)) or
+      (not hasRcv and contradicts(k.rcvLine, k.rcvPoint, k.rcvIndex, rel.receiver)):
+    return jmConflict
   if not hasSrc:
     (k.srcLine, k.srcPoint, k.srcIndex) = (rel.source.line, rel.source.point, rel.source.index)
   if not hasRcv:
@@ -477,55 +665,47 @@ proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
   if rel.component > 0 and k.component == 0:
     k.component = uint8(min(rel.component, 255))
 
-func coordinatesDiffer(a, b: TraceKeys): bool =
-  func same(x, y: float64): bool = x == y or (x.isNaN and y.isNaN)
-  not (same(a.srcX, b.srcX) and same(a.srcY, b.srcY) and same(a.srcZ, b.srcZ) and
-    same(a.rcvX, b.rcvX) and same(a.rcvY, b.rcvY) and same(a.rcvZ, b.rcvZ) and
-    same(a.offset, b.offset) and same(a.cmpX, b.cmpX) and same(a.cmpY, b.cmpY))
-
-func stationsDiffer(a, b: TraceKeys): bool =
-  func same(x, y: float64): bool = x == y or (x.isNaN and y.isNaN)
-  not (same(a.srcLine, b.srcLine) and same(a.srcPoint, b.srcPoint) and
-    same(a.rcvLine, b.rcvLine) and same(a.rcvPoint, b.rcvPoint) and
-    a.srcIndex == b.srcIndex and a.rcvIndex == b.rcvIndex and a.component == b.component)
-
-proc join(k: var TraceKeys, g: SurveyGeometry, overwrite: bool, match: var JoinMatch): bool =
+proc join(k: var TraceKeys, g: SurveyGeometry, overwrite: bool,
+    match: var JoinMatch): set[JoinGroup] =
+  # `applySurvey` on one trace: how it matched, and the groups of values
+  # that are not what they were (none for a trace that already holds the
+  # survey's values, also with `overwrite`).
   let before = k
   match = k.joinStations(g)
-  result = stationsDiffer(before, k)
-  if match != jmAuxiliary and k.applyGeometry(g.table, overwrite): result = true
+  if match != jmAuxiliary: discard k.applyGeometry(g.table, overwrite)
+  changedGroups(before, k)
 
 proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, overwrite = false): bool =
   ## Fills `k` from the survey: the stations its header lacks
   ## (`joinStations`), then coordinates by station, offset and midpoint.
   ## `overwrite` replaces known coordinates, offset and midpoint; header
-  ## stations are never replaced. True if anything changed.
+  ## stations are never replaced. True if a value changed (false for a trace
+  ## that already holds the survey's values).
   var match: JoinMatch
-  k.join(g, overwrite, match)
+  k.join(g, overwrite, match) != {}
 
 proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, stats: var JoinStats,
     overwrite = false): int =
   ## `applySurvey` on every trace; returns the traces changed, and how they
-  ## matched in `stats`. Raises `ValueError` for an index built without
-  ## `keys = true`.
+  ## matched in `stats`. A join that changes no trace leaves the index as it
+  ## was (`keysRevision`, `joined`). Raises `ValueError` for an index built
+  ## without `keys = true`.
   ix.requireKeys()
-  ix.joined = true
   stats = JoinStats(traces: ix.keys.len)
   for i, k in ix.keys.mpairs:
-    let before = k
     var match: JoinMatch
-    if k.join(g, overwrite, match):
+    let groups = k.join(g, overwrite, match)
+    if groups != {}:
       inc result
-      var groups: set[JoinGroup]
-      if coordinatesDiffer(before, k): groups.incl jgCoordinates
-      if stationsDiffer(before, k): groups.incl jgStations
       ix.markJoined(i, groups)
     inc stats.matches[match]
     if match != jmAuxiliary:
       if not k.hasSourceXY: inc stats.noSourceXy
       if not k.hasReceiverXY: inc stats.noReceiverXy
   stats.changed = result
-  if result > 0: inc ix.keysRevision
+  if result > 0:
+    ix.joined = true # only now: an index no join changed is still the file's own
+    inc ix.keysRevision
 
 proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, overwrite = false): int =
   ## `applySurvey` on every trace; returns the traces changed. Raises
@@ -570,15 +750,7 @@ proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, fields: GeometryFields,
     (k.srcLine, k.srcPoint, k.srcIndex) = (j.srcLine, j.srcPoint, j.srcIndex)
     (k.rcvLine, k.rcvPoint, k.rcvIndex) = (j.rcvLine, j.rcvPoint, j.rcvIndex)
     k.component = j.component
-  func same(a, b: float64): bool = a == b or (a.isNaN and b.isNaN)
-  not (same(k.srcX, before.srcX) and same(k.srcY, before.srcY) and
-    same(k.rcvX, before.rcvX) and same(k.rcvY, before.rcvY) and
-    same(k.srcZ, before.srcZ) and same(k.rcvZ, before.rcvZ) and
-    same(k.cmpX, before.cmpX) and same(k.cmpY, before.cmpY) and
-    same(k.offset, before.offset) and same(k.srcLine, before.srcLine) and
-    same(k.srcPoint, before.srcPoint) and same(k.rcvLine, before.rcvLine) and
-    same(k.rcvPoint, before.rcvPoint) and k.srcIndex == before.srcIndex and
-    k.rcvIndex == before.rcvIndex and k.component == before.component)
+  changedGroups(before, k) != {}
 
 # ------------------------------------------------------- receiver domain ---
 
@@ -615,8 +787,8 @@ proc receiverRelations*(g: SurveyGeometry, firstGather = 1'i64,
   let multi = g.multiComponent
   # X runs by receiver line: (record, run).
   var byLine: Table[float64, seq[(int64, int)]]
-  for rec, runs in g.runs[rdSource]:
-    for j, run in runs: byLine.mgetOrPut(run.line, @[]).add (rec, j)
+  for rec, rr in g.runs[rdSource]:
+    for j, run in rr.runs: byLine.mgetOrPut(run.line, @[]).add (rec, j)
   var lines = newSeqOfCap[float64](byLine.len)
   for l in byLine.keys: lines.add l
   lines.sort
@@ -624,18 +796,13 @@ proc receiverRelations*(g: SurveyGeometry, firstGather = 1'i64,
   for line in lines:
     var at: Table[StationKey, seq[SourceAt]]
     for (rec, j) in byLine[line]:
-      let runs = g.runs[rdSource][rec]
-      let run = runs[j]
-      var c = run.fromChannel
-      while c <= run.lastChannel(multi):
-        if run.covers(c, multi):
-          var earlier = false
-          for o in 0 ..< j:
-            if runs[o].covers(c, multi):
-              earlier = true
-              break
-          let rel = run.at(c, multi, rdSource)
-          if not earlier and rel.component <= 1:
+      # By address: a copy of the record's runs per run was most of the time.
+      let rr = addr g.runs[rdSource][rec]
+      var c = rr.runs[j].fromChannel
+      while c <= rr.runs[j].lastChannel(multi):
+        if rr[].owns(j, c, multi):
+          let rel = rr.runs[j].at(c, multi, rdSource)
+          if rel.component <= 1:
             at.mgetOrPut(rel.receiver, @[]).add SourceAt(line: rel.source.line,
               point: rel.source.point, index: rel.source.index)
         inc c

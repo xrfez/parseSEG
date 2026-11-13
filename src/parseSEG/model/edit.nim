@@ -27,13 +27,14 @@
 ##   flushed before the map is written, so an interrupted session can still
 ##   be rolled back.
 ##
-## A refused edit returns false and leaves a diagnostic in `log`; it never
-## raises. A journal entry that cannot be written or synced to disk refuses
-## its edit (and, in a batch, every edit not yet on the map): the map is
-## written only after its journal entry is safely on disk, and the entries
-## of refused edits are cut from the journal again (if that fails, the
-## editor refuses all further edits). Not available on
-## tape (there is no map); `contiguous` sources only.
+## A refused edit returns false and leaves a diagnostic in `log` (the first
+## 1000 of a session; the rest are counted); it never raises. A journal
+## entry that cannot be written or synced to disk refuses its edit (and, in
+## a batch, every edit not yet on the map): the map is written only after
+## its journal entry is safely on disk, and the entries of refused edits are
+## cut from the journal again (if that fails, the editor refuses all further
+## edits). Not available on tape (there is no map); `contiguous` sources
+## only.
 ##
 ## Fields are named `<block>.<field>`, with the field names of the header
 ## types:
@@ -54,16 +55,20 @@
 ##
 ## Stored keys (`openSeismic(keys = true)`) follow the edits: a trace,
 ## record or keyed binary field edit refreshes the keys of the traces it
-## touches once its bytes are on the map (a batch's at `endBatch`) and bumps
+## touches once its bytes are on the map (a batch's at `endBatch`, trace and
+## record edits alike: one sync and one refresh for the batch) and bumps
 ## `keysRevision` when they changed. Keys a join wrote (`applyGeometry`,
-## `applySurvey`: `TraceIndex.joinedTraces`) keep their joined values; the
-## trace's other keys follow its headers.
+## `applySurvey`: `TraceIndex.joinedTraces`, by `JoinGroup`) keep their joined
+## values; the trace's other keys follow its headers, and an offset and
+## midpoint the join derived follow an end it left to the headers.
 ##
 ## `rollbackJournal` undoes a journal (newest first), `applyJournal` replays
 ## it (oldest first); their editor forms do it on the open file and refresh
-## its cached headers and keys. Both check each location first: bytes that already
-## hold the target are skipped, and bytes that hold neither the original
-## nor the edited value are a conflict, logged and left alone.
+## its cached headers and keys. Both check each location first: bytes that
+## already hold the target are skipped, and so are the bytes of an edit that
+## was journaled but never written (an interrupted session), also where that
+## edit overlaps or abuts an earlier one. Bytes that hold none of the values
+## the journal's edits gave them are a conflict, logged and left alone.
 
 import std/[algorithm, macros, math, options, os, strutils, tables]
 when defined(posix):
@@ -90,7 +95,11 @@ type
     unsynced: string     ## Journal lines not yet written and synced.
     journalDead: bool    ## The journal could not be cut back after a failed write.
     edits: int
+    refusals: int        ## Refused edits; the first `MaxRefusalsLogged` are in `log`.
     stale: seq[int] ## Traces edited in the batch: their keys are refreshed when it is written.
+    staleRecords: seq[StaleRecord]
+      ## SEG-D record headers edited in the batch: the index's copies, and the
+      ## keys of the records' traces, are refreshed when it is written.
     intervalStale: bool ## A batched interval edit: `segyIntervalUs` is refreshed with the keys.
     batch: bool          ## Inside `beginBatch` / `endBatch`.
     pending: seq[PendingWrite] ## Batched writes, journaled but not yet on the map.
@@ -101,6 +110,10 @@ type
   PendingWrite = object
     at: int64
     bytes: seq[byte]
+
+  StaleRecord = object
+    record: int
+    blk: BlockRef ## The general header block that was edited.
 
 proc `=destroy`(j: JournalFile) =
   if j.f != nil:
@@ -113,13 +126,21 @@ proc `=dup`(src: JournalFile): JournalFile {.error.}
 const
   MaxJournalLine = 1 shl 16 ## Longer journal lines are malformed.
   MaxRepeats = 5 ## Journal diagnostics of one kind logged per call; the rest are counted.
+  MaxRefusalsLogged = 1000
+    ## Refused edits an editor logs; the rest are counted (a script retrying
+    ## a refused edit per trace would grow the log with the file).
 
 
 # ---------------------------------------------------------------- journal --
 
 func hexOf(b: openArray[byte]): string =
-  result = newStringOfCap(2 * b.len)
-  for x in b: result.add toHex(x, 2).toLowerAscii
+  # Two lowercase digits per byte, from a table: `toHex` and `toLowerAscii`
+  # allocate two strings per byte (57 % of a geometry write-back).
+  const digits = "0123456789abcdef"
+  result = newString(2 * b.len)
+  for i, x in b:
+    result[2 * i] = digits[int(x shr 4)]
+    result[2 * i + 1] = digits[int(x and 15)]
 
 when defined(windows):
   proc c_fileno(f: File): cint {.importc: "_fileno", header: "<stdio.h>".}
@@ -190,6 +211,7 @@ proc dropPending(ed: var HeaderEditor) =
   ed.pending.setLen 0
   ed.pendingPages.clear()
   ed.stale.setLen 0
+  ed.staleRecords.setLen 0
 
 proc refreshStale(ed: var HeaderEditor) =
   # The keys of the traces edited since the last refresh, from the map.
@@ -208,20 +230,59 @@ proc keysChanged(ed: var HeaderEditor, trace: int) =
   ed.stale.add trace
   if not ed.batch: ed.refreshStale()
 
+func recordTraces(ix: TraceIndex, record: int): Slice[int] =
+  # The traces of SEG-D record `record`. The entries are in file order,
+  # record after record, so they are one run, found by binary search: a scan
+  # of every entry per edited record made 500 record edits take 3 s.
+  let r = uint32(record)
+  var (lo, hi) = (0, ix.entries.len)
+  while lo < hi:
+    let mid = (lo + hi) shr 1
+    if ix.entries[mid].record < r: lo = mid + 1 else: hi = mid
+  result.a = lo
+  hi = ix.entries.len
+  while lo < hi:
+    let mid = (lo + hi) shr 1
+    if ix.entries[mid].record <= r: lo = mid + 1 else: hi = mid
+  result.b = lo - 1
+
+proc refreshRecords(ed: var HeaderEditor) =
+  # The record headers edited since the last refresh, now on the map: the
+  # index's copies of the blocks, and the records' traces for `refreshStale`.
+  if ed.staleRecords.len == 0: return
+  ed.staleRecords.sort(proc (a, b: StaleRecord): int = cmp(a.record, b.record))
+  let mem = ed.file.unsafeMemory
+  var last = -1
+  for s in ed.staleRecords:
+    let (a, z) = (int(s.blk.offset), int(s.blk.offset) + s.blk.size - 1)
+    if s.blk.kind == hbSegdGh1:
+      ed.file.index.segdRecords[s.record].gh1 =
+        decodeBlock[SegdGeneralHeader1](mem.toOpenArray(a, z))
+    else:
+      ed.file.index.segdRecords[s.record].sourceHeaders[s.blk.sourceIndex] =
+        decodeBlock[SegdGeneralHeaderN](mem.toOpenArray(a, z))
+    if s.record != last and ed.file.hasKeys:
+      for t in ed.file.index.recordTraces(s.record): ed.stale.add t
+    last = s.record
+  ed.staleRecords.setLen 0
+
 proc flushBatch(ed: var HeaderEditor): bool =
   # One sync for every journaled edit of the batch, then the map writes.
   # When the journal cannot be synced, the batch's edits are dropped (the
   # map never sees them), logged, and the result is false.
   result = true
-  if ed.pending.len == 0: return
-  if not ed.syncJournal():
-    ed.dropPending()
-    return false
-  let mem = ed.file.unsafeMemory
-  for p in ed.pending:
-    copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
-  ed.pending.setLen 0
-  ed.pendingPages.clear()
+  if ed.pending.len > 0:
+    if not ed.syncJournal():
+      ed.dropPending()
+      return false
+    let mem = ed.file.unsafeMemory
+    for p in ed.pending:
+      copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
+    ed.pending.setLen 0
+    ed.pendingPages.clear()
+  # Also with nothing pending: the edit that fills a batch is written from
+  # inside its own call, before its trace is listed as stale.
+  ed.refreshRecords()
   ed.refreshStale()
   if ed.intervalStale:
     ed.intervalStale = false
@@ -259,10 +320,31 @@ proc currentBytes(ed: HeaderEditor, at: int64, size: int): seq[byte] =
     let b = min(at + size, p.at + p.bytes.len)
     copyMem(addr result[a - at], addr p.bytes[a - p.at], b - a)
 
+proc admitRefusal(ed: var HeaderEditor): bool =
+  # Counts a refused edit; true while it is one of the first
+  # `MaxRefusalsLogged`, which the caller logs. The first one past them is
+  # announced once.
+  inc ed.refusals
+  result = ed.refusals <= MaxRefusalsLogged
+  if ed.refusals == MaxRefusalsLogged + 1:
+    ed.log.report(sevInfo, dcValidation, "more than " & $MaxRefusalsLogged & " edits were " &
+      "refused; further refusals are counted, not logged (each still returns false)",
+      loc = Location(file: ed.file.path))
+
+proc countRefusals(ed: var HeaderEditor) =
+  # At the end of the session: how many refusals `log` does not hold.
+  if ed.refusals > MaxRefusalsLogged:
+    ed.log.report(sevInfo, dcValidation, $(ed.refusals - MaxRefusalsLogged) &
+      " refused edits were not logged", loc = Location(file: ed.file.path))
+    ed.refusals = 0
+
 proc beginBatch*(ed: var HeaderEditor) =
   ## Starts a batch: edits are journaled at once but synced and written to the
   ## map together, up to 4096 at a time (one fsync instead of one per edit).
-  ## Reads through `file` may not see an edit until `endBatch`.
+  ## Reads through `file` may not see an edit until `endBatch`: the mapped
+  ## bytes, the stored keys and the index's copies of SEG-D record headers
+  ## follow when the batch is written (the `current...Field` readers see it
+  ## at once). `setFileField` writes the batch so far.
   ed.batch = true
 
 proc endBatch*(ed: var HeaderEditor): bool =
@@ -309,10 +391,21 @@ proc parseString(line: string, i: var int, s: var string): bool =
   inc i
   true
 
+func hexVal(c: char): int {.inline.} =
+  # The value of a hex digit, -1 for any other character.
+  case c
+  of '0'..'9': ord(c) - ord('0')
+  of 'a'..'f': ord(c) - ord('a') + 10
+  of 'A'..'F': ord(c) - ord('A') + 10
+  else: -1
+
 proc parseHexBytes(s: string, b: var seq[byte]): bool =
-  if s.len mod 2 != 0 or not s.allCharsInSet(HexDigits): return false
+  if s.len mod 2 != 0: return false
   b = newSeq[byte](s.len div 2)
-  for k in 0..<b.len: b[k] = byte(fromHex[int](s[2 * k .. 2 * k + 1]))
+  for k in 0..<b.len:
+    let (h, l) = (hexVal(s[2 * k]), hexVal(s[2 * k + 1]))
+    if h < 0 or l < 0: return false
+    b[k] = byte(h shl 4 or l)
   true
 
 proc parseEditLine(line: string, e: var JournalEdit): bool =
@@ -388,70 +481,97 @@ proc readJournal*(journalPath: string, log: var DiagLog): seq[JournalEdit] =
   summarize(log, bad, "malformed journal lines", Location(file: journalPath, field: "journal"))
 
 type
-  ByteState = object
-    original, final: byte
-    label: string # of the last edit touching the byte (for diagnostics)
-
-type
   ReadSpan = proc (at: int64, buf: var seq[byte]): bool {.closure.}
   WriteSpan = proc (at: int64, buf: seq[byte]): bool {.closure.}
 
+const MaxShownBytes = 32 ## Bytes of a conflicting span quoted in its diagnostic.
+
 proc replayOn(path, journalPath: string, size: int64, undo: bool, readAt: ReadSpan,
     writeAt: WriteSpan, log: var DiagLog) =
-  # Merges the journal per byte (original = the first edit's old byte, final
-  # = the last edit's new byte) and moves each contiguous run of touched
-  # bytes as a whole: from final to original (undo) or back (apply). A run
-  # already at the target is skipped and any other run is a conflict, so
-  # both operations can be repeated, also when a location was edited twice.
+  # Edits whose spans share a byte form one component, replayed as a chain of
+  # states: the original bytes, then the bytes after each edit in journal
+  # order. The file may hold any state of the chain (a crash between the
+  # journal sync and the map write leaves an earlier one) and is moved to the
+  # first state (undo) or the last (apply). A component already there is
+  # skipped and one that holds no state of its chain is a conflict, so both
+  # operations can be repeated. Spans that only abut share no byte: they are
+  # independent, and an interrupted edit beside an earlier one is no conflict.
+  #
+  # One pass over the edits sorted by offset, with buffers of the largest
+  # component: a table entry per journaled byte took 26 KiB and 100 us per
+  # trace of a geometry write-back (200 000 traces: 5.3 GiB, 21 s).
   var edits: seq[JournalEdit]
   if not log.tryRecord(Location(file: journalPath), (edits = readJournal(journalPath, log))):
     return
-  var bytes: Table[int64, ByteState]
+  var order = newSeqOfCap[int](edits.len)
   var pastEnd = 0
-  for e in edits:
+  for i, e in edits:
     if e.offset + e.old.len > size:
       capped(log, pastEnd, sevError, dcInconsistent, "journal line " & $e.line &
         " lies past the end of the file; skipped", e.offset, Location(file: path, field: e.label))
     else:
-      for k in 0..<e.old.len:
-        let at = e.offset + k
-        if at in bytes:
-          bytes[at].final = e.new[k]
-          bytes[at].label = e.label
-        else:
-          bytes[at] = ByteState(original: e.old[k], final: e.new[k], label: e.label)
+      order.add i
   summarize(log, pastEnd, "journal lines past the end of the file", Location(file: path))
-  var offsets = newSeqOfCap[int64](bytes.len)
-  for at in bytes.keys: offsets.add at
-  offsets.sort()
+  order.sort(proc (a, b: int): int =
+    result = cmp(edits[a].offset, edits[b].offset)
+    if result == 0: result = cmp(a, b))
   var conflicts = 0
+  var cur, first, last: seq[byte]
+  var seen: seq[bool]
+  var members: seq[int]
   var i = 0
-  while i < offsets.len:
+  while i < order.len:
+    let lo = edits[order[i]].offset
+    var hi = lo + edits[order[i]].old.len
     var j = i + 1
-    while j < offsets.len and offsets[j] == offsets[j - 1] + 1: inc j
-    let at = offsets[i]
-    var cur = newSeq[byte](j - i)
-    if not readAt(at, cur):
-      log.report(sevFatal, dcIo, "short read", at, Location(file: path))
+    while j < order.len and edits[order[j]].offset < hi:
+      hi = max(hi, edits[order[j]].offset + edits[order[j]].old.len)
+      inc j
+    members.setLen 0
+    for k in i ..< j: members.add order[k]
+    if members.len > 1: members.sort() # journal order
+    let n = int(hi - lo)
+    cur.setLen n
+    if not readAt(lo, cur):
+      log.report(sevFatal, dcIo, "short read", lo, Location(file: path))
       return
-    var target = newSeq[byte](cur.len)
-    var atTarget, atSource = true
-    for k in 0..<cur.len:
-      let b = bytes[offsets[i + k]]
-      let (src, dst) = if undo: (b.final, b.original) else: (b.original, b.final)
-      target[k] = dst
-      if cur[k] != dst: atTarget = false
-      if cur[k] != src: atSource = false
+    # The first state: each byte as the first edit touching it found it.
+    first.setLen n
+    seen.setLen 0
+    seen.setLen n
+    for m in members:
+      let at = int(edits[m].offset - lo)
+      for k, b in edits[m].old:
+        if not seen[at + k]:
+          first[at + k] = b
+          seen[at + k] = true
+    # Walk the chain, counting the bytes where the file differs from the
+    # state: 0 at any state puts the file on the chain.
+    last = first
+    var differing = 0
+    for k in 0 ..< n:
+      if cur[k] != first[k]: inc differing
+    let atFirst = differing == 0
+    var onChain = atFirst
+    for m in members:
+      let at = int(edits[m].offset - lo)
+      for k, b in edits[m].new:
+        differing += ord(cur[at + k] != b) - ord(cur[at + k] != last[at + k])
+        last[at + k] = b
+      if differing == 0: onChain = true
+    let atTarget = if undo: atFirst else: differing == 0
     if atTarget:
       discard "already done"
-    elif atSource:
-      if not writeAt(at, target):
-        log.report(sevFatal, dcIo, "write failed", at, Location(file: path))
+    elif onChain:
+      if not (if undo: writeAt(lo, first) else: writeAt(lo, last)):
+        log.report(sevFatal, dcIo, "write failed", lo, Location(file: path))
         return
     else:
-      capped(log, conflicts, sevError, dcInconsistent, "the file holds " & hexOf(cur) &
-        ", neither the original nor the edited bytes; left alone", at,
-        Location(file: path, field: bytes[at].label))
+      let shown = if n <= MaxShownBytes: hexOf(cur)
+                  else: hexOf(cur.toOpenArray(0, MaxShownBytes - 1)) & "... (" & $n & " bytes)"
+      capped(log, conflicts, sevError, dcInconsistent, "the file holds " & shown &
+        ", neither the original nor the edited bytes; left alone", lo,
+        Location(file: path, field: edits[members[^1]].label))
     i = j
   summarize(log, conflicts, "conflicts", Location(file: path))
 
@@ -473,13 +593,16 @@ proc replay(path, journalPath: string, undo: bool): DiagLog =
 proc rollbackJournal*(path, journalPath: string): DiagLog =
   ## Undoes the journal's edits on `path`, newest first. Locations already
   ## holding their original bytes are skipped (so a rollback can be
-  ## repeated); conflicts are logged and left alone.
+  ## repeated), also when the session was interrupted before its last edits
+  ## reached the file; conflicts (bytes that are neither the original nor
+  ## what one of the journal's edits left there) are logged and left alone.
   replay(path, journalPath, undo = true)
 
 proc applyJournal*(path, journalPath: string): DiagLog =
   ## Replays the journal's edits on `path`, oldest first: redo after a
-  ## rollback, or the same edits on a copy of the file. Locations already
-  ## holding the edited bytes are skipped; conflicts are logged and left alone.
+  ## rollback, the same edits on a copy of the file, or the rest of an
+  ## interrupted session. Locations already holding the edited bytes are
+  ## skipped; conflicts are logged and left alone.
   replay(path, journalPath, undo = false)
 
 # ------------------------------------------------------------------ edits --
@@ -524,6 +647,7 @@ proc close*(ed: var HeaderEditor) =
   ## be flushed, or when the batch's journal entries cannot be synced: then
   ## its pending edits are not written (see `endBatch`; `log` says how many).
   var synced = true
+  ed.countRefusals()
   try:
     if ed.batch: synced = ed.endBatch()
     ed.file.flush()
@@ -543,6 +667,7 @@ proc release*(ed: sink HeaderEditor): SeismicFile =
   ## the journal. Raises `IOError` as `close` does; the file is closed then.
   var e = ed
   var synced = true
+  e.countRefusals()
   try:
     if e.batch: synced = e.endBatch()
     e.file.flush()
@@ -561,7 +686,9 @@ func file*(ed: HeaderEditor): lent SeismicFile {.inline.} =
   ed.file
 
 func log*(ed: HeaderEditor): lent DiagLog {.inline.} =
-  ## Refused edits and journal problems.
+  ## Refused edits and journal problems. The first 1000 refused edits of a
+  ## session are logged; after that they are counted, and `close` or
+  ## `release` adds how many were not logged.
   ed.log
 
 proc logVar*(ed: var HeaderEditor): var DiagLog {.inline.} =
@@ -612,9 +739,10 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
   let at = b.offset
   let size = b.size
   template refuse(msg: string) =
-    var l = loc
-    l.field = b.name & "." & field
-    ed.log.report(sevError, dcValidation, b.name & "." & field & ": " & msg, at, l)
+    if ed.admitRefusal():
+      var l = loc
+      l.field = b.name & "." & field
+      ed.log.report(sevError, dcValidation, b.name & "." & field & ": " & msg, at, l)
     return false
   if not ed.file.isOpen: refuse "the file is closed"
   if not ed.file.index.detected: refuse "the file is not SEG-Y, SEG-D or SEG-2"
@@ -662,9 +790,10 @@ proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label:
   ## writes nothing. False, with an error in `log` labelled `label`, when
   ## refused.
   template refuse(msg: string) =
-    var l = loc
-    l.field = label
-    ed.log.report(sevError, dcValidation, label & ": " & msg, at, l)
+    if ed.admitRefusal():
+      var l = loc
+      l.field = label
+      ed.log.report(sevError, dcValidation, label & ": " & msg, at, l)
     return false
   if not ed.file.isOpen: refuse "the file is closed"
   if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
@@ -686,12 +815,13 @@ proc flushPending*(ed: var HeaderEditor): bool =
   ed.flushBatch()
 
 proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
-  var l = loc
-  l.field = name
-  ed.log.report(sevError, dcValidation, name & ": " & msg, loc = l)
+  if ed.admitRefusal():
+    var l = loc
+    l.field = name
+    ed.log.report(sevError, dcValidation, name & ": " & msg, loc = l)
   false
 
-proc current(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
+proc current(ed: HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
   let r = ed.file.index.locate(scope, index, name)
   if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
   # The block as edited so far: a batch's pending writes laid over the map.
@@ -702,18 +832,18 @@ proc current(ed: var HeaderEditor, scope: HeaderScope, index: int, name: string)
   if v.error.len > 0: raise newException(ValueError, name & ": " & v.error)
   v.value
 
-proc currentTraceField*(ed: var HeaderEditor, trace: int, name: string): FieldValue =
+proc currentTraceField*(ed: HeaderEditor, trace: int, name: string): FieldValue =
   ## Reads `trace.<field>` / `ext1.<field>` of trace `trace` as edited so far
   ## (a batch's pending edits included, without syncing them). Raises
   ## `ValueError` like `traceField`.
   ed.current(hsTrace, trace, name)
 
-proc currentRecordField*(ed: var HeaderEditor, record: int, name: string): FieldValue =
+proc currentRecordField*(ed: HeaderEditor, record: int, name: string): FieldValue =
   ## Reads a SEG-D record field as edited so far. Raises like
   ## `currentTraceField`.
   ed.current(hsRecord, record, name)
 
-proc currentFileField*(ed: var HeaderEditor, name: string): FieldValue =
+proc currentFileField*(ed: HeaderEditor, name: string): FieldValue =
   ## Reads a SEG-Y binary header field as edited so far. Raises like
   ## `currentTraceField`.
   ed.current(hsFile, 0, name)
@@ -766,24 +896,18 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     value: FieldValue): bool =
   ## Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
   ## for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
-  ## copy of the record's headers is refreshed. False, with a diagnostic in
-  ## `log`, if the edit is refused.
+  ## copy of the record's headers and the stored keys of its traces are
+  ## refreshed once the edit is on the map: at once, or in a batch when the
+  ## batch is written (`endBatch`), like a trace edit. False, with a
+  ## diagnostic in `log`, if the edit is refused.
   var b: BlockRef
   result = ed.setLocated(hsRecord, record, name, value,
-    Location(file: ed.file.path, record: record), b) and ed.flushBatch()
+    Location(file: ed.file.path, record: record), b)
   if result:
-    let (a, z) = (int(b.offset), int(b.offset) + b.size - 1)
-    if b.kind == hbSegdGh1:
-      ed.file.index.segdRecords[record].gh1 =
-        decodeBlock[SegdGeneralHeader1](ed.file.unsafeMemory.toOpenArray(a, z))
-    else:
-      ed.file.index.segdRecords[record].sourceHeaders[b.sourceIndex] =
-        decodeBlock[SegdGeneralHeaderN](ed.file.unsafeMemory.toOpenArray(a, z))
-    if ed.file.hasKeys:
-      var traces: seq[int]
-      for i, e in ed.file.index.entries:
-        if int(e.record) == record: traces.add i
-      discard ed.file.refreshKeys(traces)
+    ed.staleRecords.add StaleRecord(record: record, blk: b)
+    if not ed.batch:
+      ed.refreshRecords()
+      ed.refreshStale()
 
 proc setTraceField*(ed: var HeaderEditor, trace: int, name: string,
     value: SomeNumber | string): bool {.inline.} =

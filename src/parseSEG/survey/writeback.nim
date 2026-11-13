@@ -8,7 +8,8 @@
 ##   journaled `HeaderEditor`: same-size header fields only, every change
 ##   journaled first, so `rollbackJournal` undoes it;
 ## - `copyWithGeometry` writes a copy of the file (same standard and layout)
-##   with the geometry, `convertWithGeometry` a converted SEG-Y file;
+##   with the geometry, `convertWithGeometry` a converted SEG-Y file (new
+##   files: written without a journal, and dropped whole on a failure);
 ## - `geometryChanges` only reports what would change.
 ##
 ## A value is written when the joined key differs from what the trace's
@@ -17,6 +18,13 @@
 ## only for traces whose source or receiver X/Y change. Values with no slot
 ## in the file, or too large for theirs, are counted (`unwritable`) and
 ## reported in the log, one warning per kind, never dropped silently.
+##
+## The counts (`GeometryChanges`) say what the headers hold differently
+## afterwards, per kind of value: a source point 99.5 written into an
+## integer field that already holds 100 is no change. A "rounded" warning
+## is given per kind for the traces where a value was written and none of
+## its fields holds it exactly (the point 99.5 in `espnum` is not reported
+## while `sp`, with its scalar, holds 99.5).
 ##
 ## Where the values go:
 ##
@@ -45,14 +53,15 @@ import ../segd/[reader as segdreader]
 import ../model/[traceindex, keys, edit]
 import ../convert
 import ./join
-import ../private/[checks, coordscalar, progressticker]
+import ../private/[checks, coordscalar, progressticker, segykeys]
 
 export join
 
 type
   GeometryChanges* = object
     ## What `writeGeometry` changed (or `geometryChanges` would change), in
-    ## traces per kind of value.
+    ## traces per kind of value: a kind counts for a trace when its headers
+    ## hold another value afterwards.
     traces*: int ## Traces with at least one changed value.
     sourceXy*, receiverXy*: int ## Traces whose source / receiver X/Y change.
     sourceZ*, receiverZ*: int ## Traces whose source / receiver elevation changes.
@@ -75,6 +84,30 @@ type
     vRcvZ = "receiver elevation", vCmp = "midpoint", vOffset = "offset",
     vSrcStation = "source station", vRcvStation = "receiver station"
 
+  Name = enum
+    ## The layout names the SEG-Y planner reads or writes.
+    nShtX = "sht_x", nShtY = "sht_y", nRecX = "rec_x", nRecY = "rec_y", nCdpX = "cdp_x",
+    nCdpY = "cdp_y", nSelev = "selev", nRelev = "relev", nOffset = "offset",
+    nEspnum = "espnum", nSp = "sp", nShtLine = "sht_line", nShtPoint = "sht_point",
+    nShtIndex = "sht_index", nRecLine = "rec_line", nRecPoint = "rec_point",
+    nRecIndex = "rec_index", nCoorUnit = "coorunit", nCoScal = "co_scal",
+    nEdScal = "ed_scal", nSpScal = "sp_scal"
+
+  Slot = object
+    ## A layout entry resolved for the planner, once per file: looking the
+    ## names up in the layout per value and trace was 37 % of a write-back.
+    at: int         ## 0-based byte within its 240-byte header.
+    kind: LayoutType
+    ifNonZero: bool
+    header: int     ## Indexes `Planner.headers` and `Planner.bases`.
+    protected: bool ## Over bytes that size the trace or name a header: never written.
+    name: int       ## `ord` of its `Name`; -1 for a name the planner does not set.
+
+  GroupSlot = object
+    ## A scaled field of the trace being rewritten (`writeScaledGroup`).
+    at: int
+    up: int ## Index into `Planner.ups`, -1 for an unchanged field.
+
   Planner = object
     ## One pass over a file's traces: what changes, and the reports.
     fields: GeometryFields
@@ -82,6 +115,18 @@ type
     order: ByteOrder
     lay: TraceLayout   ## SEG-Y: the file's effective layout.
     gr: GeometryReader ## SEG-Y: for the current keys.
+    headers: seq[string]
+      ## SEG-Y: the names of the 240-byte headers the layout's entries live
+      ## in: the standard one, Extension 1, then proprietary ones.
+    bases: seq[int]
+      ## SEG-Y: where each of `headers` starts in the current trace's header
+      ## bytes, -1 when the trace has none (`locate`).
+    byName: array[Name, seq[Slot]]       ## SEG-Y: each name's entries, in layout order.
+    byKind: array[LayoutType, seq[Slot]] ## SEG-Y: every entry of each scaled kind.
+    kindNames: array[LayoutType, set[Name]] ## SEG-Y: the names with an entry of each scaled kind.
+    ups: seq[Update]      ## The current trace's updates (kept between traces: no allocation).
+    group: seq[GroupSlot] ## `writeScaledGroup`'s fields, with their values in `vals`.
+    vals: seq[float64]
     changes: GeometryChanges
     noSlot: array[Value, int]
     noSlotFirst: array[Value, int]
@@ -93,14 +138,18 @@ type
 
   Update = object
     ## A SEG-Y layout name to set.
-    name: string
+    name: Name
     value: float64
+    before: float64 ## What the name's field held (`slotValue`), NaN without one.
     what: Value
     part: char     ## Values of one kind and part need only one field: 'p' point, ...
     written: bool  ## Handled: written, or refused (`refused`, reported).
     refused: bool
+    exact: bool    ## A field written holds the value exactly.
+    rounded: bool  ## A field written holds it rounded.
 
 const
+  ScaledKinds = {ltCoor4, ltElev4, ltSpNum4} ## The 4-byte kinds stored under a scalar.
   MaxRefusals = 5 ## Range errors logged one by one; the rest are counted.
   StdProtected = [(114, 2)] ## Std header bytes (0-based, length) never written: the sample count.
   Ext1Protected = [(136, 4), (156, 4), (232, 8)] ## Ext1 sample count, header count, flags, name.
@@ -118,12 +167,7 @@ func stationDiffers(new, cur: float64): bool =
   # Stations match at 1/100 (see `stationKey`).
   new.known and (cur.isNaN or round(new * 100) != round(cur * 100))
 
-proc initPlanner(ix: TraceIndex, path: string, fields: GeometryFields): Planner =
-  result = Planner(fields: fields, path: path)
-  if ix.kind == skSegy:
-    result.order = ix.segy.byteOrder
-    result.lay = ix.segy.layoutOf
-    result.gr = initGeometryReader(ix.segy)
+func same(a, b: float64): bool {.inline.} = a == b or (a.isNaN and b.isNaN)
 
 proc unwritable(p: var Planner, v: Value, trace: int, why: string) =
   # A value with no slot in the trace: counted, reported once per kind.
@@ -179,37 +223,73 @@ func `$`*(c: GeometryChanges): string =
 
 # ------------------------------------------------------------------ SEG-Y --
 
-func scalarNameOf(k: LayoutType): string =
+func scalarNameOf(k: LayoutType): Name =
+  # The scalar of a scaled 4-byte kind (`ScaledKinds`).
   case k
-  of ltCoor4: "co_scal"
-  of ltElev4: "ed_scal"
-  of ltSpNum4: "sp_scal"
-  else: ""
+  of ltCoor4: nCoScal
+  of ltElev4: nEdScal
+  else: nSpScal
 
-proc blockBase(buf: openArray[byte], ext: string): int =
-  # Where the 240-byte header an entry lives in starts in the trace's
-  # header bytes; -1 when the trace has no such header.
-  if ext.len == 0 or cmpIgnoreCase(ext, "SEG00000") == 0: return 0
-  if buf.len < 2 * TraceHeaderSize: return -1
-  if cmpIgnoreCase(ext, "SEG00001") == 0: return TraceHeaderSize
-  var i = 2 * TraceHeaderSize
-  while i + TraceHeaderSize <= buf.len:
-    if cmpIgnoreCase(headerBlockName(buf.toOpenArray(i, i + TraceHeaderSize - 1)), ext) == 0:
-      return i
-    i += TraceHeaderSize
-  -1
-
-func protectedEntry(base: int, e: LayoutEntry): bool =
-  # An entry over bytes that size the trace or name a header.
-  let a = e.bytePos - 1
-  let z = a + e.kind.size
+func protectedBytes(header, at, size: int): bool =
+  # Bytes `at ..< at + size` of a header (0 the standard one, 1 Extension 1,
+  # else a proprietary one) size the trace or name the header.
   template check(list: untyped) =
     for (p, n) in list:
-      if a < p + n and p < z: return true
-  if base == 0: check(StdProtected)
-  elif base == TraceHeaderSize: check(Ext1Protected)
+      if at < p + n and p < at + size: return true
+  case header
+  of 0: check(StdProtected)
+  of 1: check(Ext1Protected)
   else: check(PropProtected)
   false
+
+proc resolveLayout(p: var Planner) =
+  # The layout's entries under the names and scaled kinds the planner uses,
+  # in layout order (for a repeated name the last applicable entry wins).
+  p.headers = @["", "SEG00001"]
+  for e in p.lay.entries:
+    var name = -1
+    for n in Name:
+      if e.name == $n: name = ord(n)
+    if name >= 0 or e.kind in ScaledKinds:
+      var h = -1
+      if e.extension.len == 0 or cmpIgnoreCase(e.extension, "SEG00000") == 0: h = 0
+      else:
+        for i in 1 ..< p.headers.len:
+          if cmpIgnoreCase(p.headers[i], e.extension) == 0: h = i
+        if h < 0:
+          h = p.headers.len
+          p.headers.add e.extension
+      let s = Slot(at: e.bytePos - 1, kind: e.kind, ifNonZero: e.ifNonZero, header: h,
+        protected: protectedBytes(h, e.bytePos - 1, e.kind.size), name: name)
+      if name >= 0:
+        p.byName[Name(name)].add s
+        if e.kind in ScaledKinds: p.kindNames[e.kind].incl Name(name)
+      if e.kind in ScaledKinds: p.byKind[e.kind].add s
+  p.bases = newSeq[int](p.headers.len)
+
+proc initPlanner(ix: TraceIndex, path: string, fields: GeometryFields): Planner =
+  result = Planner(fields: fields, path: path)
+  if ix.kind == skSegy:
+    result.order = ix.segy.byteOrder
+    result.lay = ix.segy.layoutOf
+    result.gr = initGeometryReader(ix.segy)
+    result.resolveLayout()
+
+proc locate(p: var Planner, buf: openArray[byte]) =
+  # Where each 240-byte header of `headers` starts in this trace's header
+  # bytes; -1 when the trace has no such header.
+  let extended = buf.len >= 2 * TraceHeaderSize
+  p.bases[0] = 0
+  p.bases[1] = if extended: TraceHeaderSize else: -1
+  for h in 2 ..< p.headers.len:
+    p.bases[h] = -1
+    if extended:
+      var i = 2 * TraceHeaderSize
+      while p.bases[h] < 0 and i + TraceHeaderSize <= buf.len:
+        if cmpIgnoreCase(headerBlockName(buf.toOpenArray(i, i + TraceHeaderSize - 1)),
+            p.headers[h]) == 0:
+          p.bases[h] = i
+        i += TraceHeaderSize
 
 proc readRaw(buf: openArray[byte], at: int, k: LayoutType, order: ByteOrder): float64 =
   case k
@@ -260,169 +340,193 @@ proc writeRaw(buf: var openArray[byte], at: int, k: LayoutType, v: float64, orde
   of ltScale6: return "scale6 fields are not written"
   ""
 
-proc scalarOf(p: Planner, buf: openArray[byte], name: string, present: var bool): int16 =
+proc scalarOf(p: Planner, buf: openArray[byte], name: Name, present: var bool): int16 =
   # The trace's scalar `name` (the last applicable entry), 1 for 0 or none.
   result = 1
   present = false
-  for e in p.lay.entriesFor(name):
-    let b = blockBase(buf, e.extension)
+  for s in p.byName[name]:
+    let b = p.bases[s.header]
     if b >= 0:
-      let x = readRaw(buf, b + e.bytePos - 1, e.kind, p.order)
-      if (not e.ifNonZero or x != 0) and x == trunc(x) and x >= -32768 and x <= 32767:
+      let x = readRaw(buf, b + s.at, s.kind, p.order)
+      if (not s.ifNonZero or x != 0) and x == trunc(x) and x >= -32768 and x <= 32767:
         present = true
         result = if x == 0: 1'i16 else: int16(x)
 
-proc slotValue(p: Planner, buf: openArray[byte], name: string): float64 =
+proc slotValue(p: Planner, buf: openArray[byte], name: Name): float64 =
   # The value of layout name `name` as `fieldValue` reads it; NaN if none.
   result = NaN
-  for e in p.lay.entriesFor(name):
-    let b = blockBase(buf, e.extension)
+  for s in p.byName[name]:
+    let b = p.bases[s.header]
     if b >= 0:
-      var x = readRaw(buf, b + e.bytePos - 1, e.kind, p.order)
-      if not e.ifNonZero or x != 0:
-        let sn = scalarNameOf(e.kind)
-        if sn.len > 0:
+      var x = readRaw(buf, b + s.at, s.kind, p.order)
+      if not s.ifNonZero or x != 0:
+        if s.kind in ScaledKinds:
           var present: bool
-          x = applyScalar(x, p.scalarOf(buf, sn, present))
+          x = applyScalar(x, p.scalarOf(buf, scalarNameOf(s.kind), present))
         result = x
 
-proc writeScaledGroup(p: var Planner, buf: var seq[byte], trace: int, kind: LayoutType,
-    ups: var seq[Update]) =
+proc writeScaledGroup(p: var Planner, buf: var seq[byte], trace: int, kind: LayoutType) =
   # Rewrites every `kind` field of the trace with one scalar chosen for the
-  # new values and the unchanged ones.
-  type Slot = object
-    at: int
-    value: float64
-    up: int # index into `ups`, -1 for an unchanged field
-  var slots: seq[Slot]
-  var any = false
+  # new values (`p.ups`) and the unchanged ones.
+  var wanted = false
+  for u in p.ups:
+    if u.name in p.kindNames[kind]: wanted = true
+  if not wanted: return
   let sn = scalarNameOf(kind)
   var present: bool
   let s0 = p.scalarOf(buf, sn, present)
-  for e in p.lay.entries:
-    if e.kind == kind:
-      let b = blockBase(buf, e.extension)
-      if b >= 0 and not protectedEntry(b, e):
-        let at = b + e.bytePos - 1
-        var up = -1
-        for i, u in ups:
-          if u.name == e.name: up = i
-        if up >= 0: any = true
-        let value = if up >= 0: ups[up].value
-                    else: applyScalar(readRaw(buf, at, kind, p.order), s0)
-        slots.add Slot(at: at, up: up, value: value)
+  p.group.setLen 0
+  p.vals.setLen 0
+  var any = false
+  for s in p.byKind[kind]:
+    let b = p.bases[s.header]
+    if b >= 0 and not s.protected:
+      let at = b + s.at
+      var up = -1
+      if s.name >= 0:
+        for i, u in p.ups:
+          if ord(u.name) == s.name: up = i
+      if up >= 0: any = true
+      let value = if up >= 0: p.ups[up].value
+                  else: applyScalar(readRaw(buf, at, kind, p.order), s0)
+      p.group.add GroupSlot(at: at, up: up)
+      p.vals.add value
   if not any: return
-  var vals: seq[float64]
-  for s in slots: vals.add s.value
   var exact: bool
   var s = s0
   if present:
-    s = chooseScalar(vals, s0, exact)
+    s = chooseScalar(p.vals, s0, exact)
   else:
-    exact = exactScalar(vals, s0)
-    if not fitsScalar(vals, s0): s = 0
+    exact = exactScalar(p.vals, s0)
+    if not fitsScalar(p.vals, s0): s = 0
   if s == 0:
-    for sl in slots:
-      if sl.up >= 0:
-        p.refuse(ups[sl.up].what, trace, $ups[sl.up].value & " is too large for a 4-byte " &
-          "SEG-Y field with any coordinate scalar (" & ups[sl.up].name & ")")
-        ups[sl.up].written = true
-        ups[sl.up].refused = true # reported
+    for i in 0 ..< p.group.len:
+      let up = p.group[i].up
+      if up >= 0:
+        p.refuse(p.ups[up].what, trace, $p.ups[up].value & " is too large for a 4-byte " &
+          "SEG-Y field with any coordinate scalar (" & $p.ups[up].name & ")")
+        p.ups[up].written = true
+        p.ups[up].refused = true # reported
     return
-  for sl in slots:
-    putNum(buf, sl.at, int32(round(rawOf(sl.value, s))), p.order)
-    if sl.up >= 0:
-      ups[sl.up].written = true
-      if not exact: p.noteRounded(ups[sl.up].what, trace)
+  for i in 0 ..< p.group.len:
+    let raw = rawOf(p.vals[i], s)
+    putNum(buf, p.group[i].at, int32(round(raw)), p.order)
+    let up = p.group[i].up
+    if up >= 0:
+      p.ups[up].written = true
+      # As `exactScalar`: exact to 1e-4 of the stored unit.
+      if exact or abs(raw - round(raw)) <= 1e-4: p.ups[up].exact = true
+      else: p.ups[up].rounded = true
   if present and s != s0:
-    for e in p.lay.entriesFor(sn):
-      let b = blockBase(buf, e.extension)
-      if b >= 0 and not protectedEntry(b, e):
+    for sl in p.byName[sn]:
+      let b = p.bases[sl.header]
+      if b >= 0 and not sl.protected:
         var r: bool
-        discard writeRaw(buf, b + e.bytePos - 1, e.kind, float64(s), p.order, r)
+        discard writeRaw(buf, b + sl.at, sl.kind, float64(s), p.order, r)
 
-proc writeUnscaled(p: var Planner, buf: var seq[byte], trace: int, u: var Update) =
-  # The entries of `u.name` that are not scaled 4-byte fields; an `ifNonZero`
-  # entry only while it is in use.
-  for e in p.lay.entriesFor(u.name):
-    if e.kind notin {ltCoor4, ltElev4, ltSpNum4}:
-      let b = blockBase(buf, e.extension)
-      if b >= 0 and not protectedEntry(b, e):
-        let at = b + e.bytePos - 1
-        if not e.ifNonZero or readRaw(buf, at, e.kind, p.order) != 0:
+proc writeUnscaled(p: var Planner, buf: var seq[byte], trace, up: int) =
+  # The entries of update `up`'s name that are not scaled 4-byte fields; an
+  # `ifNonZero` entry only while it is in use.
+  let name = p.ups[up].name
+  for i in 0 ..< p.byName[name].len:
+    let s = p.byName[name][i]
+    if s.kind notin ScaledKinds:
+      let b = p.bases[s.header]
+      if b >= 0 and not s.protected:
+        let at = b + s.at
+        if not s.ifNonZero or readRaw(buf, at, s.kind, p.order) != 0:
           var r = false
-          let err = writeRaw(buf, at, e.kind, u.value, p.order, r)
+          let err = writeRaw(buf, at, s.kind, p.ups[up].value, p.order, r)
           if err.len > 0:
-            p.refuse(u.what, trace, err & " (" & u.name & ")")
-            u.refused = true
+            p.refuse(p.ups[up].what, trace, err & " (" & $name & ")")
+            p.ups[up].refused = true
           elif r:
-            p.noteRounded(u.what, trace)
-          u.written = true
+            p.ups[up].rounded = true
+          else:
+            p.ups[up].exact = true
+          p.ups[up].written = true
 
 proc currentSegyKeys(p: Planner, buf: openArray[byte]): TraceKeys =
-  var t = SegyTrace(header: decodeTraceHeader(buf.toOpenArray(0, TraceHeaderSize - 1), p.order))
-  if buf.len >= 2 * TraceHeaderSize:
-    t.hasExt1 = true
-    t.ext1 = decodeTraceHeaderExt1(buf.toOpenArray(TraceHeaderSize, 2 * TraceHeaderSize - 1),
-      p.order)
-    t.proprietary = @(buf.toOpenArray(2 * TraceHeaderSize, buf.len - 1))
-  p.gr.traceKeys(t)
+  # The keys of the trace with header bytes `buf`, straight from the bytes
+  # as the index reads them.
+  let extra = buf.len - 2 * TraceHeaderSize
+  let h = RawHeaders(std: cast[ByteBuf](addr buf[0]),
+    ext1: if extra >= 0: cast[ByteBuf](addr buf[TraceHeaderSize]) else: nil,
+    prop: if extra > 0: cast[ByteBuf](addr buf[2 * TraceHeaderSize]) else: nil,
+    propLen: max(extra, 0))
+  segyKeys(p.gr, h)
 
 proc planSegy(p: var Planner, trace: int, k: TraceKeys, buf: var seq[byte]): set[Value] =
   if buf.len < TraceHeaderSize: return
+  p.locate(buf)
   let cur = p.currentSegyKeys(buf)
-  var ups: seq[Update]
-  template up(n: string, x: float64, w: Value, pt = 'v') =
-    ups.add Update(name: n, value: x, what: w, part: pt)
+  p.ups.setLen 0
+  template up(n: Name, x: float64, w: Value, pt = 'v') =
+    p.ups.add Update(name: n, value: x, what: w, part: pt, before: p.slotValue(buf, n))
   let f = p.fields
   let srcXY = f.sourceXy and k.hasSourceXY and
     (differs(k.srcX, cur.srcX) or differs(k.srcY, cur.srcY))
   let rcvXY = f.receiverXy and k.hasReceiverXY and
     (differs(k.rcvX, cur.rcvX) or differs(k.rcvY, cur.rcvY))
   if srcXY:
-    up("sht_x", k.srcX, vSrcXY)
-    up("sht_y", k.srcY, vSrcXY)
+    up(nShtX, k.srcX, vSrcXY, 'x')
+    up(nShtY, k.srcY, vSrcXY, 'y')
   if rcvXY:
-    up("rec_x", k.rcvX, vRcvXY)
-    up("rec_y", k.rcvY, vRcvXY)
+    up(nRecX, k.rcvX, vRcvXY, 'x')
+    up(nRecY, k.rcvY, vRcvXY, 'y')
   if srcXY or rcvXY:
-    if p.slotValue(buf, "coorunit") == 0: # unset: the coordinates are lengths
-      up("coorunit", 1, if srcXY: vSrcXY else: vRcvXY, 'u')
+    if p.slotValue(buf, nCoorUnit) == 0: # unset: the coordinates are lengths
+      up(nCoorUnit, 1, if srcXY: vSrcXY else: vRcvXY, 'u')
     if f.midpoints and k.cmpX.known and k.cmpY.known and
         (differs(k.cmpX, cur.cmpX) or differs(k.cmpY, cur.cmpY)):
-      up("cdp_x", k.cmpX, vCmp)
-      up("cdp_y", k.cmpY, vCmp)
-    if f.offsets and differs(k.offset, cur.offset): up("offset", k.offset, vOffset)
+      up(nCdpX, k.cmpX, vCmp, 'x')
+      up(nCdpY, k.cmpY, vCmp, 'y')
+    if f.offsets and differs(k.offset, cur.offset): up(nOffset, k.offset, vOffset)
   if f.elevations:
-    if differs(k.srcZ, cur.srcZ): up("selev", k.srcZ, vSrcZ)
-    if differs(k.rcvZ, cur.rcvZ): up("relev", k.rcvZ, vRcvZ)
+    if differs(k.srcZ, cur.srcZ): up(nSelev, k.srcZ, vSrcZ)
+    if differs(k.rcvZ, cur.rcvZ): up(nRelev, k.rcvZ, vRcvZ)
   if f.stations:
     if stationDiffers(k.srcPoint, cur.srcPoint):
-      up("espnum", k.srcPoint, vSrcStation, 'p')
-      up("sp", k.srcPoint, vSrcStation, 'p')
-    template station(n: string, x: float64, w: Value, pt: char) =
-      if stationDiffers(x, p.slotValue(buf, n)): up(n, x, w, pt)
-    station("sht_line", k.srcLine, vSrcStation, 'l')
-    station("sht_point", k.srcPoint, vSrcStation, 'p')
-    station("rec_line", k.rcvLine, vRcvStation, 'l')
-    station("rec_point", k.rcvPoint, vRcvStation, 'p')
-    if k.srcIndex != 0: station("sht_index", float64(k.srcIndex), vSrcStation, 'i')
-    if k.rcvIndex != 0: station("rec_index", float64(k.rcvIndex), vRcvStation, 'i')
-  if ups.len == 0: return
-  for kind in [ltCoor4, ltElev4, ltSpNum4]: p.writeScaledGroup(buf, trace, kind, ups)
-  for u in ups.mitems: p.writeUnscaled(buf, trace, u)
-  # Values with no slot: one report per kind and trace. A part (the point,
-  # the line, ...) needs only one of its fields (espnum, sp, sht_point).
+      up(nEspnum, k.srcPoint, vSrcStation, 'p')
+      up(nSp, k.srcPoint, vSrcStation, 'p')
+    template station(n: Name, x: float64, w: Value, pt: char) =
+      let held = p.slotValue(buf, n)
+      if stationDiffers(x, held):
+        p.ups.add Update(name: n, value: x, what: w, part: pt, before: held)
+    station(nShtLine, k.srcLine, vSrcStation, 'l')
+    station(nShtPoint, k.srcPoint, vSrcStation, 'p')
+    station(nRecLine, k.rcvLine, vRcvStation, 'l')
+    station(nRecPoint, k.rcvPoint, vRcvStation, 'p')
+    if k.srcIndex != 0: station(nShtIndex, float64(k.srcIndex), vSrcStation, 'i')
+    if k.rcvIndex != 0: station(nRecIndex, float64(k.rcvIndex), vRcvStation, 'i')
+  if p.ups.len == 0: return
+  for kind in ScaledKinds: p.writeScaledGroup(buf, trace, kind)
+  for i in 0 ..< p.ups.len: p.writeUnscaled(buf, trace, i)
+  # What changed is what the fields hold differently now: a value that
+  # rounds to the one already there (99.5 into an espnum of 100) is no
+  # change. Values with no slot: one report per kind and trace. A part (the
+  # point, the line, ...) needs only one of its fields (espnum, sp,
+  # sht_point).
   var missing: set[Value]
-  for u in ups:
+  for u in p.ups:
     if u.part == 'u': discard # the units follow the coordinates
     elif u.written:
-      if not u.refused: result.incl u.what
+      if not u.refused and not same(u.before, p.slotValue(buf, u.name)): result.incl u.what
     else:
       var done = false
-      for o in ups:
+      for o in p.ups:
         if o.written and o.what == u.what and o.part == u.part: done = true
       if not done: missing.incl u.what
+  # Rounded: a part written whose fields all hold it rounded (once per kind
+  # and trace).
+  var lossy: set[Value]
+  for u in p.ups:
+    if u.rounded and u.what in result:
+      var held = false
+      for o in p.ups:
+        if o.exact and o.what == u.what and o.part == u.part: held = true
+      if not held: lossy.incl u.what
+  for v in lossy: p.noteRounded(v, trace)
   for v in missing:
     p.unwritable(v, trace, case v
       of vSrcStation, vRcvStation: "the file's layout has no field for the line, point or " &
@@ -530,10 +634,10 @@ proc currentSegdKeys(rec: SegdRecord, buf: openArray[byte]): TraceKeys =
       t.ext1 = some(decodeBlock[SegdTraceHeaderExt1](e1))
   traceKeys(rec, t)
 
-proc planSegd(p: var Planner, rec: SegdRecord, trace: int, k: TraceKeys,
+proc writeSegd(p: var Planner, rec: SegdRecord, trace: int, k, cur: TraceKeys,
     buf: var seq[byte]): set[Value] =
-  if buf.len < SegdTraceHeaderSize: return
-  let cur = currentSegdKeys(rec, buf)
+  # The joined values of `k` that differ from the header's (`cur`) into
+  # `buf`; the kinds written.
   let f = p.fields
   let hasExt1 = buf.len >= SegdTraceHeaderSize + SegdBlockSize
   let srcXY = f.sourceXy and k.hasSourceXY and
@@ -620,6 +724,30 @@ proc planSegd(p: var Planner, rec: SegdRecord, trace: int, k: TraceKeys,
         except SegFormatError as x:
           p.refuse(vSrcStation, trace, x.msg)
 
+func changedValues(a, b: TraceKeys): set[Value] =
+  # The kinds of values that differ between two readings of a trace's keys.
+  result = {}
+  if not (same(a.srcX, b.srcX) and same(a.srcY, b.srcY)): result.incl vSrcXY
+  if not (same(a.rcvX, b.rcvX) and same(a.rcvY, b.rcvY)): result.incl vRcvXY
+  if not same(a.srcZ, b.srcZ): result.incl vSrcZ
+  if not same(a.rcvZ, b.rcvZ): result.incl vRcvZ
+  if not (same(a.cmpX, b.cmpX) and same(a.cmpY, b.cmpY)): result.incl vCmp
+  if not same(a.offset, b.offset): result.incl vOffset
+  if not (same(a.srcLine, b.srcLine) and same(a.srcPoint, b.srcPoint) and
+      a.srcIndex == b.srcIndex):
+    result.incl vSrcStation
+  if not (same(a.rcvLine, b.rcvLine) and same(a.rcvPoint, b.rcvPoint) and
+      a.rcvIndex == b.rcvIndex):
+    result.incl vRcvStation
+
+proc planSegd(p: var Planner, rec: SegdRecord, trace: int, k: TraceKeys,
+    buf: var seq[byte]): set[Value] =
+  if buf.len < SegdTraceHeaderSize: return
+  let cur = currentSegdKeys(rec, buf)
+  result = p.writeSegd(rec, trace, k, cur, buf)
+  # What changed is what the keys read from the new bytes hold differently.
+  if result != {}: result = result * changedValues(cur, currentSegdKeys(rec, buf))
+
 # ------------------------------------------------------------------- pass --
 
 proc planTrace(p: var Planner, ix: TraceIndex, trace: int, k: TraceKeys,
@@ -657,9 +785,7 @@ template eachChange(f: SeismicFile, keys: openArray[TraceKeys], fields: Geometry
     if e.offset >= 0 and e.offset + n <= f.mappedSize and n > 0:
       buf.setLen n
       copyMem(addr buf[0], addr mem[e.offset], n)
-      var changed = p.planTrace(f.index, i, keys[i], buf)
-      if changed.card > 0 and equalMem(addr buf[0], addr mem[e.offset], n):
-        changed = {} # the values round to the bytes already there (e.g. 99.5 → 100)
+      let changed = p.planTrace(f.index, i, keys[i], buf)
       p.count(changed)
       if changed.card > 0:
         body
@@ -747,18 +873,23 @@ proc writeGeometry*(ed: var HeaderEditor, fields = GeometryFields()): GeometryCh
 
 proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overwrite: bool,
     log: var DiagLog, progress: Progress = nil): GeometryChanges =
-  # Joins `g` to the file at `path` and writes it in place, journaled into a
-  # temporary journal that is removed afterwards (the file is new output).
-  var j = openSeismic(path, keys = true, progress = progress)
-  discard j.applySurvey(g, overwrite)
-  let journal = path & ".geometry.nif"
-  var ed = openEditor(j, journal)
+  # Joins `g` to the file at `path` and writes the geometry into its headers
+  # through a writable map, without a journal: the file is new output that
+  # its caller drops whole when anything fails, so there is nothing to undo
+  # (journaling it and removing the journal afterwards was a third of the
+  # time, and 770 bytes of journal per trace on disk meanwhile).
+  var f = openSeismic(path, keys = true, progress = progress)
   try:
-    result = ed.writeGeometry(fields)
+    discard f.applySurvey(g, overwrite)
+    f.remapWritable()
+    let map = f.unsafeMemory
+    eachChange(f, f.index.keys, fields, p, i, e, buf):
+      copyMem(addr map[e.offset], addr buf[0], buf.len)
+    log.add p.log
+    result = p.changes
+    f.flush()
   finally:
-    ed.close()
-    log.add ed.log
-    discard tryRemoveFile(journal)
+    f.close()
 
 proc copyReporting(src, dst: string, progress: Progress) =
   # `copyFile`, in chunks through `progress` when there is one; raises

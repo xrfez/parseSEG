@@ -132,9 +132,16 @@ file's. Stations a header has are never replaced; the relations only fill the on
   header's);
 - no station: the trace's record and channel, the fallback.
 
+A header that has only the line or only the point of a station (a SEG-Y shotpoint without a
+line) has the station filled whole, when the relation agrees with the part it has: the same
+value to 1/100, or the relation's as a whole number (an integer field holds point 99.5 as
+100). A relation that contradicts the part is a conflict (`jmConflict`) and fills nothing.
+
 Then coordinates come from the stations, then offset and midpoint. `overwrite` replaces
 coordinates already known, never stations. Auxiliary traces are left alone. A `JoinStats`
-says how the traces matched.
+says how the traces matched and how many changed: a trace that already holds the survey's
+values is not a change, so joining the same survey again changes nothing (`keysRevision`
+stays, and an index no join changed can still be saved with `saveIndex`).
 
 ```nim
 import std/math
@@ -179,6 +186,12 @@ doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
 - `records(g)`, `relations(g, record)`, `expectedChannels`, `recordsAt(g, station)` (the
   records of a source station, or the gathers of a receiver) and `channelOf` enumerate and
   look up the relations, in either domain (`rdSource`, `rdReceiver`).
+- `relationRuns(g, record)` yields a record's relations run by run, as the survey file's X
+  (or O) records give them: a channel range on evenly spaced stations of one line, with the
+  fixed station (`RelationRun`; `station(run, i)` is its i-th station). Code that visits
+  every station of a survey (fold, patch description) walks the runs instead of asking per
+  channel: the pre-plot fold of a 5519-shot, 11-million-trace survey takes a quarter of a
+  second that way.
 - Line names that are not numbers (SPS 1.0, P1) are mapped with `g.mapLine(name, number)`,
   or by their trailing digits with `g.trailingDigits = true`.
 - `g.multiComponent` makes X records with a channel increment cover consecutive component
@@ -186,7 +199,15 @@ doAssert go.recordsAt(stationKey(10, 104, 1), rdReceiver) == @[1'i64]
 - A host with its own coordinate database can fill the table directly:
   `g.addSource(line, point, index, x, y, z)` and `g.addReceiver(...)`.
 - `readSps`/`writeSps` and `readP1`/`writeP1` read and write the survey files themselves
-  (column-exact, unchanged records byte for byte, Rev 1.0 ↔ 2.1).
+  (column-exact, unchanged records byte for byte, Rev 1.0 ↔ 2.1). Their logs hold the first
+  five problems of each kind and field and a count of the rest, so a file of bad records
+  stays readable. An SPS file without a revision in H00 is read by its column layout, with a
+  warning (`SpsOptions(revision: ...)` chooses); a P1 file's angles are read as DMS or grads
+  for the whole file (`P1Options.angleUnit`, by default decided from its first records).
+  `readSps` keeps the text of every record for the byte-exact write-back;
+  `SpsOptions(keepRaw: false)` reads the values only (`g.addSps(path)` does).
+- A station that a survey file gives twice is reported in `g.log`; the later coordinates are
+  used.
 
 ## Write the geometry into the file
 
@@ -240,3 +261,9 @@ trace headers have no coordinate fields: that is what `unwritable` counts); SEG-
 THE#1 fields and the Position and Source Description blocks the traces already have. SEG-2
 is refused for now. `GeometryFields` selects which values to write (`sourceXy`,
 `receiverXy`, `elevations`, `midpoints`, `offsets`, `stations`; all by default).
+
+The counts (`GeometryChanges`) say what the headers hold differently afterwards: a source
+point 99.5 for an integer field that already holds 100 is no change. A value that a field
+cannot hold exactly is written rounded, with one "rounded" warning per kind of value, unless
+another field of the same value holds it exactly (the SEG-Y shotpoint with its scalar holds
+99.5 beside the energy source point's 100).

@@ -173,7 +173,7 @@ block joins_bump_the_revision_and_record_groups:
   var g: GeometryTable
   g.addReceiver(10, 104, 0, 1000, 2000)
   doAssert f.index.applyGeometry(g) == 1
-  doAssert f.keysRevision == 1 and f.index.joinedGroups(0) == {jgCoordinates}
+  doAssert f.keysRevision == 1 and f.index.joinedGroups(0) == {jgReceiverXy}
   doAssert f.index.applyGeometry(g) == 0 # nothing changed: no new revision
   doAssert f.keysRevision == 1
   f.close()
@@ -181,7 +181,7 @@ block joins_bump_the_revision_and_record_groups:
   var sg: SurveyGeometry
   sg.table.addSource(20, 99.5, 0, 10, 20)
   doAssert s.applySurvey(sg) == 1
-  doAssert s.keysRevision == 1 and s.index.joinedGroups(0) == {jgCoordinates}
+  doAssert s.keysRevision == 1 and s.index.joinedGroups(0) == {jgSourceXy}
   s.close()
 
 # ------------------------------------------------------------------ keysAt --
