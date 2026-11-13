@@ -160,6 +160,21 @@ block a_known_standard_can_be_forced:
   src.close()
   doAssert ix.kind == skSegy and ix.detected and ix.log.isFatal
   doAssert ix.log.has("format code 13 is undefined", sevFatal)
+  # Through `openSeismic`: undetected without the option, read as named with it.
+  var plain = openSeismic(p)
+  doAssert plain.kind == skUnknown
+  plain.close()
+  var f = openSeismic(p, opts = OpenOptions(kind: skSegy))
+  doAssert f.kind == skSegy and f.log.has("format code 13 is undefined", sevFatal)
+  f.close()
+  # A file that is detected opens the same with its own kind named.
+  let q = tmp / "named.sgy"
+  writeFile(q, variants[1][1])
+  var g = openSeismic(q, opts = OpenOptions(kind: skSegy))
+  var h = openSeismic(q)
+  doAssert g.kind == skSegy and g.len == h.len and g.len > 0
+  g.close()
+  h.close()
 
 block every_file_at_hand_keeps_its_kind:
   # No SEG-D or SEG-2 file is taken for SEG-Y through its "binary header"

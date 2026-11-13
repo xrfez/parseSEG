@@ -450,7 +450,7 @@ proc intervalIn(h: RawHeaders, o: static ByteOrder, fixedUs: float64): float64 {
   if not fixedUs.isNaN: return fixedUs
   if h.ext1 != nil:
     let x = loadNum[float64](h.ext1, 144, o) # Ext1 bytes 145-152
-    if x != 0 and not x.isNaN: return x
+    if usableExtInterval(x): return x
   float64(loadNum[uint16](h.std, 116, o)) # bytes 117-118
 
 proc segyIntervalUs*(h: RawHeaders, order: ByteOrder, fixedUs: float64): float64 =

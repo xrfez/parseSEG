@@ -210,7 +210,8 @@ proc resolveLayout(f: var SeismicFile) =
   if f.index.kind == skSegy and f.index.detected: f.gr = initGeometryReader(f.index.segy)
 
 proc openMapped(path: string, twosComplement8015, keys, writable: bool,
-    demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled): SeismicFile =
+    demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
+    forced = skUnknown): SeismicFile =
   # `openSeismic` / `openSeismicRw`. Built in a local, so a raise (a
   # cancelled walk) unmaps the file.
   var f = SeismicFile(path: path, map: MapRef(src: openMemFileSource(path, writable)),
@@ -219,6 +220,11 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
   var why = ""
   if cache.len > 0:
     why = f.loadIndex(cache, keys, verify)
+    if why.len == 0 and forced != skUnknown and f.index.kind != forced:
+      # The cache was saved from another reading of the file than the one
+      # the caller names (`OpenOptions.kind`).
+      why = "it holds the index of another standard than the one asked for"
+      f.index = TraceIndex()
     if why.len == 0:
       f.cached = true
       f.walkLog = f.index.log.len
@@ -227,7 +233,10 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
       if not tk.finish(): raiseCancelled()
       return f
   let n = int(min(f.map.src.size, 8192))
-  let kind = if n > 0: detectKind(f.map.src.memory.toOpenArray(0, n - 1)) else: skUnknown
+  let kind =
+    if forced != skUnknown: forced # `OpenOptions.kind`: the caller knows the standard
+    elif n > 0: detectKind(f.map.src.memory.toOpenArray(0, n - 1))
+    else: skUnknown
   if kind != skUnknown:
     f.index = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify)
     if kind == skSegd and f.index.multiplexed:
@@ -296,7 +305,7 @@ proc openSeismic*(path: string, keys = false, progress: Progress = nil,
   ## `twosComplement8015` also reads SEG-2 format-3 mantissas as two's
   ## complement.
   openMapped(path, opts.twosComplement8015, keys, false, opts.demuxDir, progress, opts.cache,
-    opts.verify)
+    opts.verify, opts.kind)
 
 proc openSeismicRw*(path: string): SeismicFile =
   ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`
