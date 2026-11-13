@@ -6,12 +6,21 @@
 ##
 ## Where the values come from:
 ## - SEG-Y: the layout-aware `geometry` (source/group coordinates, energy
-##   source point or shotpoint, field record, ensemble, offset; zero
+##   source point or shotpoint, field record, channel, ensemble, offset; zero
 ##   coordinate pairs and source points count as unknown); the component is the
 ##   trace identification code when it names a component (11-17, 27-41).
+##   The source point is the energy source point (bytes 17-20), or the
+##   scaled shotpoint (197-202) when there is no energy source point or the
+##   shotpoint is that point with its fraction (99.5 beside 100). Stations
+##   come from the names `sht_line`, `sht_point`, `sht_index`, `rec_line`,
+##   `rec_point`, `rec_index` when the file's Layout stanza has them (a
+##   SEG-D file converted by this library keeps its stations so; a line and
+##   point that are both 0 are no station).
 ## - SEG-D Rev 1/2: the source from the record's first General Header #N; the
 ##   receiver from Trace Header Extension #1 (line, point, point index); the
-##   component is the sensor type (byte 21), as 2.x has no group field.
+##   component is the sensor type (byte 21), as 2.x has no group field. In
+##   every SEG-D revision a line and point that are both 0 are a header left
+##   empty: that station stays unknown (NaN, index 0).
 ## - SEG-D Rev 3: the source from a Source Description block (0x15-0x19,
 ##   0x1F) in the trace's extensions, else in the record's general header
 ##   blocks; the receiver from THE#1, plus depth and reshoot indices; the
@@ -20,14 +29,19 @@
 ##
 ## Timing and status (`t0Ms`, `intervalUs`, `traceCode`, `status`): SEG-Y
 ## from the delay, time scalar, interval and trace identification code
-## fields (`segyStatus`); SEG-D from the trace's channel set (start time,
-## interval, channel type) and its trace edit code (`segdStatus`); SEG-2 from
-## DELAY, SAMPLE_INTERVAL and TRACE_TYPE. `inline` and `crossline` are SEG-Y
-## only (the layout's `iline` and `xline`).
+## fields (`segyStatus`), the delay and the code where the layout has them
+## (a Layout stanza may move them; one that keeps something else in their
+## bytes leaves `t0Ms` NaN and the code 0), the interval always at bytes
+## 117-118 and Extension 1's, where the reader reads it; SEG-D from the
+## trace's channel set (start time, interval, channel type) and its trace
+## edit code (`segdStatus`); SEG-2 from DELAY, SAMPLE_INTERVAL and
+## TRACE_TYPE. `inline` and `crossline` are SEG-Y only (the layout's `iline`
+## and `xline`).
 ##
 ## The trace time (`time`, UTC POSIX seconds, task 6.9):
 ## - SEG-Y: trace bytes 157-166 (year, day of year, hour, minute, second;
-##   Ext1 bytes 141-144 add nanoseconds) in the time basis of bytes 167-168,
+##   Ext1 bytes 141-144 add nanoseconds; elsewhere when a Layout stanza
+##   moves them) in the time basis of bytes 167-168,
 ##   or of binary bytes 3511-3512 (Rev 2 and later) when those are 0.
 ##   GMT (2) and UTC (4) are taken as they are, GPS (5) is converted to UTC with
 ##   the leap second table, and an unset basis (0) is read as UTC, as most
@@ -94,15 +108,24 @@ proc positionsFrom(area: openArray[byte], k: var TraceKeys, generalArea: bool) =
       # source description and its position) keep the block described.
       after = bt
 
+func isStation(line, point: float64): bool {.inline.} =
+  # A line and a point that are both 0 are a header left empty, not station
+  # 0/0: the keys stay unknown, as a zero source point and zero coordinate
+  # pairs do in SEG-Y. (A join would match such a "station" to whatever the
+  # survey has at 0/0, and refuse to fill the real one.)
+  not (line == 0 and point == 0)
+
 proc sourceFrom(area: openArray[byte], k: var TraceKeys): bool =
-  # The first Source Description block of a Rev 3 block area.
+  # The first Source Description block of a Rev 3 block area that names a
+  # station.
   for at, bt in blocks(area):
     if isSourceBlock(bt):
       let s = decodeBlock[SegdSourceDescription](area.toOpenArray(at, at + SegdBlockSize - 1))
-      k.srcLine = s.sourceLineNumber
-      k.srcPoint = s.sourcePointNumber
-      k.srcIndex = int16(s.sourcePointIndex)
-      return true
+      if isStation(s.sourceLineNumber, s.sourcePointNumber):
+        k.srcLine = s.sourceLineNumber
+        k.srcPoint = s.sourcePointNumber
+        k.srcIndex = int16(s.sourcePointIndex)
+        return true
 
 proc segdTime(rec: SegdRecord, t: SegdTrace): float64 =
   if rec.isRev3:
@@ -151,9 +174,10 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
     if not sourceFrom(t.extensions, result): discard sourceFrom(rec.generalBlocks, result)
     if t.ext1Rev3.isSome:
       let e = t.ext1Rev3.get
-      result.rcvLine = e.receiverLine
-      result.rcvPoint = e.receiverPoint
-      result.rcvIndex = int16(e.receiverPointIndex)
+      if isStation(e.receiverLine, e.receiverPoint):
+        result.rcvLine = e.receiverLine
+        result.rcvPoint = e.receiverPoint
+        result.rcvIndex = int16(e.receiverPointIndex)
       result.depthIndex = e.depthIndex
       result.reshootIndex = e.reshootIndex
       result.channel = float64(traceNumber(t.header, e))
@@ -165,14 +189,16 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
   else:
     if rec.sourceHeaders.len > 0:
       let s = rec.sourceHeaders[0]
-      result.srcLine = s.sourceLineNumber
-      result.srcPoint = s.sourcePointNumber
-      result.srcIndex = int16(s.sourcePointIndex)
+      if isStation(s.sourceLineNumber, s.sourcePointNumber):
+        result.srcLine = s.sourceLineNumber
+        result.srcPoint = s.sourcePointNumber
+        result.srcIndex = int16(s.sourcePointIndex)
     if t.ext1.isSome:
       let e = t.ext1.get
-      result.rcvLine = e.receiverLine
-      result.rcvPoint = e.receiverPoint
-      result.rcvIndex = int16(e.receiverPointIndex)
+      if isStation(e.receiverLine, e.receiverPoint):
+        result.rcvLine = e.receiverLine
+        result.rcvPoint = e.receiverPoint
+        result.rcvIndex = int16(e.receiverPointIndex)
       result.sensorType = e.sensorType
       result.component = e.sensorType
 

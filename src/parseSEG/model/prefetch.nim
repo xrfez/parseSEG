@@ -52,16 +52,41 @@
 ## returned by `next` is never written again. That one is fresh, or one the
 ## caller gave up: the previous chunk's with `nextInto`, a `recycle`d one.
 ## Only tensors of the slot shape whose storage they own alone (no copy,
-## view or `fromBuffer` shares it) are reused; others are dropped.
+## view or `fromBuffer` shares it) are reused; others are dropped. A chunk
+## shorter than `chunkTraces` (the first with `quickFirst`, the last of a
+## range, a `uniform` cut) gets the slot's tensor as well: its `samples` are
+## a view of the first `count` rows, nothing is copied. Given back
+## (`nextInto`, `recycle`), that buffer is a slot buffer again; kept, it
+## keeps the whole `chunkTraces × cols` buffer alive, so `clone` a short
+## chunk that is kept for long.
 ##
-## Lifetime: the prefetcher pins the file's map, so `f.close()` (or the file
-## going out of scope) while it runs is safe: the map, and if the file is
-## destroyed its trace entries and codecs, stay alive until the prefetcher's
-## `close`. What remains a rule: do not change the file's index
-## (`applySurvey`, `applyGeometry`, assigning to `f.index`) while a
-## prefetcher runs, and call the consumer procs from one thread.
+## Lifetime: the prefetcher pins the file's map, so `f.close()`, the file
+## going out of scope, or handing it to an editor (`openEditor(f)`) while it
+## runs is safe: the map and the index tables the prefetcher reads (trace
+## entries, codecs and stored keys) stay alive until the prefetcher's
+## `close`. From then on the prefetcher reads its own copy of those tables:
+## its chunks' `rows` show the keys as they were when the file was closed
+## or handed over, not later edits, until the prefetcher is made again.
+## What remains a rule: do not change the file's index (`applySurvey`,
+## `applyGeometry`, assigning to `f.index`) while a prefetcher runs, and
+## stop every reader that was made after `openEditor` before the editor
+## writes: an edit refreshes the stored keys in place, under a transform
+## that may be reading them. `ensureKeys` is the one change a running
+## prefetcher survives, but it does not see the new keys (see
+## `newPrefetcher`).
+##
+## Threads: a prefetcher belongs to one thread: call its consumer procs,
+## `close` included, from the thread that made it. Several threads may each
+## make, use and close prefetchers of their own on one open file at the same
+## time (a background job beside the UI's read-ahead), and read it with
+## `readTracesInto` meanwhile. While another thread reads the file or has a
+## prefetcher on it, no thread may change its index (`ensureKeys`,
+## `applySurvey`, `applyGeometry`, a `HeaderEditor`), close it, hand it to
+## an editor or let it go out of scope: closing a file before its
+## prefetchers is for the thread that opened it and the prefetchers it made
+## itself.
 
-import std/locks
+import std/[locks, atomics]
 import ../common/diagnostics
 import ../segy/samples
 import ./[traceindex, tracerows]
@@ -79,6 +104,16 @@ type
     ## `newPrefetcher`. It must not raise, and may reach only memory that
     ## outlives the prefetcher through raw pointers (no closures: it may
     ## capture nothing ref-counted).
+    ##
+    ## A `Defect` raised in the hook ends the process: it is raised on a
+    ## worker thread, where nothing can catch it (an index out of bounds, an
+    ## overflow in a checked build, a failed `doAssert`, `keysAt` on rows
+    ## without keys). Every kernel reached from the hook must therefore be
+    ## free of Defects for any samples and keys: check sizes and `hasKeys`
+    ## before the prefetcher is made, and treat bad data as data.
+    ##
+    ## A chunk that a `seek` or a `close` dropped while it was decoded is
+    ## not transformed, so the hook cannot be used to count chunks decoded.
 
 type
   SlotState = enum ssFree, ssBusy, ssReady
@@ -105,6 +140,10 @@ type
     slots: ptr UncheckedArray[Slot[T]]
     depth: int
     gen: int
+    live: Atomic[int]
+      # `gen`, readable without the lock: a worker inside a chunk compares it
+      # with the chunk's generation to stop decoding what a `seek` dropped.
+    stopNow: Atomic[bool] # set by `shutdown` before it takes the lock, for the same reason
     start, stop: int # trace range [start, stop) of the current generation
     nextChunk: int   # next chunk a worker claims
     takeChunk: int   # next chunk the consumer takes
@@ -135,6 +174,8 @@ type
     pin: MapPin             # keeps the map (and a destroyed file's index) alive for the workers
     tensors: seq[Tensor[T]] # slot storage, consumer side
     spare: seq[Tensor[T]]   # recycled slot-shaped buffers, at most `depth`
+    lent: Tensor[T]         # the whole buffer of the last short chunk taken, whose `samples`
+                            # is a view of it: given back, it is a slot buffer again
     last: int               # end of the whole range (exclusive)
     selection: seq[int]     # selection mode: the trace list (fixed for the prefetcher's life)
     path: string            # the file's, for diagnostics
@@ -147,7 +188,11 @@ type
       ## Position of the chunk's first row: its trace index, or in selection
       ## mode its position in the selection (`traceAt` maps it).
     count*: int         ## Traces in the chunk.
-    samples*: Tensor[T] ## `[count, cols]`; shorter traces are zero-padded.
+    samples*: Tensor[T]
+      ## `[count, cols]`; shorter traces are zero-padded. The caller's: no
+      ## worker writes it again. For a chunk shorter than `chunkTraces` it is
+      ## a view of the first rows of a whole chunk buffer (see the module
+      ## documentation).
     failed*: int        ## Traces that could not be decoded (left zero).
     failedRows*: seq[int] ## Those traces' rows (0-based in the chunk), ascending.
     firstSample*: int
@@ -159,10 +204,13 @@ type
     rows*: TraceRows
       ## Which trace each row is, with its keys (when the file has stored
       ## keys), sample count and channel set, in place in the index: no
-      ## `traceAt` needed. Valid until the prefetcher's `close`.
+      ## `traceAt` needed. Valid until the prefetcher's `close`, also when
+      ## the file is closed, destroyed or handed to an editor first (the
+      ## keys are then those of that moment).
 
 proc shutdown[T](sh: ptr Shared[T]) =
   # Stops and joins the workers, then frees the shared state.
+  sh.stopNow.store(true) # a worker inside a chunk gives it up (`decodeChunk`)
   acquire(sh.lock)
   sh.quit = true
   broadcast(sh.work)
@@ -185,6 +233,9 @@ proc `=destroy`[T](p: Prefetcher[T]) =
   `=destroy`(p.pin) # after the shutdown: the workers read the map
   `=destroy`(p.tensors)
   `=destroy`(p.spare)
+  # `p` is passed by reference and this is its last use (a `Tensor` has only
+  # the generic `var` destructor).
+  `=destroy`((addr p.lent)[])
   `=destroy`(p.selection) # after the shutdown: the workers read it
   `=destroy`(p.path)
   `=destroy`(p.bounds) # after the shutdown: the workers read it
@@ -219,14 +270,23 @@ func headRows[T](sh: ptr Shared[T]): int {.inline.} =
 proc traceOf[T](sh: ptr Shared[T], pos: int): int {.inline.} =
   if sh.sel != nil: sh.sel[pos] else: pos
 
-proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int) {.raises: [].} =
+proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.raises: [].} =
   # Runs without the lock: the slot is busy, so nobody else touches it.
   # `tryDecodeEntry` reports failures as a status: no exception is made on
   # this thread (one destroyed here would leak ORC's per-thread cycle buffer).
+  # False when the chunk was given up: a `seek` or a `close` made it stale.
   adviseTraces(sh.mem, sh.size, sh.entries, sh.codecs, sh.sel, s.aheadLo, s.aheadHi, sh.cols,
     sh.firstSample)
   s.failed = 0
   for k in 0..<s.count:
+    # Every 8 traces: has a `seek` or a `close` dropped this chunk? Then the
+    # consumer is waiting for the worker (a 1024-trace IBM chunk took 0.6 ms
+    # to finish: a seek while it decoded took twice as long as an idle one).
+    # Only a hint, read without the lock: `live` trails `gen`, so a stale
+    # read decodes on, and the worker decides under the lock as it always did.
+    if (k and 7) == 0 and
+        (sh.live.load(moRelaxed) != s.gen or sh.stopNow.load(moRelaxed)):
+      return false
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
     let e = sh.entries[sh.traceOf(s.first + k)]
     let st = tryDecodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols,
@@ -240,6 +300,7 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int) {.raises: []
   if sh.transform != nil:
     sh.transform(worker, s.data, s.count, sh.cols, chunkView(sh.view, s.first, s.count),
       s.failRows.toOpenArray(0, s.failed - 1), sh.user)
+  true
 
 proc worker[T](arg: (ptr Shared[T], int)) {.thread.} =
   let (sh, index) = arg
@@ -271,14 +332,18 @@ proc worker[T](arg: (ptr Shared[T], int)) {.thread.} =
         s.aheadHi = 0
       inc sh.nextChunk
       release(sh.lock)
+      var done = false
       {.cast(gcsafe).}:
-        decodeChunk(sh, s, index)
+        done = decodeChunk(sh, s, index)
       acquire(sh.lock)
-      if s.gen == sh.gen:
+      if done and s.gen == sh.gen:
         s.state = ssReady
         broadcast(sh.ready)
       else:
-        s.state = ssFree # dropped by a seek: another worker may wait for the slot
+        # Dropped by a seek (given up or not), or given up for a `close`,
+        # whose consumer takes nothing more: another worker may wait for
+        # the slot.
+        s.state = ssFree
         broadcast(sh.work)
     else:
       wait(sh.work, sh.lock)
@@ -343,10 +408,13 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   ## be closed meanwhile (the prefetcher keeps the map until its `close`),
   ## but its index must not change. Raises `ValueError` for traces outside
   ## the file (an empty range must still start in `0 .. f.len`), a closed or
-  ## tape file, a non-positive chunk size, depth or worker count, or a
-  ## negative `firstSample`.
+  ## tape file, a non-positive chunk size, depth or worker count, a
+  ## negative `firstSample`, or a window or chunk size beyond the `int` range.
   ##
-  ## Each chunk's `rows` says which trace each row is (Phase 16). With
+  ## Each chunk's `rows` says which trace each row is (Phase 16), with the
+  ## trace's keys when `f` has stored keys now: a prefetcher made before
+  ## `ensureKeys` never gets them (its chunks' `rows.hasKeys` stays false),
+  ## so close it and make a new one after `ensureKeys`. With
   ## `uniform`, a chunk never spans two channel sets or sample intervals
   ## (`TraceKeys.intervalUs`): it is cut short at the boundary, so every
   ## chunk has one interval; it needs stored keys (`ValueError` otherwise).
@@ -357,6 +425,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
   if chunkTraces <= 0 or depth <= 0 or cols < -1 or firstSample < 0 or workers <= 0:
     raiseArg("need chunkTraces > 0, depth > 0, cols >= -1, firstSample >= 0 and workers > 0")
+  if cols > high(int) - firstSample:
+    raiseArg("the sample window " & $firstSample & " + " & $cols & " lies outside the int range")
   checkSpan(traces, f.len)
   let first = traces.a
   let stop = if traces.b >= first: traces.b + 1 else: first
@@ -365,9 +435,14 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
     else: 0
   # No range (even after a seek) holds more traces than the file.
   let rows = max(1, min(chunkTraces, f.len))
+  if width > 0 and rows > high(int) div sizeof(T) div width:
+    raiseArg("chunks of " & $rows & " traces of " & $width & " samples are too large")
   let chunkBytes = rows * width * sizeof(T)
-  let depth = if chunkBytes == 0: depth
-              else: min(depth, max(workers + 1, maxRingBytes div chunkBytes))
+  # min(depth, max(workers + 1, fit)), without a sum that could overflow.
+  let fit = if chunkBytes == 0: depth else: maxRingBytes div chunkBytes
+  let depth = if fit > workers: min(depth, fit)
+              elif workers < depth: workers + 1
+              else: depth
   let sh = createShared(Shared[T])
   sh.slots = cast[ptr UncheckedArray[Slot[T]]](createShared(Slot[T], depth))
   sh.depth = depth
@@ -459,13 +534,24 @@ proc reusable[T](p: Prefetcher[T], t: Tensor[T]): bool =
     t.offset == 0 and t.is_C_contiguous and not t.storage.isNil and
     t.storage.isMemOwner and isUniqueRef(t.storage)
 
+proc giveBack[T](p: var Prefetcher[T], t: var Tensor[T]): bool =
+  # The caller gives `t` up: true when it can be a slot buffer (`reusable`).
+  # The `samples` of the last short chunk are a view of a whole slot buffer:
+  # that view is first replaced by the buffer itself, which the prefetcher
+  # kept (`lent`), so it is known by identity and not by its shape.
+  if not t.storage.isNil and t.storage == p.lent.storage: t = move p.lent
+  p.reusable(t)
+
 proc recycle*[T](p: var Prefetcher[T], t: sink Tensor[T]) =
   ## Gives a chunk's tensor back: a later chunk is decoded into it instead of
   ## a fresh allocation. The caller gives the buffer up (pass it with `move`;
   ## its raw data must not be used again). Dropped, as if destroyed, unless it
-  ## has the chunk shape `[chunkTraces, cols]` and nothing else shares its
-  ## storage (a copy, a view), or when `depth` buffers are already spare.
-  if p.sh != nil and p.spare.len < p.sh.depth and p.reusable(t): p.spare.add t
+  ## has the chunk shape `[chunkTraces, cols]` (or is the last short chunk
+  ## taken) and nothing else shares its storage (a copy, a view), or when
+  ## `depth` buffers are already spare.
+  if p.sh != nil and p.spare.len < p.sh.depth:
+    var buf = t
+    if p.giveBack(buf): p.spare.add buf
 
 proc recycle*[T](p: var Prefetcher[T], c: sink PrefetchChunk[T]) {.inline.} =
   ## `recycle(p, c.samples)`.
@@ -496,17 +582,26 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool) =
       e.offset, Location(file: p.path, trace: trace,
         # SEG-2: `record` indexes the codecs; the file is one record.
         record: if sh.codecs[e.record].kind == skSeg2: 0 else: int(e.record)))
-  if s.count == sh.chunkTraces:
-    if into and p.reusable(c.samples):
-      swap(c.samples, p.tensors[i])
-    else:
-      c.samples = move(p.tensors[i])
-      p.tensors[i] = if p.spare.len > 0: p.spare.pop
-        else: newTensorUninit[T](sh.chunkTraces, sh.cols)
+  if sh.cols == 0:
+    c.samples = newTensor[T](s.count, 0)
   else:
-    if into: p.recycle(move c.samples)
-    c.samples = if sh.cols == 0: newTensor[T](s.count, 0)
-      else: p.tensors[i][0..<s.count, _].clone() # the slot keeps its buffer
+    # The slot's buffer goes to the caller and the slot gets another: the
+    # caller's previous one if it gave it up (`into`) and it can be one, else
+    # a spare or a fresh one.
+    var next: Tensor[T]
+    if into and p.giveBack(c.samples): next = move c.samples
+    elif p.spare.len > 0: next = p.spare.pop
+    else: next = newTensorUninit[T](sh.chunkTraces, sh.cols)
+    swap(next, p.tensors[i])
+    if s.count == sh.chunkTraces:
+      c.samples = move next
+    else:
+      # A short chunk (the first with `quickFirst`, the last of a range, a
+      # uniform cut) is a view of the buffer's first rows. A copy of them
+      # cost the consumer thread two allocations and a page fault per 4 KiB
+      # after every seek (256 rows of 12000 samples: 260 -> 86 us).
+      c.samples = next[0 ..< s.count, _]
+      p.lent = move next
   acquire(sh.lock)
   s.data = rawData(p.tensors[i])
   s.state = ssFree
@@ -575,8 +670,10 @@ iterator chunks*[T](p: var Prefetcher[T]): PrefetchChunk[T] =
 
 proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   ## Restarts read-ahead over the positions `span` (traces in range mode).
-  ## Chunks decoded for the old positions are dropped; one being decoded
-  ## finishes in the background and is discarded. A no-op after `close`.
+  ## Chunks decoded for the old positions are dropped, and a worker inside
+  ## one gives it up within 8 traces (before the `transform`), so the first
+  ## chunk of the new span arrives as fast as after an idle seek. A no-op
+  ## after `close`.
   ## Raises `ValueError` for positions out of range (an empty span must
   ## still start in `0 .. len`).
   if p.sh == nil: return
@@ -590,6 +687,7 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   if sh.uniform: bounds = uniformBounds(sh.view, first, stop, sh.chunkTraces, sh.headRows)
   acquire(sh.lock)
   inc sh.gen
+  sh.live.store(sh.gen)
   sh.start = first
   sh.stop = stop
   sh.nextChunk = 0
@@ -604,12 +702,14 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   release(sh.lock)
 
 proc close*[T](p: var Prefetcher[T]) =
-  ## Stops and joins the workers and frees the ring. Idempotent.
+  ## Stops and joins the workers (one inside a chunk gives it up within 8
+  ## traces) and frees the ring. Idempotent.
   if p.sh != nil:
     shutdown(p.sh)
     p.sh = nil
     p.pin = MapPin() # the last pin unmaps a file closed meanwhile
     p.tensors.setLen 0
     p.spare.setLen 0
+    p.lent = default(Tensor[T])
     p.selection.setLen 0
     p.bounds.setLen 0

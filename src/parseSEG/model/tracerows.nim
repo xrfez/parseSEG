@@ -16,7 +16,9 @@
 ## ```
 ##
 ## A view of a file without stored keys still gives each row's trace,
-## sample count and channel set; its `traceKeys` raises (`hasKeys`).
+## sample count and channel set; its `traceKeys` raises (`hasKeys`). It
+## stays without keys when the file builds them later (`ensureKeys`): make
+## the view again then.
 ## `keysAt` is the non-raising form, for code that checked `hasKeys` once
 ## and must not raise (a `{.raises: [].}` kernel, a `ChunkTransform`).
 ##
@@ -24,7 +26,10 @@
 ## arrays it was made from) and is valid while they stay alive and keep
 ## their size: until the file is closed, and, for a selection, while the
 ## trace list lives. Keys may change in place under a view (`applySurvey`,
-## `applyGeometry`, editor writes); `keysRevision` says that they did.
+## `applyGeometry`, editor writes); `keysRevision` says that they did. The
+## `rows` of a prefetcher's chunks live as long as the prefetcher, and show
+## the keys as they were when the file was closed or handed to an editor
+## before it.
 ##
 ## **Threads.** A view is a plain object with no reference-counted parts: it
 ## can be copied into worker threads, and any number of threads may read

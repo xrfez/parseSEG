@@ -105,16 +105,55 @@ func isSeismic*(ix: TraceIndex, i: int): bool =
   elif ix.segdRecords[e.record].isRev3: e.channelType in {0x10'u8, 0x11'u8}
   else: e.channelType == 1
 
+const SmallCount = 8
+  ## Distinct stations that are told apart by comparing them, before a hash
+  ## set is made.
+
+type StationCount = object
+  # The distinct stations seen. A post-stack volume has one trace per
+  # gather and a shot gather one source: the first few stations are kept in
+  # an array and compared one by one, and only a ninth makes the hash set
+  # (two sets per gather cost 492 ns per trace of a post-stack volume).
+  n: int ## Stations in `first`; `SmallCount + 1` once `more` holds them all.
+  first: array[SmallCount, StationId]
+  more: HashSet[StationId]
+
+proc incl(c: var StationCount, id: StationId) =
+  if c.n > SmallCount:
+    c.more.incl id
+  else:
+    for i in 0 ..< c.n:
+      if c.first[i] == id: return
+    if c.n < SmallCount:
+      c.first[c.n] = id
+    else:
+      for x in c.first: c.more.incl x
+      c.more.incl id
+    inc c.n
+
+func len(c: StationCount): int {.inline.} =
+  if c.n > SmallCount: c.more.len else: c.n
+
 proc classify*(ix: TraceIndex, s: Slice[int]): Gather =
   ## Counts the distinct sources and receivers of the seismic traces in `s`
   ## (all traces, if none is seismic) and derives the gather kind from them;
   ## `gkUnknown` when the receivers are unknown.
   ix.requireKeys()
   result = Gather(traces: s)
+  if s.a == s.b:
+    # One trace (every gather of a post-stack volume): nothing to count. It
+    # is a shot when its receiver is known, whether it is seismic or not.
+    template k: untyped = ix.keys[s.a]
+    result.sources = ord(knownSource(k))
+    result.receivers = ord(knownReceiver(k))
+    result.kind = if result.receivers == 0: gkUnknown else: gkShot
+    return
   var anySeismic = false
   for i in s:
-    if ix.isSeismic(i): anySeismic = true
-  var src, rcv: HashSet[StationId]
+    if ix.isSeismic(i):
+      anySeismic = true
+      break
+  var src, rcv: StationCount
   var n = 0
   var components: set[uint8]
   for i in s:

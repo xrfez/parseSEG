@@ -117,7 +117,10 @@ proc adviseTraces*(mem: ptr UncheckedArray[byte], size: int64,
     entries[if sel == nil: pos else: sel[pos]]
   template window(e: TraceEntry, a, b: var int64) =
     let c = codecs[e.record]
-    let n = min(int(e.numSamples), first + cols)
+    let ns = int(e.numSamples)
+    # `min(ns, first + cols)` without the sum, which overflows for a window
+    # that ends at `high(int)`.
+    let n = if first >= ns or cols >= ns - first: ns else: first + cols
     a = e.sampleOffset + int64(c.dataBytes(min(first, n)))
     b = e.sampleOffset + int64(c.dataBytes(n))
   var a, b: int64

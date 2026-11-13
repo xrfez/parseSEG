@@ -105,10 +105,11 @@ block cached_index_equals_rebuilt:
         k.saveIndex(kc)
         var nk = reopen(p, kc)
         doAssert nk.fromCache and (not nk.hasKeys or nk.len == 0), what
-        # Keys walk every header: the log is that of a full walk.
-        var full = openSeismic(p, opts = OpenOptions(verify: vfFull))
-        sameIndex(nk, full, what & " from a keys cache")
-        full.close()
+        # Keys no longer make the open walk: the index and its log are those
+        # of the default open (sampled for a fixed-length SEG-Y file).
+        var plain = openSeismic(p)
+        sameIndex(nk, plain, what & " from a keys cache")
+        plain.close()
         nk.close()
         k.close()
       c.close()
@@ -195,8 +196,8 @@ block stale_options_and_path:
 block stale_version_or_schema:
   let (p, cache) = fresh("version.sgy")
   let s = readFile(cache)
-  doAssert "(version 2)" in s
-  writeFile(cache, s.replace("(version 2)", "(version 3)"))
+  doAssert "(version 3)" in s
+  writeFile(cache, s.replace("(version 3)", "(version 4)"))
   rebuiltBecause(p, cache, "another version")
   let i = s.find("(schema \"") + 9
   var t = s
@@ -223,6 +224,12 @@ block damaged_caches:
   writeFile(cache, u)
   rebuiltBecause(p, cache, "corrupt")
   writeFile(cache, "")
+  rebuiltBecause(p, cache, "no header")
+  # A cache that starts with NUL: what a crash between `saveIndex`'s rename
+  # and its data reaching the disk can leave (a zero-filled file).
+  writeFile(cache, newString(4096))
+  rebuiltBecause(p, cache, "no header")
+  writeFile(cache, "\0")
   rebuiltBecause(p, cache, "no header")
   writeFile(cache, "(.nif27)\n(diagnostics)\n\0garbage")
   rebuiltBecause(p, cache, "not an index cache")

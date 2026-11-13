@@ -29,7 +29,10 @@ by default (`verify = vfSampled`) its index is computed from the file size and 6
 headers (the first, the last and 62 between) are checked against the binary header, so 10 M
 traces open in about 20 ms warm and 50 ms cold, against 1.7 s and 22 s for the walk. The log
 then has an `indexSampled` info. The first read of each page then maps it (a few µs, once
-per page), which the walk used to do at open. A sampled header that disagrees, keys, Rev 2 extension
+per page), which the walk used to do at open. With `keys = true` such a file is indexed the
+same way and its keys are then read from the mapped headers in one pass (about 130 ns per
+trace, against 260 for the walk): the same keys, without the walk's per-trace warnings. A
+sampled header that disagrees, Rev 2 extension
 headers or trailers, and a size that is not a whole number of traces all fall back to the
 walk; `OpenOptions(verify: vfFull)` always walks, and also reports a mismatch in a header that was not
 sampled (`parseSEG diag` opens that way). Pass a
@@ -235,8 +238,9 @@ f.close()
 
 ## Header columns and keys on demand
 
-Stored keys (`keys = true`) cost about 184 bytes and 220 ns per trace at open (SEG-Y; 290 ns
-in the release build). A viewer that
+Stored keys (`keys = true`) cost about 184 bytes per trace, and at open about 130 ns per
+trace for a fixed-length SEG-Y file and 70 ns on top of the walk for other SEG-Y files with
+the standard layout (about 220 ns when a Layout stanza moves fields). A viewer that
 shows geometry only for the traces on screen can open without them and ask for what it
 shows: `traceKeys(traces)` (or `traceKeysInto`, into a reused buffer) makes the keys on
 demand, exactly as `keys = true` would, and `traceFieldColumn(name, traces)` reads one
@@ -264,6 +268,12 @@ When the user first asks for geometry of the whole file, `ensureKeys` builds the
 (as `keys = true` would, with progress and cancel). `keysRevision` goes up whenever stored
 keys change (`ensureKeys`, a survey join, a header edit through a `HeaderEditor`): tag what
 is drawn from keys (moveout overlays, binning, a map) with it and rebuild when it changes.
+
+A `TraceRows` view and a `Prefetcher` take their pointers to the keys when they are made.
+Those made while the file had stored keys see every later change in place. Those made
+before `ensureKeys` have no keys and never get them (`rows.hasKeys` stays false, `traceKeys`
+raises `ValueError`): after `ensureKeys`, call `rowsOf` again, and close the session's
+prefetcher and make a new one.
 
 ```nim
 import parseSEG
@@ -321,17 +331,34 @@ f.close()
   `firstSample`). Rows are zero past a trace's end.
 - A trace that cannot be decoded is a zero row, counted in `c.failed`, with an error in
   `c.log` that names the trace.
-- One worker decodes IEEE at about 21 GB/s, but IBM float (6) and SEG-D 8015 (4.5) at one
-  core's speed: `workers = 4` gives about 22 and 16 GB/s. Chunks still arrive in order.
+- One worker decodes IEEE at about 21 GB/s, but IBM float (13 in a build that targets
+  AVX2, 6 without) and SEG-D 8015 (4.5) at one core's speed: `workers = 4` gives about 22
+  and 16 GB/s. Chunks still arrive in order.
 - The ring is capped at `maxRingBytes` (default `DefaultRingBytes`, 4 MiB; at least
   `workers + 1` chunks), so a chunk is still in the CPU cache when you take it: a 16 MB ring
   ran at 60 % of the speed. `p.depth` is the depth used.
 - `quickFirst = true` makes the first chunk of the range and of each `seek` a quarter of
-  `chunkTraces`, so the first rows after a jump arrive sooner (1024-trace chunks: 0.55 ms ->
-  0.25-0.32 ms for IEEE, 1.4 -> 0.84 ms for IBM); the full-size chunks follow from there.
-- Call the prefetcher's procs from one thread. It keeps the file's map alive until its own
-  `close`, so the order in which the file and the prefetcher are closed does not matter.
-  The file's index must not change while it runs (`applySurvey`, `applyGeometry`).
+  `chunkTraces`, so the first rows after a jump arrive sooner (1024-trace chunks of 1000
+  samples: 0.27 ms -> 0.09 ms for IEEE, 0.39 -> 0.13 ms for IBM); the full-size chunks
+  follow from there. That first chunk's `samples` is a view of a whole chunk buffer: `clone`
+  it if you keep it for long.
+- A `seek` (or `close`) while a worker is still decoding the old position does not wait
+  for that chunk: the worker gives it up within 8 traces.
+- Call a prefetcher's procs from the thread that made it. It keeps the file's map alive
+  until its own `close`, so that thread may close the file and the prefetcher in either
+  order. The file's index must not change while it runs (`applySurvey`, `applyGeometry`).
+- A prefetcher made before the file is closed or handed to an editor (`openEditor(f)`)
+  goes on with the index as it was then: its chunks' `rows` show the keys of that moment,
+  not later edits, until you make it again. Stop the readers made after `openEditor` before
+  the editor writes: an edit refreshes the stored keys in place.
+- A `transform` hook runs on a worker thread, where nothing can catch a `Defect`: an index
+  out of bounds or a failed assertion in the hook ends the process. Check sizes and
+  `hasKeys` before you make the prefetcher. A chunk dropped by a `seek` is not transformed.
+- Several threads may each make, use and close their own prefetchers on one open file at
+  the same time: a background job (a stack, an export) beside the UI's read-ahead. While
+  another thread reads the file or has a prefetcher on it, do not change its index
+  (`ensureKeys`, a survey join, an editor), close it or let it go out of scope: stop the
+  job first.
 
 ### Recycle the chunk buffers
 

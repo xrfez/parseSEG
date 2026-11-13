@@ -4,7 +4,7 @@
 ## exponent in bits 30-24, 24-bit fraction in bits 23-0.
 ## value = (-1)^sign * 0.fraction * 16^(exponent - 64).
 
-import std/math
+import std/[math, os]
 import ./endians
 
 func ldexp(x: float64, e: cint): float64 {.importc: "ldexp", header: "<math.h>".}
@@ -36,6 +36,45 @@ func ibmToFloat32*(bits: uint32): float32 {.inline.} =
   ## float32 range become +/-Inf; tiny values round to subnormals or zero.
   # The exact float64 value, rounded once to float32.
   float32(ibmToFloat64(bits))
+
+func ibmToFloat32Fast*(bits: uint32): float32 {.inline.} =
+  ## `ibmToFloat32` bit for bit, without a branch or a table and in single
+  ## precision, so that a loop over it vectorizes 8 wide with AVX2
+  ## (`decodeIbm32`). The value is fraction × 2^k with k = 4·exponent − 280,
+  ## made as two multiplies by powers of two: the first (2^k1, k1 in
+  ## −125 .. 102) is exact, a 24-bit integer times a power of two that stays
+  ## normal; the second (2^k2, k2 = k − k1) rounds once, and only when the
+  ## result is subnormal or overflows to infinity. k2 stops at −126, the
+  ## smallest scale that is a normal number: that is reached for k below
+  ## −251 only, where the value is under 2^−227 and rounds to 0 either way.
+  ## The sign rides on the first scale and is dropped for a zero fraction
+  ## (+0, as `ibmToFloat64`).
+  let frac = bits and 0x00FF_FFFF'u32
+  let k = 4'i32 * cast[int32]((bits shr 24) and 0x7F'u32) - 280'i32
+  let k1 = max(-125'i32, min(k, 102'i32))
+  let k2 = max(k - k1, -126'i32)
+  let sign = (bits shr 31) and uint32(frac != 0)
+  let f1 = cast[float32]((cast[uint32](k1 + 127'i32) shl 23) or (sign shl 31))
+  let f2 = cast[float32](cast[uint32](k2 + 127'i32) shl 23)
+  (float32(cast[int32](frac)) * f1) * f2
+
+const cpuHeader = currentSourcePath().parentDir / "cpu.h"
+let avx2Target {.importc: "PARSESEG_AVX2", header: cpuHeader.}: cint
+  # 1 when the C compiler targets AVX2 (`-march=x86-64-v3`, or native on
+  # such a CPU), else 0: a C constant, so the branch below folds away.
+
+template decodeIbm32*(d: ptr UncheckedArray[float32], n: int, word: untyped) =
+  ## `d[i] = ibmToFloat32(word(i))` for `i` in `0 ..< n`, where `word(i)` is
+  ## the IBM float bits of sample `i` (an unchecked load). When the C
+  ## compiler targets AVX2 the loop runs `ibmToFloat32Fast`, 8 samples at a
+  ## time: 6.3 -> 13 GB/s on a file of IBM floats (Zen 2, x86-64-v3). A
+  ## baseline SSE2 build keeps the table (5.3 GB/s): the same kernel is 3
+  ## times slower there (1.8 GB/s) without 32-bit `max`/`min` and variable
+  ## shifts. Both give the same bits.
+  if avx2Target != 0:
+    for i in 0 ..< n: d[i] = ibmToFloat32Fast(word(i))
+  else:
+    for i in 0 ..< n: d[i] = ibmToFloat32(word(i))
 
 func float32ToIbm*(x: float32): uint32 =
   ## Converts an IEEE single to IBM float bits with round-to-nearest.

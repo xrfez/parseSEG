@@ -133,7 +133,12 @@ A `transform` hook (`ChunkTransform`, a `{.nimcall.}` proc with a `user` pointer
 each chunk on its worker thread right after decoding, while the samples are still in the CPU
 cache. A transform must not raise, so it reads keys with `keysAt(row)`, the non-raising
 form of `traceKeys` for code that has checked `hasKeys` once (a view without keys is then a
-programming error, an `AssertionDefect` with bound checks on). Files opened without keys can build them later with `ensureKeys`; `keysRevision` goes
+programming error, an `AssertionDefect` with bound checks on). A `Defect` raised in a
+transform ends the process (it is raised on a worker thread, where nothing can catch it), so
+the kernels a transform calls must be free of Defects for any input: check sizes and
+`hasKeys` before the prefetcher is made. Files opened without keys can build them later with
+`ensureKeys`; views and prefetchers made before that call stay without keys, so make them
+again. `keysRevision` goes
 up whenever keys change (a survey join, a header edit), so derived data can be tagged with it.
 SEG-Y datum and statics fields come per trace from `traceStatics(f, traces)`.
 

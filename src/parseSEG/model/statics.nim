@@ -4,6 +4,11 @@
 ## (elevations and depths by bytes 69-70, times by the time scalar of bytes
 ## 215-216 from Rev 1 on) and Trace Header Extension 1's copies override the
 ## standard fields when non-zero. NaN where unknown, and for SEG-D and SEG-2.
+## The two datum elevations are unknown when both standard fields (bytes
+## 53-60) are 0, which is how a header that was never given a datum looks
+## (a zero pair is "not set", as for coordinates), unless Extension 1 gives
+## them: a datum at elevation 0 beside a known one, or in Extension 1, is
+## still read as 0.
 ##
 ## ```nim
 ## var f = openSeismic("line.sgy")
@@ -21,7 +26,9 @@ type
     ## The elevation and statics fields of one SEG-Y trace, scaled.
     srcDepth*: float64   ## Source depth below the surface (bytes 49-52; Ext1 57-64).
     rcvDepth*: float64   ## Receiver depth below its surface (Ext1 41-48 only).
-    rcvDatum*: float64   ## Seismic datum elevation at the receiver (53-56; Ext1 65-72).
+    rcvDatum*: float64
+      ## Seismic datum elevation at the receiver (53-56; Ext1 65-72); NaN with
+      ## `srcDatum` when both standard fields are 0 (unset).
     srcDatum*: float64   ## Seismic datum elevation at the source (57-60; Ext1 73-80).
     weatheringVelocity*, subweatheringVelocity*: float64 ## Bytes 91-92, 93-94 (ft/s or m/s).
     srcUphole*, rcvUphole*: float64 ## Uphole times at source and group, ms (95-96, 97-98).
@@ -48,8 +55,12 @@ proc staticsOf(f: SeismicFile, trace: int): TraceStatics =
   template elev(v: untyped): float64 = applyScalar(v, h.elevationScalar)
   template ms(v: untyped): float64 = applyScalar(v, time)
   result.srcDepth = elev(h.sourceDepth)
-  result.rcvDatum = elev(h.receiverDatumElevation)
-  result.srcDatum = elev(h.sourceDatumElevation)
+  # Both datum fields 0: never filled in (most files), not a datum at sea
+  # level. Reported as 0, a datum correction would silently be made to
+  # elevation 0 instead of the datum the caller asks for.
+  if h.receiverDatumElevation != 0 or h.sourceDatumElevation != 0:
+    result.rcvDatum = elev(h.receiverDatumElevation)
+    result.srcDatum = elev(h.sourceDatumElevation)
   result.weatheringVelocity = float64(h.weatheringVelocity)
   result.subweatheringVelocity = float64(h.subweatheringVelocity)
   result.srcUphole = ms(h.upholeTimeSource)
@@ -90,6 +101,7 @@ proc traceStaticsInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[Tr
 
 proc traceStatics*(f: SeismicFile, traces: Slice[int]): seq[TraceStatics] =
   ## The statics of a range of traces (see `traceStaticsInto`).
+  checkSpan(traces, f.len) # before its length is taken: that can overflow
   result = newSeq[TraceStatics](spanLen(traces))
   f.traceStaticsInto(traces, result)
 

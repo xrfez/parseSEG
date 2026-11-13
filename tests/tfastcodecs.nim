@@ -56,6 +56,46 @@ block ibm_float_matches_the_ldexp_reference:
   doAssert ibmToFloat32(0x4110_0000'u32) == 1.0 and ibmToFloat32(0xC276_A000'u32) == -118.625
   doAssert checked == 256 * 11
 
+block ibm_float32_kernel_is_bit_identical:
+  # `ibmToFloat32Fast` (two multiplies by powers of two, no table: the loop
+  # the decoders run 8 wide when the build targets AVX2) against
+  # `ibmToFloat32`: every sign and exponent byte with fractions at the edges
+  # of the rounding cases and a few thousand random ones, and random words.
+  # Then through the decoders themselves, in every byte order and from odd
+  # offsets and lengths (run this file with --passC:-march=x86-64-v3 as well:
+  # only then do the decoders use the kernel).
+  var fracs = @[0'u32, 1, 2, 3, 5, 0x7FFFFF, 0x800000, 0x800001, 0xFFFFFE, 0xFFFFFF, 0x100000,
+    0x0FFFFF, 0x555555, 0xAAAAAA]
+  for i in 0 ..< 24:
+    fracs.add 1'u32 shl i
+    fracs.add (1'u32 shl i) + 1
+    fracs.add 0xFFFFFF'u32 shr i
+  for i in 0 ..< 4000: fracs.add uint32(rng.rand(0xFFFFFF))
+  var words: seq[uint32]
+  for se in 0'u32 .. 255:
+    for f in fracs: words.add (se shl 24) or f
+  for i in 0 ..< 1_000_000: words.add uint32(rng.next() shr 32)
+  doAssert words.len == 256 * 4086 + 1_000_000
+  var want = newSeq[float32](words.len)
+  for i, w in words:
+    want[i] = ibmToFloat32(w)
+    doAssert sameBits(ibmToFloat32Fast(w), want[i]), $w
+  var got = newSeq[float32](words.len)
+  for o in ByteOrder:
+    var bytes = newSeq[byte](4 * words.len)
+    for i, w in words: putNum(bytes, 4 * i, w, o)
+    decodeSamples(sfIbm32, bytes, got, o)
+    for i in 0 ..< words.len: doAssert sameBits(got[i], want[i]), $o & " " & $words[i]
+    if o == boBig:
+      decodeSamples(sd8048, bytes, got)
+      for i in 0 ..< words.len: doAssert sameBits(got[i], want[i]), "8048 " & $words[i]
+    # Odd starts and lengths: the vector loop's head and tail.
+    for first in 0 ..< 9:
+      for n in [1, 2, 7, 8, 9, 15, 16, 17, 31, 33, 100]:
+        var part = newSeq[float32](n)
+        decodeSamples(sfIbm32, bytes.toOpenArray(4 * first, 4 * (first + n) - 1), part, o)
+        for i in 0 ..< n: doAssert sameBits(part[i], want[first + i]), $o & " " & $first
+
 proc refSegy[T](f: SampleFormat, b: openArray[byte], n: int, o: ByteOrder): seq[T] =
   # One sample at a time through the checked `getNum` accessors.
   result = newSeq[T](n)

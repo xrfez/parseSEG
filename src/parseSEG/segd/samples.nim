@@ -171,9 +171,11 @@ proc decodeSamplesRaw*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[by
       let v = T(w and 0x1FFF) * pow2(T, 4 * cast[int32]((w shr 13) and 3) - 13)
       d[i] = withSign(T, v, w shr 15)
   of sd8048:
-    for i in 0..<n:
-      when T is float64: d[i] = ibmToFloat64(loadNum[uint32](s, 4 * i, boBig))
-      else: d[i] = ibmToFloat32(loadNum[uint32](s, 4 * i, boBig))
+    when T is float64:
+      for i in 0..<n: d[i] = ibmToFloat64(loadNum[uint32](s, 4 * i, boBig))
+    else:
+      template word(i: int): uint32 = loadNum[uint32](s, 4 * i, boBig)
+      decodeIbm32(d, n, word) # 8 wide when the build targets AVX2
   of sd8036:
     for i in 0..<n: d[i] = T(cast[int32](loadU24(s, 3 * i, boBig) shl 8) shr 8)
   of sd8038:

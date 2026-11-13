@@ -39,6 +39,8 @@ type SegyCase = object
   code, delay, tmScal: int16
   dt: uint16
   iline, xline: int32
+  chan, espnum, sp: int32 # bytes 13-16, 17-20, 197-200
+  spScal: int16           # bytes 201-202
 
 proc put16(b: var seq[byte], at: int, v: int) =
   b[at] = byte((v shr 8) and 0xFF)
@@ -61,6 +63,10 @@ proc writeSegy(path: string, major: int, fixed: bool, binDt: int,
   for t, c in cases:
     let at = 3600 + t * 244
     b.put32(at, t + 1)
+    b.put32(at + 12, c.chan)
+    b.put32(at + 16, c.espnum)
+    b.put32(at + 196, c.sp)
+    b.put16(at + 200, c.spScal)
     b.put16(at + 28, c.code)
     b.put16(at + 108, c.delay)
     b.put16(at + 114, 1)
@@ -134,6 +140,128 @@ block segy_inline_crossline_from_a_layout_stanza:
   f.close()
   checkAgree(p)
 
+block segy_channel_follows_the_layout:
+  # survey.sgy's Layout stanza keeps the inline number in bytes 13-16 (as
+  # the Inglewood sample does), so those bytes are no channel number.
+  for keys in [true, false]:
+    var f = openSeismic(demoDir() / "survey.sgy", keys = keys)
+    for k in f.traceKeys([0, 5, 199]): doAssert k.channel.isNaN and k.inline == 1001, $k.channel
+    f.close()
+  # A standard header: bytes 13-16.
+  let p = tmp / "chan.sgy"
+  writeSegy(p, 1, fixed = false, binDt = 2000, [SegyCase(code: 1, dt: 2000, chan: 7),
+    SegyCase(code: 1, dt: 2000)])
+  for keys in [true, false]:
+    var f = openSeismic(p, keys = keys)
+    let k = f.traceKeys(0 ..< f.len)
+    doAssert k[0].channel == 7 and k[1].channel.isNaN # 0 is "not set"
+    f.close()
+
+block segy_source_point_keeps_its_fraction:
+  # The energy source point (17-20) is an integer; the scaled shotpoint
+  # (197-202) carries the fraction when it is the same point (the library's
+  # converters write 100 and 9950 / -100 for point 99.5).
+  let p = tmp / "sp.sgy"
+  writeSegy(p, 1, fixed = false, binDt = 2000, [
+    SegyCase(code: 1, dt: 2000, espnum: 100, sp: 9950, spScal: -100),
+    SegyCase(code: 1, dt: 2000, espnum: 100),                    # only the energy source point
+    SegyCase(code: 1, dt: 2000, espnum: 100, sp: 250, spScal: 1), # a shotpoint of its own
+    SegyCase(code: 1, dt: 2000, sp: 2505, spScal: -10),          # only the shotpoint
+    SegyCase(code: 1, dt: 2000, espnum: 100, sp: 100),
+    SegyCase(code: 1, dt: 2000, espnum: 99, sp: 9860, spScal: -100)]) # 98.6 rounds to 99
+  for keys in [true, false]:
+    var f = openSeismic(p, keys = keys)
+    let k = f.traceKeys(0 ..< f.len)
+    doAssert k[0].srcPoint == 99.5, $k[0].srcPoint
+    doAssert k[1].srcPoint == 100 and k[2].srcPoint == 100 and k[3].srcPoint == 250.5
+    doAssert k[4].srcPoint == 100 and k[5].srcPoint == 98.6
+    f.close()
+
+block converted_segd_keeps_its_stations:
+  # `convertFile` stores a SEG-D trace's stations in the PSEGD001 header and
+  # names them in a Layout stanza (sht_line, sht_point, sht_index, rec_line,
+  # rec_point, rec_index): the SEG-Y keys read them back.
+  for name in ["63.sgd", "inova_rev30_5traces.sgd"]:
+    let src = sampleOr(name)
+    let dst = tmp / (name & ".sgy")
+    doAssert not convertFile(src, dst, ConvertOptions()).isFatal
+    var a = openSeismic(src, keys = true)
+    for keys in [true, false]:
+      var b = openSeismic(dst, keys = keys)
+      doAssert a.len == b.len
+      let got = b.traceKeys(0 ..< b.len)
+      var sources, receivers = 0
+      for i in 0 ..< a.len:
+        let x = a.traceKeys(i)
+        let y = got[i]
+        doAssert same(x.srcLine, y.srcLine) and same(x.srcPoint, y.srcPoint) and
+          x.srcIndex == y.srcIndex, name & " source of trace " & $i
+        doAssert same(x.rcvLine, y.rcvLine) and same(x.rcvPoint, y.rcvPoint) and
+          x.rcvIndex == y.rcvIndex, name & " receiver of trace " & $i
+        if not y.srcLine.isNaN: inc sources
+        if not y.rcvLine.isNaN: inc receivers
+      doAssert sources > 0 and receivers > 0, name
+      b.close()
+    a.close()
+    checkAgree(dst)
+
+sampleBlock converted_63_has_its_fractional_source_point:
+  # 63.sgd: source line 13, point 99.5; receiver line 13.
+  var b = openSeismic(tmp / "63.sgd.sgy", keys = true)
+  let k = b.traceKeys(0)
+  doAssert k.srcLine == 13 and k.srcPoint == 99.5 and k.rcvLine == 13, $k
+  b.close()
+  # Without the station header the scaled shotpoint still gives the fraction.
+  let plain = tmp / "63plain.sgy"
+  doAssert not convertFile(exampleDir / "63.sgd", plain,
+    ConvertOptions(stationHeader: false)).isFatal
+  var c = openSeismic(plain, keys = true)
+  doAssert c.traceKeys(0).srcPoint == 99.5 and c.traceKeys(0).srcLine.isNaN
+  c.close()
+
+proc allocs(): int =
+  ## Allocations so far (`tkeyfields.nims` turns the counter on).
+  cast[tuple[allocs, deallocs: int]](getAllocStats()).allocs
+
+proc keysOnDemandResolveTheLayoutOnce() =
+  # The layout plan is made when the file is opened, not per call: a call
+  # for one trace allocated 70 times and took 6 to 9 µs. It still follows
+  # what an editor changes in the binary header, and a layout that code
+  # replaces in the index.
+  let p = tmp / "plan.sgy"
+  writeSegy(p, 2, fixed = true, binDt = 4000, segyCases)
+  var f = openSeismic(p)
+  var one: array[1, TraceKeys]
+  var t0: array[1, float64]
+  f.traceKeysInto([1], one) # warm
+  let a0 = allocs()
+  var sum = 0.0
+  for i in 0 ..< 1000:
+    f.traceKeysInto([i mod f.len], one)
+    f.startTimeMsInto([i mod f.len], t0)
+    sum += f.startTimeMs(i mod f.len) + one[0].intervalUs + t0[0]
+  when defined(nimAllocStats): doAssert allocs() - a0 == 0, $(allocs() - a0)
+  doAssert sum > 0 and one[0].intervalUs == 4000
+  # The binary header's interval of a fixed-length file, edited.
+  if fileExists(p & ".edits.nif"): removeFile(p & ".edits.nif")
+  var ed = openEditor(move f)
+  doAssert ed.setFileField("binary.sampleInterval", 1000), $ed.log
+  doAssert ed.file.traceKeys([1])[0].intervalUs == 1000
+  doAssert ed.file.traceKeys([1])[0].t0Ms == 250 and ed.file.startTimeMs(1) == 250
+  var g = release(ed)
+  # A layout put in place of the file's: trace code and delay elsewhere.
+  doAssert g.traceKeys([1])[0].traceCode == 2
+  g.index.segy.layout = merge(standardLayout(g.index.segy.revision), parseLayout(
+    """<segy-layout><entry name="other" byte="29" type="int2"/>
+       <entry name="other2" byte="109" type="int2"/></segy-layout>"""))
+  let k = g.traceKeys([1])[0]
+  doAssert k.traceCode == 0 and k.status == tsUnknown and k.t0Ms.isNaN, $k
+  doAssert g.startTimeMs(1).isNaN
+  g.close()
+
+block segy_keys_on_demand_resolve_the_layout_once:
+  keysOnDemandResolveTheLayoutOnce()
+
 # ------------------------------------------------------------------ SEG-D --
 
 proc rewriteSegd(src, dst: string, edit: proc (d: var SegdData)) =
@@ -184,6 +312,72 @@ block segd_rev3_auxiliary_and_start_time:
   f.close()
   checkAgree(p)
 
+block segd_zeroed_stations_are_unknown:
+  # A source or receiver station whose line and point are both 0 is a header
+  # left empty, not station 0/0 (the SEG-Y keys treat zeros the same way).
+  # record.sgd (Rev 2): one trace, source 20/99.5/1, receiver 10/104/1.
+  proc keysOf(name: string, edit: proc (d: var SegdData)): TraceKeys =
+    let p = tmp / name
+    rewriteSegd(demoDir() / "record.sgd", p, edit)
+    for keys in [true, false]:
+      var f = openSeismic(p, keys = keys)
+      result = f.traceKeys([0])[0]
+      f.close()
+    var f = openSeismic(p, keys = true)
+    doAssert f.traceKeys(0).srcIndex == result.srcIndex and
+      same(f.traceKeys(0).rcvLine, result.rcvLine) # stored keys and keys on demand agree
+    f.close()
+  let plain = keysOf("zero0.sgd") do (d: var SegdData): discard
+  doAssert plain.srcLine == 20 and plain.srcPoint == 99.5 and plain.srcIndex == 1
+  doAssert plain.rcvLine == 10 and plain.rcvPoint == 104 and plain.rcvIndex == 1
+  let noSource = keysOf("zero1.sgd") do (d: var SegdData):
+    d.records[0].record.sourceHeaders[0].sourceLineNumber = 0
+    d.records[0].record.sourceHeaders[0].sourcePointNumber = 0
+  doAssert noSource.srcLine.isNaN and noSource.srcPoint.isNaN and noSource.srcIndex == 0
+  doAssert noSource.rcvLine == 10 and noSource.rcvPoint == 104 and noSource.rcvIndex == 1
+  let noReceiver = keysOf("zero2.sgd") do (d: var SegdData):
+    var e = d.records[0].traces[0].ext1.get
+    e.receiverLineNumber = 0
+    e.receiverPointNumber = 0
+    d.records[0].traces[0].ext1 = some(e)
+  doAssert noReceiver.rcvLine.isNaN and noReceiver.rcvPoint.isNaN and noReceiver.rcvIndex == 0
+  doAssert noReceiver.srcLine == 20 and noReceiver.srcPoint == 99.5 and noReceiver.srcIndex == 1
+  let pointZero = keysOf("zero3.sgd") do (d: var SegdData): # a line with point 0 is a station
+    var e = d.records[0].traces[0].ext1.get
+    e.receiverPointNumber = 0
+    d.records[0].traces[0].ext1 = some(e)
+  doAssert pointZero.rcvLine == 10 and pointZero.rcvPoint == 0 and pointZero.rcvIndex == 1
+  # shot.sgd (Rev 3): source 1/1001/1 from a general header block, receivers
+  # 100/201 and 100/202 on traces 3 and 4.
+  let p3 = tmp / "zero4.sgd"
+  rewriteSegd(demoDir() / "shot.sgd", p3) do (d: var SegdData):
+    var e = d.records[0].traces[3].ext1Rev3.get
+    e.receiverLineNumber = 0
+    e.receiverPointNumber = 0
+    d.records[0].traces[3].ext1Rev3 = some(e)
+  for keys in [true, false]:
+    var g = openSeismic(p3, keys = keys)
+    let k = g.traceKeys(0 ..< g.len)
+    doAssert k[3].rcvLine.isNaN and k[3].rcvPoint.isNaN and k[3].rcvIndex == 0, $k[3]
+    doAssert k[4].rcvLine == 100 and k[4].rcvPoint == 202 and k[4].rcvIndex == 1
+    doAssert k[3].srcLine == 1 and k[3].srcPoint == 1001 and k[3].srcIndex == 1
+    g.close()
+  # Its Source Description block with line and point zeroed (bytes 4-13).
+  let p4 = tmp / "zero5.sgd"
+  rewriteSegd(demoDir() / "shot.sgd", p4) do (d: var SegdData):
+    var zeroed = 0
+    for at, bt in blocks(d.records[0].record.generalBlocks):
+      if bt in {0x15'u8..0x19'u8, 0x1F'u8}:
+        for i in at + 3 ..< at + 13: d.records[0].record.generalBlocks[i] = 0
+        inc zeroed
+    doAssert zeroed == 1
+  var h = openSeismic(p4, keys = true)
+  for i in 0 ..< h.len:
+    let k = h.traceKeys(i)
+    doAssert k.srcLine.isNaN and k.srcPoint.isNaN and k.srcIndex == 0, $k
+  doAssert h.traceKeys(4).rcvPoint == 202
+  h.close()
+
 # ------------------------------------------------------------------ SEG-2 --
 
 block seg2_delay_interval_and_trace_type:
@@ -226,9 +420,9 @@ block old_index_cache_is_rebuilt:
   g.close()
   # The same cache labelled with the previous format version.
   var s = readFile(cache)
-  let v = s.find("(version 2)")
+  let v = s.find("(version 3)")
   doAssert v >= 0
-  s[v + len("(version ")] = '1'
+  s[v + len("(version ")] = '2'
   writeFile(cache, s)
   var h = openSeismic(p, keys = true, opts = OpenOptions(cache: cache))
   doAssert not h.fromCache and h.len == segyCases.len and h.traceKeys(1).t0Ms == 250
