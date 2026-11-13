@@ -269,6 +269,72 @@ block segd_rev3_auxiliary_and_start_time:
   f.close()
   checkAgree(p)
 
+block segd_zeroed_stations_are_unknown:
+  # A source or receiver station whose line and point are both 0 is a header
+  # left empty, not station 0/0 (the SEG-Y keys treat zeros the same way).
+  # record.sgd (Rev 2): one trace, source 20/99.5/1, receiver 10/104/1.
+  proc keysOf(name: string, edit: proc (d: var SegdData)): TraceKeys =
+    let p = tmp / name
+    rewriteSegd(demoDir() / "record.sgd", p, edit)
+    for keys in [true, false]:
+      var f = openSeismic(p, keys = keys)
+      result = f.traceKeys([0])[0]
+      f.close()
+    var f = openSeismic(p, keys = true)
+    doAssert f.traceKeys(0).srcIndex == result.srcIndex and
+      same(f.traceKeys(0).rcvLine, result.rcvLine) # stored keys and keys on demand agree
+    f.close()
+  let plain = keysOf("zero0.sgd") do (d: var SegdData): discard
+  doAssert plain.srcLine == 20 and plain.srcPoint == 99.5 and plain.srcIndex == 1
+  doAssert plain.rcvLine == 10 and plain.rcvPoint == 104 and plain.rcvIndex == 1
+  let noSource = keysOf("zero1.sgd") do (d: var SegdData):
+    d.records[0].record.sourceHeaders[0].sourceLineNumber = 0
+    d.records[0].record.sourceHeaders[0].sourcePointNumber = 0
+  doAssert noSource.srcLine.isNaN and noSource.srcPoint.isNaN and noSource.srcIndex == 0
+  doAssert noSource.rcvLine == 10 and noSource.rcvPoint == 104 and noSource.rcvIndex == 1
+  let noReceiver = keysOf("zero2.sgd") do (d: var SegdData):
+    var e = d.records[0].traces[0].ext1.get
+    e.receiverLineNumber = 0
+    e.receiverPointNumber = 0
+    d.records[0].traces[0].ext1 = some(e)
+  doAssert noReceiver.rcvLine.isNaN and noReceiver.rcvPoint.isNaN and noReceiver.rcvIndex == 0
+  doAssert noReceiver.srcLine == 20 and noReceiver.srcPoint == 99.5 and noReceiver.srcIndex == 1
+  let pointZero = keysOf("zero3.sgd") do (d: var SegdData): # a line with point 0 is a station
+    var e = d.records[0].traces[0].ext1.get
+    e.receiverPointNumber = 0
+    d.records[0].traces[0].ext1 = some(e)
+  doAssert pointZero.rcvLine == 10 and pointZero.rcvPoint == 0 and pointZero.rcvIndex == 1
+  # shot.sgd (Rev 3): source 1/1001/1 from a general header block, receivers
+  # 100/201 and 100/202 on traces 3 and 4.
+  let p3 = tmp / "zero4.sgd"
+  rewriteSegd(demoDir() / "shot.sgd", p3) do (d: var SegdData):
+    var e = d.records[0].traces[3].ext1Rev3.get
+    e.receiverLineNumber = 0
+    e.receiverPointNumber = 0
+    d.records[0].traces[3].ext1Rev3 = some(e)
+  for keys in [true, false]:
+    var g = openSeismic(p3, keys = keys)
+    let k = g.traceKeys(0 ..< g.len)
+    doAssert k[3].rcvLine.isNaN and k[3].rcvPoint.isNaN and k[3].rcvIndex == 0, $k[3]
+    doAssert k[4].rcvLine == 100 and k[4].rcvPoint == 202 and k[4].rcvIndex == 1
+    doAssert k[3].srcLine == 1 and k[3].srcPoint == 1001 and k[3].srcIndex == 1
+    g.close()
+  # Its Source Description block with line and point zeroed (bytes 4-13).
+  let p4 = tmp / "zero5.sgd"
+  rewriteSegd(demoDir() / "shot.sgd", p4) do (d: var SegdData):
+    var zeroed = 0
+    for at, bt in blocks(d.records[0].record.generalBlocks):
+      if bt in {0x15'u8..0x19'u8, 0x1F'u8}:
+        for i in at + 3 ..< at + 13: d.records[0].record.generalBlocks[i] = 0
+        inc zeroed
+    doAssert zeroed == 1
+  var h = openSeismic(p4, keys = true)
+  for i in 0 ..< h.len:
+    let k = h.traceKeys(i)
+    doAssert k.srcLine.isNaN and k.srcPoint.isNaN and k.srcIndex == 0, $k
+  doAssert h.traceKeys(4).rcvPoint == 202
+  h.close()
+
 # ------------------------------------------------------------------ SEG-2 --
 
 block seg2_delay_interval_and_trace_type:
