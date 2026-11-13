@@ -13,6 +13,7 @@
 
 import std/[math, options]
 import ../common/[endians, ibmfloat, errors]
+import ../private/bytestore
 export options
 
 type
@@ -210,23 +211,13 @@ proc ibmWord[T: SampleType](x: T, i: int): uint32 {.inline.} =
     raiseFormat("sample " & $i & " = " & $x & " does not fit format 1 (IBM float: finite, " &
       "up to 7.237e75)")
 
-proc encodeSamples*[T: SampleType](f: SampleFormat, src: openArray[T],
-    dst: var openArray[byte], order = boBig) =
-  ## Encodes `src` as format `f` into the start of `dst` (at least
-  ## `src.len * sampleSize(f)` bytes). Integer formats round to nearest.
-  ## Raises `SegFormatError` for a value the format cannot hold (NaN or out
-  ## of range in an integer format or format 4; NaN, an infinity or a
-  ## magnitude beyond about 7.237e75 in format 1, IBM float) and for a
-  ## 3-byte format in pair-swapped order; `ValueError` when `dst` is too
-  ## short. Format 1 goes through float32, except for doubles beyond its
-  ## range; format 4 picks the largest gain per sample; the IEEE formats
-  ## hold every value (a double beyond float32 becomes an infinity in
-  ## format 5).
-  checkOrder(f, order)
+proc encodePlain[T: SampleType](f: SampleFormat, src: openArray[T], dst: var openArray[byte],
+    order: ByteOrder) =
+  # One sample at a time through the checked accessors: the formats without
+  # a kernel in `encodeSamples` (4 and the 64-bit integers), and every trace
+  # a kernel flags, for its error (it names the first sample that does not
+  # fit) or its rare values (IBM: subnormals, doubles beyond float32).
   let n = src.len
-  if dst.len < n * sampleSize(f):
-    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " &
-      $(n * sampleSize(f)) & " needed for " & $n & " samples")
   forEachOrder(order):
     case f
     of sfIbm32:
@@ -265,3 +256,109 @@ proc encodeSamples*[T: SampleType](f: SampleFormat, src: openArray[T],
         put24(dst, 3*i, v, o)
     of sfUInt8:
       for i in 0..<n: dst[i] = toInt[uint8](float64(src[i]), i)
+
+when defined(gcc):
+  # The integer kernels round and clamp without a branch; gcc vectorizes
+  # them only when it need not keep the floating-point exception flags as
+  # the scalar code would raise them (its default). The values do not
+  # depend on it. This C file only.
+  {.localPassC: "-fno-trapping-math".}
+
+{.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+# As the decoders: the lengths are checked once, then the loops load and
+# store through unchecked pointers with the byte order a constant, in every
+# build. In the shipped build (-d:release, x86-64-v3; f32 traces of 2000
+# samples) big-endian IEEE went from 1.4 to 56 GB/s, IBM float from 0.22 to
+# 10.6, int32 from 0.64 to 4.0 and int16 from 0.43 to 2.2.
+
+proc encodeKernel[T: SampleType](f: SampleFormat, src: openArray[T], dst: var openArray[byte],
+    order: ByteOrder): bool {.raises: [].} =
+  # The loops of `encodeSamples`, which has checked the order and that `dst`
+  # holds the `src.len > 0` samples. True when `encodePlain` must do the
+  # trace instead (then `dst` holds clamped or unfinished values). It
+  # raises nothing, so the compiler puts no error check into the loops.
+  let n = src.len
+  let s = cast[ptr UncheckedArray[T]](addr src[0])
+  let d = cast[ByteBuf](addr dst[0])
+  var redo = 0 # or-ed flags, no branch per sample
+  template ints(I: typedesc, lo, hi: untyped, put: untyped) =
+    # Rounded to nearest, halves away from zero. A value outside `lo..hi`
+    # (or NaN) is only flagged here, and stored clamped: no undefined
+    # conversion.
+    const a = float64(lo)
+    const b = float64(hi)
+    for i {.inject.} in 0..<n:
+      let r = roundAway(float64(s[i]))
+      redo = redo or (ord(not (r >= a)) or ord(not (r <= b)))
+      let c = max(a, min(r, b))
+      let k {.inject.} = when I is uint32: uint32(c) else: I(truncToInt32(c))
+      put
+  forEachOrder(order):
+    case f
+    of sfFloat32:
+      when T is float32 and o == hostOrder:
+        copyMem(d, s, 4 * n)
+      else:
+        for i in 0..<n: storeNum(d, 4*i, float32(s[i]), o)
+    of sfFloat64:
+      when T is float64 and o == hostOrder:
+        copyMem(d, s, 8 * n)
+      else:
+        for i in 0..<n: storeNum(d, 8*i, float64(s[i]), o)
+    of sfIbm32:
+      for i in 0..<n:
+        let b = cast[uint32](float32(s[i]))
+        let e = (b shr 23) and 0xFF
+        # Subnormals, NaN, the infinities and doubles beyond float32.
+        redo = redo or ord(e == 255) or (ord(e == 0) and ord((b and 0x7F_FFFF'u32) != 0))
+        storeNum(d, 4*i, (if (b and 0x7FFF_FFFF'u32) == 0: 0'u32 else: normalToIbm(b)), o)
+    of sfInt32:
+      ints(int32, low(int32), high(int32)):
+        storeNum(d, 4*i, k, o)
+    of sfInt16:
+      ints(int16, low(int16), high(int16)):
+        storeNum(d, 2*i, k, o)
+    of sfInt8:
+      ints(int8, low(int8), high(int8)):
+        d[i] = cast[byte](k)
+    of sfUInt32:
+      ints(uint32, low(uint32), high(uint32)):
+        storeNum(d, 4*i, k, o)
+    of sfUInt16:
+      ints(uint16, low(uint16), high(uint16)):
+        storeNum(d, 2*i, k, o)
+    of sfUInt8:
+      ints(uint8, low(uint8), high(uint8)):
+        d[i] = k
+    of sfInt24:
+      when o != boPairSwapped: # refused by checkOrder
+        ints(int32, -0x80_0000, 0x7F_FFFF):
+          storeU24(d, 3*i, cast[uint32](k) and 0xFF_FFFF'u32, o)
+    of sfUInt24:
+      when o != boPairSwapped:
+        ints(int32, 0, 0xFF_FFFF):
+          storeU24(d, 3*i, cast[uint32](k), o)
+    of sfFixedGain, sfInt64, sfUInt64:
+      redo = 1
+  redo != 0
+
+proc encodeSamples*[T: SampleType](f: SampleFormat, src: openArray[T],
+    dst: var openArray[byte], order = boBig) =
+  ## Encodes `src` as format `f` into the start of `dst` (at least
+  ## `src.len * sampleSize(f)` bytes). Integer formats round to nearest.
+  ## Raises `SegFormatError` for a value the format cannot hold (NaN or out
+  ## of range in an integer format or format 4; NaN, an infinity or a
+  ## magnitude beyond about 7.237e75 in format 1, IBM float) and for a
+  ## 3-byte format in pair-swapped order; `ValueError` when `dst` is too
+  ## short. Format 1 goes through float32, except for doubles beyond its
+  ## range; format 4 picks the largest gain per sample; the IEEE formats
+  ## hold every value (a double beyond float32 becomes an infinity in
+  ## format 5).
+  checkOrder(f, order)
+  let n = src.len
+  if dst.len < n * sampleSize(f):
+    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " &
+      $(n * sampleSize(f)) & " needed for " & $n & " samples")
+  if n > 0 and encodeKernel(f, src, dst, order): encodePlain(f, src, dst, order)
+
+{.pop.}

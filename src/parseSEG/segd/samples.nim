@@ -20,6 +20,7 @@
 import std/[math, options]
 export options
 import ../common/[endians, ibmfloat, errors]
+import ../private/bytestore
 
 type
   SegdSampleFormat* = enum
@@ -254,23 +255,13 @@ proc toInt(x: float64, lo, hi: int64, i: int): int64 =
     raiseFormat("sample " & $i & " = " & $x & " does not fit the integer format")
   int64(r)
 
-proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
-    dst: var openArray[byte], twosComplement8015 = false) =
-  ## Encodes `src` as format `f` into the start of `dst` (at least
-  ## `dataBytes(f, src.len)` bytes). The exponent formats and 8048 quantize
-  ## (rounding to nearest), the integer formats round. Raises
-  ## `SegFormatError` for a value the format cannot hold, NaN and the
-  ## infinities included (only the IEEE formats hold those): beyond ±32767
-  ## in 8015, ±15360 in 8022, ±16380 in 8024, 3968 and -3840 in 8042, 4095.5
-  ## and -4095 in 8044 (all ones is not a code), about ±7.237e75 in 8048,
-  ## and the integer range in 8036 and 8038. Raises `ValueError` when `dst`
-  ## is too short. `twosComplement8015` writes 8015 fractions as two's
-  ## complement, the inverse of the decoders' option (the spec says one's
-  ## complement); it reaches -32768.
+proc encodePlain[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
+    dst: var openArray[byte], twosComplement8015: bool) =
+  # One sample at a time through the checked accessors: the exponent
+  # formats, and every trace a kernel of `encodeSamples` flags, for its
+  # error (it names the first sample that does not fit) or its rare values
+  # (8048: subnormals, doubles beyond float32).
   let n = src.len
-  if dst.len < dataBytes(f, n):
-    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " &
-      $dataBytes(f, n) & " needed for " & $n & " samples")
   case f
   of sd8015:
     for g in 0..<(n + 3) div 4:
@@ -334,3 +325,93 @@ proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
     for i in 0..<n: putNum(dst, 4 * i, float32(src[i]), boLittle)
   of sd9080:
     for i in 0..<n: putNum(dst, 8 * i, float64(src[i]), boLittle)
+
+when defined(gcc):
+  # The integer kernels round and clamp without a branch; gcc vectorizes
+  # them only when it need not keep the floating-point exception flags as
+  # the scalar code would raise them (its default). The values do not
+  # depend on it. This C file only.
+  {.localPassC: "-fno-trapping-math".}
+
+{.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
+
+proc encodeKernel[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
+    dst: var openArray[byte]): bool {.raises: [].} =
+  # The loops of `encodeSamples`, which has checked that `dst` holds the
+  # `src.len > 0` samples: unchecked stores, the byte order a constant, as
+  # the decoders. True when `encodePlain` must do the trace instead (then
+  # `dst` holds clamped or unfinished values). It raises nothing, so the
+  # compiler puts no error check into the loops.
+  let n = src.len
+  let s = cast[ptr UncheckedArray[T]](addr src[0])
+  let d = cast[ByteBuf](addr dst[0])
+  var redo = 0 # or-ed flags, no branch per sample
+  template ints(lo, hi: untyped, put: untyped) =
+    # Rounded to nearest, halves away from zero. A value outside `lo..hi`
+    # (or NaN) is only flagged here, and stored clamped.
+    const a = float64(lo)
+    const b = float64(hi)
+    for i {.inject.} in 0..<n:
+      let r = roundAway(float64(s[i]))
+      redo = redo or (ord(not (r >= a)) or ord(not (r <= b)))
+      let k {.inject.} = truncToInt32(max(a, min(r, b)))
+      put
+  template floats(F: typedesc, o: static ByteOrder) =
+    when T is F and o == hostOrder:
+      copyMem(d, s, sizeof(F) * n)
+    else:
+      for i in 0..<n: storeNum(d, sizeof(F) * i, F(s[i]), o)
+  case f
+  of sd8058: floats(float32, boBig)
+  of sd9058: floats(float32, boLittle)
+  of sd8080: floats(float64, boBig)
+  of sd9080: floats(float64, boLittle)
+  of sd8036:
+    ints(-0x80_0000, 0x7F_FFFF):
+      storeU24(d, 3 * i, cast[uint32](k) and 0xFF_FFFF'u32, boBig)
+  of sd9036:
+    ints(-0x80_0000, 0x7F_FFFF):
+      storeU24(d, 3 * i, cast[uint32](k) and 0xFF_FFFF'u32, boLittle)
+  of sd8038:
+    ints(low(int32), high(int32)):
+      storeNum(d, 4 * i, k, boBig)
+  of sd9038:
+    ints(low(int32), high(int32)):
+      storeNum(d, 4 * i, k, boLittle)
+  of sd8048:
+    for i in 0..<n:
+      let b = cast[uint32](float32(s[i]))
+      let e = (b shr 23) and 0xFF
+      # Subnormals, NaN, the infinities and doubles beyond float32.
+      redo = redo or ord(e == 255) or (ord(e == 0) and ord((b and 0x7F_FFFF'u32) != 0))
+      # The IBM float, its 24-bit fraction rounded to 23 bits: an odd one
+      # goes up, and a carry out of 0xFFFFFF, which lands in the exponent,
+      # leaves the fraction 0.1 (hexadecimal).
+      var w = normalToIbm(b)
+      w = w + (w and 1)
+      w = w or (uint32(ord((w and 0xFF_FFFF'u32) == 0)) shl 20)
+      storeNum(d, 4 * i, (if (b and 0x7FFF_FFFF'u32) == 0: 0'u32 else: w), boBig)
+  of sd8015, sd8022, sd8024, sd8042, sd8044:
+    redo = 1
+  redo != 0
+
+proc encodeSamples*[T: SegdSampleType](f: SegdSampleFormat, src: openArray[T],
+    dst: var openArray[byte], twosComplement8015 = false) =
+  ## Encodes `src` as format `f` into the start of `dst` (at least
+  ## `dataBytes(f, src.len)` bytes). The exponent formats and 8048 quantize
+  ## (rounding to nearest), the integer formats round. Raises
+  ## `SegFormatError` for a value the format cannot hold, NaN and the
+  ## infinities included (only the IEEE formats hold those): beyond ±32767
+  ## in 8015, ±15360 in 8022, ±16380 in 8024, 3968 and -3840 in 8042, 4095.5
+  ## and -4095 in 8044 (all ones is not a code), about ±7.237e75 in 8048,
+  ## and the integer range in 8036 and 8038. Raises `ValueError` when `dst`
+  ## is too short. `twosComplement8015` writes 8015 fractions as two's
+  ## complement, the inverse of the decoders' option (the spec says one's
+  ## complement); it reaches -32768.
+  let n = src.len
+  if dst.len < dataBytes(f, n):
+    raise newException(ValueError, "the destination has " & $dst.len & " bytes, " &
+      $dataBytes(f, n) & " needed for " & $n & " samples")
+  if n > 0 and encodeKernel(f, src, dst): encodePlain(f, src, dst, twosComplement8015)
+
+{.pop.}
