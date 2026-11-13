@@ -240,4 +240,64 @@ block rollback_restores_record_headers:
   discard applyJournal(p, p & ".edits.nif")
   doAssert freshKeys(p)[0].rcvLine == 11
 
+block record_edits_wait_for_the_batch:
+  # Three records (the demo record three times over, one trace each; their
+  # trace time is the General Header #1 time). In a batch a record edit is
+  # journaled in memory like a trace edit: no sync per edit, and the index
+  # copies and the keys of its traces are refreshed once, when the batch is
+  # written.
+  let p = tmp / "three.sgd"
+  let one = readFile(demoDir() / "record.sgd")
+  writeFile(p, one & one & one)
+  let journal = p & ".edits.nif"
+  if fileExists(journal): removeFile(journal)
+  let original = freshKeys(p)
+  var ed = openEditor(openSeismic(p, keys = true))
+  doAssert ed.file.recordCount == 3 and ed.file.len == 3
+  let hour = ed.file.index.segdRecords[0].gh1.hour
+  let synced = getFileSize(journal)
+  ed.beginBatch()
+  for r in 0 ..< 3:
+    doAssert ed.setRecordField(r, "gh1.hour", (hour + 1 + r) mod 24)
+    doAssert ed.setRecordField(r, "gh1.minute", 7 + r) # twice per record
+  doAssert ed.setTraceField(2, "trace.traceEdit", 2)
+  doAssert getFileSize(journal) == synced, "nothing is synced before the batch ends"
+  doAssert ed.file.keysRevision == 0 and sameKeys(ed.file.traceKeys(1), original[1])
+  doAssert ed.file.index.segdRecords[1].gh1.hour == hour # the copy follows the map
+  doAssert ed.currentRecordField(1, "gh1.hour").intVal == (hour + 2) mod 24 # as edited so far
+  doAssert ed.endBatch()
+  doAssert getFileSize(journal) > synced and ed.file.keysRevision == 1 # once per batch
+  for r in 0 ..< 3:
+    doAssert ed.file.index.segdRecords[r].gh1.hour == (hour + 1 + r) mod 24
+    doAssert ed.file.index.segdRecords[r].gh1.minute == 7 + r
+    doAssert ed.file.traceKeys(r).time != original[r].time, $r
+  doAssert ed.file.traceKeys(2).status == tsDead
+  doAssert ed.matchesFresh(p)
+  # Outside a batch a record edit shows at once, in its own traces only.
+  let (k0, k1) = (ed.file.traceKeys(0), ed.file.traceKeys(1))
+  doAssert ed.setRecordField(1, "gh1.second", 59)
+  doAssert ed.file.index.segdRecords[1].gh1.second == 59 and ed.file.keysRevision == 2
+  doAssert sameKeys(ed.file.traceKeys(0), k0) and not sameKeys(ed.file.traceKeys(1), k1)
+  doAssert ed.matchesFresh(p)
+  discard ed.rollbackJournal()
+  for i in 0 ..< 3: doAssert sameKeys(ed.file.traceKeys(i), original[i])
+  doAssert ed.file.index.segdRecords[2].gh1.minute == ed.file.index.segdRecords[0].gh1.minute
+  ed.close()
+
+block the_edit_that_fills_a_batch_refreshes_its_keys:
+  # A batch is written whenever it holds 4096 edits. The keys of the trace
+  # whose edit filled it were left as they were when no later edit followed
+  # (trace 95 here: its key stayed 0 with 21 in the file).
+  let p = copyOf("survey.sgy", "full.sgy")
+  var ed = openEditor(openSeismic(p, keys = true))
+  ed.beginBatch()
+  for i in 0 ..< 4095:
+    doAssert ed.setTraceField(0, "trace.delayRecordingTime", 1 + i mod 2)
+  doAssert ed.setTraceField(95, "trace.delayRecordingTime", 21) # the 4096th: written at once
+  doAssert ed.setFileField("binary.jobId", 4096) # no trace edit follows
+  doAssert ed.endBatch()
+  doAssert ed.edits == 4097 and ed.file.traceKeys(95).t0Ms == 21
+  doAssert ed.matchesFresh(p)
+  ed.close()
+
 echo "teditkeys: ok"

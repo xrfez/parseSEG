@@ -108,8 +108,11 @@ ed.close()
 ## Many edits: batches
 
 Each edit is journaled and synced to disk before the file changes. For thousands of edits,
-put them in a batch to share one sync. If the journal cannot be synced, the batch's edits
-are not written (`endBatch` returns `false`, and `ed.log` says how many were dropped).
+put them in a batch to share one sync. Trace and SEG-D record edits wait for the batch
+alike: the file, the stored keys and the index's copies of the record headers follow at
+`endBatch` (`currentTraceField` and `currentRecordField` show an edit at once). If the
+journal cannot be synced, the batch's edits are not written (`endBatch` returns `false`,
+and `ed.log` says how many were dropped).
 
 ```nim
 import std/os

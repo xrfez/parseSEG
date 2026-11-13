@@ -144,7 +144,10 @@ fails too, the editor refuses every further edit). `beginBatch` / `endBatch` (fa
 batch's journal sync fails) share one sync among many edits; `close` raises `IOError` when
 the final batch cannot be journaled. `currentTraceField` (...) read fields as edited so far
 (a batch's pending edits included, without a sync; also `currentFileField`,
-`currentRecordField`; they only read, so they take the editor by value). Several fields of one header can be
+`currentRecordField`; they only read, so they take the editor by value). In a batch a
+record edit waits like a trace edit: one sync for the batch, and the index's copies of the
+record headers and the keys of the records' traces are refreshed once, at `endBatch`
+(`setFileField` writes the batch so far). Several fields of one header can be
 edited in one batch without a flush. `openEditor`
 raises `ValueError` when the journal is the file itself.
 `openEditor(f: sink SeismicFile, journalPath = "")` takes over an open file: maps it

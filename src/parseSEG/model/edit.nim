@@ -54,7 +54,8 @@
 ##
 ## Stored keys (`openSeismic(keys = true)`) follow the edits: a trace,
 ## record or keyed binary field edit refreshes the keys of the traces it
-## touches once its bytes are on the map (a batch's at `endBatch`) and bumps
+## touches once its bytes are on the map (a batch's at `endBatch`, trace and
+## record edits alike: one sync and one refresh for the batch) and bumps
 ## `keysRevision` when they changed. Keys a join wrote (`applyGeometry`,
 ## `applySurvey`: `TraceIndex.joinedTraces`, by `JoinGroup`) keep their joined
 ## values; the trace's other keys follow its headers, and an offset and
@@ -95,6 +96,9 @@ type
     edits: int
     refusals: int        ## Refused edits; the first `MaxRefusalsLogged` are in `log`.
     stale: seq[int] ## Traces edited in the batch: their keys are refreshed when it is written.
+    staleRecords: seq[StaleRecord]
+      ## SEG-D record headers edited in the batch: the index's copies, and the
+      ## keys of the records' traces, are refreshed when it is written.
     intervalStale: bool ## A batched interval edit: `segyIntervalUs` is refreshed with the keys.
     batch: bool          ## Inside `beginBatch` / `endBatch`.
     pending: seq[PendingWrite] ## Batched writes, journaled but not yet on the map.
@@ -105,6 +109,10 @@ type
   PendingWrite = object
     at: int64
     bytes: seq[byte]
+
+  StaleRecord = object
+    record: int
+    blk: BlockRef ## The general header block that was edited.
 
 proc `=destroy`(j: JournalFile) =
   if j.f != nil:
@@ -202,6 +210,7 @@ proc dropPending(ed: var HeaderEditor) =
   ed.pending.setLen 0
   ed.pendingPages.clear()
   ed.stale.setLen 0
+  ed.staleRecords.setLen 0
 
 proc refreshStale(ed: var HeaderEditor) =
   # The keys of the traces edited since the last refresh, from the map.
@@ -220,20 +229,59 @@ proc keysChanged(ed: var HeaderEditor, trace: int) =
   ed.stale.add trace
   if not ed.batch: ed.refreshStale()
 
+func recordTraces(ix: TraceIndex, record: int): Slice[int] =
+  # The traces of SEG-D record `record`. The entries are in file order,
+  # record after record, so they are one run, found by binary search: a scan
+  # of every entry per edited record made 500 record edits take 3 s.
+  let r = uint32(record)
+  var (lo, hi) = (0, ix.entries.len)
+  while lo < hi:
+    let mid = (lo + hi) shr 1
+    if ix.entries[mid].record < r: lo = mid + 1 else: hi = mid
+  result.a = lo
+  hi = ix.entries.len
+  while lo < hi:
+    let mid = (lo + hi) shr 1
+    if ix.entries[mid].record <= r: lo = mid + 1 else: hi = mid
+  result.b = lo - 1
+
+proc refreshRecords(ed: var HeaderEditor) =
+  # The record headers edited since the last refresh, now on the map: the
+  # index's copies of the blocks, and the records' traces for `refreshStale`.
+  if ed.staleRecords.len == 0: return
+  ed.staleRecords.sort(proc (a, b: StaleRecord): int = cmp(a.record, b.record))
+  let mem = ed.file.unsafeMemory
+  var last = -1
+  for s in ed.staleRecords:
+    let (a, z) = (int(s.blk.offset), int(s.blk.offset) + s.blk.size - 1)
+    if s.blk.kind == hbSegdGh1:
+      ed.file.index.segdRecords[s.record].gh1 =
+        decodeBlock[SegdGeneralHeader1](mem.toOpenArray(a, z))
+    else:
+      ed.file.index.segdRecords[s.record].sourceHeaders[s.blk.sourceIndex] =
+        decodeBlock[SegdGeneralHeaderN](mem.toOpenArray(a, z))
+    if s.record != last and ed.file.hasKeys:
+      for t in ed.file.index.recordTraces(s.record): ed.stale.add t
+    last = s.record
+  ed.staleRecords.setLen 0
+
 proc flushBatch(ed: var HeaderEditor): bool =
   # One sync for every journaled edit of the batch, then the map writes.
   # When the journal cannot be synced, the batch's edits are dropped (the
   # map never sees them), logged, and the result is false.
   result = true
-  if ed.pending.len == 0: return
-  if not ed.syncJournal():
-    ed.dropPending()
-    return false
-  let mem = ed.file.unsafeMemory
-  for p in ed.pending:
-    copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
-  ed.pending.setLen 0
-  ed.pendingPages.clear()
+  if ed.pending.len > 0:
+    if not ed.syncJournal():
+      ed.dropPending()
+      return false
+    let mem = ed.file.unsafeMemory
+    for p in ed.pending:
+      copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
+    ed.pending.setLen 0
+    ed.pendingPages.clear()
+  # Also with nothing pending: the edit that fills a batch is written from
+  # inside its own call, before its trace is listed as stale.
+  ed.refreshRecords()
   ed.refreshStale()
   if ed.intervalStale:
     ed.intervalStale = false
@@ -292,7 +340,10 @@ proc countRefusals(ed: var HeaderEditor) =
 proc beginBatch*(ed: var HeaderEditor) =
   ## Starts a batch: edits are journaled at once but synced and written to the
   ## map together, up to 4096 at a time (one fsync instead of one per edit).
-  ## Reads through `file` may not see an edit until `endBatch`.
+  ## Reads through `file` may not see an edit until `endBatch`: the mapped
+  ## bytes, the stored keys and the index's copies of SEG-D record headers
+  ## follow when the batch is written (the `current...Field` readers see it
+  ## at once). `setFileField` writes the batch so far.
   ed.batch = true
 
 proc endBatch*(ed: var HeaderEditor): bool =
@@ -844,24 +895,18 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
     value: FieldValue): bool =
   ## Sets a SEG-D general header field of record `record`: `gh1.<field>`, or
   ## for Rev 1/2 `gh<N>.<field>` (N ≥ 3: the source headers). The index's
-  ## copy of the record's headers is refreshed. False, with a diagnostic in
-  ## `log`, if the edit is refused.
+  ## copy of the record's headers and the stored keys of its traces are
+  ## refreshed once the edit is on the map: at once, or in a batch when the
+  ## batch is written (`endBatch`), like a trace edit. False, with a
+  ## diagnostic in `log`, if the edit is refused.
   var b: BlockRef
   result = ed.setLocated(hsRecord, record, name, value,
-    Location(file: ed.file.path, record: record), b) and ed.flushBatch()
+    Location(file: ed.file.path, record: record), b)
   if result:
-    let (a, z) = (int(b.offset), int(b.offset) + b.size - 1)
-    if b.kind == hbSegdGh1:
-      ed.file.index.segdRecords[record].gh1 =
-        decodeBlock[SegdGeneralHeader1](ed.file.unsafeMemory.toOpenArray(a, z))
-    else:
-      ed.file.index.segdRecords[record].sourceHeaders[b.sourceIndex] =
-        decodeBlock[SegdGeneralHeaderN](ed.file.unsafeMemory.toOpenArray(a, z))
-    if ed.file.hasKeys:
-      var traces: seq[int]
-      for i, e in ed.file.index.entries:
-        if int(e.record) == record: traces.add i
-      discard ed.file.refreshKeys(traces)
+    ed.staleRecords.add StaleRecord(record: record, blk: b)
+    if not ed.batch:
+      ed.refreshRecords()
+      ed.refreshStale()
 
 proc setTraceField*(ed: var HeaderEditor, trace: int, name: string,
     value: SomeNumber | string): bool {.inline.} =
