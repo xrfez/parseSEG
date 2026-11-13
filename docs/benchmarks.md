@@ -9,7 +9,9 @@ both the `-d:danger -march=native` build (`nim nimRelease`) and the `-d:release`
 (`nim cli`).
 
 > **Current numbers: [Phase 15](#phase-15-full-scale-re-run-2026-11-09)** (full scale,
-> 2026-11-09, after the Phase 15 performance review). The sections after it are history:
+> 2026-11-09, after the Phase 15 performance review), except what the
+> [2026-11-13 changes](#changes-of-2026-11-13-seek-ibm-float-keys-gathers) measured again
+> (seek latency, IBM float decode, keys, gathers). The sections after it are history:
 > the 2026-11-08 full-scale tables (before the C ABI and Python module were removed) and the
 > Phase 14 small-scale re-run.
 
@@ -66,6 +68,52 @@ PARSESEG_BENCH_WARM_ONLY=1 nim bench        # skip the disk-bound cold runs
 expected size are kept, so a data directory can be reused), and runs the suite. The data
 directory defaults to `bench/data` (gitignored). Sections: `baseline index decode latency
 threads prefetch write`.
+
+## Changes of 2026-11-13: seek, IBM float, keys, gathers
+
+Six changes to the read path, each measured before and after on the same machine (shared
+with other jobs that day, so each number is the best or the median of several runs, and
+both columns were run back to back). Build: `-d:danger --opt:speed
+--passC:-march=x86-64-v3` (gcc 12), small-scale files of `bench/gen` (12 000 traces of
+1000 samples; `y-ieee-10m`: 500 000 traces of 250 samples). They are not part of
+`bench/suite`.
+
+| measure | before | after |
+|---|---:|---:|
+| seek while a worker decodes the old position → first chunk, y-ibm, 1024-trace chunks, p50 | 1340-1360 µs | 690-710 µs (an idle seek: 740-760) |
+| the same after the IBM float change | | 399 µs (idle 393) |
+| `close` while a worker decodes, y-ibm 1024-trace chunks, p50 | 586 µs | 11 µs |
+| seek → first chunk with `quickFirst`, y-ieee 1024-trace chunks, p50 (idle / busy) | 154-187 / 290-384 µs | 86-102 / 74-78 µs |
+| the same, y-ibm (idle) | 276-290 µs | 130 µs |
+| decode SEG-Y IBM float to float32, 1 thread, v3 build | 6.34 GB/s | 13.2-13.5 GB/s |
+| the same, baseline x86-64 (SSE2) build | 5.3 GB/s | 5.3 GB/s (unchanged loop) |
+| `openSeismic(keys = true)`, y-ieee-10m (fixed-length SEG-Y) | 206 ms, 412 ns/trace | 64 ms, 128 ns/trace |
+| the same with `verify = vfFull` (the walk) | 206 ms, 412 ns/trace | 129 ms, 257 ns/trace |
+| `ensureKeys`, y-ieee-10m | 311-314 ns/trace | 113-123 ns/trace |
+| `traceKeysInto`, 1000 traces a call, y-ieee-10m | 332 ns/trace | 122-124 ns/trace |
+| `traceKeysInto`, one trace a call, SEG-Y | 9.5 µs | 82 ns |
+| `startTimeMs(f, i)`, SEG-Y without stored keys | 9.5 µs | 11 ns |
+| `gathers`, post-stack volume (500 000 one-trace gathers) | 233 ms, 467 ns/trace | 30 ms, 60 ns/trace |
+| `gathers`, 500 shot gathers of 1000 traces | 29.0 ms | 23.5 ms |
+
+- **Seek and close:** a worker inside a chunk that a `seek` or `close` made stale gives it
+  up within 8 traces, so a seek during a scroll costs what an idle seek costs. A chunk
+  shorter than `chunkTraces` (the first with `quickFirst`) hands its slot buffer over
+  instead of a copy made on the consumer thread.
+- **IBM float:** an 8-wide kernel when the build targets AVX2, bit-identical to the table
+  conversion (which a baseline build keeps: the kernel is slower there). SEG-D 8048 uses it
+  too.
+- **Keys:** the standard SEG-Y layout is read with direct loads instead of an entry walk per
+  name (a file with a Layout stanza keeps the walk), the layout is resolved once per file
+  and not once per call, and `keys = true` no longer makes a fixed-length file walk: it takes
+  the sampled index and reads the keys from the mapped headers. What is left per trace is
+  mostly memory: 1000 hot traces take 82 ns each, a pass over 500 000 headers that lie 1240
+  bytes apart 129 ns each, and the first pass after a sampled open 164 ns (the first touch
+  of each page).
+- **Index memory:** a `TraceKeys` is 184 bytes now (it was 144 when the tables below were
+  taken, which is why they show 144 to 147 B per trace for keys): the index takes 24.2 B per
+  trace without keys and 208.7 B with them (y-ieee-10m, 500 000 traces; 24.9 and 209.5 for
+  SEG-D).
 
 ## Phase 15: full-scale re-run (2026-11-09)
 
