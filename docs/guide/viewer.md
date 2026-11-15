@@ -595,7 +595,12 @@ What a viewer may rely on, mapped or not:
   is waited for, however long. Each prefetcher given up on keeps its worker threads,
   its ring and its pin until the share answers, so a host that makes a new one after
   every give-up grows by that much each time: `reapPrefetchers()` says how many still
-  wait.
+  wait. Freeing one drops what it pinned on the thread that reaps: when the file was
+  closed meanwhile, that unmaps it and closes its descriptor, and a close(2) can wait on
+  the share (a mapped file can also wait up to 2 s for a fault in flight in the map).
+  Every `newPrefetcher` and `close` reaps, on whichever thread calls it, so a UI thread
+  that makes prefetchers of local files may be the one that frees a given-up prefetcher
+  of a share; a job thread that calls `reapPrefetchers()` now and then makes that rare.
 
 What it must still do itself:
 

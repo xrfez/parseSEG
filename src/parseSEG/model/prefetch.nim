@@ -335,6 +335,10 @@ proc reapPrefetchers*(): int {.gcsafe, raises: [].} =
   ## still held, once their workers have returned from the reads they were
   ## stopped in, and returns how many still wait for such a worker. Every
   ## `newPrefetcher` and `close` calls it too; call it from any thread.
+  ## What is freed is dropped on the calling thread: the last pin of a file
+  ## closed meanwhile unmaps it (waiting up to 2 s for a fault in flight in
+  ## the map) and closes its descriptor, which on a share may wait for the
+  ## server.
   var ready: ptr OrphanBase
   acquire(orphanLock)
   var link = addr orphans
