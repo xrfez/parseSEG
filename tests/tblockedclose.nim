@@ -19,6 +19,7 @@ else:
   {.passL: "-ldl".}
   {.emit: """/*INCLUDESECTION*/
 #include <dlfcn.h>
+#include <unistd.h>
 """.}
   {.emit: """
 static int (*parsesegRealClose)(int) = 0;
