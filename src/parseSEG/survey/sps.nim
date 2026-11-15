@@ -25,11 +25,11 @@
 ##   (a warning says which was taken), unless the caller sets it.
 
 import std/[options, streams, strutils, math, os]
-import ../common/[diagnostics, errors, outputfile, progress]
+import ../common/[coordref, diagnostics, errors, outputfile, progress]
 import ../private/progressticker
 import ./[textrec, cards, linespans]
 
-export textrec, diagnostics
+export textrec, diagnostics, coordref
 
 type
   SpsRevision* = enum
@@ -214,6 +214,104 @@ func measurementSystem*(u: GridUnit): int16 =
   if n in ["m", "meter", "meters", "metre", "metres"]: 1
   elif n in ["ft", "foot", "feet"] or n.endsWith(" feet") or n.endsWith(" foot"): 2
   else: 0
+
+# ------------------------------------------------------- coordinate reference --
+
+func headerNumber(s: string): float64 =
+  # A real of an H record ("" and N/A: NaN).
+  let t = s.strip
+  if t.len == 0 or cmpIgnoreCase(t, "N/A") == 0: return NaN
+  try:
+    result = parseFloat(t)
+    if result.classify notin {fcNormal, fcZero, fcNegZero}: result = NaN
+  except ValueError: result = NaN
+
+func headerAngle(s: string): float64 =
+  # `I3,I2,F6.3,A1`: degrees, minutes, seconds and N, S, E or W (S and W
+  # negative), in 12 columns; or the same parts separated by blanks. NaN
+  # when it is none of these.
+  let t = s.strip
+  if t.len < 2 or cmpIgnoreCase(t, "N/A") == 0: return NaN
+  let hemi = t[^1].toUpperAscii
+  if hemi notin {'N', 'S', 'E', 'W'}: return NaN
+  let body = t[0 ..< ^1]
+  var parts = body.splitWhitespace
+  var d, m, sec: float64
+  if parts.len == 3:
+    (d, m, sec) = (headerNumber(parts[0]), headerNumber(parts[1]), headerNumber(parts[2]))
+  else:
+    # The columns as written: ddd mm ss.sss before the letter.
+    let fixed = align(body.replace(" ", "0"), 11, '0')
+    if fixed.len != 11: return NaN
+    (d, m, sec) = (headerNumber(fixed[0 .. 2]), headerNumber(fixed[3 .. 4]),
+      headerNumber(fixed[5 .. 10]))
+  if d.isNaN or m.isNaN or sec.isNaN or m >= 60 or sec >= 60: return NaN
+  result = d + m / 60 + sec / 3600
+  if hemi in {'S', 'W'}: result = -result
+
+func splitAngles(data: string, n: int): seq[string] =
+  # `n` angles of 12 columns each, or as many separated by commas.
+  if ',' in data: return data.split(',')
+  for k in 0 ..< n:
+    result.add (if 12 * k < data.len: data[12 * k ..< min(data.len, 12 * k + 12)] else: "")
+
+func crs*(f: SpsFile): CoordinateReference =
+  ## The coordinate reference system the header records give, the first of
+  ## each: H12 (geodetic datum and spheroid: names, semi-major axis, inverse
+  ## flattening), H17 (vertical datum, as written), H18 (projection type, as
+  ## `projection.name`) and H19 (zone), and as projection parameters H210
+  ## (standard parallels), H220 (central meridian), H231 (grid origin, in
+  ## degrees, south and west negative), H232 (false easting and northing, in
+  ## grid units) and H241 (scale factor). `N/A` and fields that are not
+  ## numbers are unknown. The kind is `ckProjected` when H18 names a
+  ## projection, else unknown. H14 (datum transformation), H242 and H256-H259
+  ## are not read; `gridUnit` gives the grid unit.
+  result = CoordinateReference()
+  var seen: seq[string]
+  let units = f.gridUnit.name
+  template param(label, units: string, v: float64) =
+    # (not `name`, `unit`: a template parameter would replace the field names too)
+    if not v.isNaN:
+      result.projection.parameters.add CrsParameter(name: label, value: v, unit: units)
+  for h in f.headers:
+    if h.code in seen: continue
+    seen.add h.code
+    let data = headerValue(h.data)
+    case h.code
+    of "12":
+      # Datum 33-44, spheroid 45-56, a 57-68, 1/f 69-80; or comma separated.
+      let raw = h.data.strip(leading = false)
+      var parts: seq[string]
+      if ',' in data: parts = data.split(',')
+      else:
+        for k in 0 ..< 4:
+          parts.add (if 12 * k < raw.len: raw[12 * k ..< min(raw.len, 12 * k + 12)] else: "")
+      template part(i: int): string = (if i < parts.len: headerValue(parts[i]) else: "")
+      result.datum.name = part(0)
+      result.datum.ellipsoid = part(1)
+      result.datum.semiMajorAxis = headerNumber(part(2))
+      result.datum.inverseFlattening = headerNumber(part(3))
+    of "17": result.verticalDatum = data
+    of "18": result.projection.name = data
+    of "19": result.projection.zone = data
+    of "210":
+      let a = splitAngles(data, 2)
+      param("latitude of 1st standard parallel", "degree", headerAngle(a[0]))
+      if a.len > 1: param("latitude of 2nd standard parallel", "degree", headerAngle(a[1]))
+    of "220": param("longitude of central meridian", "degree", headerAngle(data))
+    of "231":
+      let a = splitAngles(data, 2)
+      param("latitude of grid origin", "degree", headerAngle(a[0]))
+      if a.len > 1: param("longitude of grid origin", "degree", headerAngle(a[1]))
+    of "232":
+      # 2(F11.2,A1): the values and their E / N letters.
+      let a = splitAngles(data, 2)
+      template grid(s: string): float64 = headerNumber(s.strip.strip(chars = {'E', 'N', 'e', 'n'}))
+      param("false easting", units, grid(a[0]))
+      if a.len > 1: param("false northing", units, grid(a[1]))
+    of "241": param("scale factor", "unity", headerNumber(data))
+    else: discard
+  if result.projection.name.len > 0: result.kind = ckProjected
 
 # ------------------------------------------------------------- column maps --
 

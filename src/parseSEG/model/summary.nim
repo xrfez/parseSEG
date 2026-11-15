@@ -32,7 +32,7 @@
 ## Trace Descriptor Block for its sample interval.
 
 import std/[math, strutils]
-import ../common/endians
+import ../common/[coordref, endians]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/headers as seg2headers
@@ -147,6 +147,13 @@ proc crsText*(f: SeismicFile): string =
   ## which format it is in.
   if f.kind == skSegy: discard segyCrs(f.index.segy, result)
   elif f.kind == skSegd: discard segdCrs(f.index, result)
+
+proc crs*(f: SeismicFile): CoordinateReference =
+  ## The coordinate reference system `crsText` gives, as values: the CRS,
+  ## its datum and ellipsoid, the map projection and the vertical datum
+  ## (`parseCrsText`). Unknown (`known` false) when the file has no CRS text
+  ## or it gives none of these; nothing is looked up. Works on a closed file.
+  parseCrsText(f.crsText)
 
 # ---------------------------------------------------------------- summary --
 

@@ -10,7 +10,7 @@ records, channel sets, keys, gathers).
 | Section | Main names |
 |---|---|
 | [Open a file](#open-a-file-progress-cancel-and-an-index-cache) | `openSeismic(progress, opts = OpenOptions(cache: ...))`, `saveIndex`, `SegCancelledError` |
-| [The navigation tree](#the-navigation-tree) | `summary`, `gathers`, `channelSets`, `componentGroupIds` |
+| [The navigation tree](#the-navigation-tree) | `summary`, `gathers`, `channelSets`, `componentGroupIds`, `crs` |
 | [Read what is on screen](#read-what-is-on-screen) | `readTraces`, `readTracesInto`, sample windows |
 | [Sorted views](#sorted-views) | `sortTraces`, `sortOrder` |
 | [Header columns and keys on demand](#header-columns-and-keys-on-demand) | `traceFieldColumn`, `traceKeys(traces)` |
@@ -115,9 +115,13 @@ for cs in f.channelSets:
     toHex(cs.channelType, 2), ", ", cs.traceCount, " traces, ", cs.startTimeMs, "..",
     cs.endTimeMs, " ms"
 
-# Coordinate reference text, when the file has one (SEG-Y stanza, SEG-D Location Data).
+# Coordinate reference text, when the file has one (SEG-Y stanza, SEG-D Location Data),
+# and what it gives as values: the CRS, datum, projection (here only the CRS's code and name).
 if s.crsFormat != ctNone:
   echo "CRS (", s.crsFormat, "): ", f.crsText.splitLines[0]
+let crs = f.crs
+doAssert crs.kind == ckProjected and crs.epsg == 32632 and crs.name == "WGS 84 / UTM zone 32N"
+doAssert not crs.datum.known and not crs.projection.known # not given in this file
 
 doAssert f.gathers.len == 1 and f.channelSets.len == 4 and s.crsFormat == ctStanza
 ```
