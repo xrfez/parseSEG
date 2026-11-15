@@ -28,7 +28,7 @@ type LineSpan* = object
   ## One line as `lineSpans` yields it.
   lo*, hi*: int     ## The line is `buf[lo .. hi]`; `hi == lo - 1` when it is empty.
   offset*: int64    ## Byte offset of the line in the stream.
-  index*: int       ## 0-based line number.
+  index*: int       ## 0-based line number (the pieces of a cut line share it).
   crlf*: bool       ## The line ended in CR LF.
   terminated*: bool ## A line terminator followed.
   cut*: bool        ## Longer than the limit: cut there, the rest is the next line.
@@ -40,7 +40,8 @@ iterator lineSpans*(s: Stream, buf: var string, maxLine: int): LineSpan =
   ## part of the span); NUL and other bytes are data. A final line without a
   ## terminator is still a line (`terminated` false), an empty one at the
   ## very end is not. A line of `maxLine` bytes without a terminator is cut
-  ## there (`cut`), and what follows is the next line.
+  ## there (`cut`), and what follows is the next span, of the same line:
+  ## `index` counts lines, not spans.
   buf.setLen max(ChunkBytes, 4 * maxLine)
   var n = 0                        # bytes of `buf` that hold data
   var lineLo = 0                   # where the current line starts
@@ -52,7 +53,7 @@ iterator lineSpans*(s: Stream, buf: var string, maxLine: int): LineSpan =
   template emit(last: int, isCrlf, isTerminated, isCut: bool) =
     yield LineSpan(lo: lineLo, hi: last, offset: base + int64(lineLo), index: index,
       crlf: isCrlf, terminated: isTerminated, cut: isCut)
-    inc index
+    if not isCut: inc index # a cut piece is not a line of its own
   template refill() =
     # Keeps the unfinished line, at the front, and reads on behind it.
     if lineLo > 0:

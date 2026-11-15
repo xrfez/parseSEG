@@ -16,6 +16,7 @@ records, channel sets, keys, gathers).
 | [Header columns and keys on demand](#header-columns-and-keys-on-demand) | `traceFieldColumn`, `traceKeys(traces)` |
 | [Read ahead](#read-ahead-without-blocking-the-ui) | `newPrefetcher`, `tryNext`, `seek`, `nextInto`, `recycle` |
 | [A file cut short](#a-file-cut-short-while-it-is-open) | `cutShort`, `dcTruncated`, `SegTruncatedError` |
+| [Survey files](#survey-files-in-the-background) | `looksLikeSps`, `readSps(progress)`, `readP1(progress)`, `SpsOptions` |
 | [The header tab](#the-header-tab-and-the-textual-header) | `traceHeaders`, `copyBytes`, `textHeader` |
 | [Geometry](#geometry-time-and-annotation) | `traceKeys`, inline and crossline |
 | [Edits](#keep-the-users-header-edits-as-a-patch) | `writeHeaderPatch`, `openEditor(f)`, `release` |
@@ -472,6 +473,52 @@ What the viewer still does itself:
   it replaced, as parseSEG does.
 - Count one open file descriptor per mapped file: it stays open with the map, so a fault
   can ask the file's size.
+
+## Survey files in the background
+
+A viewer that lists a folder tells SPS from SEG P1 files with `looksLikeSps` on the first
+bytes it reads of each (it rewinds the stream): data records decide (SPS point records
+with grid coordinates, relation records with channel numbers; P1 records with hemisphere
+letters), and a head of header records only, as SPS headers often fill more than 4 KiB,
+is SPS when an `H00` record names SPS. `readSps` and `readP1` then read a file of any size
+in the background: `progress` gets the bytes read and the file's size about every MiB and
+once at the end, and cancels when it returns false (the records read so far stay, and the
+log ends with a fatal `dcCancelled`).
+
+```nim
+import std/[streams, strutils]
+import parseSEG
+
+var lines = @["H00 SPS format version number   SPS 2.1;"]
+for i in 0 ..< 30: lines.add "H26 " & repeat('.', 70)   # a long header block
+for i in 0 ..< 1000:
+  lines.add "R     10.00" & align($(100 + i) & ".00", 10) & "  1G1" & repeat(' ', 21) &
+    "500100.0 6000000.0  12.5 18213250"
+writeFile("receivers.r", lines.join("\r\n") & "\r\n")
+
+let head = newFileStream("receivers.r")
+doAssert looksLikeSps(newStringStream(head.readStr(2048))) # header records only
+head.close()
+
+var cancelled = false        # set by the cancel button
+let hook: Progress = proc (done, total: int64): bool =
+  not cancelled              # `total` is the file's size
+let sps = readSps("receivers.r", SpsOptions(keepRaw: false, skipBinary: true,
+  maxJunkBytes: 16 shl 20), progress = hook)
+doAssert sps.points.len == 1000 and not sps.log.isFatal
+```
+
+- `SpsOptions.skipBinary` passes by lines that hold bytes no text holds (a NUL or another
+  control character, or mostly bytes above 127): they are not read as records, and one
+  warning counts them.
+- `SpsOptions.maxJunkBytes` stops the read where a file turns into other data: after that
+  many bytes in a row of lines that are no SPS record (an unknown record type, a binary
+  line, a piece of an over-long line; blank lines neither end nor extend such a run). An
+  error says from which byte, and `others` keeps at most about the bound. 0, the default,
+  reads to the end.
+- A "line" longer than 64 KiB (`MaxLineBytes`) is cut into records with a warning; its
+  pieces keep the one line number (`TextRecord.index`, a diagnostic's `record`), so the
+  lines after it are numbered as an editor numbers them.
 
 ## The header tab and the textual header
 

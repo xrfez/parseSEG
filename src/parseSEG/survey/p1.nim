@@ -22,8 +22,9 @@
 ##   logical file.
 ## - Two-digit years: < 50 is 20YY, else 19YY.
 
-import std/[options, streams, strutils, math]
-import ../common/[diagnostics, errors, outputfile, years]
+import std/[options, os, streams, strutils, math]
+import ../common/[diagnostics, errors, outputfile, years, progress]
+import ../private/progressticker
 import ./[textrec, cards]
 
 export textrec, diagnostics
@@ -242,8 +243,9 @@ proc decideAngleUnit(s: Stream, layout: TextLayout, name: string, log: var DiagL
   ## `auAuto` for a file: grads when more than a tenth of the angles of its
   ## first P1 data records are not valid DMS, else DMS. Rewinds `s`.
   let start = s.getPosition
-  var angles, notDms, seen = 0
+  var angles, notDms, seen, scanned = 0
   for r in textRecords(s, layout):
+    inc scanned # records, not lines: an over-long line's pieces count each
     if isP1Data(r.text):
       inc seen
       for (first, degDigits) in [(27, 2), (36, 3)]:
@@ -253,7 +255,7 @@ proc decideAngleUnit(s: Stream, layout: TextLayout, name: string, log: var DiagL
           if dms(t[0 ..< degDigits], t[degDigits ..< degDigits + 2],
               t[degDigits + 2 ..< degDigits + 6]).isNone:
             inc notDms
-    if seen >= AngleSample or r.index >= AngleScan: break
+    if seen >= AngleSample or scanned >= AngleScan: break
   s.setPosition(start)
   result = auDms
   if notDms * 10 > angles:
@@ -262,7 +264,8 @@ proc decideAngleUnit(s: Stream, layout: TextLayout, name: string, log: var DiagL
       " of the first " & $angles & " angles are not valid degrees, minutes and seconds (set " &
       "P1Options.angleUnit to choose)", loc = Location(file: name))
 
-proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
+proc readP1Records(s: Stream, name: string, opts: P1Options, progress: Progress,
+    total: int64): P1File =
   ## Reads P1-P4 logical files from `s`. Problems are in `result.log` (the
   ## first few of each kind, then a count); the read stops early only on an
   ## I/O failure (fatal). A read that finds no data record says so, and why
@@ -312,7 +315,14 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
     if opts.angleUnit == auAuto:
       x.opts.angleUnit = decideAngleUnit(s, result.layout, name, result.log)
       result.options.angleUnit = x.opts.angleUnit
+    let first = s.getPosition
+    var tk = initProgressTicker(progress, total)
     for r in textRecords(s, result.layout):
+      if not tk.tick(r.offset - first):
+        result.log.report(sevFatal, dcCancelled, "cancelled by the progress callback; the " &
+          "records before byte " & $(r.offset - first) & " were read", r.offset,
+          Location(file: name, record: r.index))
+        break
       (x.offset, x.index) = (r.offset, r.index)
       inc records
       if r.index == 0: result.crlf = r.crlf
@@ -347,6 +357,9 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
       prev = r
     x.flushPending(result.log, cur, pending)
     if cur.header.len > 0 or cur.records.len > 0: result.files.add cur
+    if not result.log.isFatal and not tk.finish():
+      result.log.report(sevFatal, dcCancelled, "cancelled by the progress callback at the end",
+        loc = Location(file: name))
   except IOError, OSError:
     result.log.report(sevFatal, dcIo, getCurrentExceptionMsg(), loc = Location(file: name))
   x.cap.summarize(result.log, name)
@@ -360,14 +373,32 @@ proc readP1*(s: Stream, name = "", opts = P1Options()): P1File =
       " of them hold a point and grid coordinates but no latitude and longitude, which " &
       "is not decoded"), loc = Location(file: name))
 
-proc readP1*(path: string, opts = P1Options()): P1File =
-  ## Reads the P1-P4 file at `path` (streamed).
+proc readP1*(s: Stream, name = "", opts = P1Options(), progress: Progress = nil): P1File =
+  ## Reads P1-P4 logical files from `s`. Problems are in `result.log` (the
+  ## first few of each kind, then a count); the read stops early only on an
+  ## I/O failure (fatal) or a cancel. A read that finds no data record says
+  ## so, and why when it can (records with grid coordinates only are not
+  ## recognised); records that look like P1 data in a logical file taken as
+  ## another format are reported too. With `auAuto` the angle unit is
+  ## decided once for the file (`result.options.angleUnit` holds it; an info
+  ## says when it is grads). `progress` is called about every MiB with the
+  ## bytes read (the size of a stream is not known: -1) and once at the
+  ## end; when it returns false the read stops, with the records read so far
+  ## and a fatal `dcCancelled` in the log.
+  readP1Records(s, name, opts, progress, total = -1)
+
+proc readP1*(path: string, opts = P1Options(), progress: Progress = nil): P1File =
+  ## Reads the P1-P4 file at `path` (streamed). `progress` is called about
+  ## every MiB with the bytes read and the file's size, and once at the end;
+  ## returning false stops the read, as for a stream.
   let s = newFileStream(path, fmRead)
   if s == nil:
     result = P1File(name: path)
     result.log.report(sevFatal, dcIo, "cannot open " & path, loc = Location(file: path))
   else:
-    try: result = readP1(s, path, opts)
+    try:
+      let size = try: getFileSize(path) except OSError: -1'i64
+      result = readP1Records(s, path, opts, progress, total = if size > 0: size else: -1)
     finally: s.close()
 
 proc parseP1*(text: string, name = "", opts = P1Options()): P1File =

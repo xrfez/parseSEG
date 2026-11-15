@@ -25,12 +25,13 @@ type
     ## translated) and where it starts.
     text*: string
     offset*: int64 ## Byte offset of the record in the stream.
-    index*: int    ## 0-based record (line) number.
+    index*: int    ## 0-based record (line) number; the pieces of a cut line share it.
     crlf*: bool    ## The line ended in CR LF (`tlLines`).
     terminated*: bool ## A line terminator followed (always true for fixed records).
     cut*: bool
       ## The line was longer than `MaxLineBytes` and was cut there; the rest
-      ## follows as the next record. A reader should report it.
+      ## follows as the next record, with the same `index`. A reader should
+      ## report it.
 
 const
   CardWidth* = 80 ## Columns of a card image.

@@ -109,6 +109,16 @@ func isBlank*(s: string): bool =
   ## Only blanks (or empty).
   s.allCharsInSet({' '})
 
+func looksBinary*(s: openArray[char]): bool =
+  ## A line holds bytes no text holds: a NUL or another control character
+  ## (tab and form feed are text), DEL, or more than a quarter bytes above
+  ## 127 (text in a Latin or UTF-8 encoding has few).
+  var high = 0
+  for c in s:
+    if (c < ' ' and c notin {'\t', '\f'}) or c == '\x7F': return true
+    if c >= '\x80': inc high
+  high * 4 > s.len
+
 func allBlank*(s: openArray[char]): bool =
   ## Only blanks (or empty), for a view of a line (`toOpenArray`).
   for c in s:

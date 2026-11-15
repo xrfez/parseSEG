@@ -1181,8 +1181,10 @@ block lines_are_cut_alike_at_any_chunk_boundary:
     if trial == 3: s.add "\r" # a CR as the very last byte
     let want = reference(s)
     var got: seq[Line]
+    var lineNo = 0 # the pieces of a cut line are one line (18.4)
     for r in textRecords(newStringStream(s), tlLines):
-      doAssert r.index == got.len
+      doAssert r.index == lineNo
+      if not r.cut: inc lineNo
       got.add (r.text, r.offset, r.crlf, r.terminated, r.cut)
     doAssert got.len == want.len, $trial & ": " & $got.len & " lines, not " & $want.len
     for i in 0 ..< want.len: doAssert got[i] == want[i], $trial & " line " & $i

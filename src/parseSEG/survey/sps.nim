@@ -25,7 +25,8 @@
 ##   (a warning says which was taken), unless the caller sets it.
 
 import std/[options, streams, strutils, math, os]
-import ../common/[diagnostics, errors, outputfile]
+import ../common/[diagnostics, errors, outputfile, progress]
+import ../private/progressticker
 import ./[textrec, cards, linespans]
 
 export textrec, diagnostics
@@ -145,6 +146,18 @@ type
       ## `writeSps` writes unedited records back byte for byte. Without it a
       ## read takes about half the memory, and written records are encoded
       ## from their values; `SurveyGeometry.addSps(path)` reads that way.
+    skipBinary*: bool
+      ## Pass by lines that hold bytes no text holds (a NUL or another
+      ## control character but tab, or more than a quarter bytes above 127):
+      ## they are not read as records, one warning counts them, and each is
+      ## an empty entry of `others` (so such a file is not written back byte
+      ## for byte). Off: they are read as the records they start like.
+    maxJunkBytes*: int64
+      ## Stop reading when this many bytes in a row hold no SPS record: lines
+      ## of an unknown record type, binary lines, pieces of over-long lines
+      ## (blank lines neither end such a run nor count in it). The file turns
+      ## into other data there: an error says from which byte, and `others`
+      ## keeps at most about this much of it. 0 (the default): no bound.
 
 func initSpsPoint*(kind = pkSource): SpsPoint =
   ## A point with every value missing (index 1).
@@ -482,9 +495,11 @@ func layoutScore(line: string): int =
   else: discard
   cmp(s21, s10)
 
-proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int): SpsFile =
+proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int,
+    progress: Progress, total: int64): SpsFile =
   # `readSps`; `expected` is about how many records the stream holds (0 if
-  # unknown), to size the lists once.
+  # unknown), to size the lists once; `total` its size in bytes (-1 if
+  # unknown), for `progress`.
   result = SpsFile(name: name)
   skipBom(s)
   result.layout = if opts.forceLayout: opts.layout else: openLayout(s)
@@ -518,16 +533,28 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int): SpsF
   result.options = opts
   result.options.revision = rev
   var x = Ctx(name: name, opts: opts)
+  let first = start # the stream offset `progress` counts from
+  var tk = initProgressTicker(progress, total)
+  var binary = 0          # binary lines passed by (`skipBinary`)
+  var junk = 0'i64        # bytes in a row that hold no record (`maxJunkBytes`)
+  var junkFrom = -1'i64   # where that run started
+  var stopped = false     # by the bound or a cancel
   template take(line: untyped, lineOffset: int64, lineNumber: int, isCrlf, isTerminated,
       isCut: bool) =
     # One record: `line` is a view of its text.
     (x.offset, x.index) = (lineOffset, lineNumber)
     if lineNumber == 0: result.crlf = isCrlf
     result.finalNewline = isTerminated
-    if isCut:
+    let isBinary = (opts.skipBinary or opts.maxJunkBytes > 0) and line.looksBinary
+    var isJunk = isCut or isBinary
+    if isCut and not (opts.skipBinary and isBinary):
       x.problem(result.log, sevWarning, dcBadValue, "", "line longer than " & $MaxLineBytes &
         " bytes; cut into records (is this a text file?)")
-    if line.len == 0 or line.allBlank:
+    if opts.skipBinary and isBinary:
+      inc binary
+      result.order.add SpsEntry(kind: seOther, at: result.others.len)
+      result.others.add ""
+    elif line.len == 0 or line.allBlank:
       result.order.add SpsEntry(kind: seOther, at: result.others.len)
       result.others.add line.fieldText(0 .. line.high)
     else:
@@ -550,6 +577,7 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int): SpsF
         result.comments.add line.fieldText(1 .. line.high)
       else:
         if not (line.len >= 3 and line[0] == 'E' and line[1] == 'O' and line[2] == 'F'):
+          isJunk = true
           x.problem(result.log, sevWarning, dcBadValue, "recordId", "unknown record type '" &
             line[0] & "'; kept raw")
         result.order.add SpsEntry(kind: seOther, at: result.others.len)
@@ -557,6 +585,20 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int): SpsF
       if line.len > 80 and not line.toOpenArray(80, line.high).allBlank:
         x.problem(result.log, sevInfo, dcBadValue, "",
           "record longer than 80 columns (" & $line.len & ")")
+      if not isJunk: junk = 0 # a record ends a run of junk
+    if isJunk:
+      if junk == 0: junkFrom = lineOffset
+      junk += int64(line.len) + 1
+      if opts.maxJunkBytes > 0 and junk > opts.maxJunkBytes:
+        result.log.report(sevError, dcBadValue, "the file turns into other data from byte " &
+          $junkFrom & " (" & $junk & " bytes in a row hold no SPS record); read no further " &
+          "(SpsOptions.maxJunkBytes)", junkFrom, Location(file: name, record: lineNumber))
+        stopped = true
+    if not stopped and not tk.tick(lineOffset - first):
+      result.log.report(sevFatal, dcCancelled, "cancelled by the progress callback; the " &
+        "records before byte " & $(lineOffset - first) & " were read", lineOffset,
+        Location(file: name, record: lineNumber))
+      stopped = true
   try:
     # A file of one kind of record is the rule: room for its records at once
     # (a seq that grows by doubling held three times its final size meanwhile).
@@ -567,32 +609,50 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int): SpsF
       for span in lineSpans(s, buf, MaxLineBytes):
         take(buf.toOpenArray(span.lo, span.hi), span.offset, span.index, span.crlf,
           span.terminated, span.cut)
+        if stopped: break
     else:
       for r in textRecords(s, result.layout):
         take(r.text.toOpenArray(0, r.text.high), r.offset, r.index, r.crlf, r.terminated, r.cut)
+        if stopped: break
+    if not stopped and not tk.finish():
+      result.log.report(sevFatal, dcCancelled, "cancelled by the progress callback at the end",
+        loc = Location(file: name))
   except IOError, OSError:
     result.log.report(sevFatal, dcIo, getCurrentExceptionMsg(), loc = Location(file: name))
   x.cap.summarize(result.log, name)
+  if binary > 0:
+    result.log.report(sevWarning, dcBadValue, (if binary == 1: "1 line holds" else: $binary &
+      " lines hold") & " binary data (bytes no text holds); passed by", loc = Location(file: name))
 
-proc readSps*(s: Stream, name = "", opts = SpsOptions()): SpsFile =
+proc readSps*(s: Stream, name = "", opts = SpsOptions(), progress: Progress = nil): SpsFile =
   ## Reads SPS records from `s`. Problems are in `result.log` (the first few
   ## of each code and field, then a count); only an I/O failure ends the
-  ## read early (fatal).
-  readRecords(s, name, opts, expected = 0)
+  ## read early (fatal), or a cancel, or `opts.maxJunkBytes`. `progress` is
+  ## called about every MiB with the bytes read from `s` (its size is not
+  ## known: -1) and once at the end; when it returns false the read stops,
+  ## with the records read so far and a fatal `dcCancelled` in the log.
+  readRecords(s, name, opts, expected = 0, progress, total = -1)
 
 proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
   ## Whether `s` holds SPS rather than SEG P1 records, judged from the data
   ## records of its first `maxRecords` records: SPS point records have a
   ## record letter (R, S) and grid coordinates in columns 47-65, relation
   ## records (X) channel numbers in 39-48; P1 data records start with a blank and
-  ## have hemisphere letters in columns 35 and 45. Rewinds `s`.
+  ## have hemisphere letters in columns 35 and 45. A head with no data record
+  ## of either (SPS header records often fill more than 4 KiB) is SPS when
+  ## an H00 record names SPS (`SPS 2.1`, `SPS001`, ...: what `readSps` takes
+  ## the revision from). Rewinds `s`.
   let start = s.getPosition
   skipBom(s)
-  var sps, p1 = 0
+  var sps, p1, n = 0
+  var namesSps = false
   for r in textRecords(s, openLayout(s)):
     let t = r.text
     if t.len > 0:
       case t[0]
+      of 'H':
+        if t.col(2, 4).strip == "00" and revisionFromH00(t.col(33, max(80, t.len)))[0]:
+          namesSps = true
       of 'R', 'S':
         let (e, n) = (parseFortranFloat(t.col(47, 55), 1), parseFortranFloat(t.col(56, 65), 1))
         if e.isSome and n.isSome and not (e.get.isNaN or n.get.isNaN):
@@ -603,13 +663,17 @@ proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
       of ' ':
         if t.colChar(35) in {'N', 'S'} and t.colChar(45) in {'E', 'W'}: inc p1
       else: discard
-    if r.index >= maxRecords: break
+    inc n # records, not lines: an over-long line's pieces count each
+    if n > maxRecords: break
   s.setPosition(start)
-  sps > p1
+  sps > p1 or (sps == 0 and p1 == 0 and namesSps)
 
-proc readSps*(path: string, opts = SpsOptions()): SpsFile =
+proc readSps*(path: string, opts = SpsOptions(), progress: Progress = nil): SpsFile =
   ## Reads the SPS file at `path` (streamed, never loaded whole). A file
   ## that cannot be opened gives a fatal diagnostic and no records.
+  ## `progress` is called about every MiB with the bytes read and the file's
+  ## size, and once at the end; returning false stops the read, as for a
+  ## stream (a viewer reads large files in the background this way).
   let s = newFileStream(path, fmRead)
   if s == nil:
     result = SpsFile(name: path)
@@ -618,7 +682,8 @@ proc readSps*(path: string, opts = SpsOptions()): SpsFile =
     try:
       # Cards are 80 columns and a line end.
       let size = try: getFileSize(path) except OSError: 0'i64
-      result = readRecords(s, path, opts, expected = int(size div 82))
+      result = readRecords(s, path, opts, expected = int(size div 82), progress,
+        total = if size > 0: size else: -1)
     finally: s.close()
 
 proc parseSps*(text: string, name = "", opts = SpsOptions()): SpsFile =
