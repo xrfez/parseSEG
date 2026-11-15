@@ -67,8 +67,9 @@ type
       ## The file ends before the range does: it was cut short while open
       ## (the source's cut is lowered); the bytes past its end read as zeros.
     rsFailed
-      ## A read failed (an I/O error): the blocks it did not read are held
-      ## but empty (`holds` tells which); a later hold reads them again.
+      ## A read failed (an I/O error), or a block's memory could not be
+      ## committed: the blocks it did not fill are held but empty (`holds`
+      ## tells which); a later hold tries them again.
 
   BlockState = enum bsEmpty, bsLoading, bsLoaded
 
@@ -180,6 +181,18 @@ elif defined(windows):
     # Decommitted: a read there faults, but only a hold reads, and a hold
     # commits what it reads again.
     discard virtualFree(p, csize_t(bytes), MemDecommit)
+
+when defined(parseSegFailCommits):
+  var failCommits*: Atomic[int]
+    ## Tests: the next this many commits fail, as at Windows' commit limit
+    ## (`VirtualAlloc(MEM_COMMIT)`; on POSIX a commit never fails).
+
+  proc tryCommit(p: pointer, bytes: int): bool {.raises: [].} =
+    if failCommits.fetchSub(1) > 0: return false
+    failCommits.atomicInc
+    commit(p, bytes)
+else:
+  template tryCommit(p: pointer, bytes: int): bool = commit(p, bytes)
 
 proc c_memset(p: pointer, c: cint, n: csize_t): pointer {.importc: "memset",
   header: "<string.h>", discardable.}
@@ -468,7 +481,7 @@ proc readRun(c: ptr ReadCache, i, j: int, err: var int32): tuple[got: int64, st:
   # run's start; past the end of the file the run is zeros.
   let at = int64(i) shl BlockShift
   let want = min(int64(j) shl BlockShift, c.size) - at
-  if not commit(c.blockAt(i), (j - i) shl BlockShift):
+  if not tryCommit(c.blockAt(i), (j - i) shl BlockShift):
     when defined(windows): err = getLastError()
     return (0'i64, rsFailed)
   var got = 0'i64
@@ -510,7 +523,8 @@ proc hold*(c: ptr ReadCache, a, b: int64, h: var Hold): ReadStatus {.raises: [].
   ## Holds bytes `a ..< b` (clipped to the file) in `h`, reading the blocks
   ## that are missing: `rsOk`, `rsCut` when the file ends before `b` (also a
   ## cut found before: the bytes past it are zeros, not read), `rsFailed`
-  ## when a read failed (this one, or another thread's that it waited for).
+  ## when a read failed (this one, or another thread's that it waited for)
+  ## or memory for a block could not be committed (Windows).
   ## What `h` held before is released first. The bytes of the range may be
   ## read until `h` is destroyed or dropped.
   h.drop()
@@ -547,12 +561,21 @@ proc hold*(c: ptr ReadCache, a, b: int64, h: var Hold): ReadStatus {.raises: [].
   # Missing blocks: those past a known cut are zeros, the others this hold reads.
   var firstMiss = -1
   var lastMiss = -1
+  var uncommitted = false
   for i in first .. last:
     let blk = addr c.blocks[i]
     if blk.state == bsEmpty:
       if (int64(i) shl BlockShift) >= cut:
-        when stress: zeroMem(c.blockAt(i), BlockBytes)
-        if commit(c.blockAt(i), BlockBytes): blk.state = bsLoaded
+        if tryCommit(c.blockAt(i), BlockBytes):
+          when stress: zeroMem(c.blockAt(i), BlockBytes)
+          blk.state = bsLoaded
+        else:
+          # No memory for its zeros (Windows: the commit limit): the block
+          # stays empty, uncommitted, and the hold fails (`holds` is false
+          # for it), so no reader reads it; a later hold tries again. No
+          # read was waited for, so `failures` stays.
+          uncommitted = true
+          when defined(windows): c.lastError = getLastError()
       else:
         blk.state = bsLoading
         if firstMiss < 0: firstMiss = i
@@ -582,7 +605,7 @@ proc hold*(c: ptr ReadCache, a, b: int64, h: var Hold): ReadStatus {.raises: [].
   release(c.lock)
   if adviseTo > adviseFrom:
     c.adviseRange(int64(adviseFrom) shl BlockShift, int64(adviseTo) shl BlockShift)
-  result = if hi > cut: rsCut else: rsOk
+  result = if uncommitted: rsFailed elif hi > cut: rsCut else: rsOk
   if firstMiss < 0: return
   # Read each run of blocks this hold marked, outside the lock: no other
   # hold changes them meanwhile (it waits for them).
