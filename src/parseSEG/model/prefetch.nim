@@ -90,7 +90,7 @@ import std/[locks, atomics]
 import ../common/diagnostics
 import ../segy/samples
 import ./[traceindex, tracerows]
-import ../private/[checks, decodeentry, mapguard]
+import ../private/[checks, decodeentry, mapguard, readcache]
 
 type
   ChunkTransform*[T] = proc (worker: int, samples: ptr UncheckedArray[T], rows, cols: int,
@@ -153,6 +153,7 @@ type
     mem: ptr UncheckedArray[byte]
     size: int64
     guard: MapGuard # the map's registration: traces past its cut fail (`dsCut`)
+    cache: ptr ReadCache # unmapped: a chunk's windows are held as spans before they are read
     entries: ptr UncheckedArray[TraceEntry]
     codecs: ptr UncheckedArray[TraceCodec]
     sel: ptr UncheckedArray[int] # selection mode: positions index this list; nil = ranges
@@ -276,33 +277,52 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
   # `tryDecodeEntry` reports failures as a status: no exception is made on
   # this thread (one destroyed here would leak ORC's per-thread cycle buffer).
   # False when the chunk was given up: a `seek` or a `close` made it stale.
-  adviseTraces(sh.mem, sh.size, sh.entries, sh.codecs, sh.sel, s.aheadLo, s.aheadHi, sh.cols,
-    sh.firstSample)
+  if sh.cache == nil:
+    adviseTraces(sh.mem, sh.size, sh.entries, sh.codecs, sh.sel, s.aheadLo, s.aheadHi, sh.cols,
+      sh.firstSample)
+  else:
+    sh.cache.adviseSpans(sh.entries, sh.codecs, sh.sel, s.aheadLo, s.aheadHi, sh.cols,
+      sh.firstSample)
   s.failed = 0
   # A cut known before the chunk: the traces past it fail unread (without the
   # guard a read there faults).
   let known = sh.guard.guardCut
   let cutKnown = known < sh.size
   let knownWhy = if cutKnown: sh.guard.cutStatus else: dsOk
-  for k in 0..<s.count:
-    # Every 8 traces: has a `seek` or a `close` dropped this chunk? Then the
-    # consumer is waiting for the worker (a 1024-trace IBM chunk took 0.6 ms
-    # to finish: a seek while it decoded took twice as long as an idle one).
-    # Only a hint, read without the lock: `live` trails `gen`, so a stale
-    # read decodes on, and the worker decides under the lock as it always did.
-    if (k and 7) == 0 and
-        (sh.live.load(moRelaxed) != s.gen or sh.stopNow.load(moRelaxed)):
-      return false
-    let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
-    let e = sh.entries[sh.traceOf(s.first + k)]
-    let c = sh.codecs[e.record]
-    let st = if cutKnown and not undecodable(e, c, sh.size) and pastCut(e, c, known): knownWhy
-             else: tryDecodeEntry(sh.mem, sh.size, e, c, row, sh.cols, sh.firstSample)
-    if st != dsOk:
-      for c in 0..<sh.cols: row[c] = T(0)
-      s.fails[s.failed] = FailedRow(row: k, status: st)
-      s.failRows[s.failed] = k
-      inc s.failed
+  template rows(unmapped: static bool) =
+    when unmapped:
+      # The chunk's windows held as spans: one request for a run of
+      # consecutive traces (`holdSpan`); a trace whose bytes did not arrive fails.
+      var sp: SpanHold
+    for k in 0..<s.count:
+      # Every 8 traces: has a `seek` or a `close` dropped this chunk? Then the
+      # consumer is waiting for the worker (a 1024-trace IBM chunk took 0.6 ms
+      # to finish: a seek while it decoded took twice as long as an idle one).
+      # Only a hint, read without the lock: `live` trails `gen`, so a stale
+      # read decodes on, and the worker decides under the lock as it always did.
+      if (k and 7) == 0 and
+          (sh.live.load(moRelaxed) != s.gen or sh.stopNow.load(moRelaxed)):
+        return false
+      let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
+      let e = sh.entries[sh.traceOf(s.first + k)]
+      let c = sh.codecs[e.record]
+      var st = dsOk
+      if cutKnown and not undecodable(e, c, sh.size) and pastCut(e, c, known): st = knownWhy
+      else:
+        when unmapped:
+          let (x, y) = readSpan(e, c, sh.cols, sh.firstSample)
+          if y > x and (x < sp.lo or y > sp.hi):
+            sh.cache.holdSpan(sp, sh.entries, sh.codecs, sh.sel, s.first + k, s.first + s.count,
+              sh.cols, sh.firstSample)
+          if y > x and sp.failed and not sh.cache.holds(x, y): st = dsNotRead
+        if st == dsOk: st = tryDecodeEntry(sh.mem, sh.size, e, c, row, sh.cols, sh.firstSample)
+      if st != dsOk:
+        for c in 0..<sh.cols: row[c] = T(0)
+        s.fails[s.failed] = FailedRow(row: k, status: st)
+        s.failRows[s.failed] = k
+        inc s.failed
+  if sh.cache == nil: rows(false)
+  else: rows(true)
   if s.count > 0 and sh.guard.guardCut < sh.size:
     # A cut was found during the chunk (or before): every trace decoded
     # whose bytes reach past it read zeros there, and fails. One check per
@@ -493,6 +513,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   sh.mem = f.unsafeMemory
   sh.size = f.mappedSize
   sh.guard = f.unsafeGuard
+  sh.cache = f.unsafeCache
   if f.len > 0:
     sh.entries = cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0])
     sh.codecs = cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0])

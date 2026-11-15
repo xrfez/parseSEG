@@ -30,7 +30,15 @@ echo "tsharedreads: ok"
 # ThreadSanitizer shows the race itself (gcc: --passC and --passL
 # -fsanitize=thread, -d:useMalloc -d:noSignalHandler).
 proc mapped(): bool =
-  when defined(linux): expandFilename(path) in readFile("/proc/self/maps")
+  ## The file is held by this process: mapped, or open unmapped (a descriptor of it).
+  when defined(linux):
+    let full = expandFilename(path)
+    if full in readFile("/proc/self/maps"): return true
+    for kind, fd in walkDir("/proc/self/fd"):
+      try:
+        if expandSymlink(fd) == full: return true
+      except OSError: discard
+    false
   else: true
 
 proc prefetchWork(p: ptr SeismicFile) {.thread.} =

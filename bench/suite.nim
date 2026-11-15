@@ -5,7 +5,9 @@
 ##   suite [--scale=small|full] [--dir=DIR] [section ...]
 ##
 ## Sections: `baseline`, `index`, `decode`, `latency`, `threads`, `prefetch`,
-## `write`; all of them when none is named. `nim bench` builds this (by
+## `write`; all of them when none is named. `PARSESEG_BENCH_ACCESS=unmapped`
+## (or `mapped`) opens every file so (`OpenOptions.access`; the report's
+## name gets the access too). `nim bench` builds this (by
 ## default `-d:danger -march=native`; `PARSESEG_BENCH_BUILD=release` for the
 ## shipped x86-64-v3 build) and runs it; see `docs/benchmarks.md` for the
 ## method.
@@ -18,6 +20,7 @@ import std/[os, strformat, strutils, random, parseopt, monotimes, times, math, s
   typedthreads, memfiles, osproc]
 import parseSEG
 import parseSEG/model/traceindex as ti
+import parseSEG/private/readcache
 import ./[specs, harness]
 
 var
@@ -28,6 +31,15 @@ var
     ## Skip the cold (disk-bound) runs, e.g. for before/after builds.
   build = getEnv("PARSESEG_BENCH_BUILD", "danger")
     ## The build `nim bench` made (`danger`, `release` or `portable`).
+  access = case getEnv("PARSESEG_BENCH_ACCESS")
+    of "unmapped": faUnmapped
+    of "mapped": faMapped
+    else: faAuto
+    ## How the files are opened (`OpenOptions.access`): `PARSESEG_BENCH_ACCESS`
+    ## is `mapped`, `unmapped` or unset (`faAuto`).
+
+proc benchOpts(verify = vfSampled): OpenOptions =
+  OpenOptions(verify: verify, access: access)
 
 const
   ChunkBytes = 4_000_000
@@ -41,8 +53,11 @@ proc present(name: string): bool =
   s.traces(sc) > 0 and fileExists(s.path(dir, sc))
 
 proc dropCache(f: SeismicFile) =
-  ## Cold state for an open file: unmap its pages here, drop them from the cache.
-  dropMapping(ti.unsafeMemory(f), int(ti.mappedSize(f)))
+  ## Cold state for an open file: unmap its pages here (unmapped: empty its
+  ## read cache), drop them from the page cache.
+  let c = ti.unsafeCache(f)
+  if c != nil: c.dropUnpinned()
+  else: dropMapping(ti.unsafeMemory(f), int(ti.mappedSize(f)))
   evict(f.path)
 
 proc samplesOf(f: SeismicFile): float =
@@ -138,24 +153,24 @@ proc index() =
     var n = 0
     var cells: seq[string]
     if warmOnly:
-      var f = openSeismic(p)
+      var f = openSeismic(p, opts = benchOpts())
       n = f.len
       f.close()
       cells = @[name, $n, gb(size), "-", "-", "-"]
     else:
       evict(p)
       let tCold = timed:
-        var f = openSeismic(p)
+        var f = openSeismic(p, opts = benchOpts())
         n = f.len
         f.close()
       evict(p)
       let tFirst = timed:
-        var f = openSeismic(p)
+        var f = openSeismic(p, opts = benchOpts())
         discard f.readTraces(0..0)
         f.close()
       evict(p)
       let tWalkCold = timed:
-        var f = openSeismic(p, opts = OpenOptions(verify: vfFull))
+        var f = openSeismic(p, opts = benchOpts(vfFull))
         f.close()
       cells = @[name, $n, gb(size), ms(tCold), ms(tFirst), ms(tWalkCold)]
     if find(name).role == rBig:
@@ -164,19 +179,19 @@ proc index() =
       warm(p)
       let runs = if n >= 5_000_000: 2 else: 3
       let tWarm = best(runs):
-        var f = openSeismic(p)
+        var f = openSeismic(p, opts = benchOpts())
         f.close()
       let tWalk = best(runs):
-        var f = openSeismic(p, opts = OpenOptions(verify: vfFull))
+        var f = openSeismic(p, opts = benchOpts(vfFull))
         f.close()
       let tKeys = best(runs):
-        var f = openSeismic(p, keys = true)
+        var f = openSeismic(p, keys = true, opts = benchOpts())
         f.close()
       let m0 = getOccupiedMem()
-      var f = openSeismic(p)
+      var f = openSeismic(p, opts = benchOpts())
       let m1 = getOccupiedMem()
       f.close()
-      f = openSeismic(p, keys = true)
+      f = openSeismic(p, keys = true, opts = benchOpts())
       let m2 = getOccupiedMem()
       var gs: seq[Gather]
       let tGathers = timed: gs = f.gathers
@@ -215,7 +230,7 @@ proc decode() =
     if s.role != rFormat or not present(s.name): continue
     let p = s.path(dir, sc)
     let size = float(getFileSize(p))
-    var f = openSeismic(p)
+    var f = openSeismic(p, opts = benchOpts())
     doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0, s.name & ": " & $f.log[0]
     let samples = f.samplesOf
     var t = newTraceTensor[float32](f.chunkTraces, f.maxSamples)
@@ -226,7 +241,7 @@ proc decode() =
       cold = gbps(size, tCold)
     f.close()
     warm(p)
-    f = openSeismic(p)
+    f = openSeismic(p, opts = benchOpts())
     let tFirst = timed: doAssert f.readAll(t) == 0
     let tMapped = best(3): doAssert f.readAll(t) == 0
     var t64 = newTraceTensor[float64](f.chunkTraces, f.maxSamples)
@@ -239,7 +254,7 @@ proc decode() =
     let p = pathOf("y-ieee-big")
     let size = float(getFileSize(p))
     evict(p)
-    var f = openSeismic(p)
+    var f = openSeismic(p, opts = benchOpts())
     var t = newTraceTensor[float32](f.chunkTraces, f.maxSamples)
     f.dropCache()
     let tCold = timed: doAssert f.readAll(t) == 0
@@ -261,7 +276,7 @@ proc latency(name: string) =
   if not present(name): return
   let p = pathOf(name)
   warm(p)
-  var f = openSeismic(p)
+  var f = openSeismic(p, opts = benchOpts())
   let n = f.len
   let ns = f.maxSamples
   let per = find(name).perRecord
@@ -412,7 +427,7 @@ proc threads() =
     let p = pathOf(name)
     let size = float(getFileSize(p))
     warm(p)
-    var f = openSeismic(p)
+    var f = openSeismic(p, opts = benchOpts())
     discard f.parallelRead(8) # map every page
     var cells = @[name, "warm"]
     for c in counts:
@@ -443,7 +458,7 @@ proc prefetch() =
     let p = pathOf(name)
     let size = float(getFileSize(p))
     warm(p)
-    var f = openSeismic(p)
+    var f = openSeismic(p, opts = benchOpts())
     var t = newTraceTensor[float32](f.chunkTraces, f.maxSamples)
     discard f.readAll(t)
     let tDirect = best(3): discard f.readAll(t)
@@ -592,4 +607,5 @@ when isMainModule:
     of "prefetch": prefetch()
     of "write": write()
     else: quit "unknown section " & s
-  writeFile(dir / &"results-{sc}-{build}.md", rep.text)
+  let suffix = if access == faAuto: "" else: "-" & $access
+  writeFile(dir / &"results-{sc}-{build}{suffix}.md", rep.text)

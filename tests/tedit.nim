@@ -573,7 +573,7 @@ block interrupted_edit_over_or_beside_an_earlier_one:
     doAssert log.count(sevError) == 1 and readBytes(path)[int(at) + 72 .. int(at) + 75] ==
       odd[int(at) + 72 .. int(at) + 75], scenario
     # The same on the editor's own map.
-    var ed2 = openEditor(path, tmp / "chain_other.nif")
+    var ed2 = openEditor(path, tmp / "chain_other.nif", access = faMapped) # the map itself
     let mem = ed2.file.unsafeMemory
     for undo in [true, false]:
       copyMem(addr mem[at], addr states[1][int(at)], 240)

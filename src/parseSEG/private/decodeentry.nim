@@ -3,13 +3,15 @@
 ## read-ahead advice for a selection of traces. Raw pointers in, no
 ## `SeismicFile`: the readers, the prefetch workers and the converters call
 ## it. `tryDecodeEntry` and `adviseTraces` make no managed objects and raise
-## nothing, so worker threads may call them.
+## nothing, so worker threads may call them. For an unmapped file, the bytes
+## a decode reads (`readSpan`) are held first, many traces in one request
+## (`holdSpan`).
 
 import ../common/[diagcodes, endians, errors, seismickind]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples,
   ../seg2/samples as seg2samples
 import ../model/indextypes
-import ./[mapguard, pagehints]
+import ./[mapguard, pagehints, readcache]
 
 proc decodeRun[T: SampleType](c: TraceCodec, src: openArray[byte], dst: var openArray[T]) =
   # `dst.len` samples of codec `c` from the start of `src` (a known format).
@@ -39,19 +41,24 @@ type
     dsReadFailed
       ## As `dsCut`, but the map stopped there because a read failed (an
       ## I/O error, `guardReadFailed`), not because the file is shorter.
+    dsNotRead
+      ## Unmapped: the read of the trace's bytes failed (an I/O error); a
+      ## later read tries again.
 
 const decodeMessages*: array[DecodeStatus, string] = ["",
   "the sample format is not decodable", "trace samples lie past the end of the file",
   "the file was cut short while it was open: trace samples lie past its new end",
   "a read of the file failed while it was open (an I/O error: a network share or disk " &
-    "that failed): trace samples lie past what could be read"]
+    "that failed): trace samples lie past what could be read",
+  "the trace's samples could not be read (an I/O error: a network share or disk that " &
+    "failed); read them again"]
   ## The diagnostic text of each failure.
 
 func diagCodeOf*(st: DecodeStatus): DiagCode =
   ## The diagnostic code of a failed decode.
   case st
   of dsTruncated, dsCut: dcTruncated
-  of dsReadFailed: dcIo
+  of dsReadFailed, dsNotRead: dcIo
   else: dcUnsupportedFormat
 
 func cutStatus*(guard: MapGuard): DecodeStatus {.inline.} =
@@ -120,28 +127,127 @@ func pastCut*(e: TraceEntry, c: TraceCodec, cut: int64): bool {.inline.} =
   ## OS gives zeros, not a fault, for the rest of the page holding it.
   e.sampleOffset + int64(c.dataBytes(int(e.numSamples))) > cut
 
+const
+  AdviseMinTraces = 32       ## Smaller selections are advised only when they are large in bytes,
+  AdviseMinBytes = 1'i64 shl 20 ## at least this many.
+  AdviseGap = 64'i64 shl 10  ## Windows closer than this share one advice call.
+
+# ------------------------------------------------- unmapped: held spans --
+
+func readSpan*(e: TraceEntry, c: TraceCodec, cols, first: int): (int64, int64) {.inline.} =
+  ## The bytes `a ..< b` that `tryDecodeEntry(..., cols, first)` reads of
+  ## trace `e` (`a == b`: none): the window's, from the start of its first
+  ## 4-sample group for SEG-D 8015 and SEG-2 format 3.
+  let n = clamp(int(e.numSamples) - first, 0, cols)
+  if n <= 0 or not c.known: return (0'i64, 0'i64)
+  let start = e.sampleOffset
+  let stop = start + int64(c.dataBytes(int(e.numSamples)))
+  if c.packedInFours:
+    let g = start + int64(first div 4 * 10)
+    (g, min(stop, g + int64((first mod 4 + n + 3) div 4 * 10)))
+  else:
+    let a = start + int64(c.dataBytes(first))
+    (a, min(stop, a + int64(c.dataBytes(n))))
+
+const
+  SpanGap = 64'i64 shl 10   ## Bytes between two traces' windows read through, not skipped.
+  SpanBytes = 8'i64 shl 20  ## A span's limit: one request at most this large.
+
+type SpanHold* = object
+  ## The sample bytes held for a run of traces (`holdSpan`).
+  h: Hold
+  lo*, hi*: int64 ## Bytes held: `lo ..< hi`.
+  failed*: bool   ## The hold failed: a trace's bytes are held only if `holds` says so.
+
+proc holdSpan*(c: ptr ReadCache, sp: var SpanHold, entries: ptr UncheckedArray[TraceEntry],
+    codecs: ptr UncheckedArray[TraceCodec], sel: ptr UncheckedArray[int], pos, hi, cols,
+    first: int) {.raises: [].} =
+  ## Holds in `sp` the windows (`readSpan`) of positions `pos ..< hi`
+  ## (trace indices, or indices into `sel` when it is not nil) from `pos` on,
+  ## as far as each lies within 64 KiB of the span so far, before or after
+  ## it, and the span fits 8 MiB: one request for a run of neighbouring
+  ## traces, in either order. What `sp` held before is released. Makes no
+  ## managed objects and raises nothing.
+  template entry(p: int): TraceEntry = entries[if sel == nil: p else: sel[p]]
+  var (a, b) = (0'i64, 0'i64)
+  var p = pos
+  while p < hi:
+    let e = entry(p)
+    let (x, y) = readSpan(e, codecs[e.record], cols, first)
+    if y > x:
+      if b <= a:
+        (a, b) = (x, y)
+      elif x > b + SpanGap or y + SpanGap < a or max(b, y) - min(a, x) > SpanBytes:
+        break # far from the span (either way), or the span would be too large
+      else:
+        (a, b) = (min(a, x), max(b, y)) # a selection newest first grows it down
+    inc p
+  sp.lo = a
+  sp.hi = b
+  sp.failed = b > a and c.hold(a, b, sp.h) == rsFailed
+
+proc adviseSpans*(c: ptr ReadCache, entries: ptr UncheckedArray[TraceEntry],
+    codecs: ptr UncheckedArray[TraceCodec], sel: ptr UncheckedArray[int], lo, hi, cols: int,
+    first = 0) {.raises: [].} =
+  ## Unmapped: before reading the windows of positions `lo ..< hi` (as
+  ## `holdSpan` takes them), asks the OS to read them all now (`adviseRange`),
+  ## so that scattered windows (a gather, the next chunks of a prefetcher)
+  ## are fetched together, not one round trip at a time. Small reads are not
+  ## advised (as `adviseTraces`). Raises nothing, makes no managed objects.
+  let count = hi - lo
+  if count <= 0 or cols <= 0: return
+  template entry(p: int): TraceEntry = entries[if sel == nil: p else: sel[p]]
+  if count < AdviseMinTraces:
+    var bytes = 0'i64
+    for p in lo ..< hi:
+      let e = entry(p)
+      let (x, y) = readSpan(e, codecs[e.record], cols, first)
+      bytes += y - x
+    if bytes < AdviseMinBytes: return
+  var a, b = -1'i64
+  for p in lo ..< hi:
+    let e = entry(p)
+    let (x, y) = readSpan(e, codecs[e.record], cols, first)
+    if y <= x: continue
+    if b >= 0 and x >= a and x <= b + AdviseGap:
+      b = max(b, y)
+    else:
+      if b > a: c.adviseRange(a, b)
+      (a, b) = (x, y)
+  if b > a: c.adviseRange(a, b)
+
+proc drop*(sp: var SpanHold) {.raises: [].} =
+  ## Releases the span.
+  sp.h.drop()
+  sp.lo = 0
+  sp.hi = 0
+  sp.failed = false
+
 proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, guard: MapGuard,
-    e: TraceEntry, c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0) =
+    e: TraceEntry, c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0,
+    cache: ptr ReadCache = nil) =
   ## `tryDecodeEntry` that raises `SegFormatError` for an
   ## undecodable format and `SegTruncatedError` for a trace past `size` or,
   ## after the decode, past the cut of `guard` (the map's registration: the
-  ## file was cut short while mapped). For the caller's thread (conversions);
-  ## worker threads use `tryDecodeEntry`.
+  ## file was cut short while mapped), and `IOError` when an unmapped file's
+  ## bytes (`cache`) could not be read. For the caller's thread
+  ## (conversions); worker threads use `tryDecodeEntry`.
   # A cut known before: not read (without the guard a read past it faults).
   let known = guard.guardCut
+  var h: Hold
   var st = if known < size and not undecodable(e, c, size) and pastCut(e, c, known):
       guard.cutStatus
-    else: tryDecodeEntry(mem, size, e, c, dst, cols, first)
+    else: dsOk
+  if st == dsOk and cache != nil:
+    let (x, y) = readSpan(e, c, cols, first)
+    if y > x and cache.hold(x, y, h) == rsFailed and not cache.holds(x, y): st = dsNotRead
+  if st == dsOk: st = tryDecodeEntry(mem, size, e, c, dst, cols, first)
   if st == dsOk and pastCut(e, c, guard.guardCut): st = guard.cutStatus
   case st
   of dsOk: discard
   of dsUndecodable: raiseFormat(decodeMessages[st], e.offset)
   of dsTruncated, dsCut, dsReadFailed: raiseTruncated(decodeMessages[st], e.sampleOffset)
-
-const
-  AdviseMinTraces = 32       ## Smaller selections are advised only when they are large in bytes,
-  AdviseMinBytes = 1'i64 shl 20 ## at least this many.
-  AdviseGap = 64'i64 shl 10  ## Windows closer than this share one advice call.
+  of dsNotRead: raise newException(IOError, decodeMessages[st])
 
 proc adviseTraces*(mem: ptr UncheckedArray[byte], size: int64,
     entries: ptr UncheckedArray[TraceEntry], codecs: ptr UncheckedArray[TraceCodec],

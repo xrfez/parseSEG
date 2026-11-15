@@ -77,7 +77,7 @@ import ../common/[endians, errors, diagnostics, fieldlayout, niftext]
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ./[traceindex, headerfields]
-import ../private/fieldaccess
+import ../private/[fieldaccess, readcache]
 
 
 type
@@ -94,6 +94,7 @@ type
     journal: JournalFile ## Unbuffered: entries wait in `unsynced` (see `syncJournal`).
     unsynced: string     ## Journal lines not yet written and synced.
     journalDead: bool    ## The journal could not be cut back after a failed write.
+    unwritten: int       ## Journaled edits a write did not bring to the file (unmapped: an I/O error).
     edits: int
     refusals: int        ## Refused edits; the first `MaxRefusalsLogged` are in `log`.
     stale: seq[int] ## Traces edited in the batch: their keys are refreshed when it is written.
@@ -253,8 +254,16 @@ proc refreshRecords(ed: var HeaderEditor) =
   ed.staleRecords.sort(proc (a, b: StaleRecord): int = cmp(a.record, b.record))
   let mem = ed.file.unsafeMemory
   var last = -1
+  var held: Hold
   for s in ed.staleRecords:
     let (a, z) = (int(s.blk.offset), int(s.blk.offset) + s.blk.size - 1)
+    try: ed.file.holdBytes(held, s.blk.offset, s.blk.offset + s.blk.size)
+    except IOError as e:
+      # Unmapped: the edited header cannot be read back; its copy in the
+      # index stays as it was (the file has the edit).
+      ed.log.report(sevWarning, dcIo, e.msg, s.blk.offset, Location(file: ed.file.path,
+        record: s.record))
+      continue
     if s.blk.kind == hbSegdGh1:
       ed.file.mindex.segdRecords[s.record].gh1 =
         decodeBlock[SegdGeneralHeader1](mem.toOpenArray(a, z))
@@ -275,9 +284,18 @@ proc flushBatch(ed: var HeaderEditor): bool =
     if not ed.syncJournal():
       ed.dropPending()
       return false
-    let mem = ed.file.unsafeMemory
+    var unwritten = 0
+    var why = ""
     for p in ed.pending:
-      copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
+      let w = ed.file.writeFileBytes(p.at, unsafeAddr p.bytes[0], p.bytes.len)
+      if w.len > 0:
+        inc unwritten
+        why = w
+    if unwritten > 0:
+      ed.unwritten += unwritten
+      ed.log.report(sevError, dcIo, ed.file.path & ": " & $unwritten & " of a batch of " &
+        $ed.pending.len & " edits did not reach the file: " & why & " (the journal has them)",
+        loc = Location(file: ed.file.path))
     if ed.file.cutSeen:
       ed.log.report(sevError, dcTruncated, ed.file.path & " was cut short by another " &
         "program while a batch of " & $ed.pending.len & " edits was written: those past its " &
@@ -317,6 +335,8 @@ proc currentBytes(ed: HeaderEditor, at: int64, size: int): seq[byte] =
   # pending writes laid over it in order.
   let mem = ed.file.unsafeMemory
   result = newSeq[byte](size)
+  var held: Hold
+  ed.file.holdBytes(held, at, at + size)
   if size > 0: copyMem(addr result[0], addr mem[at], size)
   for i in ed.pendingUnder(at, size):
     let p = ed.pending[i]
@@ -617,16 +637,20 @@ proc journalFor(path, journalPath: string): string =
   if result == path or (fileExists(result) and fileExists(path) and sameFile(result, path)):
     raise newException(ValueError, "the journal " & result & " is the file being edited")
 
-proc openEditor*(path: string, journalPath = ""): HeaderEditor =
+proc openEditor*(path: string, journalPath = "", access = DefaultAccess): HeaderEditor =
   ## Maps `path` read-write, builds its trace index and opens the journal
   ## (default `path & ".edits.nif"`) for appending. Raises `IOError`/`OSError`
   ## if either cannot be opened, and `ValueError` if the journal is the file
   ## itself or the file holds multiplexed SEG-D (convert it to a
   ## demultiplexed file first; see `openSeismic`). Problems reading the file
   ## are in `file.index.log`; a file whose index has a fatal problem can
-  ## still be edited where its headers were located.
+  ## still be edited where its headers were located. `access` is
+  ## `OpenOptions.access`: unmapped (also `faAuto` on a network file system),
+  ## each edit is written to the file with `pwrite`, and one that cannot be
+  ## (an I/O error) is refused with a diagnostic (its journal entry stays:
+  ## `applyJournal` writes it later) and makes `close` raise `IOError`.
   let jp = journalFor(path, journalPath)
-  result = HeaderEditor(file: openSeismicRw(path), journalPath: jp)
+  result = HeaderEditor(file: openSeismicRw(path, access), journalPath: jp)
   result.openJournal()
 
 proc openEditor*(f: sink SeismicFile, journalPath = ""): HeaderEditor =
@@ -649,6 +673,11 @@ proc raiseCutWhileEdited(ed: HeaderEditor) {.noinline, noreturn.} =
   raise newException(IOError, ed.file.path & " was cut short by another program while it " &
     "was being edited: edits past its new end did not reach it (the journal " &
     ed.journalPath & " has every edit)")
+
+proc raiseUnwritten(ed: HeaderEditor) {.noinline, noreturn.} =
+  raise newException(IOError, $ed.unwritten & " edit(s) could not be written to " &
+    ed.file.path & " (an I/O error: a network share that failed); the journal " &
+    ed.journalPath & " has them (applyJournal writes them)")
 
 proc close*(ed: var HeaderEditor) =
   ## Ends a batch, flushes the map and closes it and the journal. Both are
@@ -674,6 +703,7 @@ proc close*(ed: var HeaderEditor) =
     raise newException(IOError, "the journal " & ed.journalPath &
       " cannot be synced; the batch's pending edits were not written")
   if cut: raiseCutWhileEdited(ed)
+  if ed.unwritten > 0: raiseUnwritten(ed)
 
 proc release*(ed: sink HeaderEditor): SeismicFile =
   ## Ends the editing session and hands back the file, still mapped, with its
@@ -696,6 +726,7 @@ proc release*(ed: sink HeaderEditor): SeismicFile =
     raise newException(IOError, "the journal " & e.journalPath &
       " cannot be synced; the batch's pending edits were not written")
   if cut: raiseCutWhileEdited(e)
+  if e.unwritten > 0: raiseUnwritten(e)
   result = ensureMove e.file
 
 func file*(ed: HeaderEditor): lent SeismicFile {.inline.} =
@@ -731,8 +762,6 @@ proc commitSpan(ed: var HeaderEditor, at: int64, cur, buf: openArray[byte],
   # inside the map) that differ from `cur`, the bytes there as edited so far
   # (`currentBytes`), as one span from the first to the last changed byte.
   # "" when done (also when nothing differs), else why nothing changed.
-  let mem = ed.file.unsafeMemory
-  let a = int(at)
   let size = buf.len
   var first = 0
   while first < size and buf[first] == cur[first]: inc first
@@ -750,7 +779,10 @@ proc commitSpan(ed: var HeaderEditor, at: int64, cur, buf: openArray[byte],
     if ed.pending.len >= MaxPending and not ed.flushBatch():
       return "the journal cannot be synced; this batch's pending edits were not written"
   else:
-    copyMem(addr mem[a + first], addr buf[first], last - first + 1)
+    let w = ed.file.writeFileBytes(at + first, unsafeAddr buf[first], last - first + 1)
+    if w.len > 0:
+      inc ed.unwritten
+      return w & "; it did not reach the file (the journal has it)"
     if ed.file.cutSeen:
       return "the file was cut short by another program while this edit was written; it " &
         "may not have reached the file (the journal has it)"
@@ -782,7 +814,9 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
     refuse "changes the file's structure (sizes or counts); rewrite the file instead"
   # The block as edited so far (a batch's pending writes included), so
   # several fields of one header in a batch need no flush.
-  let cur = ed.currentBytes(at, size)
+  var cur: seq[byte]
+  try: cur = ed.currentBytes(at, size)
+  except IOError as e: refuse e.msg # unmapped: the header could not be read
   var h: T
   decodeFields(h, cur, firstByte, b.order)
   var err = ""
@@ -825,7 +859,10 @@ proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label:
   if ed.file.cutSeen: refuse cutRefusal
   if bytes.len == 0: return true
   if at < 0 or at + bytes.len > ed.file.mappedSize: refuse "the bytes lie outside the file"
-  let failure = ed.commitSpan(at, ed.currentBytes(at, bytes.len), bytes, label)
+  var cur: seq[byte]
+  try: cur = ed.currentBytes(at, bytes.len)
+  except IOError as e: refuse e.msg # unmapped: the bytes could not be read
+  let failure = ed.commitSpan(at, cur, bytes, label)
   if failure.len > 0: refuse failure
   ed.keysChanged(loc.trace)
   true
@@ -914,8 +951,14 @@ proc setFileField*(ed: var HeaderEditor, name: string, value: FieldValue): bool 
   result = ed.setLocated(hsFile, 0, name, value, Location(file: ed.file.path), b) and
     ed.flushBatch() # the index copy is refreshed from the map
   if result:
-    ed.file.mindex.segy.binary = decodeBinaryHeader(ed.file.unsafeMemory.toOpenArray(int(b.offset),
-      int(b.offset) + b.size - 1), b.order)
+    var held: Hold
+    try:
+      ed.file.holdBytes(held, b.offset, b.offset + b.size)
+      ed.file.mindex.segy.binary = decodeBinaryHeader(ed.file.unsafeMemory.toOpenArray(
+        int(b.offset), int(b.offset) + b.size - 1), b.order)
+    except IOError as e:
+      # Unmapped: the edited header cannot be read back; the index's copy stays.
+      ed.log.report(sevWarning, dcIo, e.msg, b.offset, Location(file: ed.file.path))
     if name in keyedBinaryFields:
       ed.refreshAllKeys()
       ed.file.refreshSegyInterval()
@@ -961,16 +1004,19 @@ proc reloadHeaders(ed: var HeaderEditor) =
   template ix: untyped = ed.file.mindex
   let mem = ed.file.unsafeMemory
   let size = ed.file.mappedSize
+  var held: Hold
   case ix.kind
   of skSegy:
     let b = ix.locateBlock(hsFile, 0, "binary").blk
     if b.offset >= 0 and b.offset + b.size <= size:
+      ed.file.holdBytes(held, b.offset, b.offset + b.size)
       ix.segy.binary = decodeBinaryHeader(mem.toOpenArray(int(b.offset),
         int(b.offset) + b.size - 1), b.order)
   of skSegd:
     for rec in ix.segdRecords.mitems:
       let a = int(rec.offset)
       if a < 0 or a + SegdBlockSize > size: continue
+      ed.file.holdBytes(held, a, min(size, a + SegdBlockSize * (2 + rec.sourceHeaders.len)))
       rec.gh1 = decodeBlock[SegdGeneralHeader1](mem.toOpenArray(a, a + SegdBlockSize - 1))
       if not rec.isRev3 and rec.gh2.isSome:
         for n in 0 ..< rec.sourceHeaders.len:
@@ -996,17 +1042,23 @@ proc replayHere(ed: var HeaderEditor, undo: bool): DiagLog =
       "was replayed", loc = loc)
     return
   let mem = ed.file.unsafeMemory
+  let file = addr ed.file
   let readAt = proc (at: int64, buf: var seq[byte]): bool =
+    var held: Hold
+    try: file[].holdBytes(held, at, at + buf.len)
+    except IOError: return false
     if buf.len > 0: copyMem(addr buf[0], addr mem[at], buf.len)
     true
   let writeAt = proc (at: int64, buf: seq[byte]): bool =
-    if buf.len > 0: copyMem(addr mem[at], addr buf[0], buf.len)
-    true
+    buf.len == 0 or file[].writeFileBytes(at, unsafeAddr buf[0], buf.len).len == 0
   replayOn(ed.file.path, ed.journalPath, ed.file.mappedSize, undo, readAt, writeAt, result)
   if ed.file.cutSeen:
     result.report(sevFatal, dcTruncated, ed.file.path & " was cut short by another program " &
       "during the replay: what lies past its new end did not reach it", loc = loc)
-  ed.reloadHeaders()
+  try: ed.reloadHeaders()
+  except IOError as e: # unmapped: the headers cannot be read back now
+    result.report(sevError, dcIo, e.msg & "; the index's copies of the headers are as before",
+      loc = loc)
 
 proc rollbackJournal*(ed: var HeaderEditor): DiagLog =
   ## Undoes the editor's journal on its open file, as

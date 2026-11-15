@@ -53,7 +53,7 @@ import ../segd/[reader as segdreader]
 import ../model/[traceindex, keys, edit]
 import ../convert
 import ./join
-import ../private/[checks, coordscalar, progressticker, segykeys]
+import ../private/[checks, coordscalar, progressticker, segykeys, readcache]
 
 export join
 
@@ -818,11 +818,13 @@ template eachChange(f: SeismicFile, keys: openArray[TraceKeys], fields: Geometry
   var p = initPlanner(f.index, f.path, fields)
   let mem = f.unsafeMemory
   var buf: seq[byte]
+  var cur: Cursor # unmapped: the headers held as the pass goes
   for i in 0 ..< f.len:
     let e = f.index.entries[i]
     let n = int(e.headerBytes)
     if e.offset >= 0 and e.offset + n <= f.mappedSize and n > 0:
       buf.setLen n
+      f.coverBytes(cur, e.offset, e.offset + n)
       copyMem(addr buf[0], addr mem[e.offset], n)
       let changed = p.planTrace(f.index, i, keys[i], buf)
       p.count(changed)
@@ -923,8 +925,11 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
     discard f.applySurvey(g, overwrite)
     f.remapWritable()
     let map = f.unsafeMemory
+    var unwritten = ""
     eachChange(f, f.index.keys, fields, p, i, e, buf):
-      copyMem(addr map[e.offset], addr buf[0], buf.len)
+      let w = f.writeFileBytes(e.offset, addr buf[0], buf.len)
+      if w.len > 0 and unwritten.len == 0: unwritten = w
+    if unwritten.len > 0: raise newException(IOError, path & ": " & unwritten)
     log.add p.log
     result = p.changes
     # SEG-Y: the binary header says what the joined coordinates are in.
@@ -934,7 +939,13 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
       let start = f.index.segy.tapeLabel.len + TextHeaderSize
       if start + 400 <= f.mappedSize:
         let old = f.index.segy.binary.measurementSystem
-        putNum(map.toOpenArray(start, start + 399), at, system, f.index.segy.byteOrder)
+        var held: Hold
+        f.holdBytes(held, start, start + 400)
+        var bin = newSeq[byte](400)
+        copyMem(addr bin[0], addr map[start], 400)
+        putNum(bin, at, system, f.index.segy.byteOrder)
+        let w = f.writeFileBytes(start, addr bin[0], 400)
+        if w.len > 0: raise newException(IOError, path & ": " & w)
         log.report(sevInfo, dcValidation, "binary measurement system " & $old & " -> " &
           $system & " (" & (if system == 1: "metres" else: "feet") & ", the survey's grid " &
           "unit '" & g.gridUnit.name & "')", loc = Location(file: path))

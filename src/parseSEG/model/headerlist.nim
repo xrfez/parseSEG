@@ -55,7 +55,7 @@ import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/[reader as seg2reader]
 import ./[traceindex, headerfields]
-import ../private/fieldaccess
+import ../private/[fieldaccess, readcache]
 
 type
   HeaderRow* = object
@@ -77,12 +77,23 @@ type Lister = object
   mem: ptr UncheckedArray[byte]
   size: int64
   rows: seq[HeaderRow]
+  cache: ptr ReadCache # unmapped: the blocks are held before they are read
+  cur: Cursor
+  path: string
+
+proc need(L: var Lister, a, b: int64) =
+  # Unmapped: holds bytes `a ..< b` before a block is read (`IOError` when
+  # they cannot be).
+  if L.cache != nil and L.cache.cover(L.cur, a, b) == rsFailed and not L.cache.holds(a, b):
+    raise newException(IOError, L.path & " could not be read at byte " & $a & " (" &
+      L.cache.errorText & "); try again")
 
 proc addFields[T](L: var Lister, name: string, kind: HeaderBlock, pos: int64, size: int,
     firstByte: static int, order: ByteOrder) =
   # One row per named field of the block of type `T` at `pos`.
   var h: T
   let a = int(pos)
+  L.need(pos, pos + size)
   decodeFields(h, L.mem.toOpenArray(a, a + size - 1), firstByte, order)
   const specs = fieldTable(T)
   var k = 0
@@ -130,6 +141,7 @@ proc addRev3Blocks(L: var Lister, prefix: string, first: int, at: int64, n: int)
   while k < n:
     let b = at + int64(k) * SegdBlockSize
     if b + SegdBlockSize > L.size: return
+    L.need(b, min(b + 96, L.size))
     let t = L.mem[b + SegdBlockSize - 1]
     let kind = rev3Kind(t)
     let name = prefix & $(first + k)
@@ -148,7 +160,8 @@ proc initLister(f: SeismicFile): Lister =
   # The listings check for a cut after the read (`requireUncut`).
   f.requireOpen()
   f.requireUncutFirst()
-  Lister(mem: f.unsafeMemory, size: f.mappedSize)
+  Lister(mem: f.unsafeMemory, size: f.mappedSize, cache: f.unsafeCache,
+    path: if f.unsafeCache != nil: f.path else: "")
 
 proc located(L: var Lister, f: SeismicFile, scope: HeaderScope, index: int,
     name: string): bool =
@@ -165,6 +178,7 @@ proc addSeg2Block(L: var Lister, f: SeismicFile, name: string, kind: HeaderBlock
   let first = if kind == hbSeg2File: Seg2FixedSize + int(f.index.seg2.pointerBytes)
               else: int(at) + Seg2FixedSize
   var spans: seq[Slice[int]]
+  L.need(at, at + size)
   let strs = blockStrings(L.mem.toOpenArray(0, int(L.size) - 1), first, int(at) + size,
     f.index.seg2, spans)
   for i, x in strs:
@@ -288,6 +302,7 @@ proc listFileHeaders(f: SeismicFile): seq[HeaderRow] =
   of skSegd:
     if f.index.segdLabel.isSome: L.addRaw("label", "storage unit label", 0, 128)
   of skSeg2:
+    L.need(0, f.seg2FileBlockEnd)
     L.addSeg2Block(f, "file", hbSeg2File, 0,
       fileBlockSize(L.mem.toOpenArray(0, int(L.size) - 1), f.index.seg2))
   of skUnknown: discard

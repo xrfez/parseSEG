@@ -44,7 +44,7 @@ import ../common/[errors, diagnostics, niftext, outputfile, progress]
 import ../segd/reader as segdreader
 from ../seg2/reader import Seg2String, fileBlockSize
 import ./[traceindex, headerfields, edit]
-import ../private/[fieldaccess, progressticker]
+import ../private/[fieldaccess, progressticker, readcache]
 
 type
   HeaderChange* = object
@@ -128,6 +128,8 @@ proc putBlock(o: var NifOut, f: SeismicFile, blk: BlockRef, raw: bool, indent: s
     o.put "\n" & indent & " (s " & nifString(x.key) & " " & nifString(x.value) & ")"
   if raw:
     let size = if rawSize >= 0: rawSize else: blk.size
+    var held: Hold
+    f.holdBytes(held, blk.offset, blk.offset + size)
     o.put "\n" & indent & " (raw \"" &
       hexOf(f.unsafeMemory.toOpenArray(int(blk.offset), int(blk.offset) + size - 1)) & "\")"
   o.put ")"
@@ -186,6 +188,8 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
     if bin.error.len == 0:
       o.put "\n (file\n"
       if seg2:
+        var held: Hold # unmapped: up to the first trace block, as `fileBlockSize` reads
+        f.holdBytes(held, 0, seg2FileBlockEnd(f))
         let size = fileBlockSize(f.unsafeMemory.toOpenArray(0, int(f.mappedSize) - 1),
           f.index.seg2)
         o.putBlock(f, bin.blk, raw, "  ", f.index.seg2.strings, size)
@@ -211,6 +215,8 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
           else: o.putBlock(f, b.blk, false, "  ")
       if raw and f.index.entries[t].headerBytes > 0:
         template e: untyped = f.index.entries[t]
+        var held: Hold
+        f.holdBytes(held, e.offset, e.offset + int64(e.headerBytes))
         o.put "\n  (raw \"" & hexOf(f.unsafeMemory.toOpenArray(int(e.offset),
           int(e.offset) + int(e.headerBytes) - 1)) & "\")"
       o.put ")"

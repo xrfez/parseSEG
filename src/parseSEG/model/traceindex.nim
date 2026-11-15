@@ -31,7 +31,7 @@
 ## instead (`demuxPath`); the copy is deleted on `close`.
 
 import std/[algorithm, math, os, times, locks]
-import ../common/[errors, diagnostics, seismickind, progress, tensors]
+import ../common/[errors, diagnostics, endians, seismickind, progress, tensors]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader, demux]
@@ -40,7 +40,7 @@ import ./[keys, indextypes, indexwalk]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples,
   ../seg2/samples as seg2samples
 import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, indexcache,
-  mapguard]
+  mapguard, readcache]
 
 export memsource, diagnostics, keys, seismickind, progress, tensors, indextypes, indexwalk
 
@@ -228,6 +228,71 @@ template requireUncutFirst*(f: SeismicFile) =
   ## exported by `parseSEG`.
   when not mapsGuarded: requireUncut(f)
 
+proc unsafeCache*(f: SeismicFile): ptr ReadCache {.inline.} =
+  ## **Internal.** An unmapped file's read cache (nil when mapped or closed):
+  ## raw readers hold what they read in it. Not exported by `parseSEG`.
+  if f.mapped: f.map.src.readCache else: nil
+
+proc access*(f: SeismicFile): FileAccess {.inline.} =
+  ## How the file's bytes are reached: `faMapped` or `faUnmapped`
+  ## (`OpenOptions.access`, with `faAuto` resolved when it was opened).
+  ## `faAuto` for a closed file.
+  if f.mapped: f.map.src.access else: faAuto
+
+proc raiseReadFailed(f: SeismicFile, a: int64) {.noinline, noreturn.} =
+  raise newException(IOError, f.path & " could not be read at byte " & $a & " (" &
+    f.unsafeCache.errorText & "); try again")
+
+proc holdBytes*(f: SeismicFile, h: var Hold, a, b: int64) {.inline.} =
+  ## **Internal.** Unmapped: holds bytes `a ..< b` of the file in `h` before
+  ## a call reads them (what `h` held before is released); raises `IOError`
+  ## when they cannot be read (an I/O error: a network share that failed;
+  ## a later call tries again). A cut it finds is the file's cut, as a read
+  ## of a map finds it (`requireUncut` after the read). Mapped: nothing. Not
+  ## exported by `parseSEG`.
+  let c = f.unsafeCache
+  if c != nil and c.hold(a, b, h) == rsFailed and not c.holds(a, b): f.raiseReadFailed(a)
+
+proc coverBytes*(f: SeismicFile, cur: var Cursor, a, b: int64) {.inline.} =
+  ## **Internal.** `holdBytes` for a call that reads forward through the
+  ## file (header loops): `cur` keeps a window held from one read to the
+  ## next. Not exported by `parseSEG`.
+  let c = f.unsafeCache
+  if c != nil and c.cover(cur, a, b) == rsFailed and not c.holds(a, b): f.raiseReadFailed(a)
+
+proc coverSeg2Block*(f: SeismicFile, cur: var Cursor, p: int64) =
+  ## **Internal.** Unmapped: holds the SEG-2 descriptor block at `p` in
+  ## `cur`: its fixed part, then the size that gives. Mapped: nothing. Not
+  ## exported by `parseSEG`.
+  if f.unsafeCache == nil or p < 0 or p >= f.map.src.size: return
+  f.coverBytes(cur, p, p + Seg2FixedSize)
+  if p + 4 <= f.map.src.size:
+    let a = int(p)
+    let bs = getNum[uint16](f.map.src.memory.toOpenArray(a, a + 3), 2, f.idx.seg2.order)
+    f.coverBytes(cur, p, p + max(int64(bs), int64(Seg2FixedSize)))
+
+proc seg2FileBlockEnd*(f: SeismicFile): int64 =
+  ## **Internal.** SEG-2: where the File Descriptor Block ends at the latest
+  ## (its strings run up to the first trace block, or to the end of the
+  ## file): what `fileBlockSize` reads. Not exported by `parseSEG`.
+  let first = Seg2FixedSize + int64(f.idx.seg2.pointerBytes)
+  result = if f.mapped: f.map.src.size else: 0
+  for p in f.idx.seg2.pointers:
+    if int64(p) >= first and int64(p) < result: result = int64(p)
+
+proc coverHeaders*(f: SeismicFile, cur: var Cursor, trace: int) {.inline.} =
+  ## **Internal.** Unmapped: holds trace `trace`'s header bytes in `cur`
+  ## before a call reads them (SEG-2: its descriptor block). Mapped: nothing.
+  ## Not exported by `parseSEG`.
+  if f.unsafeCache == nil: return
+  let e = f.idx.entries[trace]
+  case f.idx.kind
+  of skSeg2: f.coverSeg2Block(cur, e.offset)
+  of skSegy: f.coverBytes(cur, e.offset, e.offset + max(int64(e.headerBytes), TraceHeaderSize))
+  of skSegd:
+    f.coverBytes(cur, e.offset, e.offset + max(int64(e.headerBytes), SegdTraceHeaderSize))
+  of skUnknown: discard
+
 proc cutShort*(f: SeismicFile): bool =
   ## The file was cut short by another program since it was opened: an
   ## earlier read found it so, or this call does (it asks the OS for the
@@ -275,7 +340,7 @@ proc newDemuxPath(dir: string): string =
   writeFile(result, "")
 
 proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: string,
-    progress: Progress) =
+    progress: Progress, access: FileAccess) =
   # Replaces the map and index of a multiplexed SEG-D file by those of a
   # demultiplexed copy in `dir`. The original's walk is dropped: the copy's
   # log repeats its reader diagnostics.
@@ -287,9 +352,10 @@ proc openDemultiplexed(f: var SeismicFile, twosComplement8015, keys: bool, dir: 
   log.report(sevWarning, dcMultiplexed, "the file holds multiplexed SEG-D, demultiplexed into " &
     "the temporary copy " & tmp & " (deleted on close); the index, range reads and keys " &
     "use the copy", 0, Location(file: f.path))
-  f.map.src = openMemFileSource(tmp)
+  f.map.src = openMemFileSource(tmp, access = access) # where `dir` lies, for `faAuto`
   f.demuxPath = tmp
   f.idx = buildIndex(f.map.src, skSegd, twosComplement8015, keys, progress)
+  f.map.src.endWalk()
   log.add f.idx.log
   f.idx.log = log
 
@@ -303,6 +369,10 @@ proc resolveLayout(f: var SeismicFile) =
 proc requireWholeOpen(f: SeismicFile) =
   # The end of an open: a file cut short while it was walked (the walk read
   # zeros past the cut, or stopped there) gives no index. Asks the OS once.
+  # Unmapped, a read of the walk that failed (logged fatal by its reader)
+  # raises: the next open tries again.
+  if f.mapped and f.map.src.walkError.len > 0:
+    raise newException(IOError, f.map.src.walkError & " (while it was opened)")
   if f.mapped and f.map.src.cutShort:
     if f.map.src.readFailed:
       raise newException(IOError, f.path & " could not be read past byte " &
@@ -314,12 +384,12 @@ proc requireWholeOpen(f: SeismicFile) =
 
 proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
-    forced = skUnknown): SeismicFile =
+    forced = skUnknown, access = DefaultAccess): SeismicFile =
   # `openSeismic` / `openSeismicRw`. Built in a local, so a raise (a
   # cancelled walk) unmaps the file. The source is opened before the map
   # ref is made: a `MapRef` under construction is not freed when an
   # argument of its constructor raises (96 bytes per failed open).
-  let src = openMemFileSource(path, writable)
+  let src = openMemFileSource(path, writable, access = access)
   var f = SeismicFile(path: path, map: MapRef(src: src), twos: twosComplement8015)
   f.stamp = stampOf(path)
   var why = ""
@@ -339,18 +409,20 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
       f.requireWholeOpen()
       return f
   let n = int(min(f.map.src.size, 8192))
-  let kind =
-    if forced != skUnknown: forced # `OpenOptions.kind`: the caller knows the standard
-    elif n > 0: detectKind(f.map.src.memory.toOpenArray(0, n - 1))
-    else: skUnknown
+  var kind = forced # `OpenOptions.kind`: the caller knows the standard
+  if kind == skUnknown and n > 0:
+    var h: Hold
+    f.holdBytes(h, 0, n)
+    kind = detectKind(f.map.src.memory.toOpenArray(0, n - 1))
   if kind != skUnknown:
     f.idx = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify)
+    f.map.src.endWalk()
     if kind == skSegd and f.idx.multiplexed:
       if writable:
         raise newException(ValueError, path & " holds multiplexed SEG-D, which cannot be " &
           "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
           "--to=segd`, `convertSegdRevision`) and edit that")
-      f.openDemultiplexed(twosComplement8015, keys, demuxDir, progress)
+      f.openDemultiplexed(twosComplement8015, keys, demuxDir, progress, access)
   else:
     f.idx.contiguous = true
     f.idx.log.report(sevFatal, dcUnsupportedFormat,
@@ -412,13 +484,13 @@ proc openSeismic*(path: string, keys = false, progress: Progress = nil,
   ## `twosComplement8015` also reads SEG-2 format-3 mantissas as two's
   ## complement.
   openMapped(path, opts.twosComplement8015, keys, false, opts.demuxDir, progress, opts.cache,
-    opts.verify, opts.kind)
+    opts.verify, opts.kind, opts.access)
 
-proc openSeismicRw*(path: string): SeismicFile =
+proc openSeismicRw*(path: string, access = DefaultAccess): SeismicFile =
   ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`
-  ## mapped read-write. Raises `ValueError` for multiplexed SEG-D: edits
-  ## would change only the demultiplexed copy.
-  openMapped(path, false, false, true, "")
+  ## read-write (mapped or unmapped, as `access` says). Raises `ValueError`
+  ## for multiplexed SEG-D: edits would change only the demultiplexed copy.
+  openMapped(path, false, false, true, "", access = access)
 
 proc parkAndDrop(f: var SeismicFile, next: sink MapRef) =
   # Replaces the file's map by `next` (nil: none). When prefetchers pin the
@@ -460,7 +532,8 @@ proc remapWritable*(f: var SeismicFile) =
     raise newException(ValueError, f.path & " holds multiplexed SEG-D, which cannot be " &
       "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
       "--to=segd`, `convertSegdRevision`) and edit that")
-  let src = openMemFileSource(f.path, writable = true) # before the ref, as in `openMapped`
+  let src = openMemFileSource(f.path, writable = true, access = f.access) # before the ref
+    # (as in `openMapped`), the way the file was opened
   let m = MapRef(src: src) # unmapped on a raise
   if m.src.size != f.map.src.size:
     raise newException(ValueError, f.path & " changed size since it was opened (" &
@@ -549,6 +622,8 @@ proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   f.requireTrace(trace)
   f.requireOpen()
   f.requireUncutFirst()
+  var cur: Cursor
+  f.coverHeaders(cur, trace)
   var log: DiagLog # already reported by the index walk
   result = readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.idx.seg2,
     trace, log, f.path)
@@ -590,6 +665,8 @@ proc extendedTextHeaders*(f: SeismicFile): seq[string] =
       raise newException(ValueError, "the extended textual header lies past the end of the file")
   template record(rec: openArray[byte]): string =
     cardLines(decodeText(rec, detectTextEncoding(rec)))
+  var h: Hold
+  if not ext.isComplete and n > 0: f.holdBytes(h, start, start + int64(n * TextHeaderSize))
   for r in 0..<n:
     let a = r * TextHeaderSize
     if ext.isComplete:
@@ -630,9 +707,28 @@ proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
     raise newException(ValueError, "bytes " & $offset & "+" & $n & " lie outside the file (" &
       $size & " bytes)")
   f.requireUncutFirst()
+  var h: Hold
+  f.holdBytes(h, offset, offset + int64(n))
   result = newSeq[byte](n)
   if n > 0: copyMem(addr result[0], addr f.map.src.memory[offset], n)
   f.requireUncut()
+
+proc writeFileBytes*(f: var SeismicFile, at: int64, src: pointer, n: int): string =
+  ## **Internal** (the editor, geometry write-back; not exported by
+  ## `parseSEG`). Writes `n` bytes from `src` at `at` of a file opened
+  ## read-write: mapped, into the map; unmapped, to the file (`pwrite`) and
+  ## to the cache, so later reads see them. "" when done, else why not (an
+  ## I/O error: a network share that failed).
+  if n <= 0 or not f.mapped: return ""
+  let c = f.unsafeCache
+  if c == nil:
+    copyMem(addr f.map.src.memory[at], src, n)
+    return ""
+  var err = 0'i32
+  if not c.writeAt(at, src, n, err):
+    return "the bytes could not be written to the file (" &
+      (if err == 0: "nothing was written" else: osErrorMsg(OSErrorCode(err))) & ")"
+  ""
 
 proc mappedSize*(f: SeismicFile): int64 {.inline.} =
   ## **Internal.** Bytes mapped (0 after `close`). Not exported by `parseSEG`.
@@ -698,6 +794,8 @@ proc segyIntervalOf*(f: SeismicFile, trace: int): float64 =
   let fixed = fixedIntervalUs(f.idx.segy)
   if not fixed.isNaN: return fixed
   f.requireUncutFirst()
+  var cur: Cursor
+  f.coverHeaders(cur, trace)
   var h: RawHeaders
   result = if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.idx.entries[trace], h): NaN
     else: segyIntervalUs(h, f.idx.segy.byteOrder, NaN)
@@ -761,14 +859,19 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
       # of a 400 ns call for one trace).
       let timeBasis = timeBasisOf(f.idx.segy)
       let fixedUs = fixedIntervalUs(f.idx.segy)
+      var cur: Cursor
       for k in 0 ..< count:
         let trace = traceAt(k)
+        f.coverHeaders(cur, trace)
         var h: RawHeaders
         if not mappedSegyHeaders(mem, size, f.idx.entries[trace], h): raiseOutside(trace)
         dst[k] = segyKeys(f.gr, h, timeBasis, fixedUs)
     else:
       var r = initKeyReader(f)
-      for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k))
+      var cur: Cursor
+      for k in 0 ..< count:
+        f.coverHeaders(cur, traceAt(k))
+        dst[k] = f.keysOf(r, mem, size, traceAt(k))
     f.requireUncut()
 
 proc traceKeysInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[TraceKeys]) =
@@ -820,7 +923,9 @@ proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
   var r = initKeyReader(f)
   var tick = initProgressTicker(progress, size)
   var keys = newSeq[TraceKeys](n)
+  var cur: Cursor
   for i in 0 ..< n:
+    f.coverHeaders(cur, i)
     keys[i] = f.keysOf(r, mem, size, i)
     if not tick.tick(f.idx.entries[i].offset): raiseCancelled()
   if not tick.finish(): raiseCancelled()
@@ -882,11 +987,14 @@ proc refreshKeys*(f: var SeismicFile, traces: openArray[int]): bool =
   let mem = f.unsafeMemory
   let size = f.mappedSize
   var r = initKeyReader(f)
+  var cur: Cursor
   for t in traces:
     if t < 0 or t >= f.len: continue
     var k: TraceKeys
-    try: k = f.keysOf(r, mem, size, t)
-    except ValueError: continue
+    try:
+      f.coverHeaders(cur, t)
+      k = f.keysOf(r, mem, size, t)
+    except ValueError, IOError: continue # outside the file, or unmapped and not read
     k.keepJoined(f.idx.keys[t], f.idx.joinedGroups(t))
     if not sameKeys(k, f.idx.keys[t]):
       f.idx.keys[t] = k
@@ -931,14 +1039,19 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
     let size = f.mappedSize
     if f.segyPlanFits:
       # SEG-Y: only the delay is read, not the whole key.
+      var cur: Cursor
       for k in 0 ..< count:
         let trace = traceAt(k)
+        f.coverHeaders(cur, trace)
         var h: RawHeaders
         if not mappedSegyHeaders(mem, size, f.idx.entries[trace], h): raiseOutside(trace)
         dst[k] = segyStartTimeMs(f.gr, h)
     else:
       var r = initKeyReader(f)
-      for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k)).t0Ms
+      var cur: Cursor
+      for k in 0 ..< count:
+        f.coverHeaders(cur, traceAt(k))
+        dst[k] = f.keysOf(r, mem, size, traceAt(k)).t0Ms
     f.requireUncut()
 
 proc startTimeMsInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[float64]) =
@@ -979,12 +1092,19 @@ proc traceKeys*(f: SeismicFile, traces: Slice[int]): seq[TraceKeys] =
 
 # ---------------------------------------------------------------- reading --
 
-template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, first: int,
-    log: var DiagLog, T: typedesc, failedRows: untyped = nil): int =
+func selOf(traces: openArray[int]): ptr UncheckedArray[int] {.inline.} =
+  # A selection's positions as a raw list (nil when empty), for `holdSpan`.
+  if traces.len > 0: cast[ptr UncheckedArray[int]](unsafeAddr traces[0]) else: nil
+
+template decodeLoop(f: SeismicFile, count: int, sel: ptr UncheckedArray[int], posBase: int,
+    traceAt, rowAt: untyped, cols, first: int, log: var DiagLog, T: typedesc,
+    failedRows: untyped = nil): int =
   # Decodes `count` traces: samples `first ..< first + cols` of trace
   # `traceAt(k)` into row pointer `rowAt(k)`. With `failedRows` (a `ptr
   # seq[int]`), the list is cleared (its capacity kept) and gets the `k` of
-  # each trace left zero, in order, instead of a report in `log`.
+  # each trace left zero, in order, instead of a report in `log`. Position
+  # `posBase + k` is trace `traceAt(k)`, an index into `sel` when it is not
+  # nil (`holdSpan`, for an unmapped file).
   var failed = 0
   when failedRows isnot typeof(nil): failedRows[].setLen 0
   let mem = f.unsafeMemory
@@ -1000,7 +1120,32 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
     inc failed
   let guard = f.unsafeGuard
   let known = guard.guardCut
-  if known >= size:
+  let cache = f.unsafeCache
+  if cache != nil and count > 0:
+    # Unmapped: the windows of consecutive traces are held as spans, one
+    # request each (`holdSpan`); a trace whose bytes did not arrive fails.
+    let entries = cast[ptr UncheckedArray[TraceEntry]](addr f.idx.entries[0])
+    let codecs = cast[ptr UncheckedArray[TraceCodec]](addr f.idx.codecs[0])
+    let why = guard.cutStatus
+    # Scattered or large reads: the OS is asked for all their windows at once.
+    cache.adviseSpans(entries, codecs, sel, posBase, posBase + count, cols, first)
+    var sp: SpanHold
+    for k in 0..<count:
+      let i = traceAt(k)
+      let e = f.idx.entries[i]
+      let c = f.idx.codecs[e.record]
+      let p = rowAt(k)
+      var st = dsOk
+      if known < size and not undecodable(e, c, size) and pastCut(e, c, known): st = why
+      else:
+        let (x, y) = readSpan(e, c, cols, first)
+        if y > x and (x < sp.lo or y > sp.hi):
+          cache.holdSpan(sp, entries, codecs, sel, posBase + k, posBase + count, cols, first)
+        st = if y > x and sp.failed and not cache.holds(x, y): dsNotRead
+             else: tryDecodeEntry(mem, size, e, c, p, cols, first)
+      if st != dsOk: fail(p, k, i, e, st)
+    sp.drop()
+  elif known >= size:
     for k in 0..<count:
       let i = traceAt(k)
       let e = f.idx.entries[i]
@@ -1057,16 +1202,18 @@ proc checkRows[T](dst: Tensor[T], row, count: int) =
       "need a row-major [traces, samples] tensor with room for the traces")
 
 proc advise(f: SeismicFile, traces: Slice[int], cols, first: int) {.inline.} =
-  # Read-ahead advice for a checked range (see `adviseTraces`).
-  if traces.b - traces.a >= 0:
+  # Read-ahead advice for a checked range (see `adviseTraces`); none
+  # unmapped (the reads are made in spans instead).
+  if traces.b - traces.a >= 0 and f.unsafeCache == nil:
     adviseTraces(f.unsafeMemory, f.mappedSize,
       cast[ptr UncheckedArray[TraceEntry]](addr f.idx.entries[0]),
       cast[ptr UncheckedArray[TraceCodec]](addr f.idx.codecs[0]),
       nil, traces.a, traces.b + 1, cols, first)
 
 proc advise(f: SeismicFile, traces: openArray[int], cols, first: int) {.inline.} =
-  # Read-ahead advice for a checked selection (see `adviseTraces`).
-  if traces.len > 0:
+  # Read-ahead advice for a checked selection (see `adviseTraces`); none
+  # unmapped.
+  if traces.len > 0 and f.unsafeCache == nil:
     adviseTraces(f.unsafeMemory, f.mappedSize,
       cast[ptr UncheckedArray[TraceEntry]](addr f.idx.entries[0]),
       cast[ptr UncheckedArray[TraceCodec]](addr f.idx.codecs[0]),
@@ -1094,7 +1241,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces.a + k
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, count, trace, rowOf, dst.shape[1], 0, log, T)
+  decodeLoop(f, count, nil, traces.a, trace, rowOf, dst.shape[1], 0, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     dst: var Tensor[T], log: var DiagLog, row = 0): int =
@@ -1108,7 +1255,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces[k]
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], 0, log, T)
+  decodeLoop(f, traces.len, selOf(traces), 0, trace, rowOf, dst.shape[1], 0, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var Tensor[T],
     row = 0): int =
@@ -1167,7 +1314,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces.a + k
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, count, trace, rowOf, dst.shape[1], samples.a, log, T)
+  decodeLoop(f, count, nil, traces.a, trace, rowOf, dst.shape[1], samples.a, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     samples: Slice[int], dst: var Tensor[T], log: var DiagLog, row = 0): int =
@@ -1180,7 +1327,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces[k]
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], samples.a, log, T)
+  decodeLoop(f, traces.len, selOf(traces), 0, trace, rowOf, dst.shape[1], samples.a, log, T)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples: Slice[int],
     dst: var Tensor[T], row = 0): int =
@@ -1214,7 +1361,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces.a + k
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, count, trace, rowOf, dst.shape[1], 0, log, T, addr failedRows)
+  decodeLoop(f, count, nil, traces.a, trace, rowOf, dst.shape[1], 0, log, T, addr failedRows)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
@@ -1228,7 +1375,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   f.advise(traces, dst.shape[1], 0)
   template trace(k: int): int = traces[k]
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], 0, log, T, addr failedRows)
+  decodeLoop(f, traces.len, selOf(traces), 0, trace, rowOf, dst.shape[1], 0, log, T, addr failedRows)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples: Slice[int],
     dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
@@ -1245,7 +1392,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], samples:
   f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces.a + k
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, count, trace, rowOf, dst.shape[1], samples.a, log, T, addr failedRows)
+  decodeLoop(f, count, nil, traces.a, trace, rowOf, dst.shape[1], samples.a, log, T, addr failedRows)
 
 proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
     samples: Slice[int], dst: var Tensor[T], failedRows: var seq[int], row = 0): int =
@@ -1260,7 +1407,7 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: openArray[int],
   f.advise(traces, dst.shape[1], samples.a)
   template trace(k: int): int = traces[k]
   template rowOf(k: int): ptr UncheckedArray[T] = rowPtr(dst, row + k)
-  decodeLoop(f, traces.len, trace, rowOf, dst.shape[1], samples.a, log, T, addr failedRows)
+  decodeLoop(f, traces.len, selOf(traces), 0, trace, rowOf, dst.shape[1], samples.a, log, T, addr failedRows)
 
 func maxSamples*(f: SeismicFile, traces: Slice[int]): int =
   ## Largest sample count in the trace range (0 when empty). Raises
@@ -1387,10 +1534,20 @@ proc cacheKey(f: SeismicFile): CacheKey =
   CacheKey(path: f.path, stamp: f.stamp, mem: f.unsafeMemory, size: f.mappedSize,
     twos: f.twos)
 
+proc holdEnds(f: SeismicFile, head, tail: var Hold) =
+  # Unmapped: the file's first and last `StampSpan` bytes, which the cache's
+  # key hashes. `IOError` when they cannot be read.
+  let size = f.mappedSize
+  f.holdBytes(head, 0, min(size, StampSpan))
+  f.holdBytes(tail, max(0'i64, size - StampSpan), size)
+
 proc loadIndex(f: var SeismicFile, cache: string, keys: bool, verify: VerifyMode): string
     {.raises: [].} =
   # Reads `f.index` from the cache `cache`: "" when done, else why not
   # (then `f.index` is unchanged).
+  var head, tail: Hold
+  try: f.holdEnds(head, tail)
+  except IOError as e: return "the file could not be read: " & e.msg
   readIndexCache(cache, f.cacheKey, keys, verify, f.idx)
 
 proc saveIndex*(f: SeismicFile, path: string) =
@@ -1422,4 +1579,6 @@ proc saveIndex*(f: SeismicFile, path: string) =
     raise newException(ValueError, "the index cache " & path & " is the seismic file itself")
   if stampOf(f.path) != f.stamp:
     raise newException(ValueError, f.path & " changed since it was opened; open it again")
+  var head, tail: Hold
+  f.holdEnds(head, tail)
   writeIndexCache(path, f.cacheKey, f.idx, f.walkLog, f.hasKeys)

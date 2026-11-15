@@ -10,6 +10,7 @@ import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/[headers as seg2headers, reader as seg2reader]
 import ../model/[traceindex, fieldvalues]
+import ./readcache
 
 type
   FieldRef* = object
@@ -279,6 +280,8 @@ proc blockStrings*(f: SeismicFile, b: BlockRef): seq[Seg2String] =
   ## The keyword strings of a located SEG-2 block (checked by `checkBlock`).
   if b.kind == hbSeg2File: f.index.seg2.strings
   else:
+    var h: Hold
+    f.holdBytes(h, b.offset, b.offset + b.size)
     let a = int(b.offset)
     blockStrings(f.unsafeMemory.toOpenArray(0, int(f.mappedSize) - 1), a + Seg2FixedSize,
       a + b.size, f.index.seg2)
@@ -289,6 +292,8 @@ proc readField(f: SeismicFile, b: BlockRef, field: string, bytes: openArray[byte
   if err.len > 0: return FieldRead(error: err)
   let a = int(b.offset)
   var v = none(FieldValue)
+  var held: Hold
+  if fromMap: f.holdBytes(held, b.offset, b.offset + b.size)
   withBlockType(b.kind):
     var h: BlockT
     if fromMap: decodeFields(h, f.unsafeMemory.toOpenArray(a, a + b.size - 1), firstByte, b.order)
@@ -323,6 +328,8 @@ proc readFields*(f: SeismicFile, b: BlockRef, values: var seq[Option[FieldValue]
   values.setLen 0
   result = f.checkBlock(b)
   if result.len == 0:
+    var held: Hold
+    f.holdBytes(held, b.offset, b.offset + b.size)
     let mem = f.unsafeMemory
     let a = int(b.offset)
     withBlockType(b.kind):

@@ -98,12 +98,21 @@ task testNoGuard, "Run the test suite built with -d:parseSegNoMapGuard (no SIGBU
   ## program as in 0.11 (tcutshort asserts that in children).
   selfExec "c -r --hints:off -d:parseSegNoMapGuard" & dev() & "tests/tester.nim"
 
+task testUnmapped, "Run the test suite with every file unmapped, in the read cache's stress build":
+  ## `-d:parseSegUnmapped` makes `faUnmapped` the default access, and
+  ## `-d:parseSegReadCacheStress` gives the read cache 4 KiB blocks, no
+  ## read-ahead and no budget, and fills what it evicts with 0xA5: every value
+  ## the suite checks is read through `pread` and holds, and a read outside a
+  ## hold decodes garbage.
+  selfExec "c -r --hints:off -d:parseSegUnmapped -d:parseSegReadCacheStress" & dev() &
+    "tests/tester.nim"
+
 task asan, "Run the threaded tests under ASan/LSan (any leak or memory error fails)":
   ## The tests whose worker or caller threads decode (15.1: a leak there once
   ## came from exceptions destroyed on worker threads). Needs gcc or clang
   ## with libasan. Each test gets its own nimcache under nimcache/asan.
   for t in ["tprefetch", "tsharedreads", "tcolumns", "tviewerreads", "tdiagnostics",
-      "ttracerows", "tprefetchrows", "tcutshort", "tcrossthread"]:
+      "ttracerows", "tprefetchrows", "tcutshort", "tcrossthread", "tunmapped"]:
     selfExec "c -r --hints:off -d:useMalloc -d:noSignalHandler --debugger:native " &
       "--passC:-fsanitize=address " &
       "--passL:-fsanitize=address --nimcache:nimcache/asan/" & t & " -o:bin/asan/" & t &

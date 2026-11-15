@@ -17,7 +17,8 @@ import ../segy/[reader as segyreader, fields]
 import ../segd/[reader as segdreader, mux]
 import ../seg2/[reader as seg2reader]
 import ./[keys, indextypes]
-import ../private/[progressticker, segykeys, segywalk, segyfixed]
+import ../private/[progressticker, segykeys, segywalk, segyfixed, readcache]
+import ../seg2/headers as seg2headers
 
 # ------------------------------------------------------------- detection --
 
@@ -143,8 +144,14 @@ proc sampledKeys(ix: var TraceIndex, src: MemFileSource, tk: var ProgressTicker)
   # Extension 1 or proprietary headers, and every entry lies inside the map.
   let gr = initGeometryReader(ix.segy)
   let mem = src.memory
+  let c = src.readCache
+  var cur: Cursor # unmapped: the headers held as the pass goes
   ix.keys = newSeqUninit[TraceKeys](ix.entries.len)
   for i, e in ix.entries:
+    if c != nil and c.cover(cur, e.offset, e.offset + TraceHeaderSize) == rsFailed and
+        not c.holds(e.offset, e.offset + TraceHeaderSize):
+      raise newException(IOError, src.name & " could not be read at byte " & $e.offset &
+        " (" & c.errorText & "); try again")
     ix.keys[i] = segyKeys(gr, RawHeaders(std: cast[ByteBuf](addr mem[e.offset])))
     if not tk.tick(e.offset): raiseCancelled()
 
@@ -209,11 +216,50 @@ func traceTypeCode(t: Seg2Trace): uint8 =
   let tt = t.traceType
   if tt.isSome: uint8(ord(tt.get) + 1) else: 0
 
+proc holdSeg2Blocks(src: MemFileSource): seq[Hold] =
+  # Unmapped: holds the File Descriptor Block (fixed part, trace pointers,
+  # file strings) and every Trace Descriptor Block, not the data blocks: the
+  # bytes the walk reads. `IOError` when they cannot be read.
+  let c = src.readCache
+  let size = src.size
+  template mem: untyped = src.memory
+  proc fail(c: ptr ReadCache, src: MemFileSource, at: int64) {.noinline, noreturn.} =
+    raise newException(IOError, src.name & " could not be read at byte " & $at & " (" &
+      c.errorText & "); try again")
+  template holdRange(a, b: int64) =
+    var h: Hold
+    if c.hold(a, b, h) == rsFailed and not c.holds(a, b): fail(c, src, a)
+    result.add move(h)
+  holdRange(0, min(size, Seg2FixedSize))
+  if size < Seg2FixedSize: return
+  let o = seg2Order(mem.toOpenArray(0, Seg2FixedSize - 1))
+  if o.isNone: return
+  let order = o.get
+  let m = int64(getNum[uint16](mem.toOpenArray(0, Seg2FixedSize - 1), 4, order))
+  holdRange(0, min(size, Seg2FixedSize + m))
+  let n = min(int64(getNum[uint16](mem.toOpenArray(0, Seg2FixedSize - 1), 6, order)), m div 4)
+  var pointers = newSeq[int64]()
+  var limit = size
+  for i in 0 ..< int(n):
+    let at = Seg2FixedSize + 4 * i
+    if at + 4 > size: break
+    let p = int64(getNum[uint32](mem.toOpenArray(at, at + 3), 0, order))
+    pointers.add p
+    if p >= Seg2FixedSize + m and p < limit: limit = p
+  holdRange(0, limit) # the file strings end before the first trace block
+  for p in pointers:
+    if p < 0 or p >= size: continue
+    holdRange(p, min(size, p + Seg2FixedSize))
+    if p + 4 <= size:
+      let bs = int64(getNum[uint16](mem.toOpenArray(int(p), int(p) + 3), 2, order))
+      holdRange(p, min(size, p + max(bs, Seg2FixedSize)))
+
 proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool,
     tk: var ProgressTicker): TraceIndex =
   # The whole file, from the map: pointers may come in any order.
   result = TraceIndex(kind: skSeg2, contiguous: true)
   let size = src.size
+  let held = if src.readCache != nil: holdSeg2Blocks(src) else: @[]
   let empty: seq[byte] = @[]
   template data: untyped =
     (if size > 0: src.memory.toOpenArray(0, int(size) - 1) else: empty.toOpenArray(0, -1))

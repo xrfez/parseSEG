@@ -256,8 +256,21 @@ proc guardReadFailed*(g: MapGuard): bool {.inline, raises: [].} =
 
 proc lowerGuardCut*(g: MapGuard, size: int64) {.raises: [].} =
   ## Lowers the cut to `size` when the file is known to hold no more.
-  when mapsTracked:
-    if g != nil: g.lowerCut(size)
+  if g != nil:
+    var cur = g.cut.load(moRelaxed)
+    while size < cur and not g.cut.compareExchangeWeak(cur, size, moSequentiallyConsistent, moRelaxed):
+      discard
+
+proc newTrackSlot*(): MapGuard {.raises: [].} =
+  ## A slot that records a cut and nothing else, for a file read without a
+  ## map (`private/readcache`): on every platform, outside the registry, so
+  ## no handler ever looks at it. Free it with `freeTrackSlot`.
+  result = createShared(GuardSlot)
+  result.cut.store(high(int64), moRelaxed)
+
+proc freeTrackSlot*(g: MapGuard) {.raises: [].} =
+  ## Frees a slot of `newTrackSlot` (nil: nothing to do).
+  if g != nil: freeShared(g)
 
 proc guardedFileSize*(g: MapGuard): int64 {.raises: [].} =
   ## The file's size now (`fstat` of its descriptor, about 0.5 µs), -1 when

@@ -29,6 +29,9 @@ when not defined(posix):
 else:
   import std/[memfiles, posix]
 
+when defined(parseSegUnmapped):
+  echo "tcutshort: skipped: every file is unmapped in this build (tunmapped covers them)"
+  quit 0
 let tmp = scratchDir(if paramCount() == 1: "parseseg_tcutshort_child" else: "parseseg_tcutshort")
 createDir(tmp)
 var copies = 0

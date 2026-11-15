@@ -4,6 +4,7 @@
 ## re-exports this module.
 
 import ../common/[endians, diagnostics, seismickind]
+import ../io/memsource
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/[reader as seg2reader]
@@ -31,6 +32,13 @@ type
       ## The standard to read the file as, without detecting it: for a file
       ## `detectKind` does not recognize, or takes for another standard.
       ## `skUnknown`, the default, detects.
+    access*: FileAccess = DefaultAccess
+      ## How the file's bytes are reached: `faAuto` (the default) reads a
+      ## file on a network file system unmapped and maps any other;
+      ## `faMapped` maps it; `faUnmapped` reads it with `pread` into
+      ## parseSEG's own cache, where a failed read fails its call and the
+      ## next call tries again (see `FileAccess`). `SeismicFile.access` says
+      ## which one the open used.
 
   TraceEntry* = object
     ## Where one trace lives (24 bytes).

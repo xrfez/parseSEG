@@ -369,7 +369,7 @@ block direct_loads_equal_the_layout_walk:
   for path in walkFiles(benchDir / "*.sgy"): files.add path
   var direct, traces = 0
   for path in files:
-    var sf = openSeismic(path)
+    var sf = openSeismic(path, opts = OpenOptions(access: faMapped)) # read from the map below
     let gr = initGeometryReader(sf.index.segy)
     let walk = gr.withoutDirect
     if gr.usesDirectLoads: inc direct

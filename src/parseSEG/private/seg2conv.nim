@@ -80,7 +80,7 @@ proc decodeFloat64*(f: SeismicFile, i: int, vals: var seq[float64]) =
   vals.setLen int(e.numSamples)
   if vals.len > 0:
     decodeEntry(f.unsafeMemory, f.mappedSize, f.unsafeGuard, e, f.index.codecs[e.record],
-      cast[ptr UncheckedArray[float64]](addr vals[0]), vals.len)
+      cast[ptr UncheckedArray[float64]](addr vals[0]), vals.len, cache = f.unsafeCache)
 
 proc reportFailure*(c: var Seg2Conv, e: ref CatchableError) =
   if e of SegCancelledError: c.log.reportCancelled(c.loc.file)

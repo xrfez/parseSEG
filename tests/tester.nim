@@ -16,7 +16,9 @@ const mode =
   (when defined(danger): " -d:danger"
    elif defined(release): " -d:release"
    else: "") & (when defined(cpuV3): " -d:cpuV3" else: "") &
-  (when defined(parseSegNoMapGuard): " -d:parseSegNoMapGuard" else: "")
+  (when defined(parseSegNoMapGuard): " -d:parseSegNoMapGuard" else: "") &
+  (when defined(parseSegUnmapped): " -d:parseSegUnmapped" else: "") &
+  (when defined(parseSegReadCacheStress): " -d:parseSegReadCacheStress" else: "")
 
 let testDir = getCurrentDir() / "tests"
 for f in walkFiles(testDir / "t*.nim"):

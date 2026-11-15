@@ -16,7 +16,7 @@ import ../common/endians
 import ../io/memsource
 import ../segy/reader
 import ../model/indextypes
-import ./pagehints
+import ./[pagehints, readcache]
 
 const SampledHeaders* = 64
   ## Trace headers `fixedEntries` reads at most: the first, the last and the
@@ -56,11 +56,20 @@ proc fixedEntries*(r: SegyReader, src: MemFileSource, entries: var seq[TraceEntr
   let m = min(n, SampledHeaders)
   template headerOf(k: int): int64 =
     f.firstTraceOffset + (if m == 1: 0'i64 else: int64(k) * int64(n - 1) div int64(m - 1)) * stride
-  if not isResident(mem, src.size, headerOf(m - 1)):
+  let c = src.readCache
+  if c == nil and not isResident(mem, src.size, headerOf(m - 1)):
     # Cold: queue the sampled pages' reads at once, not one fault at a time.
     for k in 0..<m: adviseWillNeed(mem, src.size, headerOf(k), headerOf(k) + TraceHeaderSize)
+  elif c != nil:
+    # Unmapped: the same, through the file (one round trip on a share, not 64).
+    for k in 0..<m: c.adviseRange(headerOf(k), headerOf(k) + TraceHeaderSize)
+  var held: Hold # unmapped: one sampled header at a time
   for k in 0..<m:
     let at = int(headerOf(k))
+    if c != nil and c.hold(at, at + TraceHeaderSize, held) == rsFailed and
+        not c.holds(at, at + TraceHeaderSize):
+      raise newException(IOError, src.name & " could not be read at byte " & $at & " (" &
+        c.errorText & "); try again")
     template h: untyped = mem.toOpenArray(at, at + TraceHeaderSize - 1)
     if uint32(getNum[uint16](h, 114, f.byteOrder)) != ns or
         float64(getNum[uint16](h, 116, f.byteOrder)) != dt:

@@ -23,8 +23,8 @@ block private_modules_stay_private:
   # modules import them, no module re-exports them, so `import parseSEG`
   # cannot reach them whatever the re-export graph does.
   const privateMods = ["bytestore", "checks", "coordscalar", "decodeentry", "fieldaccess",
-    "indexcache", "mapguard", "pagehints", "progressticker", "sampleconv", "seg2conv",
-    "segyencode", "segyfixed", "segykeys", "segywalk", "tensorrows"]
+    "indexcache", "mapguard", "netfs", "pagehints", "progressticker", "readcache", "sampleconv",
+    "seg2conv", "segyencode", "segyfixed", "segykeys", "segywalk", "tensorrows"]
   doAssert sorted(privateModules()) == @privateMods,
     "update privateMods (and the hidden-name check below) for " & $privateModules()
   for path in sourceFiles():
@@ -59,7 +59,9 @@ block exported_internals_stay_hidden:
     "convertJoined", "convertSegdToSegyJoined", "GeometryJoin",
     "unsafeMemory", "mappedSize", "MapPin", "pinMap", "openSeismicRw", "remapWritable",
     "requireOpen", "requireTrace", "requireKind", "requireUncut", "cutSeen", "unsafeGuard",
-    "mapGuard",
+    "mapGuard", "requireUncutFirst", "unsafeCache", "holdBytes", "coverBytes", "coverSeg2Block",
+    "coverHeaders", "seg2FileBlockEnd", "writeFileBytes", "readCache", "endWalk",
+    "resolveAccess", "walkError",
     "flushPending", "batching", "logVar"]
   macro assertHidden(names: static openArray[string]): untyped =
     result = newStmtList()

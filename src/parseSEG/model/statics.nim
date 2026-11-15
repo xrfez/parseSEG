@@ -21,7 +21,7 @@
 import std/math
 import ./traceindex
 import ../segy/[traceheader, reader as segyreader]
-import ../private/checks
+import ../private/[checks, readcache]
 
 type
   TraceStatics* = object
@@ -50,6 +50,8 @@ proc staticsOf(f: SeismicFile, trace: int): TraceStatics =
   let a = int(e.offset)
   let hb = int(e.headerBytes)
   if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > f.mappedSize: return
+  var held: Hold
+  f.holdBytes(held, e.offset, e.offset + TraceHeaderSize)
   let mem = f.unsafeMemory
   let order = f.index.segy.byteOrder
   let h = decodeTraceHeader(mem.toOpenArray(a, a + TraceHeaderSize - 1), order)

@@ -22,6 +22,7 @@
 import std/[os, times, strutils]
 import ../common/[diagnostics, diagcodes, binstore, niftext, outputfile]
 import ../io/memsource
+import ./readcache
 import ../model/[keys, indextypes]
 import ../version
 
@@ -48,7 +49,7 @@ const
     # 3: the SEG-Y keys read the channel, the trace code, the delay and the
     # date through the layout, the stations a layout names, and a fractional
     # source point: keys cached by version 2 are not these.
-  StampSpan = 64 shl 10 ## Bytes hashed at each end of the file.
+  StampSpan* = 64 shl 10 ## Bytes hashed at each end of the file.
   HeaderLimit = 64 shl 10 ## Longest cache header read.
 
 proc stampOf*(path: string): FileStamp =
@@ -113,6 +114,9 @@ proc readIndexCache*(cache: string, k: CacheKey, keys: bool, verify: VerifyMode,
   try:
     m = openMemFileSource(cache)
     let size = m.size
+    var h: Hold # unmapped (a cache on a share): the whole file, read once
+    if m.readCache != nil and m.readCache.hold(0, size, h) == rsFailed:
+      return "it cannot be read: " & m.readCache.errorText
     let mem = m.memory
     var nul = -1
     for i in 0 ..< int(min(size, HeaderLimit)):
@@ -182,6 +186,9 @@ proc writeIndexCache*(path: string, k: CacheKey, ix: TraceIndex, walkLog: int, k
     try:
       let start = int64((head.len + 8) and not 7)
       if m.size != start + n: raise newException(IOError, "cannot write " & tmp)
+      var h: Hold # unmapped: the whole file, read back once
+      if m.readCache != nil and m.readCache.hold(0, m.size, h) == rsFailed:
+        raise newException(IOError, "cannot read back " & tmp & ": " & m.readCache.errorText)
       if n > 0: trailer[1] = checksum(cast[ptr UncheckedArray[byte]](addr m.memory[start]), int(n))
       else: trailer[1] = checksum(nil, 0)
     finally:

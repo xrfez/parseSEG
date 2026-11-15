@@ -170,8 +170,16 @@ block failed_rows_are_logged:
   f.close()
 
 proc mapped(path: string): bool =
-  ## The file is mapped into this process (Linux; true elsewhere).
-  when defined(linux): expandFilename(path) in readFile("/proc/self/maps")
+  ## The file is held by this process (Linux; true elsewhere): mapped, or
+  ## open unmapped (a descriptor of it).
+  when defined(linux):
+    let full = expandFilename(path)
+    if full in readFile("/proc/self/maps"): return true
+    for kind, fd in walkDir("/proc/self/fd"):
+      try:
+        if expandSymlink(fd) == full: return true
+      except OSError: discard
+    false
   else: true
 
 block close_while_prefetching:

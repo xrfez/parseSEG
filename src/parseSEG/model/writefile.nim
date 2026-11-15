@@ -76,7 +76,7 @@ from ./keys import traceKeys
 from ../survey/join import GeometryFields
 from ../survey/writeback import KeysPlan, planKeys, finishKeys
 import ../common/tensors
-import ../private/[tensorrows, fieldaccess, segyencode]
+import ../private/[tensorrows, fieldaccess, segyencode, readcache]
 import ../version
 
 type
@@ -409,7 +409,10 @@ template withTemplateHeaders(s: var WriterState, src: SeismicFile, trace, minimu
   let (a, n) = src.headerBytes(trace, minimum)
   src.requireUncutFirst()
   s.hdr.setLen n
-  copyMem(addr s.hdr[0], addr src.unsafeMemory[a], n)
+  block:
+    var held: Hold
+    src.holdBytes(held, a, a + n)
+    copyMem(addr s.hdr[0], addr src.unsafeMemory[a], n)
   src.requireUncut()
   if keys != nil: s.keysPlan.planKeys(src, trace, keys[], s.hdr, fields)
   template h: untyped = s.hdr.toOpenArray(0, n - 1)

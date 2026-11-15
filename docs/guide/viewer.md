@@ -16,6 +16,7 @@ records, channel sets, keys, gathers).
 | [Header columns and keys on demand](#header-columns-and-keys-on-demand) | `traceFieldColumn`, `traceKeys(traces)` |
 | [Read ahead](#read-ahead-without-blocking-the-ui) | `newPrefetcher`, `tryNext`, `seek`, `nextInto`, `recycle` |
 | [A file cut short](#a-file-cut-short-while-it-is-open) | `cutShort`, `dcTruncated`, `SegTruncatedError` |
+| [Files on a network drive](#files-on-a-network-drive) | `OpenOptions.access`, `faAuto`, `faUnmapped`, `dcIo` |
 | [Survey files](#survey-files-in-the-background) | `looksLikeSps`, `readSps(progress)`, `readP1(progress)`, `SpsOptions` |
 | [The header tab](#the-header-tab-and-the-textual-header) | `traceHeaders`, `copyBytes`, `textHeader` |
 | [Geometry](#geometry-time-and-annotation) | `traceKeys`, inline and crossline |
@@ -492,7 +493,8 @@ What the viewer still does itself:
   and records the cut, and from then on sample reads fail the traces past it without
   reading them, calls that read headers, keys or bytes raise `SegTruncatedError` before
   they read, and the editor refuses edits. So such a program calls `cutShort` before it
-  reads a file that may change (after a change of its size or modification time).
+  reads a file that may change (after a change of its size or modification time), and
+  reads network files unmapped (below), where no read faults.
 - Do not block `SIGBUS` on a thread that reads files (`pthread_sigmask`, a thread pool
   that blocks every signal): the OS cannot deliver a fault there and ends the program.
 - A debugger stops at every fault the guard takes; let them through (gdb:
@@ -504,17 +506,78 @@ What the viewer still does itself:
 
 ### Files on a network drive
 
-A mapped read on a network share is a page fault the OS answers over the network. When
-the share or its server fails, a read either fails (a soft mount after its timeout, SMB
-on Linux by default: the guard above takes it, `readFailed`) or waits until the server
-answers, for minutes or for ever (a hard mount, NFS's default). No guard helps a read
-that waits: the thread that makes it stops, inside a parseSEG call or a prefetcher's
-worker. What a viewer may rely on then:
+A mapped read of a file on a network share is a page fault the OS answers over the
+network. When the share or its server fails, the fault either fails (a soft mount after its
+timeout, SMB on Linux by default) or waits until the server answers, for minutes or for
+ever (a hard mount, NFS's default). So parseSEG reads such files **unmapped** by default:
+`openSeismic` with `OpenOptions(access: faAuto)`, the default, reads a file that lies on a
+network file system with `pread` into its own cache, and maps any other.
+
+```nim
+import parseSEG
+
+var f = openSeismic("survey.sgy")              # faAuto: a share is read unmapped
+echo f.access                                  # faMapped on a local disk
+var g = openSeismic("survey.sgy", opts = OpenOptions(access: faUnmapped))
+var log: DiagLog
+discard g.readTraces(0 ..< g.len, log)         # a failed read: rows with dcIo, no signal
+f.close()
+g.close()
+```
+
+How `faAuto` decides: Linux asks `statfs` for the file system's type (NFS, SMB/CIFS, AFS,
+Coda, NCP, Ceph, 9P, Lustre, GPFS, OCFS2, GFS2 and FUSE: sshfs, rclone, gvfs mounts,
+s3fs, virtiofs); macOS and the BSDs take a file system without `MNT_LOCAL`, or of type
+nfs, smbfs, afpfs, webdav, cifs, ftp or a FUSE one; Windows takes a remote drive
+(`GetDriveTypeW` of the path's volume: a mapped network drive or a `\\server\share`
+path). When the OS cannot tell, the file is mapped. Name `faMapped` or `faUnmapped` to
+choose; `f.access` says what an open used. A program built with `-d:parseSegUnmapped`
+opens every file unmapped unless it says otherwise.
+
+What each gives:
+
+| | `faMapped` | `faUnmapped` |
+|---|---|---|
+| A read that fails (I/O error) | the guard turns the fault into failed reads, from that page on, for as long as the file is open (`readFailed`); open it again | that call fails: rows `dcIo` ("could not be read; read them again"), header, key and field calls and `openSeismic` raise `IOError` ("... try again"), the editor refuses the edit and its `close` raises; nothing is remembered, so the next call reads again |
+| A read that waits (a hung share) | waits inside the page fault | waits inside `pread` |
+| A cut | found by the first read of a page past it, or `cutShort` | found by a read that must fetch past it, or `cutShort`; bytes already in parseSEG's cache read as they were |
+| Signals | a process-wide `SIGBUS` handler (POSIX) | none: an unmapped file installs no handler |
+| Memory | the OS's page cache | up to 64 MiB a file in parseSEG's cache, besides the OS's |
+| Cost | as fast as memory once cached | a copy of every byte read and a system call per request (below) |
+
+**Is unmapped slower on a share?** No: there the round trips and the link cost the time,
+and both ways make about the same requests for the same bytes. A viewer's first look at a
+file (open it, its file headers, the keys and samples of a window of 2000 traces, then the
+next record: keys and samples of 1000 more), medians of 3 runs, from a cold cache, with
+every read that misses the page cache delayed by a round trip and the link's time for its
+bytes:
+
+| file | mapped / unmapped, data in this machine's cache | 1 ms round trip, 1 Gb/s | 20 ms, 1 Gb/s | 20 ms, no bandwidth limit |
+|---|---:|---:|---:|---:|
+| SEG-Y, 12 000 traces of 1000 samples (50 MB) | 3 / 13 ms | 217 / 132 ms | 248 / 266 ms | 85 / 196 ms |
+| SEG-D 2.1, 12 records of 1000 traces of 1000 samples (48 MB) | 6 / 29 ms | 515 / 452 ms | 534 / 547 ms | 93 / 187 ms |
+| SEG-Y, 500 000 traces of 250 samples (620 MB) | 4 / 10 ms | 112 / 78 ms | 130 / 156 ms | 38 / 121 ms |
+| SEG-D 2.1, 500 000 traces of 100 samples (226 MB: the open walks every header) | 98 / 220 ms | 2214 / 2152 ms | 2234 / 2406 ms | 178 / 550 ms |
+
+Unmapped made 6 to 20 requests for all of it (the open of the large SEG-D file 20 of 16
+MiB). The mapped times are a lower bound: a page fault that waited for the device counts
+as one round trip, and the kernel's read-ahead requests count only by their bytes. What
+the simulation leaves out: a share client's own read-ahead and its pipelined requests
+(NFS reads ahead about 15 times its read size, for maps and reads alike), and the server's
+disk. Unmapped is slower where the network is not the cost: data already in this
+machine's cache (on a local disk, warm: a random trace 32 µs against 0.4 µs, a window of
+10 000 traces 8.8 ms against 1.8 ms, a header listing 67 µs against 4 µs; decoding a file
+that fits the cache 9 to 11 GB/s against 14 to 15) and a share with no bandwidth limit and
+long round trips. So local files stay mapped (`faAuto`), and a file on a share is read
+unmapped: a failure there is an ordinary failed read, at about the cost of a map.
+
+What a viewer may rely on, mapped or not:
 
 - A thread stopped in a read holds no lock of parseSEG's: other threads go on reading,
-  opening and closing other files. A file's map is unmapped and its descriptor closed
-  outside the lock that all files share, so a close that waits on the share holds up
-  only the thread that closes.
+  opening and closing other files (and, unmapped, the blocks of the same file that are in
+  the cache). A file's map is unmapped and its descriptor closed outside the lock that
+  all files share, so a close that waits on the share holds up only the thread that
+  closes.
 - `tryNext` never waits for a worker; `next`, `nextInto` and a direct read
   (`readTracesInto`, headers, keys, `cutShort`, which asks the OS too) wait as long as the
   share makes them.
@@ -526,12 +589,14 @@ What it must still do itself:
 
 - Read network files on job threads only, and keep the UI on `tryNext` and on what is
   already decoded.
+- Unmapped: show a failed read (`dcIo` rows, an `IOError`) and offer to read again; keep
+  the file open, the next read tries the share again. Mapped: open the file again once
+  the share is back (`readFailed`).
 - Give up on a thread that waits too long by leaving it alone: do not close or drop the
-  file it reads, nor its prefetcher, while it is stopped. Unmapping the file under it
-  makes its read end the program when the share answers. Keep the file (a list of
+  file it reads, nor its prefetcher, while it is stopped. Keep the file (a list of
   abandoned files) and close it once the thread has returned.
-- Open the file again once the share is back: a failed read leaves the rest of the map
-  unreadable (`readFailed`).
+- Watch a network file for changes (size, modification time) and open it again: an
+  unmapped file does not see another program's change to bytes it holds in its cache.
 
 ## Survey files in the background
 
