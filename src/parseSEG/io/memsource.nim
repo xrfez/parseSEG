@@ -35,8 +35,11 @@ type
     faAuto
       ## Unmapped where the file lies on a network file system (NFS,
       ## SMB/CIFS, AFS, 9P, FUSE and the like on Linux; not `MNT_LOCAL` on
-      ## macOS; a remote drive or UNC path on Windows), mapped elsewhere and
-      ## when the OS cannot tell.
+      ## macOS; a remote drive or UNC path on Windows), mapped elsewhere.
+      ## When the OS cannot tell: mapped on Linux and macOS (the guard takes
+      ## a failed read), unmapped on Windows, which maps only files on a
+      ## fixed drive or a RAM disk that are no cloud placeholders (a failed
+      ## read of a map there ends the program).
     faMapped
       ## Memory-mapped: the OS pages the file in on demand, and reads are
       ## as fast as memory once it is cached. A read the OS cannot do (a
@@ -75,10 +78,12 @@ const DefaultAccess* = when defined(parseSegUnmapped): faUnmapped else: faAuto
 
 proc resolveAccess*(path: string, access: FileAccess): FileAccess =
   ## `access`, with `faAuto` resolved for `path`: `faUnmapped` on a network
-  ## file system, `faMapped` elsewhere and when the OS cannot tell (one
-  ## `statfs`, or `GetDriveTypeW` on Windows).
+  ## file system, `faMapped` elsewhere; when the OS cannot tell, `faMapped`
+  ## on Linux and macOS and `faUnmapped` on Windows (one `statfs`; on
+  ## Windows `GetVolumePathNameW`, `GetDriveTypeW`, `QueryDosDeviceW` and
+  ## `GetFileAttributesW`).
   if access != faAuto: access
-  elif onNetworkFileSystem(path) == naNetwork: faUnmapped
+  elif unmappedByDefault(onNetworkFileSystem(path)): faUnmapped
   else: faMapped
 
 proc openMemFileSource*(path: string; writable = false; chunk = DefaultMapChunk;

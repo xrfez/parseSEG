@@ -7,6 +7,10 @@
 ## has no `\`; and, when `zig` is on the PATH, `zig cc -target
 ## x86_64-windows-gnu` compiles both C files. Seen failing with the path
 ## joined by `/` again (the include held `\cpu.h`; zig: file not found).
+## Zig also compiles the Windows system calls of `faAuto` (`private/netfs`:
+## `GetVolumePathNameW`, `GetDriveTypeW`, `QueryDosDeviceW`,
+## `GetFileAttributesW`) and of unmapped reads (`private/readcache`)
+## against the real `windows.h`.
 
 import std/[assertions, os, osproc, strutils]
 
@@ -49,6 +53,13 @@ for path in walkFiles(cache / "*.c"):
       inc checked
       cFiles.add path
 doAssert checked >= 2, "the generated C that includes cpu.h: " & $checked & " files"
+for name in ["netfs.nim.c", "readcache.nim.c"]:
+  var found = false
+  for path in walkFiles(cache / "*.c"):
+    if path.endsWith(name):
+      cFiles.add path
+      found = true
+  doAssert found, name & " is not in the generated C"
 
 let zig = findExe("zig")
 if zig.len == 0:

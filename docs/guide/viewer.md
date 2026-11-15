@@ -528,10 +528,15 @@ g.close()
 How `faAuto` decides: Linux asks `statfs` for the file system's type (NFS, SMB/CIFS, AFS,
 Coda, NCP, Ceph, 9P, Lustre, GPFS, OCFS2, GFS2 and FUSE: sshfs, rclone, gvfs mounts,
 s3fs, virtiofs); macOS and the BSDs take a file system without `MNT_LOCAL`, or of type
-nfs, smbfs, afpfs, webdav, cifs, ftp or a FUSE one; Windows takes a remote drive
-(`GetDriveTypeW` of the path's volume: a mapped network drive or a `\\server\share`
-path). When the OS cannot tell, the file is mapped. Name `faMapped` or `faUnmapped` to
-choose; `f.access` says what an open used. A program built with `-d:parseSegUnmapped`
+nfs, smbfs, afpfs, webdav, cifs, ftp or a FUSE one. When the OS cannot tell, the file is
+mapped there: the guard turns a failed read into failed calls. Windows has no such guard
+(a failed read of a map is an in-page error that ends the program), so there `faAuto`
+maps only a file on a fixed drive or a RAM disk (`GetDriveTypeW` of the path's volume, a
+`subst` drive by the folder it stands for, `\\?\` and `\\?\UNC\` paths too) that is no
+cloud placeholder (a synced file whose data is fetched on access); a mapped network
+drive, a `\\server\share` path, a removable drive, a CD-ROM, and a path the probe cannot
+place are read unmapped. Name `faMapped` or `faUnmapped` to choose; `f.access` says what
+an open used. A program built with `-d:parseSegUnmapped`
 opens every file unmapped unless it says otherwise.
 
 What each gives:
