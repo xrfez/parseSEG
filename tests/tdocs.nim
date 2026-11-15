@@ -86,7 +86,7 @@ block umbrella_allowlists_match_api_md:
     ("traceindex", "model/traceindex.nim", @["MapPin", "pinMap", "openSeismicRw",
       "remapWritable", "requireOpen", "requireTrace", "requireKind", "unsafeMemory",
       "mappedSize", "flush", "segyIntervalOf", "refreshKeys", "refreshSegyInterval", "mindex",
-      "requireUncut", "cutSeen", "unsafeGuard"]),
+      "requireUncut", "requireUncutFirst", "cutSeen", "unsafeGuard"]),
     ("headerfields", "model/headerfields.nim", newSeq[string]()),
     ("edit", "model/edit.nim", @["logVar", "writeBytes", "batching", "flushPending"]),
     ("tosegy", "convert/tosegy.nim", @["GeometryJoin", "convertSegdToSegyJoined"]),

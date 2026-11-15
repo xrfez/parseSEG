@@ -72,6 +72,7 @@ proc lookup(f: SeismicFile, scope: HeaderScope, index: int, name: string): Field
   # Checked for a cut after the read only: a cut known before is still
   # known then (a check before as well cost 20 instructions per call).
   let r = f.index.locate(scope, index, name)
+  if r.error.len == 0: f.requireUncutFirst()
   result = if r.error.len > 0: FieldRead(error: r.error) else: f.readField(r.blk, r.field)
   f.requireUncut()
 
@@ -277,6 +278,7 @@ proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: openArray[int],
   if dst.len != traces.len:
     raise newException(ValueError, "need " & $traces.len & " values, got " & $dst.len)
   let p = f.planColumn(name)
+  f.requireUncutFirst()
   let mem = f.unsafeMemory
   let size = f.mappedSize
   for k, t in traces: dst[k] = f.columnValue(p, mem, size, t, name)
@@ -289,6 +291,7 @@ proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: Slice[int],
   let n = spanLen(traces)
   if dst.len != n: raise newException(ValueError, "need " & $n & " values, got " & $dst.len)
   let p = f.planColumn(name)
+  f.requireUncutFirst()
   let mem = f.unsafeMemory
   let size = f.mappedSize
   for k in 0 ..< n: dst[k] = f.columnValue(p, mem, size, traces.a + k, name)

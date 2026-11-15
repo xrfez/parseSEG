@@ -485,6 +485,14 @@ What the viewer still does itself:
   `SIGBUS` handler before the first file is opened. One installed later sees parseSEG's
   faults first: it must pass on the faults that are not its own to the handler it
   replaced, as parseSEG does, and a crash reporter would report a cut file as a crash.
+- A program that must own `SIGBUS` itself (a JVM, a Go runtime, a crash reporter that
+  must see every fault first) builds parseSEG with `-d:parseSegNoMapGuard`: then no
+  handler is installed and a read past a cut, or of a page the OS cannot read, ends the
+  program with `SIGBUS`, as in parseSEG 0.11. What still works: `cutShort` asks the OS
+  and records the cut, and from then on sample reads fail the traces past it without
+  reading them, calls that read headers, keys or bytes raise `SegTruncatedError` before
+  they read, and the editor refuses edits. So such a program calls `cutShort` before it
+  reads a file that may change (after a change of its size or modification time).
 - Do not block `SIGBUS` on a thread that reads files (`pthread_sigmask`, a thread pool
   that blocks every signal): the OS cannot deliver a fault there and ends the program.
 - A debugger stops at every fault the guard takes; let them through (gdb:

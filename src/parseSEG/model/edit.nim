@@ -850,6 +850,7 @@ proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
 proc current(ed: HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
   let r = ed.file.index.locate(scope, index, name)
   if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
+  ed.file.requireUncutFirst()
   # The block as edited so far: a batch's pending writes laid over the map.
   let inRange = r.blk.offset >= 0 and r.blk.offset + r.blk.size <= ed.file.mappedSize
   let v = if ed.batch and inRange and ed.overlapsPending(r.blk.offset, r.blk.size):

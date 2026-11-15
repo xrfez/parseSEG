@@ -10,6 +10,8 @@
 ## program (POSIX): a read of a page past its new end gets zeros instead of
 ## `SIGBUS`, and `readable` says where the bytes still in the file end.
 ## Record reads stop there. The file's descriptor stays open with the map for this.
+## Built with `-d:parseSegNoMapGuard` there is no `SIGBUS` handler: such a read
+## ends the program, as in parseSEG 0.11, and `cutShort` still finds a cut.
 
 import std/[memfiles, os]
 import records
@@ -40,10 +42,10 @@ proc openMemFileSource*(path: string; writable = false;
     # `allowRemap` keeps the descriptor open: the guard asks it for the
     # file's size when a read meets a cut.
     result.mf = memfiles.open(path, mode = if writable: fmReadWrite else: fmRead,
-      allowRemap = mapsGuarded)
+      allowRemap = mapsTracked)
     result.mapped = true
     result.size = int64(result.mf.size) # the mapped size, not an earlier stat
-    when mapsGuarded:
+    when mapsTracked:
       try:
         result.guard = guardMap(result.mf.mem, result.mf.size, result.mf.handle, writable)
       except OSError:
@@ -65,7 +67,8 @@ proc cutShort*(s: MemFileSource): bool {.raises: [].} =
   ## The file was found shorter than it was mapped: by an earlier read, or
   ## now: this asks the OS for its size (`fstat`, about 0.5 µs) and, when it
   ## is less than the map, records the cut as a read past it would (`readable`).
-  ## False for an empty or closed source, and where maps are not guarded.
+  ## False for an empty or closed source, and on Windows (where a mapped file
+  ## cannot be cut).
   if s.mapped:
     let n = s.guard.guardedFileSize
     if n >= 0 and n < s.size: s.guard.lowerGuardCut(n)

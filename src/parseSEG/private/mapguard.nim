@@ -23,13 +23,25 @@
 ## The OS gives zeros, not a fault, for the bytes between a new end and the
 ## end of its page: a read of those alone is not seen as cut until some read
 ## reaches a page past them, or `lowerGuardCut` is told the size.
+##
+## `-d:parseSegNoMapGuard` leaves the handler out, for a program that owns
+## `SIGBUS` itself (a JVM, a Go runtime, a crash reporter that must see every
+## fault first): no `sigaction` is made, and a read past a cut, or of a page
+## the OS cannot read, ends the program with `SIGBUS` as in parseSEG 0.11.
+## Every map still gets its slot and keeps its descriptor (`mapsTracked`), so
+## a cut that `lowerGuardCut` is told of (`cutShort` asks the size) fails the
+## reads past it as with the guard.
 
 import std/atomics
 when defined(posix):
-  import std/[locks, oserrors, posix]
+  import std/[locks, posix]
 
-const mapsGuarded* = defined(posix) and not defined(nimscript)
-  ## Maps are guarded on this platform.
+const
+  mapsTracked* = defined(posix) and not defined(nimscript)
+    ## Maps are registered with their descriptor and cut on this platform.
+  mapsGuarded* = mapsTracked and not defined(parseSegNoMapGuard)
+    ## The `SIGBUS` handler guards the registered maps (not with
+    ## `-d:parseSegNoMapGuard`).
 
 type
   GuardSlot = object
@@ -51,16 +63,18 @@ type
     slots: array[SlotsPerBlock, GuardSlot]
     next: Atomic[ptr SlotBlock] # blocks are added at the end and never freed
 
-when mapsGuarded:
+when mapsTracked:
   var
     guardLock: Lock          # guards `used`, adding blocks and the installation
     installed: bool          # under `guardLock`
     firstBlock: SlotBlock    # the handler walks the blocks from here
-    previous: Sigaction      # the SIGBUS action before ours
     pageMask: uint
 
   initLock(guardLock)
 
+when mapsGuarded:
+  import std/oserrors
+  var previous: Sigaction    # the SIGBUS action before ours
   var errnoVar {.importc: "errno", header: "<errno.h>".}: cint
   proc c_raise(sig: cint): cint {.importc: "raise", header: "<signal.h>".}
   proc c_sigaction(sig: cint, act, old: ptr Sigaction): cint {.
@@ -69,6 +83,8 @@ when mapsGuarded:
   when defined(linux):
     var busAdrErr {.importc: "BUS_ADRERR", header: "<signal.h>".}: cint
       # The code of a fault on a page the file no longer backs (or cannot be read).
+
+when mapsTracked:
 
   # The handler's atomics are the C compiler's builtins (POSIX: gcc or clang),
   # on the same words as the `Atomic` fields: `std/atomics`' procs are Nim
@@ -93,6 +109,11 @@ when mapsGuarded:
     var cur = atomicLoad(p, atomicRelaxed)
     while cut < cur and not atomicCas(p, addr cur, cut, true, atomicSeqCst, atomicRelaxed):
       discard
+
+  {.pop.}
+
+when mapsGuarded:
+  {.push stackTrace: off, lineTrace: off, checks: off.}
 
   proc chain(sig: cint, info: ptr SigInfo, ctx: pointer) {.raises: [].} =
     # The fault is not ours: what the action before ours would have done.
@@ -162,7 +183,6 @@ when mapsGuarded:
   proc install() =
     # Under `guardLock`. The previous action is read first, so it is in
     # place before the handler can run.
-    pageMask = uint(sysconf(SC_PAGESIZE)) - 1
     if c_sigaction(SIGBUS, nil, addr previous) != 0: raiseOSError(osLastError(), "sigaction")
     var act: Sigaction
     act.sa_sigaction = onBus
@@ -174,12 +194,16 @@ when mapsGuarded:
 proc guardMap*(mem: pointer, len: int, fd: cint, writable: bool): MapGuard =
   ## Registers the map `mem[0 ..< len]` of the open file `fd`, which stays
   ## open until `unguard`. nil where maps are not guarded, or for an empty
-  ## map. Raises `OSError` if the handler cannot be installed.
-  when mapsGuarded:
+  ## map. Raises `OSError` if the handler cannot be installed. With
+  ## `-d:parseSegNoMapGuard` the map gets its slot (its cut, its descriptor)
+  ## but no handler: a fault in it ends the program.
+  when mapsTracked:
     if mem == nil or len <= 0: return nil
     acquire(guardLock)
     try:
-      if not installed: install()
+      if pageMask == 0: pageMask = uint(sysconf(SC_PAGESIZE)) - 1
+      when mapsGuarded:
+        if not installed: install()
       var b = addr firstBlock
       while result == nil:
         for i in 0 ..< SlotsPerBlock:
@@ -207,7 +231,7 @@ proc guardMap*(mem: pointer, len: int, fd: cint, writable: bool): MapGuard =
 proc unguard*(g: MapGuard) =
   ## Unregisters a map, before it is unmapped (nil: nothing to do). A fault
   ## in it after this call ends the process.
-  when mapsGuarded:
+  when mapsTracked:
     if g == nil: return
     g.base.store(0, moRelease)
     acquire(guardLock)
@@ -232,13 +256,13 @@ proc guardReadFailed*(g: MapGuard): bool {.inline, raises: [].} =
 
 proc lowerGuardCut*(g: MapGuard, size: int64) {.raises: [].} =
   ## Lowers the cut to `size` when the file is known to hold no more.
-  when mapsGuarded:
+  when mapsTracked:
     if g != nil: g.lowerCut(size)
 
 proc guardedFileSize*(g: MapGuard): int64 {.raises: [].} =
   ## The file's size now (`fstat` of its descriptor, about 0.5 µs), -1 when
   ## it cannot be had or the map is not guarded.
-  when mapsGuarded:
+  when mapsTracked:
     if g == nil: return -1
     var st: Stat
     if fstat(g.fd, st) == 0: int64(st.st_size) else: -1

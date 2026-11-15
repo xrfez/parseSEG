@@ -9,12 +9,14 @@ proc exec(cmd: string) =
   if execShellCmd(cmd) != 0: fatal cmd
 
 # Forward the build mode, so `nim c -d:danger -r tests/tester.nim` tests danger
-# builds, and `-d:cpuV3` (tests/config.nims: x86-64-v3) so `nim testV3` tests
-# the CPU target the CLI ships with.
+# builds, `-d:cpuV3` (tests/config.nims: x86-64-v3) so `nim testV3` tests
+# the CPU target the CLI ships with, and `-d:parseSegNoMapGuard` (`nim
+# testNoGuard`: no SIGBUS handler).
 const mode =
   (when defined(danger): " -d:danger"
    elif defined(release): " -d:release"
-   else: "") & (when defined(cpuV3): " -d:cpuV3" else: "")
+   else: "") & (when defined(cpuV3): " -d:cpuV3" else: "") &
+  (when defined(parseSegNoMapGuard): " -d:parseSegNoMapGuard" else: "")
 
 let testDir = getCurrentDir() / "tests"
 for f in walkFiles(testDir / "t*.nim"):

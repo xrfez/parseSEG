@@ -5,7 +5,8 @@
 ## program with parseSEG in a debug build and reads the C of the handler's
 ## functions: no frame, and no call but the ones listed. Seen failing with
 ## the handler on `std/atomics` (`load_u1`, `compareExchangeWeak_u0`, with
-## `nimfr_`).
+## `nimfr_`). Built with `-d:parseSegNoMapGuard` (`nim testNoGuard`), the
+## program is too, and must hold no handler and call no `sigaction`.
 
 import std/[assertions, os, osproc, sets, strutils]
 
@@ -31,7 +32,8 @@ writeFile(main, "import std/os\nimport parseSEG\nvar f = openSeismic(paramStr(1)
 let cache = tmp / "nimcache"
 let (o, code) = execCmdEx(getCurrentCompilerExe().quoteShell & " c --compileOnly" &
   " --hints:off --warnings:off --skipParentCfg --skipUserCfg --stackTrace:on" &
-  " --lineTrace:on --checks:on" & nimPaths() & " --nimcache:" & quoteShell(cache) & " " &
+  " --lineTrace:on --checks:on" &
+  (when defined(parseSegNoMapGuard): " -d:parseSegNoMapGuard" else: "") & nimPaths() & " --nimcache:" & quoteShell(cache) & " " &
   quoteShell(main))
 doAssert code == 0, o
 
@@ -83,20 +85,27 @@ func short(name: string): string =
   let k = name.find("__", 1)
   if k < 0: name else: name[0 ..< k]
 
-let handler = ["onBus", "chain", "lowerCut", "sentByTheKernel"]
-let allowed = toHashSet(["__atomic_load_n", "__atomic_store_n", "__atomic_compare_exchange_n",
-  "fstat", "mmap",
-  "sigaction", "sigemptyset", "raise", "nimZeroMem", "nimErrorFlag", "NIM_UNLIKELY",
-  "if", "while", "sizeof"])
-var seen = 0
-for f in fns:
-  let n = f.name.short
-  if n.split('_')[0] notin handler: continue
-  inc seen
-  doAssert "nimfr_" notin f.body and "nimFrame" notin f.body, n & " has a stack frame"
-  for c in f.body.callees:
-    let callee = c.short
-    if callee.split('_')[0] in handler or callee in allowed or callee.isLocal: continue
-    doAssert false, n & " calls " & callee
-doAssert seen == handler.len, "found " & $seen & " of the handler's functions in " & cFile
-echo "tmapguardc: ok"
+when defined(parseSegNoMapGuard):
+  for f in fns:
+    doAssert f.name.short.split('_')[0] notin ["onBus", "chain", "install"],
+      "a handler function without the guard: " & f.name
+    doAssert "sigaction(" notin f.body, f.name & " calls sigaction without the guard"
+  echo "tmapguardc: ok (no handler: -d:parseSegNoMapGuard)"
+else:
+  let handler = ["onBus", "chain", "lowerCut", "sentByTheKernel"]
+  let allowed = toHashSet(["__atomic_load_n", "__atomic_store_n", "__atomic_compare_exchange_n",
+    "fstat", "mmap",
+    "sigaction", "sigemptyset", "raise", "nimZeroMem", "nimErrorFlag", "NIM_UNLIKELY",
+    "if", "while", "sizeof"])
+  var seen = 0
+  for f in fns:
+    let n = f.name.short
+    if n.split('_')[0] notin handler: continue
+    inc seen
+    doAssert "nimfr_" notin f.body and "nimFrame" notin f.body, n & " has a stack frame"
+    for c in f.body.callees:
+      let callee = c.short
+      if callee.split('_')[0] in handler or callee in allowed or callee.isLocal: continue
+      doAssert false, n & " calls " & callee
+  doAssert seen == handler.len, "found " & $seen & " of the handler's functions in " & cFile
+  echo "tmapguardc: ok"

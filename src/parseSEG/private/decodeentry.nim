@@ -127,7 +127,11 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, gua
   ## after the decode, past the cut of `guard` (the map's registration: the
   ## file was cut short while mapped). For the caller's thread (conversions);
   ## worker threads use `tryDecodeEntry`.
-  var st = tryDecodeEntry(mem, size, e, c, dst, cols, first)
+  # A cut known before: not read (without the guard a read past it faults).
+  let known = guard.guardCut
+  var st = if known < size and not undecodable(e, c, size) and pastCut(e, c, known):
+      guard.cutStatus
+    else: tryDecodeEntry(mem, size, e, c, dst, cols, first)
   if st == dsOk and pastCut(e, c, guard.guardCut): st = guard.cutStatus
   case st
   of dsOk: discard

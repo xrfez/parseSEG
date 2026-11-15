@@ -407,6 +407,7 @@ template withTemplateHeaders(s: var WriterState, src: SeismicFile, trace, minimu
   # against a cut of the file (`SegTruncatedError`) before any of it can
   # reach the output: bytes read past a cut are zeros.
   let (a, n) = src.headerBytes(trace, minimum)
+  src.requireUncutFirst()
   s.hdr.setLen n
   copyMem(addr s.hdr[0], addr src.unsafeMemory[a], n)
   src.requireUncut()

@@ -147,6 +147,7 @@ proc addRev3Blocks(L: var Lister, prefix: string, first: int, at: int64, n: int)
 proc initLister(f: SeismicFile): Lister =
   # The listings check for a cut after the read (`requireUncut`).
   f.requireOpen()
+  f.requireUncutFirst()
   Lister(mem: f.unsafeMemory, size: f.mappedSize)
 
 proc located(L: var Lister, f: SeismicFile, scope: HeaderScope, index: int,

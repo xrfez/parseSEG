@@ -219,6 +219,15 @@ proc requireUncut*(f: SeismicFile) {.inline.} =
   ## then too; long calls also call it before). Not exported by `parseSEG`.
   if f.cutSeen: f.raiseCut()
 
+template requireUncutFirst*(f: SeismicFile) =
+  ## **Internal.** `requireUncut` before a call reads the map, where a read
+  ## past a cut would fault: built without the guard (`-d:parseSegNoMapGuard`),
+  ## a call that reads headers, keys or bytes once a cut is known raises
+  ## before it reads. With the guard nothing: the check after the read finds
+  ## it (a check before as well cost 20 instructions a call, 18.1). Not
+  ## exported by `parseSEG`.
+  when not mapsGuarded: requireUncut(f)
+
 proc cutShort*(f: SeismicFile): bool =
   ## The file was cut short by another program since it was opened: an
   ## earlier read found it so, or this call does (it asks the OS for the
@@ -539,6 +548,7 @@ proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   f.requireKind(skSeg2)
   f.requireTrace(trace)
   f.requireOpen()
+  f.requireUncutFirst()
   var log: DiagLog # already reported by the index walk
   result = readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.idx.seg2,
     trace, log, f.path)
@@ -575,6 +585,7 @@ proc extendedTextHeaders*(f: SeismicFile): seq[string] =
   let start = int64(f.idx.segy.tapeLabel.len + TextHeaderSize + BinaryHeaderSize)
   if not ext.isComplete and n > 0:
     f.requireOpen()
+    f.requireUncutFirst()
     if start + int64(n * TextHeaderSize) > f.map.src.size:
       raise newException(ValueError, "the extended textual header lies past the end of the file")
   template record(rec: openArray[byte]): string =
@@ -618,6 +629,7 @@ proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
   if offset < 0 or offset > size or int64(n) > size - offset:
     raise newException(ValueError, "bytes " & $offset & "+" & $n & " lie outside the file (" &
       $size & " bytes)")
+  f.requireUncutFirst()
   result = newSeq[byte](n)
   if n > 0: copyMem(addr result[0], addr f.map.src.memory[offset], n)
   f.requireUncut()
@@ -685,6 +697,7 @@ proc segyIntervalOf*(f: SeismicFile, trace: int): float64 =
   ## when they lie outside the file. The caller checks the trace and the map.
   let fixed = fixedIntervalUs(f.idx.segy)
   if not fixed.isNaN: return fixed
+  f.requireUncutFirst()
   var h: RawHeaders
   result = if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.idx.entries[trace], h): NaN
     else: segyIntervalUs(h, f.idx.segy.byteOrder, NaN)
@@ -740,6 +753,7 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
     for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)]
   elif count > 0:
     f.requireOpen()
+    f.requireUncutFirst()
     let mem = f.unsafeMemory
     let size = f.mappedSize
     if f.segyPlanFits:
@@ -863,6 +877,8 @@ proc refreshKeys*(f: var SeismicFile, traces: openArray[int]): bool =
   ## Traces whose headers lie outside the map keep their keys.
   result = false
   if not f.hasKeys or traces.len == 0 or not f.isOpen: return
+  when not mapsGuarded:
+    if f.cutSeen: return # a read past the cut would fault; the editor refuses edits now
   let mem = f.unsafeMemory
   let size = f.mappedSize
   var r = initKeyReader(f)
@@ -910,6 +926,7 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
     for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)].t0Ms
   elif count > 0:
     f.requireOpen()
+    f.requireUncutFirst()
     let mem = f.unsafeMemory
     let size = f.mappedSize
     if f.segyPlanFits:
@@ -981,24 +998,40 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
         Location(file: f.path, record: if f.idx.kind == skSeg2: 0 else: int(e.record),
           trace: i))
     inc failed
-  for k in 0..<count:
-    let i = traceAt(k)
-    let e = f.idx.entries[i]
-    let p = rowAt(k)
-    let st = tryDecodeEntry(mem, size, e, f.idx.codecs[e.record], p, cols, first)
-    if st != dsOk: fail(p, k, i, e, st)
   let guard = f.unsafeGuard
+  let known = guard.guardCut
+  if known >= size:
+    for k in 0..<count:
+      let i = traceAt(k)
+      let e = f.idx.entries[i]
+      let p = rowAt(k)
+      let st = tryDecodeEntry(mem, size, e, f.idx.codecs[e.record], p, cols, first)
+      if st != dsOk: fail(p, k, i, e, st)
+  else:
+    # A cut known before the read: the traces past it fail unread (without
+    # the guard a read there faults; with it, it would read zeros).
+    let why = guard.cutStatus
+    for k in 0..<count:
+      let i = traceAt(k)
+      let e = f.idx.entries[i]
+      let c = f.idx.codecs[e.record]
+      let p = rowAt(k)
+      let st = if not undecodable(e, c, size) and pastCut(e, c, known): why
+               else: tryDecodeEntry(mem, size, e, c, p, cols, first)
+      if st != dsOk: fail(p, k, i, e, st)
   if count > 0 and guard.guardCut < size:
     # A cut was found during the read (or before): every trace decoded whose
     # bytes reach past it read zeros there, and fails too. One check per
     # read, none per trace (`guardCut` comes after the decodes: a fence).
+    # Those past a cut known before failed already.
     let cut = guard.guardCut
     let why = guard.cutStatus
     for k in 0..<count:
       let i = traceAt(k)
       let e = f.idx.entries[i]
       let c = f.idx.codecs[e.record]
-      if not undecodable(e, c, size) and pastCut(e, c, cut): fail(rowAt(k), k, i, e, why)
+      if not undecodable(e, c, size) and pastCut(e, c, cut) and not pastCut(e, c, known):
+        fail(rowAt(k), k, i, e, why)
     when failedRows isnot typeof(nil):
       var rows = move failedRows[] # sorted through a local: `failedRows[].sort()`
       rows.sort()                  # makes C that does not compile (Nim 2.4.2)

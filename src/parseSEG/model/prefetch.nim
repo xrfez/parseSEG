@@ -279,6 +279,11 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
   adviseTraces(sh.mem, sh.size, sh.entries, sh.codecs, sh.sel, s.aheadLo, s.aheadHi, sh.cols,
     sh.firstSample)
   s.failed = 0
+  # A cut known before the chunk: the traces past it fail unread (without the
+  # guard a read there faults).
+  let known = sh.guard.guardCut
+  let cutKnown = known < sh.size
+  let knownWhy = if cutKnown: sh.guard.cutStatus else: dsOk
   for k in 0..<s.count:
     # Every 8 traces: has a `seek` or a `close` dropped this chunk? Then the
     # consumer is waiting for the worker (a 1024-trace IBM chunk took 0.6 ms
@@ -290,8 +295,9 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
       return false
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
     let e = sh.entries[sh.traceOf(s.first + k)]
-    let st = tryDecodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols,
-      sh.firstSample)
+    let c = sh.codecs[e.record]
+    let st = if cutKnown and not undecodable(e, c, sh.size) and pastCut(e, c, known): knownWhy
+             else: tryDecodeEntry(sh.mem, sh.size, e, c, row, sh.cols, sh.firstSample)
     if st != dsOk:
       for c in 0..<sh.cols: row[c] = T(0)
       s.fails[s.failed] = FailedRow(row: k, status: st)

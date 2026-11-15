@@ -92,6 +92,12 @@ task testV3, "Run the test suite in a -d:release x86-64-v3 (AVX2) build, as the 
   ## other CPUs it is the plain release run.
   selfExec "c -r --hints:off -d:release -d:cpuV3" & dev() & "tests/tester.nim"
 
+task testNoGuard, "Run the test suite built with -d:parseSegNoMapGuard (no SIGBUS handler)":
+  ## The build for programs that own `SIGBUS` (a JVM, a Go runtime, a crash
+  ## reporter): parseSEG installs no handler, and a read past a cut ends the
+  ## program as in 0.11 (tcutshort asserts that in children).
+  selfExec "c -r --hints:off -d:parseSegNoMapGuard" & dev() & "tests/tester.nim"
+
 task asan, "Run the threaded tests under ASan/LSan (any leak or memory error fails)":
   ## The tests whose worker or caller threads decode (15.1: a leak there once
   ## came from exceptions destroyed on worker threads). Needs gcc or clang
