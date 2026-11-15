@@ -263,9 +263,11 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
     forced = skUnknown): SeismicFile =
   # `openSeismic` / `openSeismicRw`. Built in a local, so a raise (a
-  # cancelled walk) unmaps the file.
-  var f = SeismicFile(path: path, map: MapRef(src: openMemFileSource(path, writable)),
-    twos: twosComplement8015)
+  # cancelled walk) unmaps the file. The source is opened before the map
+  # ref is made: a `MapRef` under construction is not freed when an
+  # argument of its constructor raises (96 bytes per failed open).
+  let src = openMemFileSource(path, writable)
+  var f = SeismicFile(path: path, map: MapRef(src: src), twos: twosComplement8015)
   f.stamp = stampOf(path)
   var why = ""
   if cache.len > 0:
@@ -405,7 +407,8 @@ proc remapWritable*(f: var SeismicFile) =
     raise newException(ValueError, f.path & " holds multiplexed SEG-D, which cannot be " &
       "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
       "--to=segd`, `convertSegdRevision`) and edit that")
-  let m = MapRef(src: openMemFileSource(f.path, writable = true)) # unmapped on a raise
+  let src = openMemFileSource(f.path, writable = true) # before the ref, as in `openMapped`
+  let m = MapRef(src: src) # unmapped on a raise
   if m.src.size != f.map.src.size:
     raise newException(ValueError, f.path & " changed size since it was opened (" &
       $f.map.src.size & " bytes, now " & $m.src.size & "); open it again")

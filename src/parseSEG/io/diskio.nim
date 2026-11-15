@@ -11,13 +11,16 @@ import records
 import ../common/outputfile
 
 type
-  DiskSource* = ref object of RecordSource
-    ## Reads a disk file as a byte stream, in chunks; seeks to skip.
+  DiskSource* {.acyclic.} = ref object of RecordSource
+    ## Reads a disk file as a byte stream, in chunks; seeks to skip. Acyclic
+    ## (it refers to nothing that could lead back to it): it may be released
+    ## on another thread than the one that opened it.
     f: File
     size: int64
 
-  DiskSink* = ref object of RecordSink
+  DiskSink* {.acyclic.} = ref object of RecordSink
     ## Writes records back to back into a disk file; tape marks are dropped.
+    ## Acyclic, as `DiskSource`.
     ## Records are collected in a buffer of `SinkBufferSize` bytes and written
     ## when it is full and on `close`, so the file is complete only then.
     f: File

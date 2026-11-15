@@ -20,7 +20,10 @@ const DefaultMapChunk* = 64 shl 10
   ## copying (and paging in) the sample bytes it skips.
 
 type
-  MemFileSource* = ref object of RecordSource
+  MemFileSource* {.acyclic.} = ref object of RecordSource
+    ## A mapped disk file. It holds no reference that could lead back to it,
+    ## and says so (`acyclic`): ORC never lists it as a possible cycle root,
+    ## so one opened on one thread may be released on another.
     mf: MemFile
     mapped: bool
     size: int64

@@ -32,7 +32,12 @@ type
     rkEndOfData  ## End of recorded data: a double tape mark, end of file or blank tape.
 
   RecordSource* = ref object of RootObj
-    ## Base type of all record readers.
+    ## Base type of all record readers. The library's own sources hold
+    ## nothing that leads back to them and are marked `{.acyclic.}`, so one
+    ## opened on one thread may be released on another (ORC lists an object
+    ## of a type that may be cyclic on the thread that drops a reference to
+    ## it). Mark a source of your own `{.acyclic.}` too when it cannot form
+    ## a cycle. `DeviceSource` is not marked: its `TapeDevice` may be yours.
     name*: string           ## File path or device name, for diagnostics.
     offset*: int64          ## Medium offset of the next record (bytes read so far for devices).
     dataOffset*: int64      ## Medium offset of the first data byte of the last record read.

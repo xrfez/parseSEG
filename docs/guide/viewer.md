@@ -360,6 +360,13 @@ f.close()
   another thread reads the file or has a prefetcher on it, do not change its index
   (`ensureKeys`, a survey join, an editor), close it or let it go out of scope: stop the
   job first.
+- A file opened on one thread may be closed, or dropped, on another (a job thread opens
+  it, the UI thread lets it go), with or without prefetchers. Its record source is
+  `{.acyclic.}`, so ORC never lists it as a possible cycle root on the thread that opened
+  it, and nothing needs `clearCycleRoots` for it. ORC keeps a thread's root buffer (16
+  KiB) once anything at all was listed there (the standard library's XML parser, reading
+  a SEG-Y Layout stanza, does so): `GC_runOrc()` on that thread frees it, or it stays
+  until the process ends.
 
 ### Recycle the chunk buffers
 

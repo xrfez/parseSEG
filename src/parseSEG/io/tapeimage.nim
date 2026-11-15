@@ -26,11 +26,13 @@ const
   TapClassMask = 0xF000_0000'u32
 
 type
-  TapeImageSource* = ref object of RecordSource
+  TapeImageSource* {.acyclic.} = ref object of RecordSource
+    ## Acyclic: it may be released on another thread than the one that opened it.
     f: File
     padOdd: bool
 
-  TapeImageSink* = ref object of RecordSink
+  TapeImageSink* {.acyclic.} = ref object of RecordSink
+    ## Acyclic, as `TapeImageSource`.
     f: File
     padOdd: bool
 

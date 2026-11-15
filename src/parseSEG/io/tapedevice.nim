@@ -66,6 +66,8 @@ method close*(d: TapeDevice) {.base, raises: [CatchableError].} =
 type
   DeviceSource* = ref object of RecordSource
     ## Adapts a `TapeDevice` to the record layer for reading: one block per record.
+    ## Not `{.acyclic.}` (unlike the other sources): the device may be a type of
+    ## the caller's that refers back to it.
     dev: TapeDevice
     maxBlock: int
 

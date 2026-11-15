@@ -105,7 +105,7 @@ type
     traceSorting*: int16 = 0 ## Binary 3229-3230: 1 as recorded, 2 CDP ensembles, 4 stack, ...
     measurementSystem*: int16 = 0 ## Binary 3255-3256: 1 metres, 2 feet, 0 unknown.
 
-  NullSink = ref object of RecordSink
+  NullSink {.acyclic.} = ref object of RecordSink
     ## Discards what it is given: `openSeismicWriter` validates the SEG-Y
     ## file headers with it before the first trace fixes the sample count.
 
