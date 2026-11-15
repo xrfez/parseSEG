@@ -288,10 +288,15 @@ proc stopWorkers[T](sh: ptr Shared[T], timeout: Duration): bool =
 type
   OrphanBase = object
     # A prefetcher whose workers `close` gave up on: what they may still touch,
-    # kept until they have left (`reapPrefetchers`).
+    # kept until they have left (`reapPrefetchers`). `done` and `free` are
+    # `gcsafe` so that `newPrefetcher`, `close` and `reapPrefetchers`, which
+    # call them, stay callable from a caller's `{.gcsafe.}` proc or thread
+    # (an indirect call through a proc type without it is not GC-safe): they
+    # touch only the orphan, in shared memory, which the list hands to one
+    # thread at a time under `orphanLock`.
     next: ptr OrphanBase
-    done: proc (o: ptr OrphanBase): bool {.nimcall, raises: [].}
-    free: proc (o: ptr OrphanBase) {.nimcall, raises: [].}
+    done: proc (o: ptr OrphanBase): bool {.nimcall, gcsafe, raises: [].}
+    free: proc (o: ptr OrphanBase) {.nimcall, gcsafe, raises: [].}
 
   Orphan[T] = object
     base: OrphanBase # first: a `ptr Orphan[T]` is a `ptr OrphanBase`
@@ -302,6 +307,8 @@ type
     bounds: seq[int]
 
 var
+  # Plain memory (no `ref`, `seq` or `string`), so reaching it from any
+  # thread is GC-safe; `orphanLock` orders those reaches.
   orphanLock: Lock
   orphans: ptr OrphanBase # under `orphanLock`
   orphanCount: int        # under `orphanLock`
@@ -323,7 +330,7 @@ proc orphanFree[T](o: ptr OrphanBase) {.raises: [].} =
   `=destroy`(x[]) # the pin, the buffers and the lists, on this thread
   freeShared(x)
 
-proc reapPrefetchers*(): int {.raises: [].} =
+proc reapPrefetchers*(): int {.gcsafe, raises: [].} =
   ## Frees what the prefetchers that `close` (or their destructor) gave up on
   ## still held, once their workers have returned from the reads they were
   ## stopped in, and returns how many still wait for such a worker. Every
@@ -606,7 +613,7 @@ const DefaultCloseTimeout* = initDuration(seconds = 2)
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTraces = 256,
     depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
     maxRingBytes = DefaultRingBytes, uniform = false, transform: ChunkTransform[T] = nil,
-    user: pointer = nil, closeTimeout = DefaultCloseTimeout): Prefetcher[T] =
+    user: pointer = nil, closeTimeout = DefaultCloseTimeout): Prefetcher[T] {.gcsafe.} =
   ## Starts decoding `traces` on `workers` threads, `chunkTraces` at a time,
   ## at most `depth` chunks ahead. The ring holds at most `maxRingBytes` of
   ## chunks (`chunkTraces * cols * sizeof(T)` each), but at least `workers +
@@ -706,7 +713,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
     depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
     maxRingBytes = DefaultRingBytes, uniform = false, transform: ChunkTransform[T] = nil,
-    user: pointer = nil, closeTimeout = DefaultCloseTimeout): Prefetcher[T] =
+    user: pointer = nil, closeTimeout = DefaultCloseTimeout): Prefetcher[T] {.gcsafe.} =
   ## Read-ahead over a list of trace indices (a gather, a component group, a
   ## sort order), decoded in list order. Positions (`seek`) index the list;
   ## `traceAt` maps them to traces. The list is fixed for the prefetcher's
@@ -923,7 +930,7 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   broadcast(sh.work)
   release(sh.lock)
 
-proc close*[T](p: var Prefetcher[T], timeout: Duration): bool {.discardable.} =
+proc close*[T](p: var Prefetcher[T], timeout: Duration): bool {.discardable, gcsafe.} =
   ## Stops the workers (one inside a chunk gives it up within 8 traces) and
   ## frees the ring; true. A worker that has not returned within `timeout`
   ## (stopped in a read: a network share that does not answer) is given up
@@ -934,6 +941,13 @@ proc close*[T](p: var Prefetcher[T], timeout: Duration): bool {.discardable.} =
   ## close the file and open it again. A worker inside the `transform` is
   ## waited for, however long: it is the caller's code, and may use `user`.
   ## The chunks taken stay valid. Idempotent (true after the first).
+  ##
+  ## The result is `discardable`: `p.close()` is a statement. The compiler
+  ## does not discard it where the call is the value of a block, such as the
+  ## last statement of a `{.cast(...).}:` block that ends a proc; write
+  ## `discard p.close()` there. `close`, `newPrefetcher` and
+  ## `reapPrefetchers` are GC-safe: a `{.gcsafe.}` proc or a thread calls
+  ## them without a cast.
   discard reapPrefetchers()
   result = true
   if p.sh != nil:
@@ -948,7 +962,8 @@ proc close*[T](p: var Prefetcher[T], timeout: Duration): bool {.discardable.} =
     p.selection.setLen 0
     p.bounds.setLen 0
 
-proc close*[T](p: var Prefetcher[T]): bool {.discardable.} =
+proc close*[T](p: var Prefetcher[T]): bool {.discardable, gcsafe.} =
   ## `close` with the prefetcher's `closeTimeout` (`newPrefetcher`; 2 s by
-  ## default).
+  ## default). Its result is `discardable` (as the last statement of a
+  ## block whose value is used, write `discard p.close()`).
   p.close(p.closeTimeout)
