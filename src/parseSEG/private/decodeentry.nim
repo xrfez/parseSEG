@@ -36,15 +36,27 @@ type
       ## The file was cut short while mapped, before the trace's samples
       ## ended (`pastCut`; not returned by `tryDecodeEntry`: the readers
       ## check what they decoded once per call or chunk).
+    dsReadFailed
+      ## As `dsCut`, but the map stopped there because a read failed (an
+      ## I/O error, `guardReadFailed`), not because the file is shorter.
 
 const decodeMessages*: array[DecodeStatus, string] = ["",
   "the sample format is not decodable", "trace samples lie past the end of the file",
-  "the file was cut short while it was open: trace samples lie past its new end"]
+  "the file was cut short while it was open: trace samples lie past its new end",
+  "a read of the file failed while it was open (an I/O error: a network share or disk " &
+    "that failed): trace samples lie past what could be read"]
   ## The diagnostic text of each failure.
 
 func diagCodeOf*(st: DecodeStatus): DiagCode =
   ## The diagnostic code of a failed decode.
-  if st in {dsTruncated, dsCut}: dcTruncated else: dcUnsupportedFormat
+  case st
+  of dsTruncated, dsCut: dcTruncated
+  of dsReadFailed: dcIo
+  else: dcUnsupportedFormat
+
+func cutStatus*(guard: MapGuard): DecodeStatus {.inline.} =
+  ## How the traces past `guard`'s cut fail: `dsCut`, or `dsReadFailed`.
+  if guard.guardReadFailed: dsReadFailed else: dsCut
 
 func undecodable*(e: TraceEntry, c: TraceCodec, size: int64): bool {.inline.} =
   ## `tryDecodeEntry` fails for trace `e` whatever the bytes: its format is
@@ -116,11 +128,11 @@ proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, gua
   ## file was cut short while mapped). For the caller's thread (conversions);
   ## worker threads use `tryDecodeEntry`.
   var st = tryDecodeEntry(mem, size, e, c, dst, cols, first)
-  if st == dsOk and pastCut(e, c, guard.guardCut): st = dsCut
+  if st == dsOk and pastCut(e, c, guard.guardCut): st = guard.cutStatus
   case st
   of dsOk: discard
   of dsUndecodable: raiseFormat(decodeMessages[st], e.offset)
-  of dsTruncated, dsCut: raiseTruncated(decodeMessages[st], e.sampleOffset)
+  of dsTruncated, dsCut, dsReadFailed: raiseTruncated(decodeMessages[st], e.sampleOffset)
 
 const
   AdviseMinTraces = 32       ## Smaller selections are advised only when they are large in bytes,

@@ -8,13 +8,17 @@
 ## offset and the file's size now) and maps anonymous zero pages over the
 ## map from that page to its end, so the read goes on over zeros. Readers
 ## compare what they read with `guardCut` afterwards and fail what lies past
-## it. A fault at any other address goes to the handler installed before
-## this one (Nim's, a sanitizer's, the default).
+## it. A fault at any other address, and a `SIGBUS` that a program sent
+## (`kill`, `sigqueue`), goes to the handler installed before this one
+## (Nim's, a sanitizer's, the default).
 ##
 ## The fast path costs one atomic load per check (`guardCut`). The handler
-## uses only async-signal-safe system calls (`fstat`, `mmap`, `sigaction`,
-## `raise`) and no managed memory. Windows refuses to cut a mapped file, so
-## nothing is registered there.
+## makes no managed memory, no Nim stack frame (also in a debug build: its
+## atomics are the C compiler's builtins) and these system calls only:
+## `fstat`, `sigaction` and `raise`, which POSIX lists as async-signal-safe,
+## and `mmap`, which it does not list but which is a plain system call on
+## Linux and macOS. Windows refuses to cut a mapped file, so nothing is
+## registered there.
 ##
 ## The OS gives zeros, not a fault, for the bytes between a new end and the
 ## end of its page: a read of those alone is not seen as cut until some read
@@ -34,6 +38,7 @@ type
     fd: cint             # the mapped file's descriptor, for its size
     writable: bool       # the map is writable: the zero pages are too
     cut: Atomic[int64]   # bytes still in the file; high(int64) until a cut is seen
+    failed: Atomic[bool] # a fault was a read that failed (an I/O error), not a shorter file
     base: Atomic[uint]   # the map's address; 0 while the slot is free
 
   MapGuard* = ptr GuardSlot
@@ -61,13 +66,32 @@ when mapsGuarded:
   proc c_sigaction(sig: cint, act, old: ptr Sigaction): cint {.
     importc: "sigaction", header: "<signal.h>".}
     # `std/posix` has no form that only reads the action (`act` nil).
+  when defined(linux):
+    var busAdrErr {.importc: "BUS_ADRERR", header: "<signal.h>".}: cint
+      # The code of a fault on a page the file no longer backs (or cannot be read).
+
+  # The handler's atomics are the C compiler's builtins (POSIX: gcc or clang),
+  # on the same words as the `Atomic` fields: `std/atomics`' procs are Nim
+  # procs, which push a stack frame in a debug build.
+  var
+    atomicRelaxed {.importc: "__ATOMIC_RELAXED", nodecl.}: cint
+    atomicAcquire {.importc: "__ATOMIC_ACQUIRE", nodecl.}: cint
+    atomicSeqCst {.importc: "__ATOMIC_SEQ_CST", nodecl.}: cint
+  proc atomicLoad(p: ptr uint, order: cint): uint {.importc: "__atomic_load_n", nodecl.}
+  proc atomicLoad(p: ptr int64, order: cint): int64 {.importc: "__atomic_load_n", nodecl.}
+  proc atomicCas(p, expected: ptr int64, desired: int64, weak: bool,
+    success, failure: cint): bool {.importc: "__atomic_compare_exchange_n", nodecl.}
+  proc atomicStore(p: ptr bool, value: bool, order: cint) {.importc: "__atomic_store_n", nodecl.}
+  static:
+    doAssert sizeof(Atomic[uint]) == sizeof(uint) and sizeof(Atomic[int64]) == 8 and
+      sizeof(Atomic[ptr SlotBlock]) == sizeof(uint) and sizeof(Atomic[bool]) == sizeof(bool)
 
   {.push stackTrace: off, lineTrace: off, checks: off.}
 
   proc lowerCut(s: ptr GuardSlot, cut: int64) {.inline, raises: [].} =
-    var cur = s.cut.load(moRelaxed)
-    while cut < cur and not s.cut.compareExchangeWeak(cur, cut, moSequentiallyConsistent,
-        moRelaxed):
+    let p = cast[ptr int64](addr s.cut)
+    var cur = atomicLoad(p, atomicRelaxed)
+    while cut < cur and not atomicCas(p, addr cur, cut, true, atomicSeqCst, atomicRelaxed):
       discard
 
   proc chain(sig: cint, info: ptr SigInfo, ctx: pointer) {.raises: [].} =
@@ -95,20 +119,32 @@ when mapsGuarded:
     discard c_sigaction(SIGBUS, addr dfl, nil)
     discard c_raise(sig)
 
+  proc sentByTheKernel(info: ptr SigInfo): bool {.inline.} =
+    # A fault of this thread's access, whose `si_addr` is the address: not a
+    # `SIGBUS` a program sent (`kill`, `sigqueue`, `raise`), whose `si_addr`
+    # is other data (Linux: the sender's pid and uid) and may lie in a map.
+    when defined(linux): info.si_code == busAdrErr
+    else: info.si_code < 0x10000 # BSD and macOS: `SI_USER` and the like are 0x1000x
+
   proc onBus(sig: cint, info: ptr SigInfo, ctx: pointer) {.noconv, raises: [].} =
     let saved = errnoVar
-    if info != nil:
+    if info != nil and info.sentByTheKernel:
       let a = cast[uint](info.si_addr)
       var b = addr firstBlock
       while b != nil:
         for i in 0 ..< SlotsPerBlock:
           let s = addr b.slots[i]
-          let base = s.base.load(moAcquire)
+          let base = atomicLoad(cast[ptr uint](addr s.base), atomicAcquire)
           if base != 0 and a >= base and a - base < s.span:
             let page = (a - base) and not pageMask
             var cut = int64(page)
             var st: Stat
-            if fstat(s.fd, st) == 0 and int64(st.st_size) < cut: cut = int64(st.st_size)
+            if fstat(s.fd, st) == 0 and int64(st.st_size) <= cut:
+              cut = int64(st.st_size) # the file is shorter: cut short
+            else:
+              # The file still holds the page (or cannot say): the OS could
+              # not read it, an I/O error (a network share gone, a disk).
+              atomicStore(cast[ptr bool](addr s.failed), true, atomicSeqCst)
             s.lowerCut(cut)
             let prot = if s.writable: PROT_READ or PROT_WRITE else: PROT_READ
             if mmap(cast[pointer](base + page), int(s.span - page), prot,
@@ -117,7 +153,7 @@ when mapsGuarded:
               return # the faulting access runs again, over zeros
             b = nil  # could not map: the fault ends the process as before
             break
-        if b != nil: b = b.next.load(moAcquire)
+        if b != nil: b = cast[ptr SlotBlock](atomicLoad(cast[ptr uint](addr b.next), atomicAcquire))
     errnoVar = saved
     chain(sig, info, ctx)
 
@@ -161,6 +197,7 @@ proc guardMap*(mem: pointer, len: int, fd: cint, writable: bool): MapGuard =
       result.fd = fd
       result.writable = writable
       result.cut.store(high(int64), moRelaxed)
+      result.failed.store(false, moRelaxed)
       result.base.store(cast[uint](mem), moRelease) # last: the handler may see it now
     finally:
       release(guardLock)
@@ -185,6 +222,13 @@ proc guardCut*(g: MapGuard): int64 {.inline, raises: [].} =
   if g == nil: return high(int64)
   fence(moAcquire)
   g.cut.load(moAcquire)
+
+proc guardReadFailed*(g: MapGuard): bool {.inline, raises: [].} =
+  ## The cut came from a read the OS could not do (`SIGBUS` on a page the
+  ## file, by `fstat`, still holds, or whose size `fstat` could not give: an
+  ## I/O error, a network share that went away), not from a shorter file.
+  ## A file cut and grown again before the handler asked its size looks so too.
+  if g == nil: false else: g.failed.load(moAcquire)
 
 proc lowerGuardCut*(g: MapGuard, size: int64) {.raises: [].} =
   ## Lowers the cut to `size` when the file is known to hold no more.

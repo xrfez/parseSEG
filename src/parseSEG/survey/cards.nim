@@ -111,13 +111,12 @@ func isBlank*(s: string): bool =
 
 func looksBinary*(s: openArray[char]): bool =
   ## A line holds bytes no text holds: a NUL or another control character
-  ## (tab and form feed are text), DEL, or more than a quarter bytes above
-  ## 127 (text in a Latin or UTF-8 encoding has few).
-  var high = 0
+  ## (tab, form feed and CR are text), or DEL. Bytes above 127 never make a
+  ## line binary: they are text in some encoding (UTF-8, Latin-1, CP1251,
+  ## ...), and binary data holds control bytes anyway.
   for c in s:
-    if (c < ' ' and c notin {'\t', '\f'}) or c == '\x7F': return true
-    if c >= '\x80': inc high
-  high * 4 > s.len
+    if (c < ' ' and c notin {'\t', '\f', '\r'}) or c == '\x7F': return true
+  false
 
 func allBlank*(s: openArray[char]): bool =
   ## Only blanks (or empty), for a view of a line (`toOpenArray`).

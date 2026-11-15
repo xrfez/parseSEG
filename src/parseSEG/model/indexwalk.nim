@@ -263,6 +263,10 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
   ## `MemFileSource` from its size, as `openSeismic` does by default (see
   ## there), and with `keys` reads the keys from every mapped trace header;
   ## the default walks every trace.
+  ##
+  ## A `MemFileSource` that another program cuts short during the walk gives
+  ## the index of what the walk saw (zeros past the cut): ask `src.cutShort`
+  ## afterwards, as `openSeismic` does (it raises `IOError` then).
   var tk = initProgressTicker(progress, if src of MemFileSource: MemFileSource(src).size else: -1)
   result = case kind
     of skSegy: indexSegy(src, keys, verify, tk)

@@ -59,8 +59,12 @@ proc reportCut*(log: var DiagLog, f: SeismicFile, loc: Location) {.raises: [].} 
   # converted (asks the OS once): what was read past the cut is zeros, so
   # the output is not kept. Nothing more when the log is already fatal.
   if not log.isFatal and f.cutShort:
-    log.report(sevFatal, dcTruncated, f.path & " was cut short by another program while it " &
-      "was converted; nothing is written", loc = loc)
+    if f.readFailed:
+      log.report(sevFatal, dcIo, "a read of " & f.path & " failed while it was converted " &
+        "(an I/O error: a network share or disk that failed); nothing is written", loc = loc)
+    else:
+      log.report(sevFatal, dcTruncated, f.path & " was cut short by another program while " &
+        "it was converted; nothing is written", loc = loc)
 
 proc closeQuietly*(f: var SeismicFile) {.raises: [].} =
   # Unmaps a read-only input; a failure there loses nothing.

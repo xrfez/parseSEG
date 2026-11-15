@@ -63,12 +63,26 @@ type
 
   MapRef = ref MapOwner
 
-proc `=destroy`(m: MapOwner) =
-  if m.src != nil:
-    # A destructor must not raise; the base methods raise [CatchableError].
-    try: m.src.close()
+var deferredClose {.threadvar.}: tuple[active: bool, src: MemFileSource, temp: string]
+  # The map of the last `MapRef` this thread dropped under `mapLock`, closed
+  # (unmapped, its descriptor closed, a demultiplexed copy deleted) once the
+  # lock is released (`unlockMaps`): close(2) can block on a network share
+  # (NFS writes back an edited file's pages, SMB waits for the server), and
+  # every other file's pins and drops wait for the lock meanwhile.
+
+proc closeMap(src: MemFileSource, temp: string) {.raises: [].} =
+  # A destructor must not raise; the base methods raise [CatchableError].
+  if src != nil:
+    try: src.close()
     except CatchableError: discard
-  if m.tempPath.len > 0: discard tryRemoveFile(m.tempPath)
+  if temp.len > 0: discard tryRemoveFile(temp)
+
+proc `=destroy`(m: MapOwner) =
+  if deferredClose.active and deferredClose.src == nil and m.src != nil:
+    deferredClose.src = m.src # under `mapLock`: closed after it
+    deferredClose.temp = m.tempPath
+  else:
+    closeMap(m.src, m.tempPath)
   `=destroy`(m.src)
   `=destroy`(m.tempPath)
   `=destroy`(m.parkedEntries)
@@ -87,6 +101,17 @@ var mapLock: Lock
   # the last holder of a map, which unmaps the file under it.
 initLock(mapLock)
 
+template lockMaps() =
+  # `mapLock`, around a drop that may be a map's last: its close waits for `unlockMaps`.
+  acquire(mapLock)
+  deferredClose.active = true
+
+template unlockMaps() =
+  deferredClose.active = false
+  release(mapLock)
+  if deferredClose.src != nil or deferredClose.temp.len > 0:
+    closeMap(move deferredClose.src, move deferredClose.temp)
+
 type
   MapPin* = object
     ## **Internal** (the prefetcher). Keeps a file's map alive, and the
@@ -97,10 +122,10 @@ proc `=destroy`*(p: MapPin) =
   # Exported: `Prefetcher`'s destructor (another module) destroys its pin
   # explicitly, and only a visible hook binds to a non-`var` field there.
   if p.m != nil:
-    acquire(mapLock)
+    lockMaps()
     dec p.m.pins
     `=destroy`(p.m)
-    release(mapLock)
+    unlockMaps()
 
 proc `=copy`(dst: var MapPin, src: MapPin) {.error.}
 proc `=dup`(src: MapPin): MapPin {.error.}
@@ -141,7 +166,7 @@ proc `=destroy`(f: SeismicFile) =
   # be moved out (and `TraceIndex` has only the generic `var` destructor).
   let pf = addr f
   if f.map != nil:
-    acquire(mapLock)
+    lockMaps()
     if f.map.pins > 0:
       # A prefetcher still reads `entries` and `codecs` through raw pointers:
       # hand them to the map it keeps alive. A seq move keeps the payload's
@@ -150,7 +175,7 @@ proc `=destroy`(f: SeismicFile) =
       f.map.parkedCodecs = move pf[].idx.codecs
       f.map.parkedKeys = move pf[].idx.keys
     `=destroy`(f.map)
-    release(mapLock)
+    unlockMaps()
   `=destroy`(pf[].idx)
   `=destroy`(pf[].gr)
   `=destroy`(f.path)
@@ -173,8 +198,13 @@ proc requireOpen*(f: SeismicFile) {.inline.} =
 
 proc raiseCut(f: SeismicFile) {.noinline, noreturn.} =
   let left = f.map.src.readable
-  raise (ref SegTruncatedError)(msg: f.path & " was cut short while it was open (" &
-    $f.map.src.size & " bytes mapped, " & $left & " left); open it again", offset: left)
+  let what = if f.map.src.readFailed:
+      " could not be read past byte " & $left & " (an I/O error: a network share or " &
+        "disk that failed; " & $f.map.src.size & " bytes mapped)"
+    else:
+      " was cut short while it was open (" & $f.map.src.size & " bytes mapped, " & $left &
+        " left)"
+  raise (ref SegTruncatedError)(msg: f.path & what & "; open it again", offset: left)
 
 func cutSeen*(f: SeismicFile): bool {.inline.} =
   ## **Internal.** The file was found cut short while mapped (a read reached
@@ -196,8 +226,18 @@ proc cutShort*(f: SeismicFile): bool =
   ## past the cut (zero rows, `dcTruncated`) and calls that read headers,
   ## keys or raw bytes from the file raise `SegTruncatedError`: close it and
   ## open it again. False for a closed file, and on Windows, where a mapped
-  ## file cannot be cut.
+  ## file cannot be cut. Also true when a read of the file failed with an
+  ## I/O error, its size unchanged (a network share that went away):
+  ## `readFailed` tells the two apart.
   f.mapped and f.map.src.cutShort
+
+proc readFailed*(f: SeismicFile): bool =
+  ## The file stopped being readable at `cutShort` because a read of it
+  ## failed (an I/O error: a network share or disk that failed), not because
+  ## another program cut it: its size was unchanged then. Reads past that
+  ## point fail as for a cut (rows with `dcIo`, `SegTruncatedError` from
+  ## header calls) until the file is opened again. No system call.
+  f.mapped and f.map.src.readFailed
 
 proc pinMap*(f: SeismicFile): MapPin =
   ## **Internal.** A pin on `f`'s map (an empty pin for a closed file). Any
@@ -255,6 +295,10 @@ proc requireWholeOpen(f: SeismicFile) =
   # The end of an open: a file cut short while it was walked (the walk read
   # zeros past the cut, or stopped there) gives no index. Asks the OS once.
   if f.mapped and f.map.src.cutShort:
+    if f.map.src.readFailed:
+      raise newException(IOError, f.path & " could not be read past byte " &
+        $f.map.src.readable & " while it was opened (an I/O error: a network share or " &
+        "disk that failed); open it again")
     raise newException(IOError, f.path & " was cut short while it was opened (" &
       $f.map.src.size & " bytes mapped, " & $f.map.src.readable & " left); open it again " &
       "once it stops changing")
@@ -375,23 +419,23 @@ proc parkAndDrop(f: var SeismicFile, next: sink MapRef) =
   # nothing it frees or changes later is read by them. `next` has no pins
   # yet, so this is the only moment to park them.
   var old: MapRef
-  acquire(mapLock)
+  lockMaps()
   if f.map.pins > 0:
     f.map.parkedEntries = move f.idx.entries
     f.map.parkedCodecs = move f.idx.codecs
     f.map.parkedKeys = move f.idx.keys
     old = f.map
   f.map = next
-  release(mapLock)
+  unlockMaps()
   if old != nil:
     # Copied outside the lock (10 ms per 500 000 traces with keys); `old`
     # keeps the parked tables alive meanwhile, whatever the pins do.
     f.idx.entries = old.parkedEntries
     f.idx.codecs = old.parkedCodecs
     f.idx.keys = old.parkedKeys
-    acquire(mapLock)
+    lockMaps()
     old = nil
-    release(mapLock)
+    unlockMaps()
 
 proc remapWritable*(f: var SeismicFile) =
   ## **Internal** (`openEditor(f)`; not exported by `parseSEG`). Maps `f.path`
@@ -949,11 +993,12 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
     # bytes reach past it read zeros there, and fails too. One check per
     # read, none per trace (`guardCut` comes after the decodes: a fence).
     let cut = guard.guardCut
+    let why = guard.cutStatus
     for k in 0..<count:
       let i = traceAt(k)
       let e = f.idx.entries[i]
       let c = f.idx.codecs[e.record]
-      if not undecodable(e, c, size) and pastCut(e, c, cut): fail(rowAt(k), k, i, e, dsCut)
+      if not undecodable(e, c, size) and pastCut(e, c, cut): fail(rowAt(k), k, i, e, why)
     when failedRows isnot typeof(nil):
       var rows = move failedRows[] # sorted through a local: `failedRows[].sort()`
       rows.sort()                  # makes C that does not compile (Nim 2.4.2)

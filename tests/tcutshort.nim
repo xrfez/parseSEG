@@ -15,6 +15,7 @@
 
 import std/[assertions, os, osproc, sequtils, streams, strutils, times]
 import parseSEG
+from parseSEG/model/traceindex import unsafeMemory # the map's address
 import ./utils/testutils
 
 when not defined(posix):
@@ -78,6 +79,26 @@ block foreign:
     echo "survived ", sum # never reached: the fault is not parseSEG's
     f.close()
     quit 0
+  when defined(linux):
+    if paramCount() == 1 and paramStr(1) == "queued":
+      # Run by `a_sigbus_sent_by_a_program_is_no_cut`: a `SIGBUS` queued to
+      # this thread whose `si_addr` lies in parseSEG's map is no fault there.
+      var rlimitCore {.importc: "RLIMIT_CORE", header: "<sys/resource.h>".}: cint
+      var none = RLimit(rlim_cur: 0, rlim_max: 0)
+      discard setrlimit(rlimitCore, none)
+      var f = openSeismic(fresh("survey.sgy"))
+      var sysTgSigqueueinfo {.importc: "SYS_rt_tgsigqueueinfo",
+        header: "<sys/syscall.h>".}: clong
+      proc syscall(n: clong): clong {.importc, header: "<unistd.h>", varargs.}
+      proc gettid(): Pid {.importc, header: "<unistd.h>".}
+      var info: SigInfo
+      info.si_signo = SIGBUS
+      info.si_code = -1 # SI_QUEUE: sent by a program
+      info.si_addr = addr f.unsafeMemory[f.len div 2 * 1000] # inside the map
+      doAssert syscall(sysTgSigqueueinfo, getpid(), gettid(), clong(SIGBUS), addr info) == 0
+      echo "survived; cutShort=", f.cutShort # never reached: the signal was sent, not a fault
+      f.close()
+      quit 0
 
 block samples_after_a_cut:
   # A range and a list, with a log and with failed rows: the traces past the
@@ -248,6 +269,53 @@ block calls_after_a_cut_was_found:
   f.close()
   doAssert not f.cutShort # closed
 
+block a_read_that_fails_is_no_cut:
+  # On a network share a mapped read faults (`SIGBUS`) when the share or the
+  # server goes away, the file's size unchanged: an I/O error, not a cut.
+  # Simulated here: parseSEG's descriptor of the file is made to refer to a
+  # larger file (`dup2`), so `fstat` says the file still holds the faulting
+  # page, as after an I/O error; the file is cut on a page boundary so that
+  # the read faults there. The rows fail with `dcIo`, `readFailed` says so,
+  # header calls say "could not be read". Seen failing before the guard
+  # recorded the cause: `dcTruncated`, "cut short".
+  let p = fresh("survey.sgy")
+  var f = openSeismic(p)
+  var st: Stat
+  doAssert stat(p.cstring, st) == 0
+  var fd = cint(-1)
+  for i in cint(3) .. cint(4096):
+    var s: Stat
+    if fstat(i, s) == 0 and s.st_dev == st.st_dev and s.st_ino == st.st_ino: fd = i
+  doAssert fd >= 0, "parseSEG keeps the file's descriptor open"
+  let other = posix.open(cstring(tmp / "larger.bin"), O_RDWR or O_CREAT, 0o600)
+  doAssert other >= 0 and ftruncate(other, Off(4 * getFileSize(p))) == 0
+  doAssert dup2(other, fd) == fd
+  discard posix.close(other)
+  let at = getFileSize(p) div 2 div pageSize * pageSize
+  cut(p, at)
+  var log: DiagLog
+  var t = newTraceTensor[float32](f.len, f.maxSamples)
+  doAssert f.readTracesInto(0 ..< f.len, t, log) == f.pastCut(at).len
+  doAssert f.readFailed and f.cutShort
+  doAssert log.len > 0
+  for d in log: doAssert d.code == dcIo and "I/O error" in d.msg, $d
+  try:
+    discard f.traceHeaders(f.len - 1)
+    doAssert false, "a header past the failed read"
+  except SegTruncatedError as e:
+    doAssert "could not be read past byte " & $at in e.msg, e.msg
+  f.close()
+  block:
+    # A cut is still a cut.
+    let q = fresh("survey.sgy")
+    var g = openSeismic(q)
+    cut(q, getFileSize(q) div 2)
+    var log: DiagLog
+    var u = newTraceTensor[float32](g.len, g.maxSamples)
+    doAssert g.readTracesInto(0 ..< g.len, u, log) > 0 and not g.readFailed
+    doAssert log[0].code == dcTruncated
+    g.close()
+
 block segd_and_seg2:
   for name in ["shot.sgd", "line.sg2"]:
     let p = fresh(name)
@@ -371,5 +439,19 @@ block a_fault_outside_parseSEG_still_ends_the_process:
   let code = child.waitForExit()
   child.close()
   doAssert code != 0 and "survived" notin output, $code & ": " & output
+
+block a_sigbus_sent_by_a_program_is_no_cut:
+  # A `SIGBUS` a program queues (`si_code` SI_QUEUE) has no fault address:
+  # its `si_addr` is other data, here an address in parseSEG's map. The
+  # handler passes it on (the process ends, as `kill -BUS` ends it), instead
+  # of taking it for a cut and zeroing half the map of an intact file. Seen
+  # failing without the `si_code` check: "survived; cutShort=true".
+  when defined(linux):
+    let child = startProcess(getAppFilename(), args = ["queued"],
+      options = {poStdErrToStdOut})
+    let output = child.outputStream.readAll()
+    let code = child.waitForExit()
+    child.close()
+    doAssert code != 0 and "survived" notin output, $code & ": " & output
 
 echo "tcutshort: ok"

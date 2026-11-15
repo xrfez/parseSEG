@@ -103,13 +103,32 @@ func isCrsStanza(s: Stanza): bool =
   let name = s.name.toLowerAscii
   name.startsWith("p1/11") or name.startsWith("location data")
 
+func segyCrsStanza(file: SegyFile): int =
+  # The first P1/11 or Location Data stanza of the extended textual header
+  # (-1: none).
+  for i, s in file.extended.stanzas:
+    if isCrsStanza(s): return i
+  -1
+
 proc segyCrs(file: SegyFile, text: var string): CrsTextFormat =
   # The first P1/11 or Location Data stanza of the extended textual header.
-  for s in file.extended.stanzas:
-    if isCrsStanza(s):
-      text = file.extended.stanzaText(s)
-      return if s.name.toLowerAscii.startsWith("p1/11"): ctP1_11 else: ctStanza
-  ctNone
+  let i = file.segyCrsStanza
+  if i < 0: return ctNone
+  let s = file.extended.stanzas[i]
+  text = file.extended.stanzaText(s)
+  if s.name.toLowerAscii.startsWith("p1/11"): ctP1_11 else: ctStanza
+
+func cardLines(text: string, start: int): string =
+  # SEG-Y Rev 0/1 extended text, whose lines may be 80-column card images
+  # without line ends: a line also starts at every 80th column of the record
+  # stream, as the reader takes it (`rev1Lines`). `start` is the stream
+  # offset of the text's first byte (records are 40 cards of 80 columns).
+  const card = 80
+  result = newStringOfCap(text.len + text.len div card + 1)
+  for i, c in text:
+    if (start + i) mod card == 0 and result.len > 0 and result[^1] notin {'\n', '\r'}:
+      result.add '\n'
+    result.add c
 
 proc segdCrs(ix: TraceIndex, text: var string): CrsTextFormat =
   # The first Rev 3 record with 0x55 blocks in its general header.
@@ -153,6 +172,14 @@ proc crs*(f: SeismicFile): CoordinateReference =
   ## its datum and ellipsoid, the map projection and the vertical datum
   ## (`parseCrsText`). Unknown (`known` false) when the file has no CRS text
   ## or it gives none of these; nothing is looked up. Works on a closed file.
+  ## A SEG-Y Rev 0/1 Location Data stanza is read by its 80-column cards too
+  ## (a line ends at every 80th column), as Rev 1 writes them without line
+  ## ends.
+  if f.kind == skSegy and f.index.segy.revision.major < 2:
+    let i = f.index.segy.segyCrsStanza
+    if i >= 0 and not f.index.segy.extended.stanzas[i].name.toLowerAscii.startsWith("p1/11"):
+      let s = f.index.segy.extended.stanzas[i]
+      return parseCrsText(cardLines(f.index.segy.extended.stanzaText(s), s.dataStart))
   parseCrsText(f.crsText)
 
 # ---------------------------------------------------------------- summary --

@@ -439,7 +439,7 @@ What a viewer can rely on:
 
 - No parseSEG call on an open file ends the program because the file was cut short:
   sample reads, the prefetcher, headers, keys, fields and bytes, the open, the editor and
-  the conversions.
+  the conversions; on any thread that does not block `SIGBUS` (see below).
 - Sample reads (`readTracesInto`, `readTraces` with a log, the prefetcher's chunks) fail
   each trace past the cut: a zero row, counted in the result (or `c.failed`), with an
   error `dcTruncated` that says the file was cut short while it was open (or its position
@@ -456,6 +456,13 @@ What a viewer can rely on:
   (edits past the new end did not reach the file; the journal has them). A conversion
   from a source cut meanwhile is fatal and writes nothing.
 - `f.cutShort` says whether the file was cut, from any thread that may read the file.
+- A read the OS cannot do (an I/O error: a network share that went away, a server that
+  timed out, a failing disk) faults the same way, the file's size unchanged. The guard
+  takes it too: from the page that failed on, the map reads as cut (`cutShort` is true),
+  `f.readFailed` says it was a failed read, sample rows fail with `dcIo` ("a read of the
+  file failed"), header calls raise `SegTruncatedError` that says "could not be read past
+  byte ..." and `openSeismic` raises `IOError`. It lasts as long as the map, also when
+  the share comes back: open the file again.
 
 A cut becomes known when a read reaches a page wholly past the new end, or when
 `cutShort` asks the OS for the file's size (one `fstat`, about 0.5 µs; reads make no
@@ -472,11 +479,51 @@ What the viewer still does itself:
   under the old index wherever they are, and the traces a file gains are not in the
   index. Let go at once when `cutShort` is true or a read reports `dcTruncated` that says
   "cut short".
-- Keep the guard in place: a program that installs its own `SIGBUS` handler after
-  parseSEG has mapped a file must pass on the faults that are not its own to the handler
-  it replaced, as parseSEG does.
+- Keep the guard in place. parseSEG installs its `SIGBUS` handler when it maps the first
+  file, and passes every fault that is not in its maps, and every `SIGBUS` a program
+  sends, to the handler that was there before. So install a crash reporter or any other
+  `SIGBUS` handler before the first file is opened. One installed later sees parseSEG's
+  faults first: it must pass on the faults that are not its own to the handler it
+  replaced, as parseSEG does, and a crash reporter would report a cut file as a crash.
+- Do not block `SIGBUS` on a thread that reads files (`pthread_sigmask`, a thread pool
+  that blocks every signal): the OS cannot deliver a fault there and ends the program.
+- A debugger stops at every fault the guard takes; let them through (gdb:
+  `handle SIGBUS nostop noprint pass`; lldb: `process handle SIGBUS -s false -p true`).
 - Count one open file descriptor per mapped file: it stays open with the map, so a fault
-  can ask the file's size.
+  can ask the file's size. A viewer that keeps many files open may need a higher limit
+  (`RLIMIT_NOFILE`; an app started from the macOS Finder gets 256 by default), or lets
+  go of files it does not show.
+
+### Files on a network drive
+
+A mapped read on a network share is a page fault the OS answers over the network. When
+the share or its server fails, a read either fails (a soft mount after its timeout, SMB
+on Linux by default: the guard above takes it, `readFailed`) or waits until the server
+answers, for minutes or for ever (a hard mount, NFS's default). No guard helps a read
+that waits: the thread that makes it stops, inside a parseSEG call or a prefetcher's
+worker. What a viewer may rely on then:
+
+- A thread stopped in a read holds no lock of parseSEG's: other threads go on reading,
+  opening and closing other files. A file's map is unmapped and its descriptor closed
+  outside the lock that all files share, so a close that waits on the share holds up
+  only the thread that closes.
+- `tryNext` never waits for a worker; `next`, `nextInto` and a direct read
+  (`readTracesInto`, headers, keys, `cutShort`, which asks the OS too) wait as long as the
+  share makes them.
+- A prefetcher's `close`, and dropping it, wait for its workers to finish the trace
+  they read, without a bound: close or drop the prefetchers of network files on a thread
+  that may wait (a job thread), never on the UI thread.
+
+What it must still do itself:
+
+- Read network files on job threads only, and keep the UI on `tryNext` and on what is
+  already decoded.
+- Give up on a thread that waits too long by leaving it alone: do not close or drop the
+  file it reads, nor its prefetcher, while it is stopped. Unmapping the file under it
+  makes its read end the program when the share answers. Keep the file (a list of
+  abandoned files) and close it once the thread has returned.
+- Open the file again once the share is back: a failed read leaves the rest of the map
+  unreadable (`readFailed`).
 
 ## Survey files in the background
 
@@ -513,13 +560,14 @@ doAssert sps.points.len == 1000 and not sps.log.isFatal
 ```
 
 - `SpsOptions.skipBinary` passes by lines that hold bytes no text holds (a NUL or another
-  control character, or mostly bytes above 127): they are not read as records, and one
-  warning counts them.
-- `SpsOptions.maxJunkBytes` stops the read where a file turns into other data: after that
-  many bytes in a row of lines that are no SPS record (an unknown record type, a binary
-  line, a piece of an over-long line; blank lines neither end nor extend such a run). An
-  error says from which byte, and `others` keeps at most about the bound. 0, the default,
-  reads to the end.
+  control character but tab, form feed and CR, or DEL; bytes above 127 are text, in UTF-8,
+  Latin-1, CP1251 or another encoding, and never make a line binary): they are not read as
+  records, a warning names each of the first few by its line, and one counts them all.
+- `SpsOptions.maxJunkBytes` stops the read where a file turns into other data: once more
+  than that many bytes in a row are lines that are no SPS record (an unknown record type,
+  a binary line, a piece of an over-long line; blank lines neither end nor extend such a
+  run). An error says from which byte, and `others` keeps at most about the bound. 0, the
+  default, reads to the end.
 - A "line" longer than 64 KiB (`MaxLineBytes`) is cut into records with a warning; its
   pieces keep the one line number (`TextRecord.index`, a diagnostic's `record`), so the
   lines after it are numbered as an editor numbers them.

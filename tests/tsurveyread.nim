@@ -9,6 +9,8 @@
 ## without the binary test.
 
 import std/[assertions, math, os, streams, strutils]
+when defined(posix):
+  import std/posix
 import parseSEG
 import parseSEG/survey/cards # column helpers (internal)
 import ./utils/testutils
@@ -59,6 +61,17 @@ proc progress_and_cancel_sps() =
   let g = readSps(path, progress = stop)
   doAssert g.log.isFatal and g.log.has("cancelled", sevFatal), $g.log
   doAssert g.points.len > 0 and g.points.len < 40_000 and n == 2
+  # Exactly the records that start before the byte the log names: the hook
+  # runs before a record is taken.
+  var at = -1'i64
+  for d in g.log:
+    if d.code == dcCancelled: at = d.offset
+  var before, off = 0'i64
+  for line in spsFile(40_000).split("\r\n"):
+    if line.len > 0 and line[0] == 'R' and off < at: inc before
+    off += int64(line.len) + 2
+  doAssert at > 0 and g.points.len == before and g.headers.len == 2,
+    "cancelled at byte " & $at & ": " & $g.points.len & " points, " & $before & " start before it"
   # A stream: the size is unknown (-1) unless the caller knows it.
   var totals: seq[int64]
   let s = readSps(newStringStream(spsFile(20_000)), "s.r", progress =
@@ -171,7 +184,6 @@ block binary_lines_passed_by:
   doAssert skipped.points.len == 2 and skipped.others.len == 2
   doAssert skipped.others[0] == "" and skipped.others[1] == ""
   doAssert skipped.log.has("2 lines hold binary data", sevWarning), $skipped.log
-  doAssert skipped.log.count(sevWarning) == 1, $skipped.log
   # 20 MiB of binary bytes (some of them line ends): read up to the bound
   # only, nothing of them kept.
   var blob = newString(20 shl 20)
@@ -198,5 +210,133 @@ block hostile_inputs:
     discard looksLikeSps(newStringStream(text))
     let p = parseP1(text, "h.p1")
     doAssert not p.log.isFatal
+
+proc binary_lines_are_named() =
+  # Each line passed by is named with its line number (the first few, as
+  # every kind of problem is), and one warning counts them all.
+  let text = [H00, point('R', 1, 1, 1.0, 2.0), "R\x01\x02 binary", "S\0\0\0",
+    point('R', 1, 2, 1.0, 2.0)].join("\n")
+  let f = parseSps(text, opts = SpsOptions(skipBinary: true))
+  var named: seq[int]
+  for d in f.log:
+    if d.severity == sevWarning and "binary data" in d.msg and d.loc.record >= 0:
+      named.add d.loc.record
+  doAssert named == @[2, 3], $f.log
+  doAssert f.log.has("2 lines hold binary data", sevWarning) and f.log.count(sevWarning) == 3,
+    $f.log
+
+binary_lines_are_named()
+
+proc high_bytes_are_text() =
+  # Bytes above 127 are text in some encoding (UTF-8, Latin-1, CP1251): they
+  # never make a line binary, so header records written in them are kept.
+  let names = ["H26 \xC3\x91and\xC3\xBA", # "Ñandú" in UTF-8: 4 of 11 bytes above 127
+    "H02 Client                      \xD0\x93\xD0\xB0\xD0\xB7\xD0\xBF\xD1\x80\xD0\xBE\xD0\xBC" &
+      "\xD0\xBD\xD0\xB5\xD1\x84\xD1\x82\xD1\x8C-\xD0\xA5\xD0\xB0\xD0\xBD\xD1\x82\xD0\xBE\xD1\x81",
+    "H03 Area                        \xD1\xE5\xE2\xE5\xF0\xED\xFB\xE9 \xD1\xF3\xF0\xE3\xF3\xF2"]
+    # Cyrillic in UTF-8; the same kind of name in CP1251 (one byte a letter)
+  for n in names: doAssert not looksBinary(n), n
+  let text = (@[H00] & @names & @[point('R', 1, 1, 1.0, 2.0)]).join("\n") & "\n"
+  let f = parseSps(text, opts = SpsOptions(skipBinary: true, maxJunkBytes: 64))
+  doAssert f.headers.len == 4 and f.points.len == 1, $f.headers.len & " " & $f.log
+  doAssert not f.log.has("binary data", sevWarning) and f.log.count(sevError) == 0, $f.log
+  doAssert f.headers[1].data.endsWith("\xC3\x91and\xC3\xBA"), f.headers[1].data
+  # Control bytes still make a line binary; tab, form feed and CR do not.
+  doAssert looksBinary("R\0") and looksBinary("R\x1A") and looksBinary("R\x7F")
+  doAssert not looksBinary("R\t\f\r x")
+
+high_bytes_are_text()
+
+proc junk_stop_ends_progress() =
+  # A read the junk bound stops still gets its final progress call.
+  var lines = @[H00, point('S', 1, 1, 1.0, 2.0)]
+  for i in 0 ..< 20_000: lines.add "#junk line " & $i & repeat('-', 70)
+  var calls: seq[(int64, int64)]
+  let f = readSps(newStringStream(lines.join("\n") & "\n"), "j.s",
+    SpsOptions(maxJunkBytes: 64 shl 10), progress = proc (done, total: int64): bool =
+      calls.add (done, total)
+      true)
+  doAssert f.log.has("turns into other data", sevError) and not f.log.isFatal, $f.log
+  doAssert calls.len >= 2 and calls[^1] == (-1'i64, -1'i64), $calls
+
+junk_stop_ends_progress()
+
+type CountingStream = ref object of StreamObj
+  ## A string stream that counts the bytes read from it.
+  inner: StringStream
+  read: int64
+
+proc csReadData(s: Stream, buffer: pointer, bufLen: int): int =
+  let c = CountingStream(s)
+  result = c.inner.readData(buffer, bufLen)
+  c.read += result
+
+proc csSetPosition(s: Stream, pos: int) = CountingStream(s).inner.setPosition(pos)
+proc csGetPosition(s: Stream): int = CountingStream(s).inner.getPosition
+proc csAtEnd(s: Stream): bool = CountingStream(s).inner.atEnd
+
+proc newCountingStream(text: string): CountingStream =
+  CountingStream(inner: newStringStream(text), readDataImpl: csReadData,
+    setPositionImpl: csSetPosition, getPositionImpl: csGetPosition, atEndImpl: csAtEnd)
+
+proc revision_scan_is_bounded() =
+  # Without an H00 the revision is judged from the first data records; a
+  # file that has none must not be read through for them before the read
+  # (and its progress, which can cancel) starts: 20 MB here.
+  var lines = @["H01 Description of survey area  no H00"]
+  for i in 0 ..< 250_000: lines.add "#junk line " & $i & repeat('-', 70)
+  lines.add point('R', 1, 1, 1.0, 2.0)
+  let s = newCountingStream(lines.join("\n") & "\n")
+  var readAtFirst = -1'i64
+  let f = readSps(s, "n.r", progress = proc (done, total: int64): bool =
+    if readAtFirst < 0: readAtFirst = s.read
+    false)
+  doAssert f.log.has("cancelled", sevFatal), $f.log
+  doAssert readAtFirst in 0'i64 .. 4 shl 20, "read before the first progress call: " &
+    $readAtFirst & " bytes"
+  # No line ends after the first line: 64 KiB pieces, few records for many
+  # bytes (640 of them in 40 MiB), so the scan is bounded in bytes too.
+  let t = newCountingStream("H01 Description of survey area  no H00\n" & repeat('Q', 40 shl 20))
+  var tAtFirst = -1'i64
+  let g = readSps(t, "q.r", progress = proc (done, total: int64): bool =
+    if tAtFirst < 0: tAtFirst = t.read
+    false)
+  doAssert g.log.has("cancelled", sevFatal), $g.log
+  doAssert tAtFirst in 0'i64 .. 8 shl 20, "read before the first progress call, no line " &
+    "ends: " & $tAtFirst & " bytes"
+
+revision_scan_is_bounded()
+
+proc reserve_is_capped() =
+  # A file of several GiB that starts with SPS records (sparse here: zeros
+  # after them, which the junk bound stops at) reserves room for at most
+  # 1 Mi records up front, not one per 82 bytes of its size (37 Mi records,
+  # 7.5 GB of capacity, for 3 GiB).
+  when defined(posix):
+    let path = tmp / "sparse.r"
+    writeFile(path, [H00, point('R', 1, 1, 1.0, 2.0), point('R', 1, 2, 1.0, 2.0)].join("\n") &
+      "\n")
+    var fh = open(path, fmReadWriteExisting)
+    doAssert posix.ftruncate(fh.getOsFileHandle, 3 shl 30) == 0
+    fh.close()
+    let f = readSps(path, SpsOptions(keepRaw: false, skipBinary: true, maxJunkBytes: 1 shl 20))
+    removeFile(path)
+    doAssert f.points.len == 2 and f.log.has("turns into other data", sevError), $f.log
+    doAssert f.order.capacity <= 1 shl 20 and f.points.capacity <= 1 shl 20,
+      "reserved: " & $f.order.capacity & " entries, " & $f.points.capacity & " points"
+  else:
+    echo "tsurveyread: reserve_is_capped skipped (a sparse file needs POSIX ftruncate)"
+
+reserve_is_capped()
+
+proc h00_revision_columns() =
+  # The revision is read from an H00's data, columns 33 on (as `data` holds
+  # it), by `readSps` and `looksLikeSps` alike.
+  let far = "H00 SPS format version number" & repeat(' ', 60) & "SPS001,12.10.90;"
+  let f = parseSps(far & "\n" & "H26 x\n")
+  doAssert f.revisionDeclared and f.revision == sps10, $f.revision & " " & $f.log
+  doAssert looksLikeSps(newStringStream(far & "\nH26 x"))
+
+h00_revision_columns()
 
 echo "tsurveyread: ok"

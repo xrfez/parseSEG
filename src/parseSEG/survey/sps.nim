@@ -148,12 +148,13 @@ type
       ## from their values; `SurveyGeometry.addSps(path)` reads that way.
     skipBinary*: bool
       ## Pass by lines that hold bytes no text holds (a NUL or another
-      ## control character but tab, or more than a quarter bytes above 127):
-      ## they are not read as records, one warning counts them, and each is
-      ## an empty entry of `others` (so such a file is not written back byte
-      ## for byte). Off: they are read as the records they start like.
+      ## control character but tab, form feed and CR, or DEL; bytes above 127
+      ## are text and never count): they are not read as records, a warning
+      ## names each of the first few by its line and one counts them all, and
+      ## each is an empty entry of `others` (so such a file is not written
+      ## back byte for byte). Off: they are read as the records they start like.
     maxJunkBytes*: int64
-      ## Stop reading when this many bytes in a row hold no SPS record: lines
+      ## Stop reading once more than this many bytes in a row hold no SPS record: lines
       ## of an unknown record type, binary lines, pieces of over-long lines
       ## (blank lines neither end such a run nor count in it). The file turns
       ## into other data there: an error says from which byte, and `others`
@@ -226,34 +227,132 @@ func headerNumber(s: string): float64 =
     if result.classify notin {fcNormal, fcZero, fcNegZero}: result = NaN
   except ValueError: result = NaN
 
+func unsignedPart(s: openArray[char], point: bool): bool =
+  # `s` is blanks, then digits (at least one), and with `point` a `.` and
+  # digits after them: an I or F field as Fortran writes it, no sign.
+  var i = 0
+  while i < s.len and s[i] == ' ': inc i
+  var digits = 0
+  while i < s.len and s[i] in Digits: (inc i; inc digits)
+  if point and i < s.len and s[i] == '.':
+    inc i
+    while i < s.len and s[i] in Digits: (inc i; inc digits)
+  digits > 0 and i == s.len
+
 func headerAngle(s: string): float64 =
   # `I3,I2,F6.3,A1`: degrees, minutes, seconds and N, S, E or W (S and W
-  # negative), in 12 columns; or the same parts separated by blanks. NaN
-  # when it is none of these.
+  # negative): as in its 12 columns (blanks as Fortran writes them, or
+  # zeros: `  5 0 0.000N`, `0153000.000E`), or the three parts separated by
+  # blanks. NaN for anything else, never another reading: decimal degrees,
+  # a sign, 60 minutes or seconds or more, more than 90° N/S or 180° E/W.
   let t = s.strip
   if t.len < 2 or cmpIgnoreCase(t, "N/A") == 0: return NaN
   let hemi = t[^1].toUpperAscii
   if hemi notin {'N', 'S', 'E', 'W'}: return NaN
   let body = t[0 ..< ^1]
-  var parts = body.splitWhitespace
-  var d, m, sec: float64
-  if parts.len == 3:
-    (d, m, sec) = (headerNumber(parts[0]), headerNumber(parts[1]), headerNumber(parts[2]))
-  else:
-    # The columns as written: ddd mm ss.sss before the letter.
-    let fixed = align(body.replace(" ", "0"), 11, '0')
-    if fixed.len != 11: return NaN
-    (d, m, sec) = (headerNumber(fixed[0 .. 2]), headerNumber(fixed[3 .. 4]),
-      headerNumber(fixed[5 .. 10]))
+  var d, m, sec = NaN
+  if body.len <= 11:
+    let f = align(body, 11) # back in its columns: the strip took leading blanks only
+    if f[7] == '.' and f.toOpenArray(0, 2).unsignedPart(false) and
+        f.toOpenArray(3, 4).unsignedPart(false) and
+        (f[5 .. 6].strip.len == 0 or f.toOpenArray(5, 6).unsignedPart(false)) and
+        f[8] in Digits and f[9] in Digits and f[10] in Digits:
+      (d, m, sec) = (headerNumber(f[0 .. 2]), headerNumber(f[3 .. 4]), headerNumber(f[5 .. 10]))
+  if d.isNaN:
+    let parts = body.splitWhitespace
+    if parts.len == 3 and parts[0].unsignedPart(false) and parts[1].unsignedPart(false) and
+        parts[2].unsignedPart(true):
+      (d, m, sec) = (headerNumber(parts[0]), headerNumber(parts[1]), headerNumber(parts[2]))
   if d.isNaN or m.isNaN or sec.isNaN or m >= 60 or sec >= 60: return NaN
   result = d + m / 60 + sec / 3600
+  if result > (if hemi in {'N', 'S'}: 90.0 else: 180.0): return NaN
   if hemi in {'S', 'W'}: result = -result
 
-func splitAngles(data: string, n: int): seq[string] =
-  # `n` angles of 12 columns each, or as many separated by commas.
-  if ',' in data: return data.split(',')
-  for k in 0 ..< n:
-    result.add (if 12 * k < data.len: data[12 * k ..< min(data.len, 12 * k + 12)] else: "")
+func gridValue(s: string, letter: char): float64 =
+  # F11.2,A1 of H232: a decimal without exponent and the letter `letter`
+  # (E or N), which may be left out. NaN otherwise.
+  var t = s.strip
+  if t.len > 0 and t[^1] in Letters:
+    if t[^1].toUpperAscii != letter: return NaN
+    t.setLen t.len - 1
+  var i = 0
+  if i < t.len and t[i] in {'+', '-'}: inc i
+  if not t.toOpenArray(i, t.len - 1).unsignedPart(true): return NaN
+  headerNumber(t)
+
+func headerFields(h: SpsHeader, n: int): seq[string] =
+  # The data of `h` (columns 33 on) up to the 2.1 terminator `;`, as fields:
+  # separated by commas (the free format), else `n` fields of 12 columns
+  # each counted from column 33 before anything is stripped; each field
+  # stripped. Empty for `N/A` or no data.
+  let i = h.data.find(';')
+  let d = if i >= 0: h.data[0 ..< i] else: h.data
+  let all = d.strip
+  if all.len == 0 or cmpIgnoreCase(all, "N/A") == 0: return
+  if ',' in d:
+    for p in d.split(','): result.add p.strip
+  else:
+    for k in 0 ..< n:
+      result.add (if 12 * k < d.len: d[12 * k ..< min(d.len, 12 * k + 12)].strip else: "")
+
+func spsDatum(h: SpsHeader): GeodeticDatum =
+  # H12, `3A4,3A4,F12.3,F12.7`: datum 33-44, spheroid 45-56, a 57-68, 1/f
+  # 69-80; or the four separated by commas. The examples write it with
+  # blanks between words instead (SPS 1.0 [p.15] `RD datum Bessel 1841
+  # 6377397.155 299.15281`): when a column boundary cuts a word, the text
+  # runs past column 80, or a and 1/f are not numbers in range, the record
+  # is read by its tokens: the last two, if numbers in range, are a and 1/f,
+  # and the names are unknown (which words name which is not said). Range:
+  # a 6 350 000 - 6 400 000 m, 1/f 250 - 350 or 0 for a sphere (SEG-D Rev
+  # 3.0 App. D table 1.2).
+  result = GeodeticDatum()
+  func axis(v: float64): bool = v >= 6_350_000.0 and v <= 6_400_000.0
+  func flattening(v: float64): bool = v == 0 or (v >= 250.0 and v <= 350.0)
+  let i = h.data.find(';')
+  let raw = (if i >= 0: h.data[0 ..< i] else: h.data).strip(leading = false)
+  if raw.strip.len == 0 or cmpIgnoreCase(raw.strip, "N/A") == 0: return
+  if ',' in raw:
+    let f = h.headerFields(4)
+    template part(k: int): string = (if k < f.len: headerValue(f[k]) else: "")
+    result.name = part(0)
+    result.ellipsoid = part(1)
+    result.semiMajorAxis = headerNumber(part(2))
+    result.inverseFlattening = headerNumber(part(3))
+    return
+  template col(k: int): string =
+    (if 12 * k < raw.len: raw[12 * k ..< min(raw.len, 12 * k + 12)] else: "")
+  var columns = raw.len <= 48
+  for b in [12, 24, 36]:
+    if b < raw.len and raw[b - 1] != ' ' and raw[b] != ' ': columns = false
+  let a = headerNumber(col(2))
+  let f = headerNumber(col(3))
+  if columns and (headerValue(col(2)).len == 0 or a.axis) and
+      (headerValue(col(3)).len == 0 or f.flattening):
+    result.name = headerValue(col(0))
+    result.ellipsoid = headerValue(col(1))
+    result.semiMajorAxis = a
+    result.inverseFlattening = f
+    return
+  let t = raw.splitWhitespace
+  if t.len >= 2:
+    let (a2, f2) = (headerNumber(t[^2]), headerNumber(t[^1]))
+    if a2.axis and f2.flattening:
+      result.semiMajorAxis = a2
+      result.inverseFlattening = f2
+
+func namesProjection(s: string): bool =
+  # H18 names a map projection: a word of the SPS 1.0 [p.7] list (Transverse
+  # Mercator, UTM, Stereographic, Oblique Mercator, Lambert Conical) or of
+  # another common family. Never a geographic CRS (latitude, longitude) or
+  # a name it does not know (a local grid).
+  var words: seq[string]
+  for w in s.toLowerAscii.split({' ', '\t', '-', '/', '(', ')', ',', '.', '_'}):
+    if w.len > 0: words.add w
+  if "geographic" in words or "geographical" in words: return false
+  for w in words:
+    if w in ["mercator", "utm", "tm", "stereographic", "lambert", "conic", "conical",
+        "albers", "cassini", "polyconic", "gauss", "kruger", "krovak", "azimuthal", "rso"]:
+      return true
 
 func crs*(f: SpsFile): CoordinateReference =
   ## The coordinate reference system the header records give, the first of
@@ -262,10 +361,16 @@ func crs*(f: SpsFile): CoordinateReference =
   ## `projection.name`) and H19 (zone), and as projection parameters H210
   ## (standard parallels), H220 (central meridian), H231 (grid origin, in
   ## degrees, south and west negative), H232 (false easting and northing, in
-  ## grid units) and H241 (scale factor). `N/A` and fields that are not
-  ## numbers are unknown. The kind is `ckProjected` when H18 names a
-  ## projection, else unknown. H14 (datum transformation), H242 and H256-H259
-  ## are not read; `gridUnit` gives the grid unit.
+  ## grid units) and H241 (scale factor). Fields are read by their columns
+  ## (12 each from column 33, as the formats give them) or, where commas
+  ## separate them, by the commas; H12 written with blanks between words
+  ## gives its a and 1/f only (see `spsDatum`). `N/A`, and a field that does
+  ## not read as its format (decimal degrees for dddmmss.sss, an exponent, a
+  ## sign), are unknown, never read another way. The kind is `ckProjected`
+  ## when H18 names a map projection (Transverse Mercator, UTM,
+  ## Stereographic, Lambert, ...), else unknown (`Geographic`, a local
+  ## grid). H14 (datum transformation), H242 and H256-H259 are not read;
+  ## `gridUnit` gives the grid unit.
   result = CoordinateReference()
   var seen: seq[string]
   let units = f.gridUnit.name
@@ -278,40 +383,27 @@ func crs*(f: SpsFile): CoordinateReference =
     seen.add h.code
     let data = headerValue(h.data)
     case h.code
-    of "12":
-      # Datum 33-44, spheroid 45-56, a 57-68, 1/f 69-80; or comma separated.
-      let raw = h.data.strip(leading = false)
-      var parts: seq[string]
-      if ',' in data: parts = data.split(',')
-      else:
-        for k in 0 ..< 4:
-          parts.add (if 12 * k < raw.len: raw[12 * k ..< min(raw.len, 12 * k + 12)] else: "")
-      template part(i: int): string = (if i < parts.len: headerValue(parts[i]) else: "")
-      result.datum.name = part(0)
-      result.datum.ellipsoid = part(1)
-      result.datum.semiMajorAxis = headerNumber(part(2))
-      result.datum.inverseFlattening = headerNumber(part(3))
+    of "12": result.datum = spsDatum(h)
     of "17": result.verticalDatum = data
     of "18": result.projection.name = data
     of "19": result.projection.zone = data
     of "210":
-      let a = splitAngles(data, 2)
-      param("latitude of 1st standard parallel", "degree", headerAngle(a[0]))
+      let a = h.headerFields(2)
+      if a.len > 0: param("latitude of 1st standard parallel", "degree", headerAngle(a[0]))
       if a.len > 1: param("latitude of 2nd standard parallel", "degree", headerAngle(a[1]))
     of "220": param("longitude of central meridian", "degree", headerAngle(data))
     of "231":
-      let a = splitAngles(data, 2)
-      param("latitude of grid origin", "degree", headerAngle(a[0]))
+      let a = h.headerFields(2)
+      if a.len > 0: param("latitude of grid origin", "degree", headerAngle(a[0]))
       if a.len > 1: param("longitude of grid origin", "degree", headerAngle(a[1]))
     of "232":
       # 2(F11.2,A1): the values and their E / N letters.
-      let a = splitAngles(data, 2)
-      template grid(s: string): float64 = headerNumber(s.strip.strip(chars = {'E', 'N', 'e', 'n'}))
-      param("false easting", units, grid(a[0]))
-      if a.len > 1: param("false northing", units, grid(a[1]))
+      let a = h.headerFields(2)
+      if a.len > 0: param("false easting", units, gridValue(a[0], 'E'))
+      if a.len > 1: param("false northing", units, gridValue(a[1], 'N'))
     of "241": param("scale factor", "unity", headerNumber(data))
     else: discard
-  if result.projection.name.len > 0: result.kind = ckProjected
+  if result.projection.name.namesProjection: result.kind = ckProjected
 
 # ------------------------------------------------------------- column maps --
 
@@ -525,6 +617,14 @@ func revisionFromH00(data: string): (bool, SpsRevision) =
   elif d.continuesWith("1", i) and next notin Digits: (true, sps10) # "1.0", "1,", "1;"
   else: (false, sps21)
 
+func declaredRevision(line: string): (bool, SpsRevision) =
+  ## The revision record `line` declares when it is an H00: `revisionFromH00`
+  ## of its data, columns 33 on, as `parseHeader` reads them. The one rule of
+  ## `readSps` and `looksLikeSps`.
+  if line.len > 0 and line[0] == 'H' and line.col(2, 4).strip == "00":
+    revisionFromH00(line.col(33, max(80, line.len)))
+  else: (false, sps21)
+
 func rightInt(line: string, first, last: int): bool =
   # An `Iw` field in columns `first..last`: digits ending in the last
   # column, with at most a sign and blanks before them.
@@ -602,23 +702,30 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int,
   skipBom(s)
   result.layout = if opts.forceLayout: opts.layout else: openLayout(s)
   # The revision is needed before data records are parsed: decide it from
-  # H00 or the first data records, then rewind.
+  # H00 or the first data records, then rewind. At most `RevisionScan`
+  # records, and those starting in the first `RevisionScanBytes`, are looked
+  # at: this pass reports no progress and cannot be cancelled, and a file
+  # without either would be read through (without line ends, a record is a
+  # 64 KiB piece: 5000 of them were 320 MB).
+  const RevisionScan = 5000
+  const RevisionScanBytes = 4'i64 shl 20
   let start = s.getPosition
   var rev = opts.revision
   if rev == spsAuto:
-    var score, seen = 0
+    var score, seen, scanned = 0
     for r in textRecords(s, result.layout):
       if r.text.len > 0:
-        if r.text[0] == 'H' and r.text.col(2, 4).strip == "00":
-          let (found, rv) = revisionFromH00(r.text.col(33, 80))
-          if found:
-            rev = rv
-            result.revisionDeclared = true
-            break
+        let (found, rv) = declaredRevision(r.text)
+        if found:
+          rev = rv
+          result.revisionDeclared = true
+          break
         elif r.text[0] in {'R', 'S', 'X', 'O'}:
           score += layoutScore(r.text)
           inc seen
           if seen >= 50: break
+      inc scanned
+      if scanned >= RevisionScan or r.offset - int64(start) >= RevisionScanBytes: break
     if rev == spsAuto:
       rev = if score >= 0: sps21 else: sps10
       # A guess the caller should see: the two layouts share few columns,
@@ -636,7 +743,18 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int,
   var binary = 0          # binary lines passed by (`skipBinary`)
   var junk = 0'i64        # bytes in a row that hold no record (`maxJunkBytes`)
   var junkFrom = -1'i64   # where that run started
-  var stopped = false     # by the bound or a cancel
+  var stopped = false     # by the bound (`maxJunkBytes`)
+  var cancelled = false   # by `progress`
+  template ticked(lineOffset: int64, lineNumber: int): bool =
+    # Progress before the record at `lineOffset` is taken; false (and a fatal
+    # diagnostic) when it cancels, so the records kept are those before it.
+    if tk.tick(lineOffset - first): true
+    else:
+      result.log.report(sevFatal, dcCancelled, "cancelled by the progress callback; the " &
+        "records before byte " & $(lineOffset - first) & " were read", lineOffset,
+        Location(file: name, record: lineNumber))
+      cancelled = true
+      false
   template take(line: untyped, lineOffset: int64, lineNumber: int, isCrlf, isTerminated,
       isCut: bool) =
     # One record: `line` is a view of its text.
@@ -650,6 +768,8 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int,
         " bytes; cut into records (is this a text file?)")
     if opts.skipBinary and isBinary:
       inc binary
+      x.problem(result.log, sevWarning, dcBadValue, "line",
+        "binary data (bytes no text holds); passed by, not read as a record")
       result.order.add SpsEntry(kind: seOther, at: result.others.len)
       result.others.add ""
     elif line.len == 0 or line.allBlank:
@@ -692,11 +812,6 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int,
           $junkFrom & " (" & $junk & " bytes in a row hold no SPS record); read no further " &
           "(SpsOptions.maxJunkBytes)", junkFrom, Location(file: name, record: lineNumber))
         stopped = true
-    if not stopped and not tk.tick(lineOffset - first):
-      result.log.report(sevFatal, dcCancelled, "cancelled by the progress callback; the " &
-        "records before byte " & $(lineOffset - first) & " were read", lineOffset,
-        Location(file: name, record: lineNumber))
-      stopped = true
   try:
     # A file of one kind of record is the rule: room for its records at once
     # (a seq that grows by doubling held three times its final size meanwhile).
@@ -705,14 +820,17 @@ proc readRecords(s: Stream, name: string, opts: SpsOptions, expected: int,
       # Each line parsed where it lies in the chunk it was read in.
       var buf: string
       for span in lineSpans(s, buf, MaxLineBytes):
+        if not ticked(span.offset, span.index): break
         take(buf.toOpenArray(span.lo, span.hi), span.offset, span.index, span.crlf,
           span.terminated, span.cut)
         if stopped: break
     else:
       for r in textRecords(s, result.layout):
+        if not ticked(r.offset, r.index): break
         take(r.text.toOpenArray(0, r.text.high), r.offset, r.index, r.crlf, r.terminated, r.cut)
         if stopped: break
-    if not stopped and not tk.finish():
+    # The final call also after the junk bound stopped the read; not after a cancel.
+    if not cancelled and not tk.finish():
       result.log.report(sevFatal, dcCancelled, "cancelled by the progress callback at the end",
         loc = Location(file: name))
   except IOError, OSError:
@@ -749,8 +867,7 @@ proc looksLikeSps*(s: Stream, maxRecords = 200): bool =
     if t.len > 0:
       case t[0]
       of 'H':
-        if t.col(2, 4).strip == "00" and revisionFromH00(t.col(33, max(80, t.len)))[0]:
-          namesSps = true
+        if declaredRevision(t)[0]: namesSps = true
       of 'R', 'S':
         let (e, n) = (parseFortranFloat(t.col(47, 55), 1), parseFortranFloat(t.col(56, 65), 1))
         if e.isSome and n.isSome and not (e.get.isNaN or n.get.isNaN):
@@ -778,9 +895,14 @@ proc readSps*(path: string, opts = SpsOptions(), progress: Progress = nil): SpsF
     result.log.report(sevFatal, dcIo, "cannot open " & path, loc = Location(file: path))
   else:
     try:
-      # Cards are 80 columns and a line end.
+      # Cards are 80 columns and a line end. Room for at most `ReserveRecords`
+      # up front, the lists grow beyond: a file of many GiB that only starts
+      # like SPS reserved one record per 82 bytes of it (160 GB for 64 GiB:
+      # out of memory), before the junk bound could stop the read.
+      const ReserveRecords = 1'i64 shl 20
       let size = try: getFileSize(path) except OSError: 0'i64
-      result = readRecords(s, path, opts, expected = int(size div 82), progress,
+      let expected = int(min(size div 82, ReserveRecords))
+      result = readRecords(s, path, opts, expected, progress,
         total = if size > 0: size else: -1)
     finally: s.close()
 

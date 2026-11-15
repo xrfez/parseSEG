@@ -71,6 +71,13 @@ proc cutShort*(s: MemFileSource): bool {.raises: [].} =
     if n >= 0 and n < s.size: s.guard.lowerGuardCut(n)
   s.readable < s.size
 
+proc readFailed*(s: MemFileSource): bool {.inline, raises: [].} =
+  ## The bytes from `readable` on are gone because a read of them failed
+  ## (an I/O error: a network share that went away, a disk error), not
+  ## because the file is shorter: its size was unchanged when the read
+  ## faulted. Like a cut, it lasts as long as the map: open the file again.
+  s.guard.guardReadFailed
+
 proc mapGuard*(s: MemFileSource): MapGuard {.inline.} =
   ## **Internal** (not exported by `parseSEG`). The map's registration, for
   ## readers that check what they read against its cut from raw pointers

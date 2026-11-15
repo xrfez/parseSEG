@@ -5,7 +5,9 @@
 ## and `crs(SeismicFile)` in `model/summary`), or SPS header records
 ## (`crs(SpsFile)` in `survey/sps`). Nothing is looked up: an EPSG code is
 ## the code the file gives, a name the name as written, and whatever the file
-## does not give is unknown (an empty name, code 0, NaN).
+## does not give is unknown (an empty name, code 0, NaN). Nothing is guessed
+## either: a value that does not read as its field's format is unknown, not
+## read some other way.
 ##
 ## ```nim
 ## let c = parseCrsText("CRS type = projected\nCRS name = WGS 84 / UTM zone 31N\n" &
@@ -34,7 +36,9 @@ type
     name*: string            ## As written (`False easting`, `scale factor`).
     value*: float64 = NaN
     unit*: string            ## As written (`metre`, `degree`); "" when not given.
-    epsg*: int               ## EPSG parameter code (8806 false easting, ...); 0 when not given.
+    epsg*: int
+      ## EPSG parameter code (8806 false easting, ...); 0 when not given (P1/11
+      ## gives it; the stanzas and SPS do not).
 
   GeodeticDatum* = object
     ## A geodetic datum and its ellipsoid.
@@ -69,13 +73,16 @@ type
     verticalEpsg*: int       ## EPSG vertical datum code; 0 when not given.
 
 func known*(d: GeodeticDatum): bool =
-  ## The file gives the datum: a name, a code or an ellipsoid.
+  ## The file gives anything of the datum: a name, a code, an ellipsoid, its
+  ## axis or flattening, or a prime meridian.
   d.name.len > 0 or d.epsg > 0 or d.ellipsoid.len > 0 or d.ellipsoidEpsg > 0 or
-    not d.semiMajorAxis.isNaN
+    not d.semiMajorAxis.isNaN or not d.inverseFlattening.isNaN or d.primeMeridian.len > 0
 
 func known*(p: MapProjection): bool =
-  ## The file gives the projection: a name, a zone, a code or a method.
-  p.name.len > 0 or p.epsg > 0 or p.zone.len > 0 or p.methodName.len > 0 or p.methodEpsg > 0
+  ## The file gives anything of the projection: a name, a zone, a code, a
+  ## method or a parameter.
+  p.name.len > 0 or p.epsg > 0 or p.zone.len > 0 or p.methodName.len > 0 or
+    p.methodEpsg > 0 or p.parameters.len > 0
 
 func known*(c: CoordinateReference): bool =
   ## The file gives anything of its coordinate reference system.
@@ -111,14 +118,17 @@ func code(s: string): int =
   parseInt(t)
 
 func kindOf*(s: string): CrsKind =
-  ## A CRS type as written (`projected`, `geographic 2D`, `geographic2D`,
-  ## `compound`; case and blanks ignored), or a P1/11 type code (1-7).
+  ## A CRS type as written (`projected`, `projected 2D` (IOGP P1/11 v2),
+  ## `geographic 2D`, `geographic2D`, `compound`; case and blanks ignored),
+  ## or a P1/11 type code (1-7). A bare `geographic` (SEG-Y Rev 1 D-1: lat,
+  ## long, "and in the case of a 3-D CRS additionally ellipsoidal height")
+  ## says neither 2D nor 3D: unknown.
   var t = ""
   for c in s:
     if c notin {' ', '_', '-'}: t.add c.toLowerAscii
   case t
-  of "projected", "1": ckProjected
-  of "geographic2d", "geographic", "2": ckGeographic2D
+  of "projected", "projected2d", "1": ckProjected
+  of "geographic2d", "2": ckGeographic2D
   of "geographic3d", "3": ckGeographic3D
   of "geocentric", "4": ckGeocentric
   of "vertical", "5": ckVertical
@@ -236,41 +246,15 @@ proc fromP1_11(text: string): CoordinateReference =
 
 # ---------------------------------------------------------------- stanzas --
 
-func keyOf(s: string): string =
+func keyOf(s: openArray[char]): string =
   # A stanza keyword compared case- and blank-insensitively (and without
   # hyphens: `semi-major`).
   for c in s:
     if c notin {' ', '\t', '-', '_'}: result.add c.toLowerAscii
 
-proc stanzas(text: string): seq[Table[string, string]] =
-  # The keyword = value lines of each Location Data stanza (`((SEG:` or
-  # other `((` header lines start one; text without any is one stanza):
-  # comments (`#`), blank lines and `&` continuations as SEG-Y Rev 1 §6.1
-  # says. The first value of a keyword wins.
-  var cur = initTable[string, string]()
-  var pending = ""
-  template flush() =
-    if cur.len > 0: result.add cur
-    cur = initTable[string, string]()
-  for raw in text.splitLines:
-    var line = raw.strip
-    if pending.len > 0:
-      line = pending & line
-      pending = ""
-    if line.len == 0 or line[0] == '#': continue
-    if line.startsWith("(("):
-      flush()
-      continue
-    if line.endsWith("&"):
-      pending = line[0 ..< ^1]
-      continue
-    let eq = line.find('=')
-    if eq <= 0: continue
-    let k = keyOf(line[0 ..< eq])
-    if k notin cur: cur[k] = line[eq + 1 .. ^1].strip
-  flush()
-
-proc fromStanza(s: Table[string, string]): CoordinateReference =
+proc fromStanza(s: Table[string, string], parameters: bool): CoordinateReference =
+  # The values of one stanza's keywords; `parameters`: a keyword starts with
+  # `projectionparameter` (else they are not looked for).
   template v(k: string): string = s.getOrDefault(k)
   result = CoordinateReference()
   result.kind = kindOf(v("crstype"))
@@ -288,53 +272,121 @@ proc fromStanza(s: Table[string, string]): CoordinateReference =
   result.projection.epsg = code(v("projectioncode"))
   result.projection.methodName = v("projectionmethodname")
   result.projection.methodEpsg = code(v("projectionmethodcode"))
-  for n in 1 .. 20:
+  for n in 1 .. (if parameters: 20 else: 0):
+    # `Projection parameter n name`, `... n value`, `... n unit name`: SEG-Y
+    # Rev 1 D-1 and Rev 2 D-3, SEG-D Rev 3.0/3.1 App. D. (Their `... n unit
+    # code` is the unit's EPSG code, not the parameter's: not read.)
     let p = "projectionparameter" & $n
     if p & "name" in s:
-      # SEG-Y Rev 1: `... n name`, `... n value`, `... n unit name`.
       result.projection.parameters.add CrsParameter(name: v(p & "name"),
-        value: number(v(p & "value")), unit: v(p & "unitname"), epsg: code(v(p & "code")))
-    elif p in s:
-      # SEG-D Rev 3: `Projection parameter n = name, value, unit code, unit name, ...`.
-      let f = v(p).split(',')
-      template part(i: int): string = (if i < f.len: f[i].strip else: "")
-      result.projection.parameters.add CrsParameter(name: part(0), value: number(part(1)),
-        unit: part(3))
+        value: number(v(p & "value")), unit: v(p & "unitname"))
   result.verticalDatum = v("verticaldatumname")
   result.verticalEpsg = code(v("verticaldatumcode"))
   if result.verticalDatum.len == 0: result.verticalDatum = v("verticalcrsname")
 
+type
+  StanzaChoice = object
+    # What the choice among stanzas needs, kept as each stanza is read: the
+    # first stanza of each preferred kind, the first that gives anything,
+    # and the first vertical datum.
+    preferred: array[4, CoordinateReference] # projected, compound, geographic 2D, 3D
+    havePreferred: array[4, bool]
+    firstKnown: CoordinateReference
+    haveKnown: bool
+    verticalDatum: string
+    verticalEpsg: int
+
+proc take(ch: var StanzaChoice, r: CoordinateReference) =
+  let slot = case r.kind
+    of ckProjected: 0
+    of ckCompound: 1
+    of ckGeographic2D: 2
+    of ckGeographic3D: 3
+    else: -1
+  if ch.verticalDatum.len == 0 and r.verticalDatum.len > 0:
+    ch.verticalDatum = r.verticalDatum
+    ch.verticalEpsg = r.verticalEpsg
+  if slot >= 0 and not ch.havePreferred[slot]:
+    ch.havePreferred[slot] = true
+    ch.preferred[slot] = r
+  elif not ch.haveKnown and r.known:
+    ch.haveKnown = true
+    ch.firstKnown = r
+
 proc fromStanzas(text: string): CoordinateReference =
   # The stanza the coordinates are in: the first projected one, else the
   # first compound, geographic or other one that names a CRS; a vertical
-  # datum named in any stanza fills in a missing one.
+  # datum named in any stanza fills in a missing one. The `keyword = value`
+  # lines of each stanza (`((SEG:` or other `((` header lines start one;
+  # text without any is one stanza), with comments (`#`), blank lines and
+  # `&` continuations as SEG-Y Rev 1 §6.1 says; the first value of a
+  # keyword wins. Each stanza becomes a value as it ends, so memory stays
+  # that of one stanza however many the text holds, and a continuation is
+  # appended, not copied, so time stays linear in the text.
   result = CoordinateReference() # the field defaults: NaN, not 0
-  let all = stanzas(text)
-  var refs: seq[CoordinateReference]
-  for s in all: refs.add fromStanza(s)
+  var ch = StanzaChoice()
+  var cur = initTable[string, string]()
+  var pending = ""
+  var parameters = false
+  template addKey(line: string) =
+    # Only the keywords `fromStanza` reads are kept.
+    let eq = line.find('=')
+    if eq > 0:
+      let k = keyOf(line.toOpenArray(0, eq - 1))
+      var wanted = true
+      case k
+      of "crstype", "crsname", "crscode", "geodeticdatumname", "geodeticdatumcode",
+          "ellipsoidname", "ellipsoidcode", "ellipsoidsemimajoraxis", "semimajoraxisunitname",
+          "ellipsoidinverseflattening", "primemeridianname", "projectionzonename",
+          "projectionname", "projectioncode", "projectionmethodname", "projectionmethodcode",
+          "verticaldatumname", "verticaldatumcode", "verticalcrsname": discard
+      elif k.startsWith("projectionparameter"): parameters = true
+      else: wanted = false
+      if wanted and k notin cur: cur[k] = line.substr(eq + 1).strip
+  template close() =
+    if cur.len > 0:
+      ch.take fromStanza(cur, parameters)
+      cur.clear()
+      parameters = false
+  for raw in text.splitLines:
+    var line = raw.strip
+    if pending.len > 0:
+      pending.add line
+      line = move pending # `pending` is empty again
+    if line.len == 0 or line[0] == '#': continue
+    if line.startsWith("(("):
+      close()
+      continue
+    if line.endsWith("&"):
+      line.setLen line.len - 1
+      pending = move line
+      continue
+    addKey(line)
+  if pending.len > 0: addKey(pending) # the text ends in a continuation
+  close()
   var main = -1
-  for want in [ckProjected, ckCompound, ckGeographic2D, ckGeographic3D]:
-    for i, r in refs:
-      if main < 0 and r.kind == want: main = i
-  for i, r in refs:
-    if main < 0 and r.known: main = i
-  if main < 0: return
-  result = refs[main]
-  for r in refs:
-    if result.verticalDatum.len == 0 and r.verticalDatum.len > 0:
-      result.verticalDatum = r.verticalDatum
-      result.verticalEpsg = r.verticalEpsg
+  for slot in 0 .. 3:
+    if main < 0 and ch.havePreferred[slot]: main = slot
+  if main >= 0: result = move ch.preferred[main]
+  elif ch.haveKnown: result = move ch.firstKnown
+  else: return
+  if result.verticalDatum.len == 0 and ch.verticalDatum.len > 0:
+    result.verticalDatum = ch.verticalDatum
+    result.verticalEpsg = ch.verticalEpsg
 
 proc parseCrsText*(text: string): CoordinateReference =
   ## The coordinate reference system that a CRS text gives (`crsText` of a
   ## `SeismicFile`): OGP P1/11 header records (`HC,1,3,0` ... `HC,1,5,2`,
   ## told by lines starting `HC,`) or SEG Location Data stanzas (`keyword =
-  ## value` lines, with or without their `((SEG: ...))` header lines). When
-  ## the text defines several CRSs, the one returned is the first projected
-  ## one (else the horizontal part of a compound one, else a geographic
-  ## one), with its datum (or its base geographic CRS's) and projection; a
-  ## vertical datum comes from any of them. Unknown (`known` false) for text
-  ## that gives none of this.
+  ## value` lines, with or without their `((SEG: ...))` header lines;
+  ## comments, `&` continuations; a keyword's first value). When the text
+  ## defines several CRSs, the one returned is the first projected one (else
+  ## the horizontal part of a compound one, else a geographic one), with its
+  ## datum (or its base geographic CRS's) and projection; a vertical datum
+  ## comes from any of them. Unknown (`known` false) for text that gives
+  ## none of this. Linear in the text's length, in memory about one stanza.
+  ## A text of 80-column cards without line ends (SEG-Y Rev 0/1) must be cut
+  ## into lines first; `crs(SeismicFile)` does so.
   for line in text.splitLines:
     if line.strip.startsWith("HC,1,"): return fromP1_11(text)
   fromStanzas(text)

@@ -302,6 +302,7 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
     # whose bytes reach past it read zeros there, and fails. One check per
     # chunk, none per trace.
     let cut = sh.guard.guardCut
+    let why = sh.guard.cutStatus
     let had = s.failed
     var j = 0
     for k in 0..<s.count:
@@ -312,7 +313,7 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
       if pastCut(e, sh.codecs[e.record], cut):
         let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
         for c in 0..<sh.cols: row[c] = T(0)
-        s.fails[s.failed] = FailedRow(row: k, status: dsCut)
+        s.fails[s.failed] = FailedRow(row: k, status: why)
         inc s.failed
     if s.failed > had:
       # Back in row order: an insertion sort, on this rare path, of at most
