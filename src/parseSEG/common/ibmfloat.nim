@@ -4,7 +4,7 @@
 ## exponent in bits 30-24, 24-bit fraction in bits 23-0.
 ## value = (-1)^sign * 0.fraction * 16^(exponent - 64).
 
-import std/[math, os]
+import std/math
 import ./endians
 
 func ldexp(x: float64, e: cint): float64 {.importc: "ldexp", header: "<math.h>".}
@@ -58,7 +58,15 @@ func ibmToFloat32Fast*(bits: uint32): float32 {.inline.} =
   let f2 = cast[float32](cast[uint32](k2 + 127'i32) shl 23)
   (float32(cast[int32](frac)) * f1) * f2
 
-const cpuHeader = currentSourcePath().parentDir / "cpu.h"
+const cpuHeader = block:
+  # `cpu.h` beside this file, by the path as the host spells it: `parentDir`
+  # and `/` rewrite every separator to the target's, so `--os:windows` on a
+  # POSIX host gave `\workspaces\...\cpu.h`, which the host's C compiler
+  # cannot open. Every C compiler takes the path as written here.
+  const here = currentSourcePath()
+  var cut = here.len
+  while cut > 0 and here[cut - 1] notin {'/', '\\'}: dec cut
+  here[0 ..< cut] & "cpu.h"
 let avx2Target {.importc: "PARSESEG_AVX2", header: cpuHeader.}: cint
   # 1 when the C compiler targets AVX2 (`-march=x86-64-v3`, or native on
   # such a CPU), else 0: a C constant, so the branch below folds away.

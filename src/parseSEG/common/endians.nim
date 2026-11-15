@@ -5,8 +5,6 @@
 ## buffer. Out-of-range access is an index defect: callers check record
 ## sizes before decoding a block.
 
-from std/os import parentDir, `/`
-
 func beU8*(b: openArray[byte], pos: int): uint8 {.inline.} = b[pos]
 
 func beI8*(b: openArray[byte], pos: int): int8 {.inline.} = cast[int8](b[pos])
@@ -182,7 +180,15 @@ func loadU24*(p: ByteBuf, pos: int, order: static ByteOrder): uint32 {.inline.} 
 
 # ------------------------------------------------------ host-order copies --
 
-const cpuHeader = currentSourcePath().parentDir / "cpu.h"
+const cpuHeader = block:
+  # `cpu.h` beside this file, by the path as the host spells it: `parentDir`
+  # and `/` rewrite every separator to the target's, so `--os:windows` on a
+  # POSIX host gave `\workspaces\...\cpu.h`, which the host's C compiler
+  # cannot open. Every C compiler takes the path as written here.
+  const here = currentSourcePath()
+  var cut = here.len
+  while cut > 0 and here[cut - 1] notin {'/', '\\'}: dec cut
+  here[0 ..< cut] & "cpu.h"
 let avx2Target {.importc: "PARSESEG_AVX2", header: cpuHeader.}: cint
   # 1 when the C compiler targets AVX2 (`-march=x86-64-v3`, or native on
   # such a CPU), else 0: a C constant, so the branch below folds away.
