@@ -303,6 +303,31 @@ static void parsesegNetwork(const char *mark, long magic) { parsesegNetworkMark 
     doAssert f.traceHeaders(f.len - 1).len > 0
     f.close()
 
+  block a_failed_read_and_a_cut_in_one_call:
+    # The read of the last trace fails; the read of an earlier one then finds
+    # the file cut just past it, so the last trace lies past the cut too: it
+    # fails once, not once for each (seen failing: `failedRows` @[0, 0], 2
+    # of 2 traces failed while the earlier one was read whole).
+    let p = fresh("survey.sgy")
+    var f = openSeismic(p, opts = unmapped)
+    let last = f.len - 1
+    let early = f.len div 4
+    f.unsafeCache.dropUnpinned()
+    cut(p, f.sampleEnd(early) + 1)
+    failReadsFrom(f.traceEntry(last).sampleOffset)
+    var t = newTraceTensor[float32](2, f.maxSamples)
+    var failedRows: seq[int]
+    let n = f.readTracesInto([last, early], t, failedRows)
+    failReadsFrom(-1)
+    doAssert f.cutShort
+    doAssert n == 1 and failedRows == @[0], $n & " " & $failedRows
+    f.unsafeCache.dropUnpinned()
+    var log: DiagLog
+    failReadsFrom(f.traceEntry(last).sampleOffset)
+    doAssert f.readTracesInto([last, early], t, log) == 1 and log.len == 1, $log
+    failReadsFrom(-1)
+    f.close()
+
   block network_file_systems_are_read_unmapped:
     let d = tmp / "share_nfs"
     createDir(d)

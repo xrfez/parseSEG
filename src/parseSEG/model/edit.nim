@@ -375,7 +375,10 @@ proc endBatch*(ed: var HeaderEditor): bool =
   ## Syncs the journal and writes the batch's edits; ends the batch. False
   ## when the journal cannot be synced: then the batch's pending edits are
   ## not written (an error in `log` says how many) and their entries are cut
-  ## from the journal.
+  ## from the journal. Edits the file did not take (unmapped: an I/O error,
+  ## a network share that failed) leave it true: an error in `log` says how
+  ## many, the journal keeps them (`applyJournal`) and `close` raises
+  ## `IOError`.
   result = ed.flushBatch()
   ed.batch = false
 

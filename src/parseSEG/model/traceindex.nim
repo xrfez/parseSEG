@@ -1137,6 +1137,7 @@ template decodeLoop(f: SeismicFile, count: int, sel: ptr UncheckedArray[int], po
   let guard = f.unsafeGuard
   let known = guard.guardCut
   let cache = f.unsafeCache
+  var notRead: seq[int] # unmapped: the `k` of the traces failed unread (ascending)
   if cache != nil and count > 0:
     # Unmapped: the windows of consecutive traces are held as spans, one
     # request each (`holdSpan`); a trace whose bytes did not arrive fails.
@@ -1159,7 +1160,9 @@ template decodeLoop(f: SeismicFile, count: int, sel: ptr UncheckedArray[int], po
           cache.holdSpan(sp, entries, codecs, sel, posBase + k, posBase + count, cols, first)
         st = if y > x and sp.failed and not cache.holds(x, y): dsNotRead
              else: tryDecodeEntry(mem, size, e, c, p, cols, first)
-      if st != dsOk: fail(p, k, i, e, st)
+      if st != dsOk:
+        if st == dsNotRead: notRead.add k
+        fail(p, k, i, e, st)
     sp.drop()
   elif known >= size:
     for k in 0..<count:
@@ -1184,10 +1187,15 @@ template decodeLoop(f: SeismicFile, count: int, sel: ptr UncheckedArray[int], po
     # A cut was found during the read (or before): every trace decoded whose
     # bytes reach past it read zeros there, and fails too. One check per
     # read, none per trace (`guardCut` comes after the decodes: a fence).
-    # Those past a cut known before failed already.
+    # Those past a cut known before failed already, and so did those whose
+    # read failed (unmapped: `notRead`, a failed read and a cut in one call).
     let cut = guard.guardCut
     let why = guard.cutStatus
+    var j = 0
     for k in 0..<count:
+      if j < notRead.len and notRead[j] == k:
+        inc j
+        continue
       let i = traceAt(k)
       let e = f.idx.entries[i]
       let c = f.idx.codecs[e.record]

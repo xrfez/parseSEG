@@ -7,6 +7,10 @@
 ## returned and `reapPrefetchers` frees it. A worker inside the caller's
 ## `transform` is waited for instead. Seen failing with `close` waiting for
 ## the worker without a bound: "close waited without a bound" (the watchdog).
+## A prefetcher whose worker thread the OS refuses (`pthread_create`
+## interposed to fail) raises at once and leaves nothing behind (seen
+## failing: it waited the whole `closeTimeout` for the thread that never ran,
+## and left a given-up prefetcher that was never freed).
 
 import std/[assertions, atomics, monotimes, os, posix, times]
 import parseSEG
@@ -25,6 +29,7 @@ else:
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <pthread.h>
 """.}
   {.emit: """
 static ssize_t (*tbcRealPread)(int, void *, size_t, off_t) = 0;
@@ -46,10 +51,23 @@ ssize_t pread(int fd, void *buf, size_t n, off_t at) {
 static void tbcHangReadsOf(unsigned long long ino) { __atomic_store_n(&tbcIno, ino, __ATOMIC_SEQ_CST); __atomic_store_n(&tbcHang, 1, __ATOMIC_SEQ_CST); }
 static void tbcLetGo(void) { __atomic_store_n(&tbcHang, 0, __ATOMIC_SEQ_CST); }
 static int tbcStuck(void) { return __atomic_load_n(&tbcInRead, __ATOMIC_SEQ_CST); }
+static int (*tbcRealCreate)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *) = 0;
+static int tbcThreadsLeft = -1; /* threads made before pthread_create fails; -1: no limit */
+int pthread_create(pthread_t *t, const pthread_attr_t *a, void *(*fn)(void *), void *arg) {
+  if (!tbcRealCreate)
+    tbcRealCreate = (int (*)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *))
+      dlsym(((void *) -1l), "pthread_create");
+  int left = __atomic_load_n(&tbcThreadsLeft, __ATOMIC_SEQ_CST);
+  if (left == 0) return EAGAIN;
+  if (left > 0) __atomic_sub_fetch(&tbcThreadsLeft, 1, __ATOMIC_SEQ_CST);
+  return tbcRealCreate(t, a, fn, arg);
+}
+static void tbcThreadLimit(int n) { __atomic_store_n(&tbcThreadsLeft, n, __ATOMIC_SEQ_CST); }
 """.}
   proc hangReadsOf(ino: culonglong) {.importc: "tbcHangReadsOf", nodecl.}
   proc letGo() {.importc: "tbcLetGo", nodecl.}
   proc stuck(): cint {.importc: "tbcStuck", nodecl.}
+  proc threadLimit(n: cint) {.importc: "tbcThreadLimit", nodecl.}
 
   # A close that waits for ever must fail the test, not hang it.
   var watchdog: Thread[void]
@@ -170,6 +188,28 @@ static int tbcStuck(void) { return __atomic_load_n(&tbcInRead, __ATOMIC_SEQ_CST)
       let t0 = getMonoTime()
       doAssert p.close()
       doAssert ms(getMonoTime() - t0) < 100, $workers
+    f.close()
+
+  block a_worker_the_os_refuses:
+    # Not under ASan (`nim asan`, `-d:useMalloc`): the standard library's
+    # `createThread` leaks the thread's storage when `pthread_create` fails
+    # (Nim 2.4.2), which LeakSanitizer reports.
+    when defined(useMalloc): break a_worker_the_os_refuses
+    var f = openSeismic(demoDir() / "survey.sgy", opts = OpenOptions(access: faMapped))
+    threadLimit(1) # the first worker is made, the second is not
+    let t0 = getMonoTime()
+    var raised = false
+    try:
+      var p = newPrefetcher[float32](f, 0 ..< f.len, chunkTraces = 8, workers = 3,
+        closeTimeout = initDuration(seconds = 2))
+      discard p.close()
+    except ResourceExhaustedError:
+      raised = true
+    threadLimit(-1)
+    let took = ms(getMonoTime() - t0)
+    doAssert raised
+    doAssert took < 1500, "waited " & $took & " ms for a thread that never ran"
+    doAssert reapPrefetchers() == 0, "a prefetcher with a thread that never ran was given up on"
     f.close()
 
   finished.store(true)

@@ -692,12 +692,16 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
     sh.slots[i].data = rawData(result.tensors[i])
     sh.slots[i].fails = cast[ptr UncheckedArray[FailedRow]](createShared(FailedRow, rows))
     sh.slots[i].failRows = cast[ptr UncheckedArray[int]](createShared(int, rows))
-  sh.workers = workers
   sh.threads = cast[ptr UncheckedArray[Thread[(ptr Shared[T], int)]]](
     createShared(Thread[(ptr Shared[T], int)], workers))
   sh.states = cast[ptr UncheckedArray[Atomic[int32]]](createShared(Atomic[int32], workers))
   sh.joined = cast[ptr UncheckedArray[bool]](createShared(bool, workers))
-  for i in 0..<workers: createThread(sh.threads[i], worker[T], (sh, i))
+  # `workers` counts the threads made: when the OS refuses one
+  # (`ResourceExhaustedError`), the destructor stops and joins those, and
+  # waits for none that never ran.
+  for i in 0..<workers:
+    createThread(sh.threads[i], worker[T], (sh, i))
+    sh.workers = i + 1
 
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
     depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,

@@ -542,7 +542,7 @@ What each gives:
 | A read that waits (a hung share) | waits inside the page fault | waits inside `pread` |
 | A cut | found by the first read of a page past it, or `cutShort` | found by a read that must fetch past it, or `cutShort`; bytes already in parseSEG's cache read as they were |
 | Signals | a process-wide `SIGBUS` handler (POSIX) | none: an unmapped file installs no handler |
-| Memory | the OS's page cache | up to 64 MiB a file in parseSEG's cache, besides the OS's |
+| Memory | the OS's page cache | up to 64 MiB a file in parseSEG's cache, besides the OS's, and what reads in progress hold (up to 8 MiB of samples for each read or prefetch chunk, 4 MiB for a header loop, an index cache file whole while it is read) |
 | Cost | as fast as memory once cached | a copy of every byte read and a system call per request (below) |
 
 **Is unmapped slower on a share?** No: there the round trips and the link cost the time,
@@ -587,15 +587,21 @@ What a viewer may rely on, mapped or not:
   worker holds (its buffers, the file's map or read cache) stays alive until it returns
   and `reapPrefetchers` frees it (every later `newPrefetcher` and `close` does too). The
   UI thread may close a prefetcher of a network file. A worker inside your `transform`
-  is waited for, however long.
+  is waited for, however long. Each prefetcher given up on keeps its worker threads,
+  its ring and its pin until the share answers, so a host that makes a new one after
+  every give-up grows by that much each time: `reapPrefetchers()` says how many still
+  wait.
 
 What it must still do itself:
 
 - Read network files on job threads only, and keep the UI on `tryNext` and on what is
   already decoded.
 - Unmapped: show a failed read (`dcIo` rows, an `IOError`) and offer to read again; keep
-  the file open, the next read tries the share again. Mapped: open the file again once
-  the share is back (`readFailed`).
+  the file open, the next read tries the share again. A prefetcher does not read a
+  failed chunk again by itself: `seek` back to it, or read its `failedRows` with
+  `readTracesInto`. An editor batch whose writes failed still ends with `endBatch`
+  true: the error is in its `log`, the journal keeps the edits and `close` raises
+  `IOError`. Mapped: open the file again once the share is back (`readFailed`).
 - Give up on a thread of your own that waits too long by leaving it alone: do not close
   the file it reads while it is stopped (a prefetcher's workers are taken care of: close
   the prefetcher, then the file, as usual). Keep the file (a list of abandoned files) and
