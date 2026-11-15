@@ -56,6 +56,10 @@ proc job(path: string) {.thread.} =
   taken.store(readAll(path))
   closeLastInBlock(path)
   discard reapPrefetchers()
+  # ORC keeps this thread's root buffer once anything was listed on it (the
+  # Layout stanza of `survey.sgy` is parsed by std/xmlparser): free it, as
+  # the guide says.
+  GC_runOrc()
 
 block a_thread:
   var t: Thread[string]
