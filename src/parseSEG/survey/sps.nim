@@ -159,6 +159,13 @@ type
       ## (blank lines neither end such a run nor count in it). The file turns
       ## into other data there: an error says from which byte, and `others`
       ## keeps at most about this much of it. 0 (the default): no bound.
+    keepNames*: bool = true
+      ## Keep the text of every line and point field (`lineName`,
+      ## `pointName`, `srcLineName`, ...). Without it a field that reads as
+      ## a number (every one in Rev 2.1) has its value and "" as its text,
+      ## so a large relation file is read with a sixth of the strings: what
+      ## a reader of the values (a join, a map) needs. A name that is not a
+      ## number is kept either way.
 
 func initSpsPoint*(kind = pkSource): SpsPoint =
   ## A point with every value missing (index 1).
@@ -495,11 +502,11 @@ proc nameField(x: var Ctx, log: var DiagLog, line: openArray[char], cols: Slice[
   ## A line or point: text in 1.0 (numeric value when it is a number), F10.2
   ## in 2.1.
   let f = line.trimmed(cols.a, cols.b)
-  text = line.fieldText(f)
   if rev == sps10:
     if not line.fortranFloat(f, 0, value): value = NaN
   else:
     value = x.numberAt(log, line, f, kind, name, 2, rev)
+  text = if x.opts.keepNames or value.isNaN: line.fieldText(f) else: ""
 
 proc parsePoint(x: var Ctx, log: var DiagLog, line: openArray[char], rev: SpsRevision,
     keepRaw = true): SpsPoint =
@@ -508,8 +515,11 @@ proc parsePoint(x: var Ctx, log: var DiagLog, line: openArray[char], rev: SpsRev
   result = initSpsPoint(if k == 'R': pkReceiver else: pkSource)
   x.nameField(log, line, cols.line, k, ".line", rev, result.lineName, result.line)
   x.nameField(log, line, cols.point, k, ".point", rev, result.pointName, result.point)
-  if result.lineName.len == 0: x.problem(log, sevWarning, dcBadValue, k & ".line", "no line")
-  if result.pointName.len == 0: x.problem(log, sevWarning, dcBadValue, k & ".point", "no point")
+  # (a number read is a field given, also when its text is not kept: `keepNames`)
+  if result.lineName.len == 0 and result.line.isNaN:
+    x.problem(log, sevWarning, dcBadValue, k & ".line", "no line")
+  if result.pointName.len == 0 and result.point.isNaN:
+    x.problem(log, sevWarning, dcBadValue, k & ".point", "no point")
   result.index = x.smallField(log, line, cols.index, k, ".index", 1)
   result.code = line.fieldText(line.trimmed(cols.code.a, cols.code.b))
   result.staticCorrection = x.numberField(log, line, cols.statics, k, ".staticCorrection", 0, rev)

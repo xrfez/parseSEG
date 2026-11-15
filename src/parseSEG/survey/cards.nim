@@ -76,11 +76,49 @@ func fieldText*(line: openArray[char], f: Slice[int]): string =
   result = newString(max(f.b - f.a + 1, 0))
   if result.len > 0: copyMem(addr result[0], addr line[f.a], result.len)
 
+const exactPowers = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12,
+  1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22]
+  ## The powers of ten a float64 holds exactly.
+
+func plainDecimal(line: openArray[char], f: Slice[int], v: var float64,
+    point: var bool): bool {.inline.} =
+  ## A field of a sign, at most 15 digits and at most one `.` (what cards
+  ## hold): its value, exactly as `parseFloat` reads it (an integer below
+  ## 2^53 divided by an exact power of ten is correctly rounded), and
+  ## whether it has a point. False for anything else (an exponent, more
+  ## digits), which `parseFloat` then reads.
+  var i = f.a
+  let negative = line[i] == '-'
+  if line[i] in {'-', '+'}: inc i
+  var mantissa = 0'i64
+  var (digits, fraction) = (0, -1)
+  while i <= f.b:
+    let c = line[i]
+    if c in {'0'..'9'}:
+      inc digits
+      if digits > 15: return false
+      mantissa = mantissa * 10 + int64(ord(c) - ord('0'))
+      if fraction >= 0: inc fraction
+    elif c == '.' and fraction < 0: fraction = 0
+    else: return false
+    inc i
+  if digits == 0: return false
+  point = fraction >= 0
+  v = float64(mantissa)
+  if fraction > 0: v = v / exactPowers[fraction]
+  if negative: v = -v
+  true
+
 func fortranFloat*(line: openArray[char], f: Slice[int], decimals: int, v: var float64): bool =
   ## `parseFortranFloat` for a `trimmed` field of `line`: false when it is
   ## not a finite number; a blank field is NaN and true.
   if f.a > f.b:
     v = NaN
+    return true
+  var point = false
+  if plainDecimal(line, f, v, point):
+    # (the common field, read without `parseFloat`: a third of an X record's parse)
+    if decimals > 0 and not point: v = v / pow(10.0, float64(decimals))
     return true
   if parseFloat(line.toOpenArray(f.a, f.b), v) != f.b - f.a + 1 or
       v.classify in {fcNan, fcInf, fcNegInf}:
@@ -97,6 +135,18 @@ func fortranInt*(line: openArray[char], f: Slice[int], v: var int64): bool =
   ## an integer; a blank field is `MissingInt` and true.
   if f.a > f.b:
     v = MissingInt
+    return true
+  block plain: # a sign and at most 18 digits, read here (`parseBiggestInt` raises)
+    var i = f.a
+    let negative = line[i] == '-'
+    if line[i] in {'-', '+'}: inc i
+    if i > f.b or f.b - i >= 18: break plain
+    var n = 0'i64
+    while i <= f.b:
+      if line[i] notin {'0'..'9'}: break plain
+      n = n * 10 + int64(ord(line[i]) - ord('0'))
+      inc i
+    v = if negative: -n else: n
     return true
   try:
     var n: BiggestInt
