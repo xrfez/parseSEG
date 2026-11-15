@@ -8,7 +8,9 @@
 ## 53-60) are 0, which is how a header that was never given a datum looks
 ## (a zero pair is "not set", as for coordinates), unless Extension 1 gives
 ## them: a datum at elevation 0 beside a known one, or in Extension 1, is
-## still read as 0.
+## still read as 0. The headers are read from the map: a file that another
+## program cut short while it was open raises `SegTruncatedError` once a
+## read has found the cut (`cutShort`).
 ##
 ## ```nim
 ## var f = openSeismic("line.sgy")
@@ -87,8 +89,11 @@ proc traceStaticsInto*(f: SeismicFile, traces: openArray[int],
   if dst.len != traces.len:
     raise newException(ValueError, "need " & $traces.len & " rows, got " & $dst.len)
   for t in traces: f.requireTrace(t)
-  if traces.len > 0: f.requireOpen()
+  if traces.len > 0:
+    f.requireOpen()
+    f.requireUncut()
   for k, t in traces: dst[k] = f.staticsOf(t)
+  f.requireUncut()
 
 proc traceStaticsInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[TraceStatics]) =
   ## `traceStaticsInto` for a range of traces (an empty range must start in
@@ -96,8 +101,11 @@ proc traceStaticsInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[Tr
   checkSpan(traces, f.len)
   let n = spanLen(traces)
   if dst.len != n: raise newException(ValueError, "need " & $n & " rows, got " & $dst.len)
-  if n > 0: f.requireOpen()
+  if n > 0:
+    f.requireOpen()
+    f.requireUncut()
   for k in 0 ..< n: dst[k] = f.staticsOf(traces.a + k)
+  f.requireUncut()
 
 proc traceStatics*(f: SeismicFile, traces: Slice[int]): seq[TraceStatics] =
   ## The statics of a range of traces (see `traceStaticsInto`).

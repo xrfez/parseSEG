@@ -162,8 +162,12 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
   ## `progress` is called about every MiB of the file (the share of traces
   ## written, in bytes) and once at the end; when it returns false the
   ## export stops with `SegCancelledError` and nothing is written (like a
-  ## failed write, a cancel raises: this call reports by exceptions).
+  ## failed write, a cancel raises: this call reports by exceptions). A file
+  ## that another program cut short while it was open (`cutShort`) stops it
+  ## with `SegTruncatedError`, also when the export finds the cut, and
+  ## nothing is written.
   if f.len > 0: f.requireOpen()
+  f.requireUncut()
   if path == f.path or (fileExists(path) and sameFile(path, f.path)):
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
   let tmp = createTempFor(path)
@@ -212,6 +216,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
       o.put ")"
     o.put ")\n"
     if not tk.finish(): raiseCancelled()
+    f.requireUncut() # before a byte reaches the output: what was read past a cut is zeros
     o.f.write o.buf
     o.f.close()
   except CatchableError:

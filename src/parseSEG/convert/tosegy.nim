@@ -1172,7 +1172,7 @@ proc convertSeg2ToSegy*(f: SeismicFile, sink: RecordSink, opts = ConvertOptions(
       try:
         c.vals.setLen ns
         if ns > 0:
-          decodeEntry(f.unsafeMemory, f.mappedSize, e, codec,
+          decodeEntry(f.unsafeMemory, f.mappedSize, f.unsafeGuard, e, codec,
             cast[ptr UncheckedArray[float64]](addr c.vals[0]), ns)
         if not encodeChecked(c.outFmt, c.vals, ot.samples, opts.byteOrder, c.scratch):
           c.losses.add(c.nOut)

@@ -30,7 +30,7 @@
 ## a temporary demultiplexed copy (`segd/demux`) and maps and indexes that
 ## instead (`demuxPath`); the copy is deleted on `close`.
 
-import std/[math, os, times, locks]
+import std/[algorithm, math, os, times, locks]
 import ../common/[errors, diagnostics, seismickind, progress, tensors]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
@@ -39,7 +39,8 @@ import ../seg2/[reader as seg2reader]
 import ./[keys, indextypes, indexwalk]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples,
   ../seg2/samples as seg2samples
-import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, indexcache]
+import ../private/[checks, decodeentry, progressticker, tensorrows, segykeys, indexcache,
+  mapguard]
 
 export memsource, diagnostics, keys, seismickind, progress, tensors, indextypes, indexwalk
 
@@ -170,6 +171,34 @@ proc requireOpen*(f: SeismicFile) {.inline.} =
   ## exported by `parseSEG`.
   if not f.mapped: raiseClosed()
 
+proc raiseCut(f: SeismicFile) {.noinline, noreturn.} =
+  let left = f.map.src.readable
+  raise (ref SegTruncatedError)(msg: f.path & " was cut short while it was open (" &
+    $f.map.src.size & " bytes mapped, " & $left & " left); open it again", offset: left)
+
+func cutSeen*(f: SeismicFile): bool {.inline.} =
+  ## **Internal.** The file was found cut short while mapped (a read reached
+  ## a page past its new end, or `cutShort` saw it). No system call; not
+  ## exported by `parseSEG`.
+  f.mapped and f.map.src.readable < f.map.src.size
+
+proc requireUncut*(f: SeismicFile) {.inline.} =
+  ## **Internal.** Raises `SegTruncatedError` when the file was found cut
+  ## short while mapped (`cutSeen`). Calls that read headers, keys or raw
+  ## bytes from the map call it before and after the read. Not exported by
+  ## `parseSEG`.
+  if f.cutSeen: f.raiseCut()
+
+proc cutShort*(f: SeismicFile): bool =
+  ## The file was cut short by another program since it was opened: an
+  ## earlier read found it so, or this call does (it asks the OS for the
+  ## file's size, about 0.5 µs). From then on, sample reads fail the traces
+  ## past the cut (zero rows, `dcTruncated`) and calls that read headers,
+  ## keys or raw bytes from the file raise `SegTruncatedError`: close it and
+  ## open it again. False for a closed file, and on Windows, where a mapped
+  ## file cannot be cut.
+  f.mapped and f.map.src.cutShort
+
 proc pinMap*(f: SeismicFile): MapPin =
   ## **Internal.** A pin on `f`'s map (an empty pin for a closed file). Any
   ## thread may pin a file and drop its pin while others do the same.
@@ -222,6 +251,14 @@ proc resolveLayout(f: var SeismicFile) =
   # The SEG-Y layout plan of the index just made (see `gr`).
   if f.idx.kind == skSegy and f.idx.detected: f.gr = initGeometryReader(f.idx.segy)
 
+proc requireWholeOpen(f: SeismicFile) =
+  # The end of an open: a file cut short while it was walked (the walk read
+  # zeros past the cut, or stopped there) gives no index. Asks the OS once.
+  if f.mapped and f.map.src.cutShort:
+    raise newException(IOError, f.path & " was cut short while it was opened (" &
+      $f.map.src.size & " bytes mapped, " & $f.map.src.readable & " left); open it again " &
+      "once it stops changing")
+
 proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
     forced = skUnknown): SeismicFile =
@@ -244,6 +281,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
       f.resolveLayout()
       var tk = initProgressTicker(progress, f.map.src.size)
       if not tk.finish(): raiseCancelled()
+      f.requireWholeOpen()
       return f
   let n = int(min(f.map.src.size, 8192))
   let kind =
@@ -267,6 +305,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
   if cache.len > 0:
     f.idx.log.report(sevInfo, dcIndexCache, "the index cache " & cache & " was not used (" &
       why & "); the file was indexed", 0, Location(file: path))
+  f.requireWholeOpen()
   f
 
 proc openSeismic*(path: string, keys = false, progress: Progress = nil,
@@ -448,13 +487,16 @@ func traceKeys*(f: SeismicFile, trace: int): TraceKeys =
 proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   ## The SEG-2 Trace Descriptor Block of trace `trace` (fixed part and
   ## keyword strings), re-read from the map. Raises `ValueError` for a file
-  ## that is not SEG-2 or is closed, or a trace out of range.
+  ## that is not SEG-2 or is closed, or a trace out of range, and
+  ## `SegTruncatedError` for a file found cut short (`cutShort`).
   f.requireKind(skSeg2)
   f.requireTrace(trace)
   f.requireOpen()
+  f.requireUncut()
   var log: DiagLog # already reported by the index walk
-  readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.idx.seg2, trace,
-    log, f.path)
+  result = readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.idx.seg2,
+    trace, log, f.path)
+  f.requireUncut()
 
 func cardLines(text: string): string =
   # A text block as lines of `CardWidth` characters joined by '\n'.
@@ -479,13 +521,15 @@ proc extendedTextHeaders*(f: SeismicFile): seq[string] =
   ## `f.index.segy.extended`). Empty when there are none. Records of binary
   ## stanzas come out as their bytes in Latin-1. Raises `ValueError` for a
   ## file that is not SEG-Y, or a closed one when the records were too large
-  ## to keep in memory.
+  ## to keep in memory (and `SegTruncatedError` when such a file was found
+  ## cut short, `cutShort`).
   f.requireKind(skSegy)
   template ext: untyped = f.idx.segy.extended
   let n = ext.recordCount
   let start = int64(f.idx.segy.tapeLabel.len + TextHeaderSize + BinaryHeaderSize)
   if not ext.isComplete and n > 0:
     f.requireOpen()
+    f.requireUncut()
     if start + int64(n * TextHeaderSize) > f.map.src.size:
       raise newException(ValueError, "the extended textual header lies past the end of the file")
   template record(rec: openArray[byte]): string =
@@ -497,6 +541,7 @@ proc extendedTextHeaders*(f: SeismicFile): seq[string] =
     else:
       let b = int(start) + a
       result.add record(f.map.src.memory.toOpenArray(b, b + TextHeaderSize - 1))
+  if not ext.isComplete and n > 0: f.requireUncut()
 
 proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
   ## **Internal.** The mapped bytes (nil after `close`), for the library's own
@@ -507,6 +552,12 @@ proc unsafeMemory*(f: SeismicFile): ptr UncheckedArray[byte] {.inline.} =
   ## or `traceField`/`fileField` instead.
   if f.mapped: f.map.src.memory else: nil
 
+proc unsafeGuard*(f: SeismicFile): MapGuard {.inline.} =
+  ## **Internal.** The map's registration (nil after `close`), which raw
+  ## readers check what they read against (`tryDecodeEntry`). Not exported by
+  ## `parseSEG`.
+  if f.mapped: f.map.src.mapGuard else: nil
+
 func isOpen*(f: SeismicFile): bool {.inline.} =
   ## The file is still mapped (range reads work).
   f.mapped
@@ -514,8 +565,10 @@ func isOpen*(f: SeismicFile): bool {.inline.} =
 proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
   ## A copy of `n` raw bytes at `offset` in the file (e.g. a header for a
   ## hex view). Raises `ValueError` if the file is closed or the range lies
-  ## outside it. Changing the copy never changes the file.
+  ## outside it, and `SegTruncatedError` for a file found cut short
+  ## (`cutShort`). Changing the copy never changes the file.
   f.requireOpen()
+  f.requireUncut()
   let size = f.map.src.size
   # `n > size - offset`, not `offset + n > size`: the sum can overflow.
   if offset < 0 or offset > size or int64(n) > size - offset:
@@ -523,6 +576,7 @@ proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
       $size & " bytes)")
   result = newSeq[byte](n)
   if n > 0: copyMem(addr result[0], addr f.map.src.memory[offset], n)
+  f.requireUncut()
 
 proc mappedSize*(f: SeismicFile): int64 {.inline.} =
   ## **Internal.** Bytes mapped (0 after `close`). Not exported by `parseSEG`.
@@ -587,9 +641,11 @@ proc segyIntervalOf*(f: SeismicFile, trace: int): float64 =
   ## when they lie outside the file. The caller checks the trace and the map.
   let fixed = fixedIntervalUs(f.idx.segy)
   if not fixed.isNaN: return fixed
+  f.requireUncut()
   var h: RawHeaders
-  if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.idx.entries[trace], h): NaN
-  else: segyIntervalUs(h, f.idx.segy.byteOrder, NaN)
+  result = if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.idx.entries[trace], h): NaN
+    else: segyIntervalUs(h, f.idx.segy.byteOrder, NaN)
+  f.requireUncut()
 
 proc keysOf(f: SeismicFile, r: var KeyReader, mem: ptr UncheckedArray[byte], size: int64,
     trace: int): TraceKeys =
@@ -641,6 +697,7 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
     for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)]
   elif count > 0:
     f.requireOpen()
+    f.requireUncut()
     let mem = f.unsafeMemory
     let size = f.mappedSize
     if f.segyPlanFits:
@@ -656,6 +713,7 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
     else:
       var r = initKeyReader(f)
       for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k))
+    f.requireUncut()
 
 proc traceKeysInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[TraceKeys]) =
   ## The keys of each trace of `traces` into `dst` (`dst.len == traces.len`).
@@ -665,7 +723,8 @@ proc traceKeysInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[T
   ## makes them (the file's own geometry: survey changes are not applied).
   ## On demand costs about what the index walk spends per trace, but only for
   ## the traces asked for. Raises `ValueError` for a trace out of range, a
-  ## closed file or a `dst` of the wrong length.
+  ## closed file or a `dst` of the wrong length, and on demand
+  ## `SegTruncatedError` for a file found cut short (`cutShort`).
   for i in traces:
     f.requireTrace(i)
   template at(k: int): int = traces[k]
@@ -686,7 +745,8 @@ proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
   ## when geometry is first needed. `progress` reports the trace header
   ## bytes read; when it cancels, `SegCancelledError` is raised and the file
   ## stays without keys. Raises `ValueError` for a closed file or headers
-  ## that lie outside it.
+  ## that lie outside it, and `SegTruncatedError` (the file stays without
+  ## keys) for a file found cut short (`cutShort`).
   ##
   ## Whatever was made from the file before this call still has no keys: a
   ## `TraceRows` view (`rowsOf`; its `hasKeys` stays false and `traceKeys`
@@ -697,6 +757,7 @@ proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
   ## thread may use the file meanwhile.
   if f.hasKeys: return
   f.requireOpen()
+  f.requireUncut()
   let n = f.len
   let mem = f.unsafeMemory
   let size = f.mappedSize
@@ -707,6 +768,7 @@ proc ensureKeys*(f: var SeismicFile, progress: Progress = nil) =
     keys[i] = f.keysOf(r, mem, size, i)
     if not tick.tick(f.idx.entries[i].offset): raiseCancelled()
   if not tick.finish(): raiseCancelled()
+  f.requireUncut()
   f.idx.keys = move keys
   inc f.idx.keysRevision
 
@@ -806,6 +868,7 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
     for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)].t0Ms
   elif count > 0:
     f.requireOpen()
+    f.requireUncut()
     let mem = f.unsafeMemory
     let size = f.mappedSize
     if f.segyPlanFits:
@@ -818,6 +881,7 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
     else:
       var r = initKeyReader(f)
       for k in 0 ..< count: dst[k] = f.keysOf(r, mem, size, traceAt(k)).t0Ms
+    f.requireUncut()
 
 proc startTimeMsInto*(f: SeismicFile, traces: openArray[int], dst: var openArray[float64]) =
   ## The time of sample 0 (`TraceKeys.t0Ms`, ms) of each trace of `traces`
@@ -862,25 +926,47 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
   # Decodes `count` traces: samples `first ..< first + cols` of trace
   # `traceAt(k)` into row pointer `rowAt(k)`. With `failedRows` (a `ptr
   # seq[int]`), the list is cleared (its capacity kept) and gets the `k` of
-  # each trace left zero, instead of a report in `log`.
+  # each trace left zero, in order, instead of a report in `log`.
   var failed = 0
+  var failedKs: seq[int] # the rows left zero, in order (allocated only when one is)
   when failedRows isnot typeof(nil): failedRows[].setLen 0
   let mem = f.unsafeMemory
   let size = f.mappedSize
+  let guard = f.unsafeGuard
+  template fail(k, i: int, e: TraceEntry, st: DecodeStatus) =
+    let p = rowAt(k)
+    for c in 0..<cols: p[c] = T(0)
+    when failedRows isnot typeof(nil):
+      failedRows[].add k
+    else:
+      log.report(sevError, diagCodeOf(st), decodeMessages[st], e.offset,
+        Location(file: f.path, record: if f.idx.kind == skSeg2: 0 else: int(e.record),
+          trace: i))
+    inc failed
   for k in 0..<count:
     let i = traceAt(k)
     let e = f.idx.entries[i]
-    let p = rowAt(k)
-    let st = tryDecodeEntry(mem, size, e, f.idx.codecs[e.record], p, cols, first)
+    let st = tryDecodeEntry(mem, size, guard, e, f.idx.codecs[e.record], rowAt(k), cols, first)
     if st != dsOk:
-      for c in 0..<cols: p[c] = T(0)
-      when failedRows isnot typeof(nil):
-        failedRows[].add k
-      else:
-        log.report(sevError, if st == dsTruncated: dcTruncated else: dcUnsupportedFormat,
-          decodeMessages[st], e.offset, Location(file: f.path,
-            record: if f.idx.kind == skSeg2: 0 else: int(e.record), trace: i))
-      inc failed
+      failedKs.add k
+      fail(k, i, e, st)
+  if count > 0 and guard.guardCut < size:
+    # A cut was found during the read (or before): a trace decoded before it
+    # was found whose bytes reach past it read zeros there (the rest of the
+    # page that holds the new end gives zeros, not a fault): it fails too.
+    let cut = guard.guardCut
+    var j = 0
+    for k in 0..<count:
+      if j < failedKs.len and failedKs[j] == k:
+        inc j
+        continue
+      let i = traceAt(k)
+      let e = f.idx.entries[i]
+      if pastCut(e, f.idx.codecs[e.record], cut): fail(k, i, e, dsCut)
+    when failedRows isnot typeof(nil):
+      var rows = move failedRows[] # sorted through a local: `failedRows[].sort()`
+      rows.sort()                  # makes C that does not compile (Nim 2.4.2)
+      failedRows[] = move rows
   failed
 
 proc checkReadable(f: SeismicFile, count: int) =
@@ -922,7 +1008,11 @@ proc readTracesInto*[T: SampleType](f: SeismicFile, traces: Slice[int], dst: var
   ## Decodes `traces` into rows `row ..< row + traces.len` of `dst` (a
   ## row-major `[rows, samples]` tensor), each truncated or zero-padded to
   ## `dst.shape[1]`. A trace that cannot be decoded is left zero, logged in
-  ## `log`, and counted in the result. Raises `ValueError` for traces outside
+  ## `log`, and counted in the result; so is a trace past the end of a file
+  ## that another program cut short while it was open (`dcTruncated`, see
+  ## `cutShort`): POSIX gives zeros there instead of ending the program
+  ## with `SIGBUS`, and each trace is checked against the cut after it is
+  ## decoded. Raises `ValueError` for traces outside
   ## the file (an empty range must still start in `0 .. f.len`), a closed
   ## file or a tensor without room. A large or scattered read whose pages
   ## are not in memory first asks the OS to read them all ahead (POSIX

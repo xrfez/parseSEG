@@ -58,7 +58,7 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.keysRevision,
   traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,
   traceindex.copyBytes, traceindex.readTracesInto, traceindex.readTraces,
-  traceindex.applyGeometry, traceindex.saveIndex, traceindex.index
+  traceindex.applyGeometry, traceindex.saveIndex, traceindex.index, traceindex.cutShort
 export headerfields.fieldNames, headerfields.fieldByName, headerfields.traceField,
   headerfields.recordField, headerfields.fileField, headerfields.findTraceField,
   headerfields.findRecordField, headerfields.findFileField, headerfields.blockKind,
@@ -77,7 +77,8 @@ export textrec, sps, p1, join
 export writeback except KeysPlan, planKeys, finishKeys # internal: model/writefile
 
 import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
-export records, diskio, memsource, tapeimage, tapedevice
+export records, diskio, tapeimage, tapedevice
+export memsource except mapGuard # internal: the readers' guard against a cut file
 when defined(linux):
   import parseSEG/io/tape_linux
   export tape_linux

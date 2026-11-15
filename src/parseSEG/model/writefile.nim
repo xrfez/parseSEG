@@ -402,19 +402,18 @@ proc loadSegyTrace(src: SeismicFile, trace: int, h: openArray[byte], t: var Segy
 
 template withTemplateHeaders(s: var WriterState, src: SeismicFile, trace, minimum: int,
     keys: ptr TraceKeys, fields: GeometryFields, h, body: untyped) =
-  # Runs `body` with `h`, trace `trace`'s header bytes: in the map, or with
-  # `keys` a copy of them with the keys' geometry written in (write-back).
+  # Runs `body` with `h`, a copy of trace `trace`'s header bytes, with
+  # `keys` the keys' geometry written in (write-back). The copy is checked
+  # against a cut of the file (`SegTruncatedError`) before any of it can
+  # reach the output: bytes read past a cut are zeros.
+  src.requireUncut()
   let (a, n) = src.headerBytes(trace, minimum)
-  if keys == nil:
-    let mem = src.unsafeMemory
-    template h: untyped = mem.toOpenArray(a, a + n - 1)
-    body
-  else:
-    s.hdr.setLen n
-    copyMem(addr s.hdr[0], addr src.unsafeMemory[a], n)
-    s.keysPlan.planKeys(src, trace, keys[], s.hdr, fields)
-    template h: untyped = s.hdr.toOpenArray(0, n - 1)
-    body
+  s.hdr.setLen n
+  copyMem(addr s.hdr[0], addr src.unsafeMemory[a], n)
+  src.requireUncut()
+  if keys != nil: s.keysPlan.planKeys(src, trace, keys[], s.hdr, fields)
+  template h: untyped = s.hdr.toOpenArray(0, n - 1)
+  body
 
 proc noteCount(s: var WriterState, n: int) =
   # A trace of `n` samples was written.

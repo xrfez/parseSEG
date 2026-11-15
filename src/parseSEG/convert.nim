@@ -13,7 +13,7 @@ import ./io/[records, diskio, memsource]
 import ./segd/samples
 import ./model/[traceindex, indexwalk]
 import ./convert/[tosegy, tosegd, toseg2]
-import ./private/progressticker
+import ./private/[progressticker, seg2conv]
 
 export tosegy, tosegd, toseg2
 
@@ -96,6 +96,7 @@ proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
       of skSeg2:
         seg2 = openSeismic(srcPath, keys = true, progress = progressPhase(progress, 0, 2))
         result = convertSeg2ToSegy(seg2, sink, opts, pass)
+        result.reportCut(seg2, Location(file: dstPath))
       of skSegy:
         src = openDiskSource(srcPath)
         result = convertSegy(src, sink, opts, pass)

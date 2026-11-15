@@ -90,7 +90,7 @@ import std/[locks, atomics]
 import ../common/diagnostics
 import ../segy/samples
 import ./[traceindex, tracerows]
-import ../private/[checks, decodeentry]
+import ../private/[checks, decodeentry, mapguard]
 
 type
   ChunkTransform*[T] = proc (worker: int, samples: ptr UncheckedArray[T], rows, cols: int,
@@ -120,7 +120,7 @@ type
 
   FailedRow = object
     row: int       # row of the chunk
-    code: DiagCode # dcTruncated or dcUnsupportedFormat
+    status: DecodeStatus # why: undecodable, past the end, past a cut
 
   Slot[T] = object
     state: SlotState
@@ -152,6 +152,7 @@ type
     firstSample: int # samples `firstSample ..< firstSample + cols` of each trace
     mem: ptr UncheckedArray[byte]
     size: int64
+    guard: MapGuard # the map's registration: traces past its cut fail (`dsCut`)
     entries: ptr UncheckedArray[TraceEntry]
     codecs: ptr UncheckedArray[TraceCodec]
     sel: ptr UncheckedArray[int] # selection mode: positions index this list; nil = ranges
@@ -289,14 +290,41 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
       return false
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
     let e = sh.entries[sh.traceOf(s.first + k)]
-    let st = tryDecodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols,
+    let st = tryDecodeEntry(sh.mem, sh.size, sh.guard, e, sh.codecs[e.record], row, sh.cols,
       sh.firstSample)
     if st != dsOk:
       for c in 0..<sh.cols: row[c] = T(0)
-      s.fails[s.failed] = FailedRow(row: k,
-        code: if st == dsTruncated: dcTruncated else: dcUnsupportedFormat)
+      s.fails[s.failed] = FailedRow(row: k, status: st)
       s.failRows[s.failed] = k
       inc s.failed
+  if s.count > 0 and sh.guard.guardCut < sh.size:
+    # A cut was found during the chunk (or before): a trace decoded before it
+    # was found whose bytes reach past it read zeros there (the rest of the
+    # page holding the new end gives zeros, not a fault): it fails too.
+    let cut = sh.guard.guardCut
+    let had = s.failed
+    var j = 0
+    for k in 0..<s.count:
+      if j < had and s.fails[j].row == k:
+        inc j
+        continue
+      let e = sh.entries[sh.traceOf(s.first + k)]
+      if pastCut(e, sh.codecs[e.record], cut):
+        let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
+        for c in 0..<sh.cols: row[c] = T(0)
+        s.fails[s.failed] = FailedRow(row: k, status: dsCut)
+        inc s.failed
+    if s.failed > had:
+      # Back in row order: an insertion sort, on this rare path, of at most
+      # `chunkTraces` rows (nothing is allocated on a worker thread).
+      for a in 1..<s.failed:
+        let x = s.fails[a]
+        var b = a
+        while b > 0 and s.fails[b - 1].row > x.row:
+          s.fails[b] = s.fails[b - 1]
+          dec b
+        s.fails[b] = x
+      for a in 0..<s.failed: s.failRows[a] = s.fails[a].row
   if sh.transform != nil:
     sh.transform(worker, s.data, s.count, sh.cols, chunkView(sh.view, s.first, s.count),
       s.failRows.toOpenArray(0, s.failed - 1), sh.user)
@@ -457,6 +485,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   sh.firstSample = firstSample
   sh.mem = f.unsafeMemory
   sh.size = f.mappedSize
+  sh.guard = f.unsafeGuard
   if f.len > 0:
     sh.entries = cast[ptr UncheckedArray[TraceEntry]](addr f.index.entries[0])
     sh.codecs = cast[ptr UncheckedArray[TraceCodec]](addr f.index.codecs[0])
@@ -577,8 +606,7 @@ proc take[T](p: var Prefetcher[T], c: var PrefetchChunk[T], into: bool) =
     let fr = s.fails[k]
     let trace = sh.traceOf(s.first + fr.row)
     let e = sh.entries[trace]
-    c.log.report(sevError, fr.code, if fr.code == dcTruncated:
-      "trace samples lie past the end of the file" else: "the sample format is not decodable",
+    c.log.report(sevError, diagCodeOf(fr.status), decodeMessages[fr.status],
       e.offset, Location(file: p.path, trace: trace,
         # SEG-2: `record` indexes the codecs; the file is one record.
         record: if sh.codecs[e.record].kind == skSeg2: 0 else: int(e.record)))

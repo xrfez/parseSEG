@@ -54,6 +54,14 @@ proc tickTrace*(c: var Seg2Conv, f: SeismicFile, k: int) =
   # Progress after `k` of the file's traces; raises when cancelled.
   if not c.tk.tick(int64(k) * f.mappedSize div max(f.len, 1)): raiseCancelled()
 
+proc reportCut*(log: var DiagLog, f: SeismicFile, loc: Location) {.raises: [].} =
+  # A fatal diagnostic when another program cut `f` short while it was
+  # converted (asks the OS once): what was read past the cut is zeros, so
+  # the output is not kept. Nothing more when the log is already fatal.
+  if not log.isFatal and f.cutShort:
+    log.report(sevFatal, dcTruncated, f.path & " was cut short by another program while it " &
+      "was converted; nothing is written", loc = loc)
+
 proc closeQuietly*(f: var SeismicFile) {.raises: [].} =
   # Unmaps a read-only input; a failure there loses nothing.
   try: f.close()
@@ -67,7 +75,7 @@ proc decodeFloat64*(f: SeismicFile, i: int, vals: var seq[float64]) =
     raiseTruncated("trace samples lie past the end of the file", e.offset)
   vals.setLen int(e.numSamples)
   if vals.len > 0:
-    decodeEntry(f.unsafeMemory, f.mappedSize, e, f.index.codecs[e.record],
+    decodeEntry(f.unsafeMemory, f.mappedSize, f.unsafeGuard, e, f.index.codecs[e.record],
       cast[ptr UncheckedArray[float64]](addr vals[0]), vals.len)
 
 proc reportFailure*(c: var Seg2Conv, e: ref CatchableError) =

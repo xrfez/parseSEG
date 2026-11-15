@@ -1225,6 +1225,7 @@ proc convertSeg2ToSegd*(srcPath, dstPath: string, opts = SegdConvertOptions(),
       if sink != nil: sink.close()
   except CatchableError as e:
     c.reportFailure(e)
+  c.log.reportCut(f, c.loc)
   f.closeQuietly()
   result.add c.log
   if direct:

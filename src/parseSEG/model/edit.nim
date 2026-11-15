@@ -278,6 +278,10 @@ proc flushBatch(ed: var HeaderEditor): bool =
     let mem = ed.file.unsafeMemory
     for p in ed.pending:
       copyMem(addr mem[p.at], addr p.bytes[0], p.bytes.len)
+    if ed.file.cutSeen:
+      ed.log.report(sevError, dcTruncated, ed.file.path & " was cut short by another " &
+        "program while a batch of " & $ed.pending.len & " edits was written: those past its " &
+        "new end did not reach it (the journal has them)", loc = Location(file: ed.file.path))
     ed.pending.setLen 0
     ed.pendingPages.clear()
   # Also with nothing pending: the edit that fills a batch is written from
@@ -641,16 +645,26 @@ proc openEditor*(f: sink SeismicFile, journalPath = ""): HeaderEditor =
   result = HeaderEditor(file: file, journalPath: jp)
   result.openJournal()
 
+proc raiseCutWhileEdited(ed: HeaderEditor) {.noinline, noreturn.} =
+  raise newException(IOError, ed.file.path & " was cut short by another program while it " &
+    "was being edited: edits past its new end did not reach it (the journal " &
+    ed.journalPath & " has every edit)")
+
 proc close*(ed: var HeaderEditor) =
   ## Ends a batch, flushes the map and closes it and the journal. Both are
   ## closed even when something fails. Raises `IOError` when the map cannot
   ## be flushed, or when the batch's journal entries cannot be synced: then
   ## its pending edits are not written (see `endBatch`; `log` says how many).
+  ## Also raises `IOError` when another program cut the file short while it
+  ## was being edited: edits past its new end did not reach it (the journal
+  ## has every edit).
   var synced = true
+  var cut = false
   ed.countRefusals()
   try:
     if ed.batch: synced = ed.endBatch()
     ed.file.flush()
+    cut = ed.file.cutShort
   finally:
     ed.file.close()
     if ed.journal.f != nil:
@@ -659,6 +673,7 @@ proc close*(ed: var HeaderEditor) =
   if not synced:
     raise newException(IOError, "the journal " & ed.journalPath &
       " cannot be synced; the batch's pending edits were not written")
+  if cut: raiseCutWhileEdited(ed)
 
 proc release*(ed: sink HeaderEditor): SeismicFile =
   ## Ends the editing session and hands back the file, still mapped, with its
@@ -667,10 +682,12 @@ proc release*(ed: sink HeaderEditor): SeismicFile =
   ## the journal. Raises `IOError` as `close` does; the file is closed then.
   var e = ed
   var synced = true
+  var cut = false
   e.countRefusals()
   try:
     if e.batch: synced = e.endBatch()
     e.file.flush()
+    cut = e.file.cutShort
   finally:
     if e.journal.f != nil:
       e.journal.f.close()
@@ -678,6 +695,7 @@ proc release*(ed: sink HeaderEditor): SeismicFile =
   if not synced:
     raise newException(IOError, "the journal " & e.journalPath &
       " cannot be synced; the batch's pending edits were not written")
+  if cut: raiseCutWhileEdited(e)
   result = ensureMove e.file
 
 func file*(ed: HeaderEditor): lent SeismicFile {.inline.} =
@@ -703,6 +721,9 @@ func journalPath*(ed: HeaderEditor): lent string {.inline.} =
 func edits*(ed: HeaderEditor): int {.inline.} =
   ## Edits written in this session (no-op edits excluded).
   ed.edits
+
+const cutRefusal = "the file was cut short by another program while it was open; nothing " &
+  "changed (close the editor and open the file again)"
 
 proc commitSpan(ed: var HeaderEditor, at: int64, cur, buf: openArray[byte],
     label: string): string =
@@ -730,6 +751,9 @@ proc commitSpan(ed: var HeaderEditor, at: int64, cur, buf: openArray[byte],
       return "the journal cannot be synced; this batch's pending edits were not written"
   else:
     copyMem(addr mem[a + first], addr buf[first], last - first + 1)
+    if ed.file.cutSeen:
+      return "the file was cut short by another program while this edit was written; it " &
+        "may not have reached the file (the journal has it)"
   ""
 
 proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, field: string,
@@ -747,6 +771,7 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
   if not ed.file.isOpen: refuse "the file is closed"
   if not ed.file.index.detected: refuse "the file is not SEG-Y, SEG-D or SEG-2"
   if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
+  if ed.file.cutSeen: refuse cutRefusal
   if at < 0 or at + size > ed.file.mappedSize: refuse "the header lies outside the file"
   if b.kind in {hbSeg2File, hbSeg2Trace}:
     refuse "SEG-2 headers cannot be edited in place: keyword strings are variable length, " &
@@ -797,6 +822,7 @@ proc writeBytes*(ed: var HeaderEditor, at: int64, bytes: openArray[byte], label:
     return false
   if not ed.file.isOpen: refuse "the file is closed"
   if ed.journalDead: refuse "the journal could not be cut back after a failed write; no edits"
+  if ed.file.cutSeen: refuse cutRefusal
   if bytes.len == 0: return true
   if at < 0 or at + bytes.len > ed.file.mappedSize: refuse "the bytes lie outside the file"
   let failure = ed.commitSpan(at, ed.currentBytes(at, bytes.len), bytes, label)
@@ -822,6 +848,7 @@ proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
   false
 
 proc current(ed: HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
+  ed.file.requireUncut()
   let r = ed.file.index.locate(scope, index, name)
   if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
   # The block as edited so far: a batch's pending writes laid over the map.
@@ -829,6 +856,7 @@ proc current(ed: HeaderEditor, scope: HeaderScope, index: int, name: string): Fi
   let v = if ed.batch and inRange and ed.overlapsPending(r.blk.offset, r.blk.size):
       ed.file.readField(r.blk, r.field, ed.currentBytes(r.blk.offset, r.blk.size))
     else: ed.file.readField(r.blk, r.field)
+  ed.file.requireUncut()
   if v.error.len > 0: raise newException(ValueError, name & ": " & v.error)
   v.value
 
@@ -960,6 +988,9 @@ proc replayHere(ed: var HeaderEditor, undo: bool): DiagLog =
   if not ed.file.isOpen:
     result.report(sevFatal, dcValidation, "the file is closed", loc = loc)
     return
+  if ed.file.cutSeen:
+    result.report(sevFatal, dcTruncated, cutRefusal, loc = loc)
+    return
   if not ed.flushBatch():
     result.report(sevFatal, dcIo, "the batch's journal entries cannot be synced; nothing " &
       "was replayed", loc = loc)
@@ -972,6 +1003,9 @@ proc replayHere(ed: var HeaderEditor, undo: bool): DiagLog =
     if buf.len > 0: copyMem(addr mem[at], addr buf[0], buf.len)
     true
   replayOn(ed.file.path, ed.journalPath, ed.file.mappedSize, undo, readAt, writeAt, result)
+  if ed.file.cutSeen:
+    result.report(sevFatal, dcTruncated, ed.file.path & " was cut short by another program " &
+      "during the replay: what lies past its new end did not reach it", loc = loc)
   ed.reloadHeaders()
 
 proc rollbackJournal*(ed: var HeaderEditor): DiagLog =

@@ -814,6 +814,7 @@ template eachChange(f: SeismicFile, keys: openArray[TraceKeys], fields: Geometry
   # Runs `body` for every trace `i` whose header bytes `buf` (at entry `e`)
   # change; `p` is the planner.
   checkGeometryInput(f, keys)
+  f.requireUncut()
   var p = initPlanner(f.index, f.path, fields)
   let mem = f.unsafeMemory
   var buf: seq[byte]
@@ -827,6 +828,7 @@ template eachChange(f: SeismicFile, keys: openArray[TraceKeys], fields: Geometry
       p.count(changed)
       if changed.card > 0:
         body
+  f.requireUncut() # a header read past a cut was zeros: its plan is not to be kept
   p.summarize()
 
 proc geometryChanges*(f: SeismicFile, fields: GeometryFields, log: var DiagLog): GeometryChanges =

@@ -15,6 +15,7 @@ records, channel sets, keys, gathers).
 | [Sorted views](#sorted-views) | `sortTraces`, `sortOrder` |
 | [Header columns and keys on demand](#header-columns-and-keys-on-demand) | `traceFieldColumn`, `traceKeys(traces)` |
 | [Read ahead](#read-ahead-without-blocking-the-ui) | `newPrefetcher`, `tryNext`, `seek`, `nextInto`, `recycle` |
+| [A file cut short](#a-file-cut-short-while-it-is-open) | `cutShort`, `dcTruncated`, `SegTruncatedError` |
 | [The header tab](#the-header-tab-and-the-textual-header) | `traceHeaders`, `copyBytes`, `textHeader` |
 | [Geometry](#geometry-time-and-annotation) | `traceKeys`, inline and crossline |
 | [Edits](#keep-the-users-header-edits-as-a-patch) | `writeHeaderPatch`, `openEditor(f)`, `release` |
@@ -389,6 +390,81 @@ doAssert shown == f.len + 64
 p.close()
 f.close()
 ```
+
+## A file cut short while it is open
+
+Another program can cut short a file the viewer has open: a recorder that writes it
+again, `cp` over it, a sync tool. Reading the map past the new end raises `SIGBUS` on
+Linux and macOS, which ends a program (Windows refuses to cut a mapped file). parseSEG
+takes that fault for its own maps: the OS gives zeros there instead, and each read checks
+what it read against the cut.
+
+```nim
+import std/os
+when defined(posix): import std/posix
+import parseSEG
+
+copyFile("survey.sgy", "recording.sgy")
+var f = openSeismic("recording.sgy")
+var view = newTraceTensor[float32](f.len, f.maxSamples)
+var log: DiagLog
+doAssert f.readTracesInto(0 ..< f.len, view, log) == 0 and not f.cutShort
+when defined(posix):
+  # Another program cuts the file to half meanwhile (here, this one does).
+  doAssert truncate("recording.sgy", Off(getFileSize("recording.sgy") div 2)) == 0
+  let failed = f.readTracesInto(0 ..< f.len, view, log) # no SIGBUS
+  doAssert failed > 0 and log[log.len - 1].code == dcTruncated
+  doAssert f.cutShort                 # let go of the file, open it again later
+  try:
+    discard f.traceHeaders(0)         # header calls raise once the cut is known
+    doAssert false
+  except SegTruncatedError:
+    discard
+f.close()
+```
+
+What a viewer can rely on:
+
+- No parseSEG call on an open file ends the program because the file was cut short:
+  sample reads, the prefetcher, headers, keys, fields and bytes, the open, the editor and
+  the conversions.
+- Sample reads (`readTracesInto`, `readTraces` with a log, the prefetcher's chunks) fail
+  each trace past the cut: a zero row, counted in the result (or `c.failed`), with an
+  error `dcTruncated` that says the file was cut short while it was open (or its position
+  in `failedRows`). The other rows are what the file holds. `readTraces` without a log
+  raises `SegTruncatedError`, as for any trace that cannot be decoded.
+- Calls that read headers, keys or raw bytes from the map (`traceHeaders`, `traceField`,
+  `traceFieldColumn`, keys on demand, `ensureKeys`, `startTimeMs`, `traceStatics`,
+  `copyBytes`, `seg2Trace`, `sortTraces`, `exportHeaders`, `writeTrace` from the file)
+  raise `SegTruncatedError` once the cut is known, also for headers before it; so does
+  the call whose read first meets the cut. The index and stored keys (`keys = true`) are
+  in memory and keep working.
+- `openSeismic` raises `IOError` for a file cut while it is being opened. The editor
+  refuses edits once the cut is known, and its `close` and `release` raise `IOError`
+  (edits past the new end did not reach the file; the journal has them). A conversion
+  from a source cut meanwhile is fatal and writes nothing.
+- `f.cutShort` says whether the file was cut, from any thread that may read the file.
+
+A cut becomes known when a read reaches a page wholly past the new end, or when
+`cutShort` asks the OS for the file's size (one `fstat`, about 0.5 µs; reads make no
+system call). The rest of the page that holds the new end (4 KiB on most systems) reads
+as zeros without a fault: a read of those bytes only, before anything found the cut,
+gives zeros as samples at the end of a trace, or as header values. A read that reaches
+further fails every trace past the cut, those it decoded before it got there included.
+Call `cutShort` after a read when you must be sure.
+
+What the viewer still does itself:
+
+- Let go of a file that changed (watch its size and modification time) and open it
+  again once it stops changing. A file cut and written again in place gives its new bytes
+  under the old index wherever they are, and the traces a file gains are not in the
+  index. Let go at once when `cutShort` is true or a read reports `dcTruncated` that says
+  "cut short".
+- Keep the guard in place: a program that installs its own `SIGBUS` handler after
+  parseSEG has mapped a file must pass on the faults that are not its own to the handler
+  it replaced, as parseSEG does.
+- Count one open file descriptor per mapped file: it stays open with the map, so a fault
+  can ask the file's size.
 
 ## The header tab and the textual header
 

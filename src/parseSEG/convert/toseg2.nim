@@ -375,6 +375,7 @@ proc convertToSeg2*(srcPath, dstPath: string, opts = Seg2ConvertOptions(),
     c.writeSeg2From(f, tmp, opts)
   except CatchableError as e:
     c.reportFailure(e)
+  c.log.reportCut(f, c.loc)
   f.closeQuietly()
   result.add c.log
   finishOutput(tmp, dstPath, keep = not result.isFatal, result)

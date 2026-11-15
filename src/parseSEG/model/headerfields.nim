@@ -22,7 +22,9 @@
 ## and the file is rewritten instead (`seg2/writer`, `convertFile`).
 ##
 ## Values are read from the mapped bytes, so they reflect in-place edits at
-## once. Integers (BCD included; -1 = all F, -2 = invalid BCD) come back as
+## once. A file that another program cut short while it was open raises
+## `SegTruncatedError` from every call here that reads the map, once a read
+## has found the cut (`cutShort`). Integers (BCD included; -1 = all F, -2 = invalid BCD) come back as
 ## `fvInt`, floats and fixed point as `fvFloat`, character fields as
 ## `fvText`. Raw byte fields are not fields here.
 ##
@@ -67,8 +69,10 @@ proc fieldByName*[T](h: T, name: string): Option[FieldValue] {.inline.} =
   layoutField(h, name)
 
 proc lookup(f: SeismicFile, scope: HeaderScope, index: int, name: string): FieldRead =
+  f.requireUncut()
   let r = f.index.locate(scope, index, name)
-  if r.error.len > 0: FieldRead(error: r.error) else: f.readField(r.blk, r.field)
+  result = if r.error.len > 0: FieldRead(error: r.error) else: f.readField(r.blk, r.field)
+  f.requireUncut()
 
 proc raiseField(name, err: string) {.noinline, noreturn.} =
   raise newException(ValueError, name & ": " & err)
@@ -226,7 +230,9 @@ proc keywordNumber(f: SeismicFile, p: ColumnPlan, offset: int64, size: int): flo
     except ValueError: discard
 
 proc columnValue(f: SeismicFile, p: ColumnPlan, mem: ptr UncheckedArray[byte], size: int64,
-    trace: int, name: string): float64 =
+    trace: int, name: string): float64 {.inline.} =
+  # Inline: a call per value cost 28 instructions when the C compiler stopped
+  # inlining it (the column's cut checks made its caller larger).
   # Field `p` of trace `trace`: only its bytes are read.
   template ix: untyped = f.index
   if trace notin 0 ..< ix.len: raiseField(name, "no trace " & $trace)
@@ -270,9 +276,11 @@ proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: openArray[int],
   if dst.len != traces.len:
     raise newException(ValueError, "need " & $traces.len & " values, got " & $dst.len)
   let p = f.planColumn(name)
+  f.requireUncut()
   let mem = f.unsafeMemory
   let size = f.mappedSize
   for k, t in traces: dst[k] = f.columnValue(p, mem, size, t, name)
+  f.requireUncut()
 
 proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: Slice[int],
     dst: var openArray[float64]) =
@@ -281,9 +289,11 @@ proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: Slice[int],
   let n = spanLen(traces)
   if dst.len != n: raise newException(ValueError, "need " & $n & " values, got " & $dst.len)
   let p = f.planColumn(name)
+  f.requireUncut()
   let mem = f.unsafeMemory
   let size = f.mappedSize
   for k in 0 ..< n: dst[k] = f.columnValue(p, mem, size, traces.a + k, name)
+  f.requireUncut()
 
 proc traceFieldColumn*(f: SeismicFile, name: string, traces: openArray[int]): seq[float64] =
   ## A numeric trace header field (`traceField` names, e.g. "trace.sourceX",

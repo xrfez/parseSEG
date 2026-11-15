@@ -5,11 +5,11 @@
 ## it. `tryDecodeEntry` and `adviseTraces` make no managed objects and raise
 ## nothing, so worker threads may call them.
 
-import ../common/[endians, errors, seismickind]
+import ../common/[diagcodes, endians, errors, seismickind]
 import ../segy/samples as segysamples, ../segd/samples as segdsamples,
   ../seg2/samples as seg2samples
 import ../model/indextypes
-import ./pagehints
+import ./[mapguard, pagehints]
 
 proc decodeRun[T: SampleType](c: TraceCodec, src: openArray[byte], dst: var openArray[T]) =
   # `dst.len` samples of codec `c` from the start of `src` (a known format).
@@ -32,24 +32,33 @@ type
     dsOk          ## Decoded.
     dsUndecodable ## The sample format is not decodable.
     dsTruncated   ## The trace's samples lie past the end of the map.
+    dsCut         ## The file was cut short while mapped, before the trace's samples ended.
 
 const decodeMessages*: array[DecodeStatus, string] = ["",
-  "the sample format is not decodable", "trace samples lie past the end of the file"]
+  "the sample format is not decodable", "trace samples lie past the end of the file",
+  "the file was cut short while it was open: trace samples lie past its new end"]
   ## The diagnostic text of each failure.
 
-proc tryDecodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
-    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0): DecodeStatus {.
-    raises: [].} =
+func diagCodeOf*(st: DecodeStatus): DiagCode =
+  ## The diagnostic code of a failed decode.
+  if st in {dsTruncated, dsCut}: dcTruncated else: dcUnsupportedFormat
+
+proc tryDecodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64,
+    guard: MapGuard, e: TraceEntry, c: TraceCodec, dst: ptr UncheckedArray[T], cols: int,
+    first = 0): DecodeStatus {.raises: [].} =
   ## Decodes samples `first ..< first + cols` of trace `e` from
   ## the mapped bytes `mem[0 ..< size]` into `dst[0 ..< cols]`, zero past the
   ## trace's end. Only the window's bytes are read; a window of SEG-D 8015 or
   ## SEG-2 format 3 (4 samples in 10 bytes) that starts inside a group decodes
   ## that whole group first. Reports an undecodable format or a trace past
   ## `size` (the whole trace is checked, whatever the window) as a status and
-  ## leaves `dst` untouched then. Makes no managed objects, not even
-  ## exceptions, so a worker thread may call it: an exception destroyed on a
-  ## thread makes ORC allocate that thread's cycle buffer, which is never
-  ## freed (15.1).
+  ## leaves `dst` untouched then. A trace past the cut of `guard` (the map's
+  ## registration: the file was cut short while mapped) when it is decoded is
+  ## `dsCut`; `dst` holds samples and zeros then (the OS gives zeros past the
+  ## cut). Makes no
+  ## managed objects, not even exceptions, so a worker thread may call it: an
+  ## exception destroyed on a thread makes ORC allocate that thread's cycle
+  ## buffer, which is never freed (15.1).
   let n = clamp(int(e.numSamples) - first, 0, cols)
   if not c.known: return dsUndecodable
   if c.kind == skSegy and c.order == boPairSwapped and c.segyFormat.get in {sfInt24, sfUInt24}:
@@ -79,17 +88,28 @@ proc tryDecodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, 
         let b = if lead > 0: g + 10 else: g
         c.decodeRun(mem.toOpenArray(b, last), dst.toOpenArray(head, n - 1))
   for k in n..<cols: dst[k] = T(0)
+  # A cut met while decoding: the bytes past it were zeros, not samples.
+  if start + nbytes > guard.guardCut: return dsCut
   dsOk
 
-proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, e: TraceEntry,
-    c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0) =
+func pastCut*(e: TraceEntry, c: TraceCodec, cut: int64): bool {.inline.} =
+  ## Trace `e`'s samples reach past `cut` (`guardCut`): a read of them made
+  ## before the cut was known gave zeros for the bytes past it. The readers
+  ## check the traces they decoded again when a read finds a cut, since the
+  ## OS gives zeros, not a fault, for the rest of the page holding it.
+  e.sampleOffset + int64(c.dataBytes(int(e.numSamples))) > cut
+
+proc decodeEntry*[T: SampleType](mem: ptr UncheckedArray[byte], size: int64, guard: MapGuard,
+    e: TraceEntry, c: TraceCodec, dst: ptr UncheckedArray[T], cols: int, first = 0) =
   ## `tryDecodeEntry` that raises `SegFormatError` for an
-  ## undecodable format and `SegTruncatedError` for a trace past `size`. For
-  ## the caller's thread (conversions); worker threads use `tryDecodeEntry`.
-  case tryDecodeEntry(mem, size, e, c, dst, cols, first)
+  ## undecodable format and `SegTruncatedError` for a trace past `size` or
+  ## past the cut of `guard`. For the caller's thread (conversions); worker
+  ## threads use `tryDecodeEntry`.
+  let st = tryDecodeEntry(mem, size, guard, e, c, dst, cols, first)
+  case st
   of dsOk: discard
-  of dsUndecodable: raiseFormat(decodeMessages[dsUndecodable], e.offset)
-  of dsTruncated: raiseTruncated(decodeMessages[dsTruncated], e.sampleOffset)
+  of dsUndecodable: raiseFormat(decodeMessages[st], e.offset)
+  of dsTruncated, dsCut: raiseTruncated(decodeMessages[st], e.sampleOffset)
 
 const
   AdviseMinTraces = 32       ## Smaller selections are advised only when they are large in bytes,

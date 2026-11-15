@@ -10,6 +10,8 @@
 ## ```
 ##
 ## The listing is **read-only**: it reads the mapped bytes and never writes.
+## A file that another program cut short while it was open raises
+## `SegTruncatedError` here once a read has found the cut (`cutShort`).
 ## A viewer collects its edits as `HeaderChange`s (`initHeaderChange`) and
 ## saves them with `writeHeaderPatch`; applying one is a separate, explicit
 ## `importHeaders` (a `dryRun` first, preferably with `outPath`).
@@ -144,6 +146,7 @@ proc addRev3Blocks(L: var Lister, prefix: string, first: int, at: int64, n: int)
 
 proc initLister(f: SeismicFile): Lister =
   f.requireOpen()
+  f.requireUncut()
   Lister(mem: f.unsafeMemory, size: f.mappedSize)
 
 proc located(L: var Lister, f: SeismicFile, scope: HeaderScope, index: int,
@@ -172,10 +175,7 @@ func traceEnd(f: SeismicFile, i: int): int64 =
   let e = f.index.entries[i]
   e.sampleOffset + int64(f.index.dataBytes(i))
 
-proc traceHeaders*(f: SeismicFile, trace: int): seq[HeaderRow] =
-  ## Every header block of trace `trace`, as rows in file order: `trace`,
-  ## `ext1` and any further extensions (see the module documentation).
-  ## Raises `ValueError` for a trace out of range or a closed file.
+proc listTraceHeaders(f: SeismicFile, trace: int): seq[HeaderRow] =
   f.requireTrace(trace)
   var L = initLister(f)
   let e = f.index.entries[trace]
@@ -203,12 +203,14 @@ proc traceHeaders*(f: SeismicFile, trace: int): seq[HeaderRow] =
             SegdBlockSize)
   ensureMove L.rows
 
-proc recordHeaders*(f: SeismicFile, record: int): seq[HeaderRow] =
-  ## Every header block of SEG-D record `record`, as rows in file order:
-  ## general headers, channel set descriptors, skew, extended and external
-  ## headers, and the trailer (see the module documentation). Empty for
-  ## record 0 of a SEG-Y file, which has no record headers. Raises
-  ## `ValueError` for a record out of range or a closed file.
+proc traceHeaders*(f: SeismicFile, trace: int): seq[HeaderRow] =
+  ## Every header block of trace `trace`, as rows in file order: `trace`,
+  ## `ext1` and any further extensions (see the module documentation).
+  ## Raises `ValueError` for a trace out of range or a closed file.
+  result = f.listTraceHeaders(trace)
+  f.requireUncut()
+
+proc listRecordHeaders(f: SeismicFile, record: int): seq[HeaderRow] =
   if record notin 0 ..< f.recordCount:
     raise newException(ValueError, "no record " & $record & " (the file has " &
       $f.recordCount & ")")
@@ -258,11 +260,16 @@ proc recordHeaders*(f: SeismicFile, record: int): seq[HeaderRow] =
     if last >= 0: L.addRaw("trailer", "general trailer", f.traceEnd(last), trailer)
   ensureMove L.rows
 
-proc fileHeaders*(f: SeismicFile): seq[HeaderRow] =
-  ## The file-level header blocks, as rows in file order: SEG-Y tape label,
-  ## textual, binary, extended textual headers and data trailer; SEG-D the
-  ## storage unit label; SEG-2 the File Descriptor Block (fixed fields and
-  ## strings). Raises `ValueError` for a closed file.
+proc recordHeaders*(f: SeismicFile, record: int): seq[HeaderRow] =
+  ## Every header block of SEG-D record `record`, as rows in file order:
+  ## general headers, channel set descriptors, skew, extended and external
+  ## headers, and the trailer (see the module documentation). Empty for
+  ## record 0 of a SEG-Y file, which has no record headers. Raises
+  ## `ValueError` for a record out of range or a closed file.
+  result = f.listRecordHeaders(record)
+  f.requireUncut()
+
+proc listFileHeaders(f: SeismicFile): seq[HeaderRow] =
   var L = initLister(f)
   case f.kind
   of skSegy:
@@ -284,3 +291,11 @@ proc fileHeaders*(f: SeismicFile): seq[HeaderRow] =
       fileBlockSize(L.mem.toOpenArray(0, int(L.size) - 1), f.index.seg2))
   of skUnknown: discard
   ensureMove L.rows
+
+proc fileHeaders*(f: SeismicFile): seq[HeaderRow] =
+  ## The file-level header blocks, as rows in file order: SEG-Y tape label,
+  ## textual, binary, extended textual headers and data trailer; SEG-D the
+  ## storage unit label; SEG-2 the File Descriptor Block (fixed fields and
+  ## strings). Raises `ValueError` for a closed file.
+  result = f.listFileHeaders()
+  f.requireUncut()
