@@ -89,9 +89,7 @@ proc traceStaticsInto*(f: SeismicFile, traces: openArray[int],
   if dst.len != traces.len:
     raise newException(ValueError, "need " & $traces.len & " rows, got " & $dst.len)
   for t in traces: f.requireTrace(t)
-  if traces.len > 0:
-    f.requireOpen()
-    f.requireUncut()
+  if traces.len > 0: f.requireOpen()
   for k, t in traces: dst[k] = f.staticsOf(t)
   f.requireUncut()
 
@@ -101,9 +99,7 @@ proc traceStaticsInto*(f: SeismicFile, traces: Slice[int], dst: var openArray[Tr
   checkSpan(traces, f.len)
   let n = spanLen(traces)
   if dst.len != n: raise newException(ValueError, "need " & $n & " rows, got " & $dst.len)
-  if n > 0:
-    f.requireOpen()
-    f.requireUncut()
+  if n > 0: f.requireOpen()
   for k in 0 ..< n: dst[k] = f.staticsOf(traces.a + k)
   f.requireUncut()
 

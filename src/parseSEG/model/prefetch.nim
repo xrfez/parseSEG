@@ -290,7 +290,7 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
       return false
     let row = cast[ptr UncheckedArray[T]](addr s.data[k * sh.cols])
     let e = sh.entries[sh.traceOf(s.first + k)]
-    let st = tryDecodeEntry(sh.mem, sh.size, sh.guard, e, sh.codecs[e.record], row, sh.cols,
+    let st = tryDecodeEntry(sh.mem, sh.size, e, sh.codecs[e.record], row, sh.cols,
       sh.firstSample)
     if st != dsOk:
       for c in 0..<sh.cols: row[c] = T(0)
@@ -298,9 +298,9 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
       s.failRows[s.failed] = k
       inc s.failed
   if s.count > 0 and sh.guard.guardCut < sh.size:
-    # A cut was found during the chunk (or before): a trace decoded before it
-    # was found whose bytes reach past it read zeros there (the rest of the
-    # page holding the new end gives zeros, not a fault): it fails too.
+    # A cut was found during the chunk (or before): every trace decoded
+    # whose bytes reach past it read zeros there, and fails. One check per
+    # chunk, none per trace.
     let cut = sh.guard.guardCut
     let had = s.failed
     var j = 0

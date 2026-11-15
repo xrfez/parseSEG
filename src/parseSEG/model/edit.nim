@@ -848,7 +848,6 @@ proc refuseName(ed: var HeaderEditor, name, msg: string, loc: Location): bool =
   false
 
 proc current(ed: HeaderEditor, scope: HeaderScope, index: int, name: string): FieldValue =
-  ed.file.requireUncut()
   let r = ed.file.index.locate(scope, index, name)
   if r.error.len > 0: raise newException(ValueError, name & ": " & r.error)
   # The block as edited so far: a batch's pending writes laid over the map.

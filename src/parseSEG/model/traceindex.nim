@@ -185,8 +185,8 @@ func cutSeen*(f: SeismicFile): bool {.inline.} =
 proc requireUncut*(f: SeismicFile) {.inline.} =
   ## **Internal.** Raises `SegTruncatedError` when the file was found cut
   ## short while mapped (`cutSeen`). Calls that read headers, keys or raw
-  ## bytes from the map call it before and after the read. Not exported by
-  ## `parseSEG`.
+  ## bytes from the map call it after the read (a cut known before is known
+  ## then too; long calls also call it before). Not exported by `parseSEG`.
   if f.cutSeen: f.raiseCut()
 
 proc cutShort*(f: SeismicFile): bool =
@@ -492,7 +492,6 @@ proc seg2Trace*(f: SeismicFile, trace: int): Seg2Trace =
   f.requireKind(skSeg2)
   f.requireTrace(trace)
   f.requireOpen()
-  f.requireUncut()
   var log: DiagLog # already reported by the index walk
   result = readSeg2Trace(f.map.src.memory.toOpenArray(0, int(f.map.src.size) - 1), f.idx.seg2,
     trace, log, f.path)
@@ -529,7 +528,6 @@ proc extendedTextHeaders*(f: SeismicFile): seq[string] =
   let start = int64(f.idx.segy.tapeLabel.len + TextHeaderSize + BinaryHeaderSize)
   if not ext.isComplete and n > 0:
     f.requireOpen()
-    f.requireUncut()
     if start + int64(n * TextHeaderSize) > f.map.src.size:
       raise newException(ValueError, "the extended textual header lies past the end of the file")
   template record(rec: openArray[byte]): string =
@@ -568,7 +566,6 @@ proc copyBytes*(f: SeismicFile, offset: int64, n: Natural): seq[byte] =
   ## outside it, and `SegTruncatedError` for a file found cut short
   ## (`cutShort`). Changing the copy never changes the file.
   f.requireOpen()
-  f.requireUncut()
   let size = f.map.src.size
   # `n > size - offset`, not `offset + n > size`: the sum can overflow.
   if offset < 0 or offset > size or int64(n) > size - offset:
@@ -641,7 +638,6 @@ proc segyIntervalOf*(f: SeismicFile, trace: int): float64 =
   ## when they lie outside the file. The caller checks the trace and the map.
   let fixed = fixedIntervalUs(f.idx.segy)
   if not fixed.isNaN: return fixed
-  f.requireUncut()
   var h: RawHeaders
   result = if not mappedSegyHeaders(f.unsafeMemory, f.mappedSize, f.idx.entries[trace], h): NaN
     else: segyIntervalUs(h, f.idx.segy.byteOrder, NaN)
@@ -697,7 +693,6 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
     for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)]
   elif count > 0:
     f.requireOpen()
-    f.requireUncut()
     let mem = f.unsafeMemory
     let size = f.mappedSize
     if f.segyPlanFits:
@@ -868,7 +863,6 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
     for k in 0 ..< count: dst[k] = f.idx.keys[traceAt(k)].t0Ms
   elif count > 0:
     f.requireOpen()
-    f.requireUncut()
     let mem = f.unsafeMemory
     let size = f.mappedSize
     if f.segyPlanFits:
@@ -928,13 +922,10 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
   # seq[int]`), the list is cleared (its capacity kept) and gets the `k` of
   # each trace left zero, in order, instead of a report in `log`.
   var failed = 0
-  var failedKs: seq[int] # the rows left zero, in order (allocated only when one is)
   when failedRows isnot typeof(nil): failedRows[].setLen 0
   let mem = f.unsafeMemory
   let size = f.mappedSize
-  let guard = f.unsafeGuard
-  template fail(k, i: int, e: TraceEntry, st: DecodeStatus) =
-    let p = rowAt(k)
+  template fail(p: ptr UncheckedArray[T], k, i: int, e: TraceEntry, st: DecodeStatus) =
     for c in 0..<cols: p[c] = T(0)
     when failedRows isnot typeof(nil):
       failedRows[].add k
@@ -946,23 +937,20 @@ template decodeLoop(f: SeismicFile, count: int, traceAt, rowAt: untyped, cols, f
   for k in 0..<count:
     let i = traceAt(k)
     let e = f.idx.entries[i]
-    let st = tryDecodeEntry(mem, size, guard, e, f.idx.codecs[e.record], rowAt(k), cols, first)
-    if st != dsOk:
-      failedKs.add k
-      fail(k, i, e, st)
+    let p = rowAt(k)
+    let st = tryDecodeEntry(mem, size, e, f.idx.codecs[e.record], p, cols, first)
+    if st != dsOk: fail(p, k, i, e, st)
+  let guard = f.unsafeGuard
   if count > 0 and guard.guardCut < size:
-    # A cut was found during the read (or before): a trace decoded before it
-    # was found whose bytes reach past it read zeros there (the rest of the
-    # page that holds the new end gives zeros, not a fault): it fails too.
+    # A cut was found during the read (or before): every trace decoded whose
+    # bytes reach past it read zeros there, and fails too. One check per
+    # read, none per trace (`guardCut` comes after the decodes: a fence).
     let cut = guard.guardCut
-    var j = 0
     for k in 0..<count:
-      if j < failedKs.len and failedKs[j] == k:
-        inc j
-        continue
       let i = traceAt(k)
       let e = f.idx.entries[i]
-      if pastCut(e, f.idx.codecs[e.record], cut): fail(k, i, e, dsCut)
+      let c = f.idx.codecs[e.record]
+      if not undecodable(e, c, size) and pastCut(e, c, cut): fail(rowAt(k), k, i, e, dsCut)
     when failedRows isnot typeof(nil):
       var rows = move failedRows[] # sorted through a local: `failedRows[].sort()`
       rows.sort()                  # makes C that does not compile (Nim 2.4.2)

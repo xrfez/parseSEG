@@ -406,7 +406,6 @@ template withTemplateHeaders(s: var WriterState, src: SeismicFile, trace, minimu
   # `keys` the keys' geometry written in (write-back). The copy is checked
   # against a cut of the file (`SegTruncatedError`) before any of it can
   # reach the output: bytes read past a cut are zeros.
-  src.requireUncut()
   let (a, n) = src.headerBytes(trace, minimum)
   s.hdr.setLen n
   copyMem(addr s.hdr[0], addr src.unsafeMemory[a], n)
