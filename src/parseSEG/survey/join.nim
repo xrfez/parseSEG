@@ -195,6 +195,18 @@ func recordCount*(g: SurveyGeometry, domain = rdSource): int {.inline.} =
   ## as many as `records` yields, without sorting them.
   g.runs[domain].records.len
 
+proc reserveRelations*(g: var SurveyGeometry, records: int, domain = rdSource) =
+  ## Room for `records` more relation records (X or O) of `domain`, so that
+  ## a large relation file's runs are not copied as their list grows (with
+  ## Nim's allocator the memory of the copies stays with the program: a
+  ## viewer reading an X file of 3 million records held about three times
+  ## what it kept). `addSps(g, path)` reserves for the file's records itself.
+  template s: untyped = g.runs[domain]
+  if records > 0 and s.runs.len + records > s.runs.capacity:
+    var runs = newSeqOfCap[Run](s.runs.len + records)
+    for r in s.runs: runs.add r
+    s.runs = move runs
+
 func initSurveyGeometry*(): SurveyGeometry =
   ## An empty geometry: no stations, no relations.
   SurveyGeometry()
@@ -543,6 +555,11 @@ proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions(),
   o.keepNames = false
   let f = readSps(path, o)
   g.addLog(f.log)
+  for domain in RelationDomain:
+    var n = 0
+    for r in f.relations:
+      if (if r.recordType == 'O': rdReceiver else: xDomain) == domain: inc n
+    g.reserveRelations(n, domain)
   g.addSps(f, xDomain)
 
 proc addP1*(g: var SurveyGeometry, path: string, opts = P1Options(), elevation = false) =
