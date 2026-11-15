@@ -77,6 +77,7 @@ type
     pins: int32       # holds on the block
     state: BlockState # empty, being read by the hold that marked it, loaded
     prev, next: int32 # the list of loaded blocks without pins (-1: none)
+    fails: uint32     # reads of the block that failed (wraps): a hold that waited sees its own
 
   ReadCache* = object
     ## An unmapped file: its descriptor, the region, the blocks' states.
@@ -98,7 +99,6 @@ type
     budget: int       # at most this many are kept
     aheadEnd: int     # the block after the last miss read: a miss there is sequential
     aheadWindow: int  # blocks read ahead now
-    failures: int     # reads that failed
     lastError: int32  # the OS error of the last failed read
     requests: Atomic[int]   # read requests made (tests, measurements)
     bytesRead: Atomic[int64]
@@ -512,6 +512,7 @@ proc settle(c: ptr ReadCache, i, j, last: int, got: int64, st: ReadStatus) {.rai
       if b.pins == 0: c.linkNewest(k)
     else:
       b.state = bsEmpty
+      b.fails += 1
   if st == rsFailed:
     # The part of a block read before the error is not kept.
     let firstEmpty = i + whole
@@ -545,10 +546,12 @@ proc hold*(c: ptr ReadCache, a, b: int64, h: var Hold): ReadStatus {.raises: [].
         busy = i
         break
     if busy < 0: break
-    let before = c.failures
+    let before = c.blocks[busy].fails
     wait(c.settled, c.lock)
-    if c.blocks[busy].state == bsEmpty and c.failures != before:
-      failed = true # the read waited for failed: this hold does not try again
+    if c.blocks[busy].state == bsEmpty and c.blocks[busy].fails != before:
+      # The read of this block failed: this hold does not try again. (Not
+      # one that loaded and was evicted before this hold woke: it reads it.)
+      failed = true
       break
   for i in first .. last:
     let blk = addr c.blocks[i]
@@ -573,7 +576,7 @@ proc hold*(c: ptr ReadCache, a, b: int64, h: var Hold): ReadStatus {.raises: [].
           # No memory for its zeros (Windows: the commit limit): the block
           # stays empty, uncommitted, and the hold fails (`holds` is false
           # for it), so no reader reads it; a later hold tries again. No
-          # read was waited for, so `failures` stays.
+          # read was waited for, so no `fails` count moves.
           uncommitted = true
           when defined(windows): c.lastError = getLastError()
       else:
@@ -620,9 +623,7 @@ proc hold*(c: ptr ReadCache, a, b: int64, h: var Hold): ReadStatus {.raises: [].
     let (got, st) = c.readRun(i, j, err)
     acquire(c.lock)
     c.settle(i, j, last, got, st)
-    if st == rsFailed:
-      inc c.failures
-      c.lastError = err
+    if st == rsFailed: c.lastError = err
     broadcast(c.settled)
     c.evictOver()
     release(c.lock)
