@@ -12,6 +12,14 @@
 ## (`kill`, `sigqueue`), goes to the handler installed before this one
 ## (Nim's, a sanitizer's, the default).
 ##
+## A read racing the close of its own file (a caller's bug) must not make
+## the handler map zero pages over memory that the close unmapped and the
+## process reused: the handler counts itself into the slot (`busy`) and
+## loads `base` again before it maps, and `unguard` clears `base` and waits
+## for `busy` to be 0 (for at most `UnguardWaitMs`; past that the map is
+## left mapped and the slot is never reused: a leak instead of zeros over
+## another map, for a handler stopped in `fstat` on a hung share).
+##
 ## The fast path costs one atomic load per check (`guardCut`). The handler
 ## makes no managed memory, no Nim stack frame (also in a debug build: its
 ## atomics are the C compiler's builtins) and these system calls only:
@@ -51,7 +59,12 @@ type
     writable: bool       # the map is writable: the zero pages are too
     cut: Atomic[int64]   # bytes still in the file; high(int64) until a cut is seen
     failed: Atomic[bool] # a fault was a read that failed (an I/O error), not a shorter file
-    base: Atomic[uint]   # the map's address; 0 while the slot is free
+    base: Atomic[uint]
+      # the map's address, a generation in its low (page offset) bits; 0
+      # while the slot is free: a slot reused for a map at the same address
+      # has another value
+    busy: Atomic[int32]  # handlers inside the slot; `unguard` waits for none
+    gen: uint            # the generation of the last map; under `guardLock`
 
   MapGuard* = ptr GuardSlot
     ## A registered map (nil: not guarded: an empty file, Windows).
@@ -74,6 +87,17 @@ when mapsTracked:
 
 when mapsGuarded:
   import std/oserrors
+  when defined(parseSegGuardTestHook):
+    # Tests: the handler waits here, counted into its slot, while a flag is
+    # set (`tests/tguardslot`).
+    {.emit: """
+int parsesegHoldHandler = 0, parsesegInHandler = 0;
+static void parsesegGuardHook(void) {
+  __atomic_store_n(&parsesegInHandler, 1, __ATOMIC_SEQ_CST);
+  while (__atomic_load_n(&parsesegHoldHandler, __ATOMIC_SEQ_CST)) {}
+}
+""".}
+    proc parsesegGuardHook() {.importc, nodecl.}
   var previous: Sigaction    # the SIGBUS action before ours
   var errnoVar {.importc: "errno", header: "<errno.h>".}: cint
   proc c_raise(sig: cint): cint {.importc: "raise", header: "<signal.h>".}
@@ -98,6 +122,8 @@ when mapsTracked:
   proc atomicCas(p, expected: ptr int64, desired: int64, weak: bool,
     success, failure: cint): bool {.importc: "__atomic_compare_exchange_n", nodecl.}
   proc atomicStore(p: ptr bool, value: bool, order: cint) {.importc: "__atomic_store_n", nodecl.}
+  proc atomicAdd(p: ptr int32, v: int32, order: cint): int32 {.importc: "__atomic_add_fetch",
+    nodecl.}
   static:
     doAssert sizeof(Atomic[uint]) == sizeof(uint) and sizeof(Atomic[int64]) == 8 and
       sizeof(Atomic[ptr SlotBlock]) == sizeof(uint) and sizeof(Atomic[bool]) == sizeof(bool)
@@ -155,8 +181,19 @@ when mapsGuarded:
       while b != nil:
         for i in 0 ..< SlotsPerBlock:
           let s = addr b.slots[i]
-          let base = atomicLoad(cast[ptr uint](addr s.base), atomicAcquire)
-          if base != 0 and a >= base and a - base < s.span:
+          let raw = atomicLoad(cast[ptr uint](addr s.base), atomicAcquire)
+          let base = raw and not pageMask
+          if raw != 0 and a >= base and a - base < s.span:
+            # Counted in, then the slot checked again: either `unguard` sees
+            # this handler and waits, or this handler sees the slot cleared
+            # (or reused: another generation) and leaves it alone.
+            let busy = cast[ptr int32](addr s.busy)
+            discard atomicAdd(busy, 1, atomicSeqCst)
+            if atomicLoad(cast[ptr uint](addr s.base), atomicSeqCst) != raw:
+              discard atomicAdd(busy, -1, atomicSeqCst)
+              b = nil
+              break
+            when defined(parseSegGuardTestHook): parsesegGuardHook()
             let page = (a - base) and not pageMask
             var cut = int64(page)
             var st: Stat
@@ -168,8 +205,10 @@ when mapsGuarded:
               atomicStore(cast[ptr bool](addr s.failed), true, atomicSeqCst)
             s.lowerCut(cut)
             let prot = if s.writable: PROT_READ or PROT_WRITE else: PROT_READ
-            if mmap(cast[pointer](base + page), int(s.span - page), prot,
-                MAP_PRIVATE or MAP_ANONYMOUS or MAP_FIXED, -1, 0) != MAP_FAILED:
+            let mapped = mmap(cast[pointer](base + page), int(s.span - page), prot,
+              MAP_PRIVATE or MAP_ANONYMOUS or MAP_FIXED, -1, 0) != MAP_FAILED
+            discard atomicAdd(busy, -1, atomicSeqCst)
+            if mapped:
               errnoVar = saved
               return # the faulting access runs again, over zeros
             b = nil  # could not map: the fault ends the process as before
@@ -222,18 +261,37 @@ proc guardMap*(mem: pointer, len: int, fd: cint, writable: bool): MapGuard =
       result.writable = writable
       result.cut.store(high(int64), moRelaxed)
       result.failed.store(false, moRelaxed)
-      result.base.store(cast[uint](mem), moRelease) # last: the handler may see it now
+      result.busy.store(0, moRelaxed)
+      result.gen = (result.gen + 1) and pageMask
+      # Last: the handler may see it now. A map's address is page aligned, so
+      # the generation goes in the bits below.
+      result.base.store(cast[uint](mem) or result.gen, moRelease)
     finally:
       release(guardLock)
   else:
     nil
 
-proc unguard*(g: MapGuard) =
-  ## Unregisters a map, before it is unmapped (nil: nothing to do). A fault
-  ## in it after this call ends the process.
+const UnguardWaitMs* = when defined(parseSegGuardTestHook): 200 else: 2000
+  ## How long `unguard` waits for a handler inside the slot.
+
+proc unguard*(g: MapGuard): bool {.discardable.} =
+  ## Unregisters a map, before it is unmapped (nil: nothing to do), and waits
+  ## for a handler still inside its slot (a fault racing the close of the
+  ## file) to leave it. True when the map may be unmapped; false when a
+  ## handler did not leave within `UnguardWaitMs` (stopped in `fstat` on a
+  ## hung share): then leave it mapped, and its descriptor open, for good:
+  ## the slot is never reused. A fault in the map after this call ends the
+  ## process.
+  result = true
   when mapsTracked:
     if g == nil: return
-    g.base.store(0, moRelease)
+    g.base.store(0, moSequentiallyConsistent)
+    var waited = 0
+    while g.busy.load(moSequentiallyConsistent) != 0:
+      if waited >= UnguardWaitMs * 10: return false # the slot stays `used`
+      var ts = Timespec(tv_sec: posix.Time(0), tv_nsec: 100_000)
+      discard nanosleep(ts, ts)
+      inc waited
     acquire(guardLock)
     g.used = false
     release(guardLock)

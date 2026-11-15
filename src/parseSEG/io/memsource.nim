@@ -226,8 +226,10 @@ method close*(s: MemFileSource) {.raises: [CatchableError].} =
     s.guard = nil
     s.mapped = false
   elif s.mapped:
-    unguard(s.guard) # before the unmap: a fault in it now is no longer ours
+    # Before the unmap: a fault in it now is no longer ours. A handler that
+    # does not leave the slot keeps the map, and its descriptor, mapped for
+    # good (it would map zero pages over whatever came there next).
+    if unguard(s.guard): s.mf.close()
     s.guard = nil
-    s.mf.close()
     s.mapped = false
   s.size = 0

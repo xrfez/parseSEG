@@ -278,13 +278,12 @@ proc checkBlock(f: SeismicFile, b: BlockRef): string =
 
 proc blockStrings*(f: SeismicFile, b: BlockRef): seq[Seg2String] =
   ## The keyword strings of a located SEG-2 block (checked by `checkBlock`).
-  if b.kind == hbSeg2File: f.index.seg2.strings
+  if b.kind == hbSeg2File: result = f.index.seg2.strings
   else:
-    var h: Hold
-    f.holdBytes(h, b.offset, b.offset + b.size)
     let a = int(b.offset)
-    blockStrings(f.unsafeMemory.toOpenArray(0, int(f.mappedSize) - 1), a + Seg2FixedSize,
-      a + b.size, f.index.seg2)
+    f.withHeld(b.offset, b.offset + b.size):
+      result = blockStrings(f.unsafeMemory.toOpenArray(0, int(f.mappedSize) - 1),
+        a + Seg2FixedSize, a + b.size, f.index.seg2)
 
 proc readField(f: SeismicFile, b: BlockRef, field: string, bytes: openArray[byte],
     fromMap: bool): FieldRead =
@@ -292,11 +291,11 @@ proc readField(f: SeismicFile, b: BlockRef, field: string, bytes: openArray[byte
   if err.len > 0: return FieldRead(error: err)
   let a = int(b.offset)
   var v = none(FieldValue)
-  var held: Hold
-  if fromMap: f.holdBytes(held, b.offset, b.offset + b.size)
   withBlockType(b.kind):
     var h: BlockT
-    if fromMap: decodeFields(h, f.unsafeMemory.toOpenArray(a, a + b.size - 1), firstByte, b.order)
+    if fromMap:
+      f.withHeld(b.offset, b.offset + b.size):
+        decodeFields(h, f.unsafeMemory.toOpenArray(a, a + b.size - 1), firstByte, b.order)
     else: decodeFields(h, bytes, firstByte, b.order)
     v = layoutField(h, field)
   if v.isNone and b.kind in {hbSeg2File, hbSeg2Trace}:
@@ -328,13 +327,12 @@ proc readFields*(f: SeismicFile, b: BlockRef, values: var seq[Option[FieldValue]
   values.setLen 0
   result = f.checkBlock(b)
   if result.len == 0:
-    var held: Hold
-    f.holdBytes(held, b.offset, b.offset + b.size)
     let mem = f.unsafeMemory
     let a = int(b.offset)
     withBlockType(b.kind):
       var h: BlockT
-      decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
+      f.withHeld(b.offset, b.offset + b.size):
+        decodeFields(h, mem.toOpenArray(a, a + b.size - 1), firstByte, b.order)
       for x in fields(h):
         when isNamedField(x): values.add fieldValueOf(x)
 

@@ -50,11 +50,18 @@ proc staticsOf(f: SeismicFile, trace: int): TraceStatics =
   let a = int(e.offset)
   let hb = int(e.headerBytes)
   if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > f.mappedSize: return
-  var held: Hold
-  f.holdBytes(held, e.offset, e.offset + TraceHeaderSize)
   let mem = f.unsafeMemory
   let order = f.index.segy.byteOrder
-  let h = decodeTraceHeader(mem.toOpenArray(a, a + TraceHeaderSize - 1), order)
+  let hasExt1 = hb >= 2 * TraceHeaderSize
+  var h: SegyTraceHeader
+  var x: SegyTraceHeaderExt1
+  # Both headers decoded under one hold (unmapped): Extension 1 may lie in the
+  # next block.
+  f.withHeld(e.offset, e.offset + max(hb, TraceHeaderSize)):
+    h = decodeTraceHeader(mem.toOpenArray(a, a + TraceHeaderSize - 1), order)
+    if hasExt1:
+      x = decodeTraceHeaderExt1(mem.toOpenArray(a + TraceHeaderSize,
+        a + 2 * TraceHeaderSize - 1), order)
   let time = if f.index.segy.revision.major >= 1: h.timeScalar else: 0'i16
   template elev(v: untyped): float64 = applyScalar(v, h.elevationScalar)
   template ms(v: untyped): float64 = applyScalar(v, time)
@@ -72,9 +79,7 @@ proc staticsOf(f: SeismicFile, trace: int): TraceStatics =
   result.srcStatic = ms(h.sourceStatic)
   result.rcvStatic = ms(h.groupStatic)
   result.totalStatic = ms(h.totalStatic)
-  if hb >= 2 * TraceHeaderSize:
-    let x = decodeTraceHeaderExt1(
-      mem.toOpenArray(a + TraceHeaderSize, a + 2 * TraceHeaderSize - 1), order)
+  if hasExt1:
     template over(dst, v: untyped) =
       if v != 0 and not v.isNaN: dst = v
     over(result.srcDepth, x.extSourceDepth)

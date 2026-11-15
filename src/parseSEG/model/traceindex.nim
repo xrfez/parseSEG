@@ -253,6 +253,18 @@ proc holdBytes*(f: SeismicFile, h: var Hold, a, b: int64) {.inline.} =
   let c = f.unsafeCache
   if c != nil and c.hold(a, b, h) == rsFailed and not c.holds(a, b): f.raiseReadFailed(a)
 
+template withHeld*(f: SeismicFile, a, b: int64, body: untyped) =
+  ## **Internal.** Runs `body` with bytes `a ..< b` held (unmapped, see
+  ## `holdBytes`); on a mapped file `body` alone, with no hold to make or
+  ## drop (a hold on every call cost 40 instructions a `traceField`). Not
+  ## exported by `parseSEG`.
+  if f.unsafeCache == nil:
+    body
+  else:
+    var held: Hold
+    f.holdBytes(held, a, b)
+    body
+
 proc coverBytes*(f: SeismicFile, cur: var Cursor, a, b: int64) {.inline.} =
   ## **Internal.** `holdBytes` for a call that reads forward through the
   ## file (header loops): `cur` keeps a window held from one read to the
@@ -859,18 +871,20 @@ template keysLoop(f: SeismicFile, dst: var openArray[TraceKeys], count: int,
       # of a 400 ns call for one trace).
       let timeBasis = timeBasisOf(f.idx.segy)
       let fixedUs = fixedIntervalUs(f.idx.segy)
+      let unmapped = f.unsafeCache != nil # asked once: the loop tests a register
       var cur: Cursor
       for k in 0 ..< count:
         let trace = traceAt(k)
-        f.coverHeaders(cur, trace)
+        if unmapped: f.coverHeaders(cur, trace)
         var h: RawHeaders
         if not mappedSegyHeaders(mem, size, f.idx.entries[trace], h): raiseOutside(trace)
         dst[k] = segyKeys(f.gr, h, timeBasis, fixedUs)
     else:
       var r = initKeyReader(f)
+      let unmapped = f.unsafeCache != nil
       var cur: Cursor
       for k in 0 ..< count:
-        f.coverHeaders(cur, traceAt(k))
+        if unmapped: f.coverHeaders(cur, traceAt(k))
         dst[k] = f.keysOf(r, mem, size, traceAt(k))
     f.requireUncut()
 
@@ -1039,18 +1053,20 @@ template t0Loop(f: SeismicFile, dst: var openArray[float64], count: int, traceAt
     let size = f.mappedSize
     if f.segyPlanFits:
       # SEG-Y: only the delay is read, not the whole key.
+      let unmapped = f.unsafeCache != nil
       var cur: Cursor
       for k in 0 ..< count:
         let trace = traceAt(k)
-        f.coverHeaders(cur, trace)
+        if unmapped: f.coverHeaders(cur, trace)
         var h: RawHeaders
         if not mappedSegyHeaders(mem, size, f.idx.entries[trace], h): raiseOutside(trace)
         dst[k] = segyStartTimeMs(f.gr, h)
     else:
       var r = initKeyReader(f)
+      let unmapped = f.unsafeCache != nil
       var cur: Cursor
       for k in 0 ..< count:
-        f.coverHeaders(cur, traceAt(k))
+        if unmapped: f.coverHeaders(cur, traceAt(k))
         dst[k] = f.keysOf(r, mem, size, traceAt(k)).t0Ms
     f.requireUncut()
 

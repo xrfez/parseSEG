@@ -75,6 +75,11 @@
 ## prefetcher survives, but it does not see the new keys (see
 ## `newPrefetcher`).
 ##
+## Closing never waits without bound for a worker stopped in a read (a
+## network share that does not answer): past `closeTimeout` the prefetcher
+## gives up on it (`close` returns false) and hands it what it may still
+## touch; `reapPrefetchers` frees that once the worker has returned.
+##
 ## Threads: a prefetcher belongs to one thread: call its consumer procs,
 ## `close` included, from the thread that made it. Several threads may each
 ## make, use and close prefetchers of their own on one open file at the same
@@ -86,7 +91,8 @@
 ## prefetchers is for the thread that opened it and the prefetchers it made
 ## itself.
 
-import std/[locks, atomics]
+import std/[locks, atomics, monotimes, os, times]
+when defined(posix): import std/posix
 import ../common/diagnostics
 import ../segy/samples
 import ./[traceindex, tracerows]
@@ -117,6 +123,13 @@ type
 
 type
   SlotState = enum ssFree, ssBusy, ssReady
+
+  WorkerState = enum
+    # A worker's state (`Shared.states`), changed by compare-and-swap.
+    wsRunning   # waiting for work, or decoding a chunk (a read may wait there)
+    wsTransform # inside the caller's `transform`: close waits for it
+    wsAbandoned # given up on by `close` (stopped in a read): it must not transform again
+    wsExited    # its last touch of the shared block was this store
 
   FailedRow = object
     row: int       # row of the chunk
@@ -163,6 +176,8 @@ type
     aheadTraces: int # advice is issued for at least this many positions at a time
     workers: int
     threads: ptr UncheckedArray[Thread[(ptr Shared[T], int)]]
+    states: ptr UncheckedArray[Atomic[int32]] # per worker: a `WorkerState`
+    joined: ptr UncheckedArray[bool]          # per worker, closing thread only
     view: TraceRows  # every position: row `pos` is position `pos`
     uniform: bool    # chunk bounds come from `bounds`
     bounds: ptr UncheckedArray[int] # uniform: chunk n is positions bounds[n] ..< bounds[n + 1]
@@ -184,6 +199,7 @@ type
     untaken: int            # chunks of the range not yet taken: `sh.chunkCount - sh.takeChunk`,
                             # kept by the consumer so `atEnd` needs no lock
     bounds: seq[int]        # uniform: the current range's chunk bounds (`sh.bounds`)
+    closeTimeout: Duration  # how long `close` and the destructor wait for a worker in a read
 
   PrefetchChunk*[T: SampleType] = object
     first*: int
@@ -210,15 +226,19 @@ type
       ## the file is closed, destroyed or handed to an editor first (the
       ## keys are then those of that moment).
 
-proc shutdown[T](sh: ptr Shared[T]) =
-  # Stops and joins the workers, then frees the shared state.
-  sh.stopNow.store(true) # a worker inside a chunk gives it up (`decodeChunk`)
-  acquire(sh.lock)
-  sh.quit = true
-  broadcast(sh.work)
-  release(sh.lock)
-  for i in 0..<sh.workers: joinThread(sh.threads[i])
+proc pause(us: int) =
+  # Sleeps about `us` microseconds (0: yields).
+  when defined(posix):
+    var ts = Timespec(tv_sec: posix.Time(us div 1_000_000), tv_nsec: (us mod 1_000_000) * 1000)
+    discard nanosleep(ts, ts)
+  else:
+    sleep(max(1, us div 1000))
+
+proc freeState[T](sh: ptr Shared[T]) =
+  # Every worker joined: the shared block goes.
   freeShared(sh.threads)
+  freeShared(sh.states)
+  freeShared(sh.joined)
   deinitCond(sh.work)
   deinitCond(sh.ready)
   deinitLock(sh.lock)
@@ -228,10 +248,131 @@ proc shutdown[T](sh: ptr Shared[T]) =
   freeShared(sh.slots)
   freeShared(sh)
 
+proc stopWorkers[T](sh: ptr Shared[T], timeout: Duration): bool =
+  # Stops the workers and joins those that leave within `timeout`; past it a
+  # worker still running (stopped in a read: a hung share) is given up on, a
+  # worker inside the caller's `transform` is waited for. True when every
+  # worker was joined.
+  sh.stopNow.store(true) # a worker inside a chunk gives it up (`decodeChunk`)
+  acquire(sh.lock)
+  sh.quit = true
+  broadcast(sh.work)
+  release(sh.lock)
+  let deadline = getMonoTime() + timeout
+  var spins = 0
+  while true:
+    var waiting = 0
+    for i in 0..<sh.workers:
+      if sh.joined[i]: continue
+      let st = WorkerState(sh.states[i].load(moAcquire))
+      if st == wsExited:
+        joinThread(sh.threads[i]) # past its last touch of `sh`: returns at once
+        sh.joined[i] = true
+      elif st != wsAbandoned: inc waiting
+    if waiting == 0: break
+    if not (getMonoTime() < deadline):
+      for i in 0..<sh.workers:
+        if not sh.joined[i]:
+          var running = int32(ord(wsRunning))
+          discard sh.states[i].compareExchange(running, int32(ord(wsAbandoned)), moAcquireRelease,
+            moAcquire) # fails for one transforming (waited for) or gone (joined next round)
+    # Workers leave within microseconds of the broadcast: yield first, then sleep.
+    inc spins
+    pause(if spins < 50: 0 elif spins < 100: 50 else: 1000)
+  result = true
+  for i in 0..<sh.workers:
+    if not sh.joined[i]: result = false
+
+# ------------------------------------------------- workers given up on --
+
+type
+  OrphanBase = object
+    # A prefetcher whose workers `close` gave up on: what they may still touch,
+    # kept until they have left (`reapPrefetchers`).
+    next: ptr OrphanBase
+    done: proc (o: ptr OrphanBase): bool {.nimcall, raises: [].}
+    free: proc (o: ptr OrphanBase) {.nimcall, raises: [].}
+
+  Orphan[T] = object
+    base: OrphanBase # first: a `ptr Orphan[T]` is a `ptr OrphanBase`
+    sh: ptr Shared[T]
+    pin: MapPin             # the map (or read cache) the workers read
+    tensors: seq[Tensor[T]] # the slot buffers they decode into
+    selection: seq[int]     # and the lists they read
+    bounds: seq[int]
+
+var
+  orphanLock: Lock
+  orphans: ptr OrphanBase # under `orphanLock`
+  orphanCount: int        # under `orphanLock`
+initLock(orphanLock)
+
+proc orphanDone[T](o: ptr OrphanBase): bool {.raises: [].} =
+  let sh = cast[ptr Orphan[T]](o).sh
+  for i in 0..<sh.workers:
+    if not sh.joined[i] and WorkerState(sh.states[i].load(moAcquire)) != wsExited: return false
+  true
+
+proc orphanFree[T](o: ptr OrphanBase) {.raises: [].} =
+  let x = cast[ptr Orphan[T]](o)
+  let sh = x.sh
+  for i in 0..<sh.workers:
+    if not sh.joined[i]:
+      {.cast(raises: []).}: joinThread(sh.threads[i])
+  freeState(sh)
+  `=destroy`(x[]) # the pin, the buffers and the lists, on this thread
+  freeShared(x)
+
+proc reapPrefetchers*(): int {.raises: [].} =
+  ## Frees what the prefetchers that `close` (or their destructor) gave up on
+  ## still held, once their workers have returned from the reads they were
+  ## stopped in, and returns how many still wait for such a worker. Every
+  ## `newPrefetcher` and `close` calls it too; call it from any thread.
+  var ready: ptr OrphanBase
+  acquire(orphanLock)
+  var link = addr orphans
+  while link[] != nil:
+    let o = link[]
+    if o.done(o):
+      link[] = o.next
+      o.next = ready
+      ready = o
+      dec orphanCount
+    else:
+      link = addr o.next
+  result = orphanCount
+  release(orphanLock)
+  while ready != nil: # outside the lock: dropping a pin may close a file
+    let o = ready
+    ready = o.next
+    o.free(o)
+
+proc giveUp[T](sh: ptr Shared[T], pin: var MapPin, tensors: var seq[Tensor[T]],
+    selection, bounds: var seq[int]) =
+  # The workers not joined keep `sh` and what they read and write: moved to
+  # an orphan, freed by `reapPrefetchers` once they have left.
+  let o = createShared(Orphan[T]) # zeroed: empty seqs and pin
+  o.base.done = orphanDone[T]
+  o.base.free = orphanFree[T]
+  o.sh = sh
+  o.pin = move pin
+  o.tensors = move tensors
+  o.selection = move selection
+  o.bounds = move bounds
+  acquire(orphanLock)
+  o.base.next = orphans
+  orphans = addr o.base
+  inc orphanCount
+  release(orphanLock)
+
 proc `=destroy`[T](p: Prefetcher[T]) =
   # A forgotten `close` must not leave a worker writing into freed buffers:
-  # join it before the slot tensors go.
-  if p.sh != nil: shutdown(p.sh)
+  # join it before the slot tensors go, or (past `closeTimeout`, a worker
+  # stopped in a read) hand them over to the worker (`giveUp`).
+  let pp = addr p
+  if p.sh != nil:
+    if stopWorkers(p.sh, p.closeTimeout): freeState(p.sh)
+    else: giveUp(p.sh, pp[].pin, pp[].tensors, pp[].selection, pp[].bounds)
   `=destroy`(p.pin) # after the shutdown: the workers read the map
   `=destroy`(p.tensors)
   `=destroy`(p.spare)
@@ -353,12 +494,23 @@ proc decodeChunk[T](sh: ptr Shared[T], s: ptr Slot[T], worker: int): bool {.rais
         s.fails[b] = x
       for a in 0..<s.failed: s.failRows[a] = s.fails[a].row
   if sh.transform != nil:
+    # Never once `close` gave up on this worker (it may have returned, and the
+    # caller freed what `user` points to): running -> transforming, or stop.
+    var running = int32(ord(wsRunning))
+    if sh.stopNow.load(moRelaxed) or
+        not sh.states[worker].compareExchange(running, int32(ord(wsTransform)), moAcquireRelease,
+          moAcquire):
+      return false
     sh.transform(worker, s.data, s.count, sh.cols, chunkView(sh.view, s.first, s.count),
       s.failRows.toOpenArray(0, s.failed - 1), sh.user)
+    sh.states[worker].store(int32(ord(wsRunning)), moRelease)
   true
 
 proc worker[T](arg: (ptr Shared[T], int)) {.thread.} =
   let (sh, index) = arg
+  defer:
+    # The last touch of `sh`: a closing thread (or the reaper) may free it now.
+    sh.states[index].store(int32(ord(wsExited)), moRelease)
   acquire(sh.lock)
   while not sh.quit:
     let n = sh.nextChunk
@@ -447,10 +599,14 @@ proc setBounds[T](p: var Prefetcher[T], bounds: sink seq[int]) =
   sh.bounds = cast[ptr UncheckedArray[int]](addr p.bounds[0])
   sh.nBounds = p.bounds.len
 
+const DefaultCloseTimeout* = initDuration(seconds = 2)
+  ## How long a prefetcher's `close` (and its destructor) waits for a worker
+  ## that is stopped in a read before it gives up on it.
+
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTraces = 256,
     depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
     maxRingBytes = DefaultRingBytes, uniform = false, transform: ChunkTransform[T] = nil,
-    user: pointer = nil): Prefetcher[T] =
+    user: pointer = nil, closeTimeout = DefaultCloseTimeout): Prefetcher[T] =
   ## Starts decoding `traces` on `workers` threads, `chunkTraces` at a time,
   ## at most `depth` chunks ahead. The ring holds at most `maxRingBytes` of
   ## chunks (`chunkTraces * cols * sizeof(T)` each), but at least `workers +
@@ -474,7 +630,10 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   ## (`TraceKeys.intervalUs`): it is cut short at the boundary, so every
   ## chunk has one interval; it needs stored keys (`ValueError` otherwise).
   ## `transform` runs on the worker after each chunk is decoded (see
-  ## `ChunkTransform`), with `user` passed through.
+  ## `ChunkTransform`), with `user` passed through. `closeTimeout` bounds how
+  ## long `close` and the destructor wait for a worker stopped in a read (a
+  ## hung network share) before they give up on it (see `close`).
+  discard reapPrefetchers()
   if uniform and not f.hasKeys: raiseArg("uniform chunks need stored keys (keys = true)")
   if f.len > 0: f.requireOpen()
   if not f.index.contiguous: raiseArg("prefetch needs a plain disk file")
@@ -524,7 +683,8 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   initLock(sh.lock)
   initCond(sh.work)
   initCond(sh.ready)
-  result = Prefetcher[T](sh: sh, pin: f.pinMap, last: f.len, path: f.path)
+  result = Prefetcher[T](sh: sh, pin: f.pinMap, last: f.len, path: f.path,
+    closeTimeout: closeTimeout)
   if uniform: result.setBounds(uniformBounds(sh.view, sh.start, sh.stop, rows, sh.head))
   result.untaken = sh.chunkCount
   for i in 0..<depth:
@@ -535,12 +695,14 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: Slice[int], chunkTrac
   sh.workers = workers
   sh.threads = cast[ptr UncheckedArray[Thread[(ptr Shared[T], int)]]](
     createShared(Thread[(ptr Shared[T], int)], workers))
+  sh.states = cast[ptr UncheckedArray[Atomic[int32]]](createShared(Atomic[int32], workers))
+  sh.joined = cast[ptr UncheckedArray[bool]](createShared(bool, workers))
   for i in 0..<workers: createThread(sh.threads[i], worker[T], (sh, i))
 
 proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkTraces = 256,
     depth = 4, cols = -1, firstSample = 0, workers = 1, quickFirst = false,
     maxRingBytes = DefaultRingBytes, uniform = false, transform: ChunkTransform[T] = nil,
-    user: pointer = nil): Prefetcher[T] =
+    user: pointer = nil, closeTimeout = DefaultCloseTimeout): Prefetcher[T] =
   ## Read-ahead over a list of trace indices (a gather, a component group, a
   ## sort order), decoded in list order. Positions (`seek`) index the list;
   ## `traceAt` maps them to traces. The list is fixed for the prefetcher's
@@ -551,7 +713,7 @@ proc newPrefetcher*[T: SampleType](f: SeismicFile, traces: sink seq[int], chunkT
   # Build in range mode over positions, then switch the workers to the list
   # before they can run: the lock orders the hand-over.
   result = newPrefetcher[T](f, 0 .. -1, chunkTraces, depth, width, firstSample, workers,
-    quickFirst, maxRingBytes, uniform, transform, user)
+    quickFirst, maxRingBytes, uniform, transform, user, closeTimeout)
   result.selection = traces
   result.last = result.selection.len
   let sh = result.sh
@@ -757,11 +919,23 @@ proc seek*[T](p: var Prefetcher[T], span: Slice[int]) =
   broadcast(sh.work)
   release(sh.lock)
 
-proc close*[T](p: var Prefetcher[T]) =
-  ## Stops and joins the workers (one inside a chunk gives it up within 8
-  ## traces) and frees the ring. Idempotent.
+proc close*[T](p: var Prefetcher[T], timeout: Duration): bool {.discardable.} =
+  ## Stops the workers (one inside a chunk gives it up within 8 traces) and
+  ## frees the ring; true. A worker that has not returned within `timeout`
+  ## (stopped in a read: a network share that does not answer) is given up
+  ## on: `close` returns false, and the shared state, the slot buffers and the
+  ## pin on the file's map or read cache stay alive until that worker has
+  ## returned and `reapPrefetchers` (or any later `newPrefetcher` or `close`)
+  ## frees them. The prefetcher is closed either way, and the caller may
+  ## close the file and open it again. A worker inside the `transform` is
+  ## waited for, however long: it is the caller's code, and may use `user`.
+  ## The chunks taken stay valid. Idempotent (true after the first).
+  discard reapPrefetchers()
+  result = true
   if p.sh != nil:
-    shutdown(p.sh)
+    result = stopWorkers(p.sh, timeout)
+    if result: freeState(p.sh)
+    else: giveUp(p.sh, p.pin, p.tensors, p.selection, p.bounds)
     p.sh = nil
     p.pin = MapPin() # the last pin unmaps a file closed meanwhile
     p.tensors.setLen 0
@@ -769,3 +943,8 @@ proc close*[T](p: var Prefetcher[T]) =
     p.lent = default(Tensor[T])
     p.selection.setLen 0
     p.bounds.setLen 0
+
+proc close*[T](p: var Prefetcher[T]): bool {.discardable.} =
+  ## `close` with the prefetcher's `closeTimeout` (`newPrefetcher`; 2 s by
+  ## default).
+  p.close(p.closeTimeout)

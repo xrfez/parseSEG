@@ -232,7 +232,7 @@ proc keywordNumber(f: SeismicFile, p: ColumnPlan, offset: int64, size: int): flo
     except ValueError: discard
 
 proc columnValue(f: SeismicFile, p: ColumnPlan, mem: ptr UncheckedArray[byte], size: int64,
-    trace: int, name: string, cur: var Cursor): float64 {.inline.} =
+    trace: int, name: string, unmapped: bool, cur: var Cursor): float64 {.inline.} =
   # Inline: a call per value cost 28 instructions when the C compiler stopped
   # inlining it (the column's cut checks made its caller larger).
   # Field `p` of trace `trace`: only its bytes are read.
@@ -269,7 +269,7 @@ proc columnValue(f: SeismicFile, p: ColumnPlan, mem: ptr UncheckedArray[byte], s
   elif at < 0 or at + bytes > size: raiseField(name, "the header lies outside the file")
   elif p.keyword: f.keywordNumber(p, at, bytes)
   else:
-    f.coverBytes(cur, at, at + bytes) # unmapped: held as the column goes
+    if unmapped: f.coverBytes(cur, at, at + bytes) # held as the column goes
     p.readers[kind].readNumber(mem.toOpenArray(int(at), int(at) + bytes - 1), order)
 
 proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: openArray[int],
@@ -283,8 +283,9 @@ proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: openArray[int],
   f.requireUncutFirst()
   let mem = f.unsafeMemory
   let size = f.mappedSize
+  let unmapped = f.unsafeCache != nil
   var cur: Cursor
-  for k, t in traces: dst[k] = f.columnValue(p, mem, size, t, name, cur)
+  for k, t in traces: dst[k] = f.columnValue(p, mem, size, t, name, unmapped, cur)
   f.requireUncut()
 
 proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: Slice[int],
@@ -297,8 +298,9 @@ proc traceFieldColumnInto*(f: SeismicFile, name: string, traces: Slice[int],
   f.requireUncutFirst()
   let mem = f.unsafeMemory
   let size = f.mappedSize
+  let unmapped = f.unsafeCache != nil
   var cur: Cursor
-  for k in 0 ..< n: dst[k] = f.columnValue(p, mem, size, traces.a + k, name, cur)
+  for k in 0 ..< n: dst[k] = f.columnValue(p, mem, size, traces.a + k, name, unmapped, cur)
   f.requireUncut()
 
 proc traceFieldColumn*(f: SeismicFile, name: string, traces: openArray[int]): seq[float64] =

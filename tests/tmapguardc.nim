@@ -94,6 +94,7 @@ when defined(parseSegNoMapGuard):
 else:
   let handler = ["onBus", "chain", "lowerCut", "sentByTheKernel"]
   let allowed = toHashSet(["__atomic_load_n", "__atomic_store_n", "__atomic_compare_exchange_n",
+    "__atomic_add_fetch",
     "fstat", "mmap",
     "sigaction", "sigemptyset", "raise", "nimZeroMem", "nimErrorFlag", "NIM_UNLIKELY",
     "if", "while", "sizeof"])

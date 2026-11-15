@@ -581,9 +581,13 @@ What a viewer may rely on, mapped or not:
 - `tryNext` never waits for a worker; `next`, `nextInto` and a direct read
   (`readTracesInto`, headers, keys, `cutShort`, which asks the OS too) wait as long as the
   share makes them.
-- A prefetcher's `close`, and dropping it, wait for its workers to finish the trace
-  they read, without a bound: close or drop the prefetchers of network files on a thread
-  that may wait (a job thread), never on the UI thread.
+- A prefetcher's `close`, and dropping it, wait for a worker stopped in a read for at
+  most `closeTimeout` (2 s by default; `newPrefetcher(..., closeTimeout = ...)`,
+  `close(timeout)`): then they give up on it, `close` returns false, and what the
+  worker holds (its buffers, the file's map or read cache) stays alive until it returns
+  and `reapPrefetchers` frees it (every later `newPrefetcher` and `close` does too). The
+  UI thread may close a prefetcher of a network file. A worker inside your `transform`
+  is waited for, however long.
 
 What it must still do itself:
 
@@ -592,9 +596,13 @@ What it must still do itself:
 - Unmapped: show a failed read (`dcIo` rows, an `IOError`) and offer to read again; keep
   the file open, the next read tries the share again. Mapped: open the file again once
   the share is back (`readFailed`).
-- Give up on a thread that waits too long by leaving it alone: do not close or drop the
-  file it reads, nor its prefetcher, while it is stopped. Keep the file (a list of
-  abandoned files) and close it once the thread has returned.
+- Give up on a thread of your own that waits too long by leaving it alone: do not close
+  the file it reads while it is stopped (a prefetcher's workers are taken care of: close
+  the prefetcher, then the file, as usual). Keep the file (a list of abandoned files) and
+  close it once the thread has returned. A read racing the close of its own file is a
+  bug: with the guard it can end the program, but it never makes the guard map zero
+  pages over memory the process reused (the close waits for the handler, for at most
+  2 s, and past that leaves the map mapped).
 - Watch a network file for changes (size, modification time) and open it again: an
   unmapped file does not see another program's change to bytes it holds in its cache.
 

@@ -61,7 +61,7 @@ block exported_internals_stay_hidden:
     "requireOpen", "requireTrace", "requireKind", "requireUncut", "cutSeen", "unsafeGuard",
     "mapGuard", "requireUncutFirst", "unsafeCache", "holdBytes", "coverBytes", "coverSeg2Block",
     "coverHeaders", "seg2FileBlockEnd", "writeFileBytes", "readCache", "endWalk",
-    "resolveAccess", "walkError",
+    "resolveAccess", "walkError", "withHeld",
     "flushPending", "batching", "logVar"]
   macro assertHidden(names: static openArray[string]): untyped =
     result = newStmtList()
