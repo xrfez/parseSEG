@@ -10,10 +10,12 @@
 ##   of nfs, smbfs, afpfs, webdav, cifs, ftp or a FUSE one (macfuse,
 ##   osxfuse, fusefs).
 ## - Windows: local only on a fixed drive or a RAM disk (`GetDriveTypeW` of
-##   the path's volume, `GetVolumePathNameW`, after a ``\\?\`` or ``\\?\UNC\``
-##   prefix is taken off; a `subst` drive by the folder it stands for,
-##   `QueryDosDeviceW`), and the file no cloud placeholder (an offline or
-##   recall-on-access attribute: a sync provider fetches its data on a read).
+##   the volume, `GetVolumePathNameW`, of the path made absolute,
+##   `GetFullPathNameW`, after a ``\\?\`` or ``\\?\UNC\`` prefix is taken off;
+##   a `subst` drive by the folder it stands for, `QueryDosDeviceW`), and
+##   the file no cloud placeholder (an offline or recall-on-access
+##   attribute: a sync provider fetches its data on a read). A path the OS
+##   cannot make absolute is `naUnknown`.
 ##   A remote drive, a UNC path, a drive letter a network redirector serves
 ##   and a placeholder are network; a removable drive, a CD-ROM, a drive of
 ##   no known type, and a probe that fails are `naUnknown`.
@@ -108,6 +110,47 @@ func substTarget*(device: string): string =
     "\\\\" & rest.substr(4)
   else: rest
 
+type WinCalls* = object
+  ## Windows: the system calls the probe makes, as procs, so that the probe
+  ## (`windowsAnswer`) can be checked with made-up answers on any OS. Each
+  ## returns "" (or `InvalidAttributes`, or 0 for `driveType`) when the call
+  ## fails.
+  fullPath*: proc (path: string): string {.closure, gcsafe, raises: [].}
+    ## `GetFullPathNameW`: `path` made absolute against the current
+    ## directory (a drive's or a share's).
+  volumeOf*: proc (path: string): string {.closure, gcsafe, raises: [].}
+    ## `GetVolumePathNameW`: the root of the volume `path` lies on.
+  driveType*: proc (root: string): uint32 {.closure, gcsafe, raises: [].} ## `GetDriveTypeW`.
+  dosDevice*: proc (drive: string): string {.closure, gcsafe, raises: [].}
+    ## `QueryDosDeviceW` of a drive (`Z:`): the first of its device names.
+  attributes*: proc (path: string): uint32 {.closure, gcsafe, raises: [].} ## `GetFileAttributesW`.
+
+proc volumeType(calls: WinCalls, full: string, depth: int): uint32 =
+  # The drive type of the volume of `full` (an absolute path), a `subst`
+  # drive's by its folder, `DriveRemote` for a letter a redirector serves;
+  # 0 (`DRIVE_UNKNOWN`) when a call fails.
+  let root = calls.volumeOf(win32Path(full))
+  if root.len == 0: return 0
+  result = calls.driveType(root)
+  if result != DriveRemote and root.len == 3 and root[1] == ':' and depth < 4:
+    let d = calls.dosDevice(root.substr(0, 1))
+    if redirected(d): return DriveRemote
+    let target = substTarget(d)
+    if target.len > 0:
+      let t = calls.fullPath(target)
+      return if t.len == 0: 0'u32 else: volumeType(calls, t, depth + 1)
+
+proc windowsAnswer*(path: string, calls: WinCalls): NetworkAnswer =
+  ## Windows: where `path` lies, from what `calls` answer (see the module
+  ## documentation). The path is made absolute first (`fullPath`):
+  ## `GetVolumePathNameW` takes a path without a volume (`x.sgy`,
+  ## ``\data\x.sgy``) as one on the boot volume, also when the current
+  ## directory is on a share. When it cannot be made absolute: `naUnknown`.
+  let full = calls.fullPath(path)
+  if full.len == 0: return naUnknown
+  let kind = volumeType(calls, full, 0)
+  driveAnswer(kind, if kind == DriveRemote: 0'u32 else: calls.attributes(path))
+
 when defined(linux):
   type StatFs {.importc: "struct statfs", header: "<sys/vfs.h>".} = object
     f_type: clong
@@ -160,6 +203,8 @@ elif defined(macosx) or defined(freebsd) or defined(openbsd) or defined(netbsd):
     else: naLocal
 
 elif defined(windows):
+  proc getFullPathNameW(name: WideCString, len: uint32, buffer: ptr Utf16Char,
+    filePart: pointer): uint32 {.stdcall, importc: "GetFullPathNameW", header: "<windows.h>".}
   proc getVolumePathNameW(fileName: WideCString, volume: ptr Utf16Char, len: uint32): int32 {.
     stdcall, importc: "GetVolumePathNameW", header: "<windows.h>".}
   proc getDriveTypeW(root: WideCString): uint32 {.
@@ -169,33 +214,38 @@ elif defined(windows):
   proc getFileAttributesW(name: WideCString): uint32 {.
     stdcall, importc: "GetFileAttributesW", header: "<windows.h>".}
 
-  proc driveType(path: string, depth = 0): uint32 =
-    # `GetDriveTypeW` of `path`'s volume, a `subst` drive's by its folder,
-    # `DriveRemote` for a letter a redirector serves; 0 (`DRIVE_UNKNOWN`)
-    # when a call fails.
-    let p = win32Path(path)
-    var volume = newSeq[Utf16Char](max(p.len + 2, 1024)) # UTF-16 units <= UTF-8 bytes
-    if getVolumePathNameW(newWideCString(p), addr volume[0], uint32(volume.len)) == 0:
-      return 0
-    let root = $cast[WideCString](addr volume[0])
-    result = getDriveTypeW(cast[WideCString](addr volume[0]))
-    if result != DriveRemote and root.len == 3 and root[1] == ':' and depth < 4:
-      var device: array[1024, Utf16Char]
-      if queryDosDeviceW(newWideCString(root.substr(0, 1)), addr device[0],
-          uint32(device.len)) != 0:
-        let d = $cast[WideCString](addr device[0]) # the first of its names
-        if redirected(d): return DriveRemote
-        let target = substTarget(d)
-        if target.len > 0: return driveType(target, depth + 1)
+  proc fullPathOf(path: string): string {.raises: [].} =
+    # `GetFullPathNameW`: the size needed is returned when the buffer is too
+    # small (the current directory can be long), so a second call fits.
+    let wide = newWideCString(path)
+    var buf = newSeq[Utf16Char](max(path.len + 2, 1024))
+    var n = getFullPathNameW(wide, uint32(buf.len), addr buf[0], nil)
+    if n >= uint32(buf.len):
+      buf.setLen(int(n) + 1)
+      n = getFullPathNameW(wide, uint32(buf.len), addr buf[0], nil)
+    if n == 0 or n >= uint32(buf.len): return ""
+    $cast[WideCString](addr buf[0])
+
+  proc volumeOfPath(path: string): string {.raises: [].} =
+    var volume = newSeq[Utf16Char](max(path.len + 2, 1024)) # UTF-16 units <= UTF-8 bytes
+    if getVolumePathNameW(newWideCString(path), addr volume[0], uint32(volume.len)) == 0:
+      return ""
+    $cast[WideCString](addr volume[0])
+
+  proc driveTypeOf(root: string): uint32 {.raises: [].} = getDriveTypeW(newWideCString(root))
+
+  proc dosDeviceOf(drive: string): string {.raises: [].} =
+    var device: array[1024, Utf16Char]
+    if queryDosDeviceW(newWideCString(drive), addr device[0], uint32(device.len)) == 0:
+      return ""
+    $cast[WideCString](addr device[0]) # the first of its names
+
+  proc attributesOf(path: string): uint32 {.raises: [].} = getFileAttributesW(newWideCString(path))
 
   proc onNetworkFileSystem*(path: string): NetworkAnswer {.raises: [].} =
     ## Where `path` lies (see the module documentation).
-    try:
-      let kind = driveType(path)
-      result = driveAnswer(kind, if kind == DriveRemote: 0'u32
-        else: getFileAttributesW(newWideCString(path)))
-    except CatchableError: # a path that is no valid UTF-8 (`newWideCString`)
-      result = naUnknown
+    windowsAnswer(path, WinCalls(fullPath: fullPathOf, volumeOf: volumeOfPath,
+      driveType: driveTypeOf, dosDevice: dosDeviceOf, attributes: attributesOf))
 
 else:
   proc onNetworkFileSystem*(path: string): NetworkAnswer {.raises: [].} =

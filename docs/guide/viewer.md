@@ -531,13 +531,14 @@ s3fs, virtiofs); macOS and the BSDs take a file system without `MNT_LOCAL`, or o
 nfs, smbfs, afpfs, webdav, cifs, ftp or a FUSE one. When the OS cannot tell, the file is
 mapped there: the guard turns a failed read into failed calls. Windows has no such guard
 (a failed read of a map is an in-page error that ends the program), so there `faAuto`
-maps only a file on a fixed drive or a RAM disk (`GetDriveTypeW` of the path's volume, a
-`subst` drive by the folder it stands for, `\\?\` and `\\?\UNC\` paths too) that is no
+maps only a file on a fixed drive or a RAM disk (`GetDriveTypeW` of the volume of the
+path made absolute, so a relative path counts where the current directory lies; a
+`subst` drive by the folder it stands for; `\\?\` and `\\?\UNC\` paths too) that is no
 cloud placeholder (a synced file whose data is fetched on access); a mapped network
 drive, a `\\server\share` path, a removable drive, a CD-ROM, and a path the probe cannot
 place are read unmapped. Name `faMapped` or `faUnmapped` to choose; `f.access` says what
-an open used. A program built with `-d:parseSegUnmapped`
-opens every file unmapped unless it says otherwise.
+an open used. A program built with `-d:parseSegUnmapped` opens every file unmapped
+unless it says otherwise.
 
 What each gives:
 
