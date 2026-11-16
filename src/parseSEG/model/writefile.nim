@@ -918,6 +918,11 @@ proc noteSource(s: var WriterState, k: TraceKeys, hasSt, hasXY: bool) =
     refuse("SEG-D record " & $s.segdRecNo & " has one source (the general header); " &
       "this trace's source differs")
 
+proc checkFinite(v: float64, what: string) =
+  # NaN is an unknown coordinate; an infinite one reads back as no position.
+  if v == Inf or v == -Inf:
+    refuse(what & " is infinite (" & $v & "); a coordinate or elevation is a number, or NaN for unknown")
+
 proc checkSegdStatus(k: TraceKeys, ct: SegdChannelType) =
   if segdSeismic(ct) and k.status == tsAuxiliary:
     refuse("an auxiliary trace needs an auxiliary SEG-D channel type, not " & $ct)
@@ -1117,6 +1122,9 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
     refuse("the keys' sample interval is " & $wholeInterval(k.intervalUs) &
       " µs, the output's is " & $s.segdOpts.sampleIntervalUs)
   checkSegdStatus(k, channelType)
+  for (v, what) in [(k.srcX, "source X"), (k.srcY, "source Y"), (k.srcZ, "source elevation"),
+      (k.rcvX, "receiver X"), (k.rcvY, "receiver Y"), (k.rcvZ, "receiver elevation")]:
+    checkFinite(v, what)
   let ch = channelOf(k)
   let num = s.chNumber(channelType, ch)
   let t0 = t0Of(k)

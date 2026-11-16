@@ -347,3 +347,24 @@ block window_fits_channel_set:
     discard openOut(tmp / "huge.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
       numSamples: 5_000_000))
   doAssert not fileExists(tmp / "huge.sgd")
+
+block infinite_coordinates:
+  # NaN is an unknown coordinate; an infinite one is refused. Without the
+  # refusal, srcX = Inf was written as a position, and the reader then
+  # dropped the whole tuple, reading every coordinate of it back as NaN.
+  let path = tmp / "inf.sgd"
+  var w = openOut(path, opts(1))
+  var k = shot(1, 1, true)
+  k.srcX = Inf
+  expect("infinite"):
+    w.writeTrace(k, samples(1, 1))
+  var z = shot(1, 2, true)
+  z.rcvZ = -Inf
+  expect("infinite"):
+    w.writeTrace(z, samples(1, 1))
+  w.writeTrace(shot(1, 3, true), samples(1, 1))
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.len == 1 and f.traceKeys(0).channel == 3
+  doAssert f.traceKeys(0).srcX == 500_000 and f.traceKeys(0).srcY == 6_000_000
+  f.close()
