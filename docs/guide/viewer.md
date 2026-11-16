@@ -670,6 +670,69 @@ doAssert sps.points.len == 1000 and not sps.log.isFatal
   pieces keep the one line number (`TextRecord.index`, a diagnostic's `record`), so the
   lines after it are numbered as an editor numbers them.
 
+### A large relation file: the map and the join
+
+A 3D survey's X file holds tens of millions of records. `addSps(g, path)` reads it as a
+map or a join needs it: values only (no raw text, `keepRaw = false`, and no text of the
+line and point fields that are numbers, `keepNames = false`), with room for the file's
+runs made at once (`reserveRelations`), at about 70 bytes a run. Files sorted by line
+rather than by record, which give each record's rows among the others' (an O file
+written source line by source line does too), cost the same: amortised O(log n) a row.
+`relationCount` and `recordCount` are O(1), for a status line.
+
+A viewer that holds such a file for its map joins it to traces without reading it again:
+`applySurvey` takes the stations' coordinates from one geometry and the relations from
+another, the same as one geometry holding both. It works on `TraceKeys`, a `TraceIndex`
+or a `SeismicFile` (`f.applySurvey(stations, relations[, stats])`), in memory only.
+
+```nim
+import std/strutils
+import parseSEG
+
+const h00 = "H00 SPS format version number   SPS 2.1;"
+proc card(kind: char, line, point: string, rest: string): string =
+  kind & align(line, 10) & align(point, 10) & rest
+
+var rs = @[h00]
+for k in 0 ..< 10:
+  rs.add card('R', "1001.00", $(101 + k) & ".00", "  1G1" & spaces(21) &
+    align(formatFloat(600000.0 + 10 * float(k), ffDecimal, 1), 8) & " 6100000.0  83.2")
+for rec in 1 .. 3:
+  rs.add card('S', "2001.00", $(1000 + rec) & ".00", "  1E1" & spaces(21) &
+    align(formatFloat(600000.0 + 10 * float(rec), ffDecimal, 1), 8) & " 6100010.0  80.0")
+writeFile("survey.rs", rs.join("\n") & "\n")
+
+# Three shots on two receiver lines, written line by line: each record's rows
+# come among the other records'.
+var x = @[h00]
+for (line, first) in [("1001.00", 1), ("1002.00", 11)]:
+  for rec in 1 .. 3:
+    x.add "X" & spaces(6) & align($rec, 8) & "11" & align("2001.00", 10) &
+      align($(1000 + rec) & ".00", 10) & "1" & align($first, 5) & align($(first + 9), 5) &
+      "1" & align(line, 10) & align("101.00", 10) & align("110.00", 10) & "1"
+writeFile("survey.x", x.join("\n") & "\n")
+
+var relations = initSurveyGeometry()  # the map's: read once
+relations.addSps("survey.x")
+doAssert relations.relationCount == 6 and relations.recordCount == 3
+var stations = initSurveyGeometry()   # new coordinates, read later
+stations.addSps("survey.rs")
+
+var k = initTraceKeys()
+(k.record, k.channel) = (2.0, 4.0)
+doAssert k.applySurvey(stations, relations)
+doAssert k.rcvPoint == 104 and k.rcvX == 600030.0 and k.srcX == 600020.0
+
+# Read without the names of numeric fields, a file is still written back as it was.
+let lean = readSps("survey.x", SpsOptions(keepNames: false))
+doAssert lean.relations[0].srcLineName == "" and lean.relations[0].srcLine == 2001
+doAssert spsText(lean).text == readFile("survey.x")
+var g = initSurveyGeometry()
+g.reserveRelations(lean.relations.len)   # room for the runs at once
+g.addSps(lean)
+doAssert g.relationCount == 6
+```
+
 ## The header tab and the textual header
 
 `traceHeaders(i)`, `recordHeaders(r)` and `fileHeaders` list every header block of a trace,

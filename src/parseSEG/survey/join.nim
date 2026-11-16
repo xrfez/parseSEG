@@ -73,8 +73,9 @@ type
 
   RecordRuns = object
     ## The runs of one record, in file order: `RunStore.runs[first ..< first
-    ## + count]`.
-    first, count: int
+    ## + count]`, in `room` slots from `first` (the rest free for its next
+    ## runs).
+    first, count, room: int
     scattered: bool
       ## A run does not start after the channels of the one before it (its
       ## multi-component extent, the wider one). Lookups then scan in file
@@ -113,14 +114,31 @@ type
 
   RunStore = object
     ## The relations of one domain. Every run is in one list, each record's
-    ## together (a record given again later in the files is moved to the
-    ## end, and the list compacted once half of it is such gaps): a run
-    ## costs its 56 bytes and the list's room to grow, where a list of its
-    ## own per record and a tape string per run took 154.
+    ## together: a run costs its 56 bytes and the list's room to grow, where
+    ## a list of its own per record and a tape string per run took 154.
+    ##
+    ## A record given again after other records (a file sorted by line, not
+    ## by record) moves to the end of the list when its slots are full, and
+    ## takes twice as many as it has runs there: it moves again only once it
+    ## has doubled. The slots it leaves are gaps, and the list is compacted
+    ## (each record keeping its slots) once the gaps outnumber the runs.
+    ## Its moves and compactions cost amortised O(log n) a run for n runs
+    ## added in any order (a record whose runs do not ascend also checks a
+    ## new run against its earlier ones: `RecordRuns.scattered`):
+    ## - a record moves at counts that at least double (its room never
+    ##   shrinks), so its moves copy fewer runs than twice its final count,
+    ##   and all moves fewer than 2n;
+    ## - a move leaves as many gaps as it copies, so fewer than 2n gaps are
+    ##   ever made; a compaction needs more gaps than the `held` runs, so the
+    ##   `held` of all compactions add up to less than 2n;
+    ## - a compaction copies the list (a record has at most 2 slots a run;
+    ##   the gaps, at most the runs before the last move and that move's
+    ##   count after it: 2 a run) and sorts the records: O(held log held).
+    ## Record order, the common case, never moves anything.
     runs: seq[Run]
     records: Table[int64, RecordRuns]
     fixed: seq[StationKey] # the runs' fixed stations, one entry per change from run to run
-    held, gaps: int        # runs held, and runs left behind by a record moved
+    held, gaps: int        # runs held, and slots left behind by records moved
     byStation: Table[StationKey, seq[StationRecord]]
       # (line, point, index 0) of a run's fixed station → its records
     lastStation: (StationKey, StationRecord) # the entry `byStation` was given last
@@ -195,17 +213,17 @@ func recordCount*(g: SurveyGeometry, domain = rdSource): int {.inline.} =
   ## as many as `records` yields, without sorting them.
   g.runs[domain].records.len
 
-proc reserveRelations*(g: var SurveyGeometry, records: int, domain = rdSource) =
-  ## Room for `records` more relation records (X or O) of `domain`, so that
+proc reserveRelations*(g: var SurveyGeometry, runs: int, domain = rdSource) =
+  ## Room for `runs` more relation runs (X or O records) of `domain`, so that
   ## a large relation file's runs are not copied as their list grows (with
   ## Nim's allocator the memory of the copies stays with the program: a
   ## viewer reading an X file of 3 million records held about three times
   ## what it kept). `addSps(g, path)` reserves for the file's records itself.
   template s: untyped = g.runs[domain]
-  if records > 0 and s.runs.len + records > s.runs.capacity:
-    var runs = newSeqOfCap[Run](s.runs.len + records)
-    for r in s.runs: runs.add r
-    s.runs = move runs
+  if runs > 0 and s.runs.len + runs > s.runs.capacity:
+    var room = newSeqOfCap[Run](s.runs.len + runs)
+    for r in s.runs: room.add r
+    s.runs = move room
 
 func initSurveyGeometry*(): SurveyGeometry =
   ## An empty geometry: no stations, no relations.
@@ -295,6 +313,13 @@ proc addStation(g: var SurveyGeometry, cap: var RepeatCap, kind: SpsPointKind, f
       g.noteCapped(cap, "moved", sevWarning, file, what & " is given again with other " &
         "coordinates; the later ones are used", record)
 
+func lineText(name: string, line: float64): string =
+  # A line as a message names it: its text, or (read without names,
+  # `SpsOptions.keepNames`) its number.
+  if name.len > 0: name
+  elif line == trunc(line) and abs(line) < 1e15: $int64(line)
+  else: $line
+
 proc lineOf(g: var SurveyGeometry, unresolved: var HashSet[string], file, name: string,
     v: float64, rec = -1): Option[float64] =
   # `resolveLine`, with one warning per unresolved line name.
@@ -380,15 +405,17 @@ func owns(s: RunStore, rr: RecordRuns, j: int, channel: int64, multi: bool): boo
 
 proc compact(s: var RunStore) =
   # The runs again without the gaps records moved to the end left, each
-  # record's in the order they were.
+  # record's in the order they were, with its room. The list keeps its spare
+  # capacity (`reserveRelations`).
   var order = newSeqOfCap[(int, int64)](s.records.len)
   for record, rr in s.records: order.add (rr.first, record)
   order.sort
-  var runs = newSeqOfCap[Run](s.held)
+  var runs = newSeqOfCap[Run](s.runs.capacity - s.gaps)
   for (_, record) in order:
     s.records.withValue(record, rr):
       let first = runs.len
       for run in s.runsOf(rr[]): runs.add run
+      runs.setLen(first + rr.room)
       rr.first = first
   s.runs = move runs
   s.gaps = 0
@@ -398,31 +425,38 @@ proc add(s: var RunStore, record: int64, run: sink Run): bool =
   # Whether the runs still ascend without sharing a channel is noted here,
   # once, so that lookups need not find out per channel: a record of
   # thousands of X rows was scanned from its first row for every channel.
+  # (See `RunStore` for the moves and why they cost O(log n) a run.)
   result = false
   var moved = false
   s.records.withValue(record, rr):
-    if rr.first + rr.count != s.runs.len:
-      # Given again after other records: its runs move to the end.
+    if rr.count == rr.room and rr.first + rr.room != s.runs.len:
+      # Full, and other records after it: it moves to the end, with room
+      # for as many runs again.
       let old = rr.first
       rr.first = s.runs.len
-      for i in 0 ..< rr.count:
-        let r = s.runs[old + i]
-        s.runs.add r
-      s.gaps += rr.count
+      s.runs.setLen(rr.first + 2 * rr.count)
+      for i in 0 ..< rr.count: s.runs[rr.first + i] = s.runs[old + i]
+      s.gaps += rr.room
+      rr.room = 2 * rr.count
       moved = true
     if rr.count > 0 and (rr.scattered or
-        run.fromChannel <= s.runs[^1].lastChannel(multi = true)):
+        run.fromChannel <= s.runs[rr.first + rr.count - 1].lastChannel(multi = true)):
       rr.scattered = true
       result = s.runsOf(rr[]).overlaps(run)
     let stations = (run.toChannel - run.fromChannel) div run.step + 1
     rr.channels[false] += stations
     rr.channels[true] += stations * run.step
+    if rr.count == rr.room: # the last record: the list grows
+      s.runs.add run
+      inc rr.room
+    else:
+      s.runs[rr.first + rr.count] = run
     inc rr.count
   do:
     let stations = (run.toChannel - run.fromChannel) div run.step + 1
-    s.records[record] = RecordRuns(first: s.runs.len, count: 1,
+    s.records[record] = RecordRuns(first: s.runs.len, count: 1, room: 1,
       channels: [stations, stations * run.step])
-  s.runs.add run
+    s.runs.add run
   inc s.held
   if moved and s.gaps > s.held: s.compact()
 
@@ -473,7 +507,7 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, xDomain = rdSource) =
     if l.isNone: discard
     elif p.point.isNaN:
       g.noteCapped(cap, "point", sevInfo, f.name, "point '" & p.pointName & "' on line " &
-        p.lineName & " is not a number; skipped", i)
+        lineText(p.lineName, l.get) & " is not a number; skipped", i)
     elif p.easting.isNaN or p.northing.isNaN:
       discard # no coordinates: nothing to add
     else:
@@ -814,8 +848,9 @@ proc applySurvey*(ix: var TraceIndex, stations, relations: SurveyGeometry,
     stats: var JoinStats, overwrite = false): int =
   ## `applySurvey` on every trace, with the stations of `stations` and the
   ## relations of `relations` (see `applySurvey` of trace keys); returns the
-  ## traces changed, and how they matched in `stats`. Raises `ValueError`
-  ## for an index built without `keys = true`.
+  ## traces changed, and how they matched in `stats`. A join that changes no
+  ## trace leaves the index as it was (`keysRevision`, `joined`). Raises
+  ## `ValueError` for an index built without `keys = true`.
   ix.requireKeys()
   stats = JoinStats(traces: ix.keys.len)
   for i, k in ix.keys.mpairs:
@@ -847,6 +882,14 @@ proc applySurvey*(ix: var TraceIndex, g: SurveyGeometry, overwrite = false): int
   var stats: JoinStats
   ix.applySurvey(g, stats, overwrite)
 
+proc applySurvey*(ix: var TraceIndex, stations, relations: SurveyGeometry,
+    overwrite = false): int =
+  ## `applySurvey` on every trace with the stations of `stations` and the
+  ## relations of `relations`; returns the traces changed. Raises
+  ## `ValueError` for an index built without `keys = true`.
+  var stats: JoinStats
+  ix.applySurvey(stations, relations, stats, overwrite)
+
 proc applySurvey*(f: var SeismicFile, g: SurveyGeometry, stats: var JoinStats,
     overwrite = false): int =
   ## Fills the trace keys from the survey, in memory only: the file does not
@@ -867,6 +910,13 @@ proc applySurvey*(f: var SeismicFile, stations, relations: SurveyGeometry,
   ## relation file is held already is joined without reading it again. The
   ## same as one geometry holding both. In memory only.
   f.mindex.applySurvey(stations, relations, stats, overwrite)
+
+proc applySurvey*(f: var SeismicFile, stations, relations: SurveyGeometry,
+    overwrite = false): int =
+  ## `applySurvey` with the stations' coordinates of `stations` and the
+  ## relations of `relations`, in memory only; returns the traces changed.
+  ## Raises `ValueError` for a file opened without `keys = true`.
+  f.mindex.applySurvey(stations, relations, overwrite)
 
 func `$`*(s: JoinStats): string =
   ## One line: traces, changed, the matches that occurred, missing coordinates.

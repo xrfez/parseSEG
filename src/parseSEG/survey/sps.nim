@@ -165,7 +165,8 @@ type
       ## a number (every one in Rev 2.1) has its value and "" as its text,
       ## so a large relation file is read with a sixth of the strings: what
       ## a reader of the values (a join, a map) needs. A name that is not a
-      ## number is kept either way.
+      ## number is kept either way. `writeSps` still writes unedited records
+      ## (with `keepRaw`) back byte for byte.
 
 func initSpsPoint*(kind = pkSource): SpsPoint =
   ## A point with every value missing (index 1).
@@ -1044,20 +1045,34 @@ func quietCtx(strict: bool): Ctx =
   # Re-parses a record to compare it; its diagnostics are not made.
   Ctx(opts: SpsOptions(strictImpliedDecimals: strict), cap: RepeatCap(quiet: true))
 
+func leaveOutName(name: var string, value: float64, like: string) {.inline.} =
+  # A record read without its names (`keepNames = false`) has "" for the
+  # text of a numeric field: its raw text then gives the same field.
+  if like.len == 0 and not value.isNaN: name = ""
+
 proc pointLine(p: SpsPoint, rev, fileRev: SpsRevision, strict: bool): string =
   ## The raw text when `p` is unchanged since it was read (its raw text
   ## parses to the same values), else encoded.
   if p.raw.len > 0 and rev == fileRev and p.raw[0] in {'R', 'S'}:
     var scratch: DiagLog
     var quiet = quietCtx(strict)
-    if sameValues(quiet.parsePoint(scratch, p.raw, rev), p): return p.raw
+    var read = quiet.parsePoint(scratch, p.raw, rev)
+    leaveOutName(read.lineName, read.line, p.lineName)
+    leaveOutName(read.pointName, read.point, p.pointName)
+    if sameValues(read, p): return p.raw
   encodeSps(p, rev)
 
 proc relationLine(r: SpsRelation, rev, fileRev: SpsRevision, strict: bool): string =
   if r.raw.len > 0 and rev == fileRev and r.raw[0] in {'X', 'O'}:
     var scratch: DiagLog
     var quiet = quietCtx(strict)
-    if sameValues(quiet.parseRelation(scratch, r.raw, rev), r): return r.raw
+    var read = quiet.parseRelation(scratch, r.raw, rev)
+    leaveOutName(read.srcLineName, read.srcLine, r.srcLineName)
+    leaveOutName(read.srcPointName, read.srcPoint, r.srcPointName)
+    leaveOutName(read.rcvLineName, read.rcvLine, r.rcvLineName)
+    leaveOutName(read.fromReceiverName, read.fromReceiver, r.fromReceiverName)
+    leaveOutName(read.toReceiverName, read.toReceiver, r.toReceiverName)
+    if sameValues(read, r): return r.raw
   encodeSps(r, rev)
 
 proc headerLine(h: SpsHeader): string =
