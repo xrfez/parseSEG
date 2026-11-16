@@ -9,8 +9,8 @@
 ##   given none that gained a block would miss it
 ## - general_header_orientation_is_separate: `recordOrientation` returned none
 ##   (`o.isSome`)
-## - second_orientation_warns: the second-block diagnostic was not reported
-##   (`f.log.len` stayed unchanged)
+## - second_orientation_is_not_reported: a second block added a warning
+##   (`f.log.len` grew); a query takes a plain SeismicFile, not `var`
 
 import std/[assertions, math, options, os, strutils]
 import parseSEG
@@ -231,9 +231,16 @@ proc otherWriter(path: string) =
   w.close()
   sink.close()
 
+proc queryTrace(f: SeismicFile, trace: int): Option[SegdOrientation] =
+  # A non-var file: a query does not write the log.
+  f.traceOrientation(trace)
+
+proc queryRecord(f: SeismicFile, record: int): Option[SegdOrientation] =
+  f.recordOrientation(record)
+
 proc orientFile(path: string, general: bool, second: bool, differ: bool) =
   # One trace. `general`: the Orientation block is in the general header.
-  # `second`: another trace block after the first; `differ` makes it disagree.
+  # `second`: another block after the first; `differ` makes it disagree.
   var r = SegdRecord(layout: slRev3, format: some(sd8058),
     revision: SegdRevision(major: 3, minor: 0))
   let orient = SegdOrientation(rotationX: 0.3'f32, rotationY: 0, rotationZ: 0,
@@ -241,6 +248,12 @@ proc orientFile(path: string, general: bool, second: bool, differ: bool) =
     timestamp: unixToTimestamp(ShotTime), blockType: BlockTypeOrientation)
   if general:
     r.generalBlocks.add @(orient.encoded)
+    if second:
+      var other = orient
+      if differ:
+        other.rotationX = 9.0'f32
+        other.orientationType = 1
+      r.generalBlocks.add @(other.encoded)
   let nOpt = r.generalBlocks.len div 32
   r.gh1 = SegdGeneralHeader1(fileNumber: 1, formatCode: 8058, year: 24,
     additionalGhBlocks: uint8(2 + nOpt), julianDay: 61, hour: 6, minute: 7, second: 8,
@@ -299,28 +312,35 @@ block general_header_orientation_is_separate:
     discard f.recordOrientation(3)
   f.close()
 
-block second_orientation_warns:
-  # Seen to fail first: the second block was dropped with no diagnostic
-  # (f.log.len stayed 0).
+block second_orientation_is_not_reported:
+  # The first block wins. A second, different one is not reported: indexing
+  # does not walk a trace's header extensions, and a query does not write
+  # the log. Seen to fail first: the query took `var` (this file did not
+  # compile) and a second block added a warning (`f.log.len` grew).
   let path = tmp / "two60.sgd"
   orientFile(path, general = false, second = true, differ = true)
   var f = openSeismic(path)
   let before = f.log.len
-  let o = f.traceOrientation(0)
+  let o = queryTrace(f, 0)
   doAssert o.isSome and o.get.rotationX == 0.3'f32 and o.get.orientationType == 2
-  doAssert f.log.len == before + 1
-  doAssert f.log[f.log.len - 1].code == dcInconsistent
-  doAssert f.log[f.log.len - 1].severity == sevWarning
-  doAssert f.log[f.log.len - 1].msg.find("second Orientation") >= 0
-  discard f.traceOrientation(0) # once
-  doAssert f.log.len == before + 1
+  doAssert f.log.len == before
+  discard queryTrace(f, 0)
+  doAssert f.log.len == before
   f.close()
-  # An identical second block is not a disagreement.
+  # An identical second block is the same: the first is used, no warning.
   orientFile(tmp / "same60.sgd", general = false, second = true, differ = false)
   var g = openSeismic(tmp / "same60.sgd")
-  doAssert g.traceOrientation(0).get.rotationX == 0.3'f32
+  doAssert queryTrace(g, 0).get.rotationX == 0.3'f32
   doAssert g.log.len == 0
   g.close()
+  # A second general-header block is not reported either.
+  orientFile(tmp / "two_gh60.sgd", general = true, second = true, differ = true)
+  var h = openSeismic(tmp / "two_gh60.sgd")
+  let rec = queryRecord(h, 0)
+  doAssert rec.isSome and rec.get.rotationX == 0.3'f32 and rec.get.orientationType == 2
+  doAssert h.log.len == 0
+  doAssert queryTrace(h, 0).isNone
+  h.close()
 
 block trace_orientation_other_writer:
   let path = tmp / "other.sgd"

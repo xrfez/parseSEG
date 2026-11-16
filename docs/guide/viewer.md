@@ -830,7 +830,7 @@ A node's attitude, when the file carries a SEG-D Rev 3 Orientation header (0x60)
 `traceOrientation(i)`: an `Option[SegdOrientation]`, none when that trace has no block. It
 does not need stored keys, and it finds the block wherever another writer put it in the
 trace header extensions, so it is cheap enough to call for every trace of a record. The
-first block wins; a second, different one adds one warning to `f.log`. A 0x60 in the
+first block wins; a second block is not reported. A 0x60 in the
 general header is not that trace's attitude: the standard's text does not say the block
 applies to every trace without its own ("A block (e.g. Position 50-52, Additional Source
 Info 20, Aux Channel Ref 21) applies to the preceding Source Description block"). Read
