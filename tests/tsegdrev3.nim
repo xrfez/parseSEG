@@ -1,4 +1,7 @@
 ## SEG-D Rev 3 header blocks and timestamps (task 5.1).
+##
+## Seen to fail first: a position after any source description was stored as
+## the source's (`k.srcX` was 999, from the second description).
 
 import std/[assertions, os, times, math, strutils]
 import parseSEG/segd/[headers, rev3, reader]
@@ -181,3 +184,44 @@ block p8_b3_position_after_additional_source_info_is_the_source:
   t.extensions.add pos.encoded
   let k = traceKeys(rec, t)
   doAssert k.srcX == 500 and k.srcY == 600 and k.srcZ.isNaN and k.rcvX.isNaN
+
+block source_position_attaches_only_to_the_selected_description:
+  # Seen to fail first: a position after any source description was the
+  # source's (srcX was 999, from the second description).
+  proc pos(x, y: float64): SegdPositionBlock =
+    SegdPositionBlock(position1Valid: 1, position1Quality: 1, tuple1Coord1: x,
+      tuple1Coord2: y, tuple1Coord3: Inf, blockType1: 0x50, blockType2: 0x51,
+      blockType3: 0x52)
+  proc desc(line, point: float64, index: uint8): SegdSourceDescription =
+    SegdSourceDescription(sourceLineNumber: line, sourcePointNumber: point,
+      sourcePointIndex: index, blockType: 0x1F)
+  var rec = SegdRecord(layout: slRev3)
+  var t = SegdTrace(layout: slRev3, ext1Rev3: some(SegdTraceHeaderExt1Rev3()))
+  t.extensions.add desc(1, 10, 1).encoded
+  t.extensions.add desc(2, 20, 2).encoded
+  t.extensions.add pos(999, 888).encoded
+  let k = traceKeys(rec, t)
+  doAssert k.srcLine == 1 and k.srcPoint == 10 and k.srcIndex == 1
+  doAssert k.srcX.isNaN and k.srcY.isNaN and k.rcvX.isNaN
+  # The position that follows the selected description is that source's.
+  t.extensions.setLen 0
+  t.extensions.add desc(1, 10, 1).encoded
+  t.extensions.add pos(111, 222).encoded
+  t.extensions.add desc(2, 20, 2).encoded
+  t.extensions.add pos(999, 888).encoded
+  let k2 = traceKeys(rec, t)
+  doAssert k2.srcLine == 1 and k2.srcPoint == 10 and k2.srcX == 111 and k2.srcY == 222
+  # Coordinates with no station (0/0) still read back: this writer emits that.
+  t.extensions.setLen 0
+  t.extensions.add desc(0, 0, 0).encoded
+  t.extensions.add pos(50, 60).encoded
+  let k3 = traceKeys(rec, t)
+  doAssert k3.srcLine.isNaN and k3.srcX == 50 and k3.srcY == 60
+  # Description only in the general header, position in the trace: the
+  # position is the receiver's (a shot gather). Do not flip this.
+  t.extensions.setLen 0
+  t.extensions.add pos(111, 222).encoded
+  rec.generalBlocks = @(desc(4, 8, 1).encoded)
+  let k4 = traceKeys(rec, t)
+  doAssert k4.srcLine == 4 and k4.srcPoint == 8
+  doAssert k4.srcX.isNaN and k4.rcvX == 111 and k4.rcvY == 222

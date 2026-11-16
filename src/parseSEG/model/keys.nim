@@ -23,7 +23,13 @@
 ##   empty: that station stays unknown (NaN, index 0).
 ## - SEG-D Rev 3: the source from a Source Description block (0x15-0x19,
 ##   0x1F) in the trace's extensions, else in the record's general header
-##   blocks; the receiver from THE#1, plus depth and reshoot indices; the
+##   blocks; a source Position attaches only to that selected description,
+##   not to a later one. A Position in the trace extensions that does not
+##   follow a source description is the receiver's, even when the only
+##   source description is in the general header: that shape is a shot
+##   gather's receiver position (description in the general header, position
+##   after Trace Header Extension #1), and it is how INOVA files are read.
+##   The receiver station is THE#1, plus depth and reshoot indices; the
 ##   component is THE#1 byte 9 (group index), else the sensor type.
 ## - SEG-2: the trace strings (see `traceKeys(Seg2File, Seg2Trace)`).
 ##
@@ -87,18 +93,32 @@ proc positionOf(area: openArray[byte], at: int, x, y, z: var float64): bool =
   use(p.tuple2Coord1, p.tuple2Coord2, p.tuple2Coord3, p.position2Valid, p.position2Quality)
   false
 
-proc positionsFrom(area: openArray[byte], k: var TraceKeys, generalArea: bool) =
+proc positionsFrom(area: openArray[byte], k: var TraceKeys, generalArea: bool,
+    srcAt: int) =
   # A Position block describes the block it follows: after a source
-  # description it is the source's, after a measurement block (0x61) it is
+  # description it is that source's, after a measurement block (0x61) it is
   # the measurement's (ignored), otherwise in a trace header it is the
-  # trace's (the receiver). In the general headers it is taken as the
-  # source's: real files (INOVA) put it before the source description.
+  # trace's (the receiver). A source position attaches only to the
+  # description `sourceFrom` selected (`srcAt`, or -1 when this area has
+  # none): a later description's position is not this trace's source. When
+  # this area selected no station, a position after a source description is
+  # still that source's (coordinates with no station, written as 0/0). In
+  # the general headers a position that does not follow a different source
+  # description is the source's: real files (INOVA) put it before the
+  # description. A trace position that does not follow a local source
+  # description is the receiver's, even when the only source description is
+  # in the general header: that is a shot gather's receiver position.
   var after = 0'u8
+  var describedAt = -1
   for at, bt in blocks(area):
     if bt == 0x50:
       var x, y, z: float64
       if after != 0x61 and positionOf(area, at, x, y, z):
-        if generalArea or isSourceBlock(after):
+        if isSourceBlock(after):
+          let selected = describedAt == srcAt and srcAt >= 0
+          if (selected or srcAt < 0) and not k.hasSourceXY:
+            (k.srcX, k.srcY, k.srcZ) = (x, y, z)
+        elif generalArea:
           if not k.hasSourceXY: (k.srcX, k.srcY, k.srcZ) = (x, y, z)
         elif not k.hasReceiverXY: (k.rcvX, k.rcvY, k.rcvZ) = (x, y, z)
     elif bt notin {0x51'u8, 0x52'u8, 0x56'u8, 0x20'u8, 0x1A'u8, 0x21'u8}:
@@ -106,6 +126,7 @@ proc positionsFrom(area: openArray[byte], k: var TraceKeys, generalArea: bool) =
       # Info / Aux Channel Reference blocks (§6.5: they sit between the
       # source description and its position) keep the block described.
       after = bt
+      describedAt = at
 
 func isStation(line, point: float64): bool {.inline.} =
   # A line and a point that are both 0 are a header left empty, not station
@@ -114,9 +135,10 @@ func isStation(line, point: float64): bool {.inline.} =
   # survey has at 0/0, and refuse to fill the real one.)
   not (line == 0 and point == 0)
 
-proc sourceFrom(area: openArray[byte], k: var TraceKeys): bool =
-  # The first Source Description block of a Rev 3 block area that names a
-  # station.
+proc sourceFrom(area: openArray[byte], k: var TraceKeys): int =
+  # Offset of the first Source Description block of a Rev 3 block area that
+  # names a station, or -1. A later description is not selected.
+  result = -1
   for at, bt in blocks(area):
     if isSourceBlock(bt):
       let s = decodeBlock[SegdSourceDescription](area.toOpenArray(at, at + SegdBlockSize - 1))
@@ -124,7 +146,7 @@ proc sourceFrom(area: openArray[byte], k: var TraceKeys): bool =
         k.srcLine = s.sourceLineNumber
         k.srcPoint = s.sourcePointNumber
         k.srcIndex = int16(s.sourcePointIndex)
-        return true
+        return at
 
 proc segdTime(rec: SegdRecord, t: SegdTrace): float64 =
   if rec.isRev3:
@@ -170,7 +192,8 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
   result.status = segdStatus(rec, t)
   if t.header.traceNumber != BcdAllF: result.channel = float64(t.header.traceNumber)
   if rec.isRev3:
-    if not sourceFrom(t.extensions, result): discard sourceFrom(rec.generalBlocks, result)
+    let srcInTrace = sourceFrom(t.extensions, result)
+    let srcAt = if srcInTrace >= 0: srcInTrace else: sourceFrom(rec.generalBlocks, result)
     if t.ext1Rev3.isSome:
       let e = t.ext1Rev3.get
       if isStation(e.receiverLine, e.receiverPoint):
@@ -182,8 +205,10 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
       result.channel = float64(traceNumber(t.header, e))
       result.sensorType = e.sensorType
       result.component = if e.groupIndex != 0: e.groupIndex else: e.sensorType
-    positionsFrom(t.extensions, result, generalArea = false)
-    positionsFrom(rec.generalBlocks, result, generalArea = true)
+    positionsFrom(t.extensions, result, generalArea = false,
+      srcAt = if srcInTrace >= 0: srcInTrace else: -1)
+    positionsFrom(rec.generalBlocks, result, generalArea = true,
+      srcAt = if srcInTrace >= 0: -1 else: srcAt)
     result.deriveGeometry()
   else:
     if rec.sourceHeaders.len > 0:
