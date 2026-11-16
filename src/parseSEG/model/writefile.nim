@@ -1386,7 +1386,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## in the order that type first appears; every trace of a set has
   ## `numSamples` samples and the options' interval (a keys `intervalUs`
   ## that differs is refused, a NaN one is left to the options). `channel`
-  ## is the trace number (NaN assigns 1, 2, ... within the channel set).
+  ## is the trace number (NaN assigns the lowest number the channel set has
+  ## not used).
   ## Receiver line and point go in Trace Header Extension #1, source line
   ## and point in one Source Description block in the general header (one
   ## source per record; a trace that names none inherits it on read).
@@ -1394,7 +1395,10 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## (general header for the source, the trace extensions for a receiver;
   ## a channel set that has any receiver position gives every trace of the
   ## set one, invalid where the coordinates are missing). A station of 0/0,
-  ## or NaN, reads back NaN. `status` of `tsDead` sets the trace edit flag
+  ## or NaN, reads back NaN. A NaN `t0Ms` reads back 0, and `component` 0
+  ## reads back as the `sensorType` value. An elevation with no X/Y is not
+  ## written; `close` warns once for the file. `status` of `tsDead` sets the
+  ## trace edit flag
   ## (byte 12 = 1) on a seismic or EM channel; an auxiliary channel type
   ## reads back as `tsAuxiliary`, so `tsLive` or `tsDead` with one is
   ## refused, as is `tsAuxiliary` with seismic or EM. Metres or feet are
@@ -1404,8 +1408,11 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## SEG-D writer not opened from `SegdOutputOptions`, a SEG-2 writer, a
   ## record number going backwards, a sample count other than the options',
   ## a start time that differs inside a channel set, a second source in a
-  ## record, a station with only a line or only a point, or a bad override
-  ## (nothing of that trace is written then); `SegFormatError` for a value
+  ## record, a station with only a line or only a point, a channel number
+  ## used twice in its channel set, a window whose end does not fit the
+  ## set's end time, an infinite coordinate or elevation, coordinates with
+  ## units unknown and no `crsText`, or a bad override (nothing of that
+  ## trace is written then); `SegFormatError` for a value
   ## the format cannot hold; `IOError` on a write failure, which discards
   ## the output and closes the writer.
   if not w.s.open: refuse("the writer is closed")
