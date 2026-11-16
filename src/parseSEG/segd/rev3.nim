@@ -244,6 +244,7 @@ const
   BlockTypePosition2* = 0x51'u8        ## Second block of a Position block.
   BlockTypePosition3* = 0x52'u8        ## Third block of a Position block.
   BlockTypeCrs* = 0x55'u8              ## Coordinate Reference System text.
+  BlockTypeOrientation* = 0x60'u8      ## Orientation header.
   BlockTypeTrailerDescription* = 0x70'u8 ## General Trailer Description.
   segdGeneralHeader2Rev3Fields* = fieldTable(SegdGeneralHeader2Rev3) ## GH#2 (Rev 3) field table.
   segdGeneralHeader3Fields* = fieldTable(SegdGeneralHeader3) ## GH#3 field table.

@@ -188,11 +188,31 @@ type
       ## trace has no `keys.time`. NaN (the default) means not set. The writer
       ## never invents a time.
 
+  TraceOrientation* = object
+    ## Attitude of one trace, written as a SEG-D Rev 3 Orientation header
+    ## (0x60, `SegdOrientation`). Rotations are radians, about X, Y and Z
+    ## (X inline, Y crossline, Z positive down).
+    rotationX*, rotationY*, rotationZ*: float32
+    referenceOrientation*: float32
+      ## Rotation about Z so that X points to true north. 0 when unknown.
+    orientationType*: uint8
+      ## Spec §4.19: 0 unknown, 1 true north, 2 cable direction, 3 sensor
+      ## housing, 4 survey, 5 magnetic north, 9 other.
+    refOrientationValid*: bool ## Byte 26: the reference orientation is valid.
+    rotationApplied*: bool     ## Byte 27: bytes 1-12 are already applied to the samples.
+    rotationNorthApplied*: bool
+      ## Byte 28: already rotated to true north. The spec requires
+      ## `rotationApplied` as well.
+    time*: float64 = NaN
+      ## UTC POSIX seconds the rotation applies to. NaN (the default) writes
+      ## the trace's recording time.
+
   SegdKeyTrace = object
     keys: TraceKeys
     channelType: SegdChannelType
     samples: seq[byte]
     overrides: seq[HeaderOverride]
+    orientation: Option[TraceOrientation]
     t0Us: int32
     channel: int ## The trace number in its channel set (assigned when kept).
     recorded: float64 ## This trace's time, or the record's when the trace has none.
@@ -279,6 +299,17 @@ func headerOverride*(name: string, value: FieldValue): HeaderOverride {.inline.}
 func headerOverride*(name: string, value: SomeNumber | string): HeaderOverride {.inline.} =
   ## A `HeaderOverride` of field `name` with a plain number or text.
   HeaderOverride(name: name, value: toFieldValue(value))
+
+func initTraceOrientation*(rotationX, rotationY, rotationZ: float32,
+    referenceOrientation: float32 = 0, orientationType: uint8 = 0,
+    refOrientationValid = false, rotationApplied = false,
+    rotationNorthApplied = false, time = NaN): TraceOrientation {.inline.} =
+  ## An orientation to pass to `writeTrace`. `time` of NaN uses the trace's
+  ## recording time.
+  TraceOrientation(rotationX: rotationX, rotationY: rotationY, rotationZ: rotationZ,
+    referenceOrientation: referenceOrientation, orientationType: orientationType,
+    refOrientationValid: refOrientationValid, rotationApplied: rotationApplied,
+    rotationNorthApplied: rotationNorthApplied, time: time)
 
 proc splitName(o: HeaderOverride): (string, string) =
   let dot = o.name.find('.')
@@ -867,6 +898,38 @@ const
   SegdTimeMax = 2524608000.0 ## 2050-01-01T00:00:00 UTC: past the latest GH#1 year.
   BlockTypeTimestamp = 0x42'u8 ## Timestamp header: time of the trace's data.
 
+func segdExtCount(hasPos, hasOrient: bool): int {.inline.} =
+  # THE#1, optional Position (3), Timestamp, optional Orientation.
+  1 + (if hasPos: 3 else: 0) + 1 + (if hasOrient: 1 else: 0)
+
+proc checkRotation(v: float32, what: string) =
+  if v.isNaN or v == Inf or v == -Inf:
+    refuse(what & " is not a finite rotation (" & $v & ")")
+
+proc checkOrientation(o: TraceOrientation) =
+  checkRotation(o.rotationX, "rotationX")
+  checkRotation(o.rotationY, "rotationY")
+  checkRotation(o.rotationZ, "rotationZ")
+  checkRotation(o.referenceOrientation, "referenceOrientation")
+  if o.rotationNorthApplied and not o.rotationApplied:
+    refuse("rotationNorthApplied is set but rotationApplied is not")
+  if o.time.isNaN: return
+  if o.time == Inf or o.time == -Inf:
+    refuse("orientation time is not finite (" & $o.time & ")")
+  let us = (o.time - float64(GpsEpochUnix)) * 1e6
+  if us < -9.0e18 or us > 9.0e18:
+    refuse("orientation time does not fit a SEG-D timestamp (" & $o.time & ")")
+
+func orientationBlock(o: TraceOrientation, recorded: float64): SegdOrientation =
+  let t = if o.time.isNaN: recorded else: o.time
+  SegdOrientation(rotationX: o.rotationX, rotationY: o.rotationY, rotationZ: o.rotationZ,
+    referenceOrientation: o.referenceOrientation, timestamp: unixToTimestamp(t),
+    orientationType: o.orientationType,
+    refOrientationValid: uint8(ord(o.refOrientationValid)),
+    rotationApplied: uint8(ord(o.rotationApplied)),
+    rotationNorthApplied: uint8(ord(o.rotationNorthApplied)),
+    blockType: BlockTypeOrientation)
+
 proc checkRecordingTime(t: float64, what: string) =
   # General Header #1 holds a two-digit year read as 1950-2049. A time outside
   # that, or one that is not finite, cannot be written.
@@ -1025,6 +1088,7 @@ proc flushSegdKeys(s: var WriterState) =
   var setCount: seq[int] = @[]
   var setT0: seq[int32] = @[]
   var setPos: seq[bool] = @[]
+  var setExt: seq[int] = @[]
   var setOf = newSeq[int](s.segdPending.len)
   for i, p in s.segdPending:
     var found = -1
@@ -1035,14 +1099,18 @@ proc flushSegdKeys(s: var WriterState) =
       setCount.add 0
       setT0.add p.t0Us
       setPos.add false
+      setExt.add 0
       found = setType.len - 1
     setOf[i] = found
     inc setCount[found]
     if p.keys.hasReceiverXY: setPos[found] = true
+  for i, p in s.segdPending:
+    let n = segdExtCount(setPos[setOf[i]], p.orientation.isSome)
+    if n > setExt[setOf[i]]: setExt[setOf[i]] = n
   var traces = newSeq[SegdTrace](s.segdPending.len)
   for i, p in s.segdPending:
     let si = setOf[i]
-    let exts = 1 + (if setPos[si]: 3 else: 0) + 1 # THE#1, optional position, timestamp
+    let exts = segdExtCount(setPos[si], p.orientation.isSome)
     let ch = p.channel
     var t = SegdTrace(layout: slRev3, index: i, numSamples: opts.numSamples)
     var hdr = SegdTraceHeader(scanTypeNumber: 1, traceHeaderExtensions: uint8(exts),
@@ -1084,6 +1152,8 @@ proc flushSegdKeys(s: var WriterState) =
     # ahead of General Header #3.
     extBytes.add SegdTimestampHeader(timeZeroOfData: unixToTimestamp(p.recorded),
       blockType: BlockTypeTimestamp).encoded
+    if p.orientation.isSome:
+      extBytes.add orientationBlock(p.orientation.get, p.recorded).encoded
     t.extensions = extBytes
     t.samples = p.samples
     t.overrideSegd(p.overrides)
@@ -1149,7 +1219,7 @@ proc flushSegdKeys(s: var WriterState) =
       channelType: uint8(ord(ct)), startTime: setT0[j], numSamples: uint32(opts.numSamples),
       descaleMultiplier: 1.0, channelsInSet: uint32(setCount[j]),
       samplingInterval: uint32(opts.sampleIntervalUs), arrayForming: 1,
-      traceHeaderExtensions: uint8(1 + (if setPos[j]: 3 else: 0) + 1), verticalStack: 1,
+      traceHeaderExtensions: uint8(setExt[j]), verticalStack: 1,
       blockType1: BlockTypeChannelSet1, blockType2: BlockTypeChannelSet2,
       blockType3: BlockTypeChannelSet3)
     for i in 0 ..< d.description.len: d.description[i] = ' '
@@ -1173,7 +1243,8 @@ proc flushSegdKeys(s: var WriterState) =
   s.segdChannels.setLen 0
 
 proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: openArray[T],
-    overrides: openArray[HeaderOverride], channelType: SegdChannelType) =
+    overrides: openArray[HeaderOverride], channelType: SegdChannelType,
+    orientation: Option[TraceOrientation]) =
   let n = s.segdOpts.numSamples
   if samples.len != n:
     refuse("a SEG-D channel set has one sample count, " & $n &
@@ -1212,6 +1283,7 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   elif not k.time.isNaN:
     checkRecordingTime(k.time, "keys.time")
   let recorded = if k.time.isNaN: s.segdRecTime else: k.time
+  if orientation.isSome: checkOrientation(orientation.get)
   s.noteSource(k, hasSrc, k.hasSourceXY)
   s.noteSetT0(channelType, t0)
   # A bad override fails here, before the trace joins the record.
@@ -1225,7 +1297,7 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
     inc s.segdNoZ
   s.noteChannel(channelType, num)
   s.segdPending.add SegdKeyTrace(keys: k, channelType: channelType, samples: raw,
-    overrides: ov, t0Us: t0, channel: num, recorded: recorded)
+    overrides: ov, orientation: orientation, t0Us: t0, channel: num, recorded: recorded)
   s.segdHaveRec = true
   s.segdRecNo = recNo
 
@@ -1405,7 +1477,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   w.writeLike(src, trace, p.toOpenArray(0, n - 1), overrides, addr keys, fields)
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: openArray[T],
-    overrides: openArray[HeaderOverride] = [], channelType: SegdChannelType = sctSeismic) =
+    overrides: openArray[HeaderOverride] = [], channelType: SegdChannelType = sctSeismic,
+    orientation: Option[TraceOrientation] = none(TraceOrientation)) =
   ## Writes a trace whose headers are built from `keys` (no template
   ## trace), with `samples`, then `overrides` applied: a stacked or derived
   ## trace of any input standard. The output is SEG-Y (from
@@ -1486,7 +1559,15 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## trace has one, else from General Header #3, so a trace's own `keys.time`
   ## is written there and reads back; a trace without one reads back the
   ## record's time. Traces of one record may
-  ## differ. The writer never invents a time. Metres or feet are
+  ## differ. The writer never invents a time.
+  ## `orientation` (`some` of a `TraceOrientation`, or none) writes one
+  ## Orientation header (0x60) after the Timestamp block of that trace. Its
+  ## timestamp is `time` when that is set, otherwise the trace's recording
+  ## time. A trace given none gets no Orientation block, so a file written
+  ## without one is unchanged. Traces of one channel set may differ: the
+  ## channel set descriptor's extension count is the largest, and a trace
+  ## with fewer is the reader's usual warning (`dcInconsistent`); each trace
+  ## header's own count is the blocks that trace carries. Metres or feet are
   ## written as a P1/11 axis record when `crsText` is empty, which
   ## `summary.coordinateUnits` reads; a caller-supplied `crsText` is written
   ## in 0x55 blocks as given. Raises `ValueError` for a closed writer, a
@@ -1497,19 +1578,25 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## used twice in its channel set, a window whose end does not fit the
   ## set's end time, an infinite coordinate or elevation, coordinates with
   ## units unknown and no `crsText`, a record with no recording time, a
-  ## recording time outside 1950-2049, or a bad override (nothing of that
-  ## trace is written then); `SegFormatError` for a value
+  ## recording time outside 1950-2049, a bad override, a NaN or infinite
+  ## rotation (the message names the value), `rotationNorthApplied` without
+  ## `rotationApplied`, an orientation time that is not finite or does not
+  ## fit a SEG-D timestamp, or an orientation passed to a writer that is not
+  ## SEG-D Rev 3 (nothing of that trace is written then); `SegFormatError` for a value
   ## the format cannot hold; `IOError` on a write failure, which discards
   ## the output and closes the writer.
   if not w.s.open: refuse("the writer is closed")
   if w.s.segdFresh:
     try:
-      w.s.writeSegdKeys(keys, samples, overrides, channelType)
+      w.s.writeSegdKeys(keys, samples, overrides, channelType, orientation)
     except IOError:
       w.s.discardOutput()
       raise
     inc w.s.written
     return
+  if orientation.isSome:
+    refuse("an orientation is written only to SEG-D Rev 3 (openSeismicWriter with " &
+      "SegdOutputOptions)")
   if w.s.kind != skSegy:
     refuse("traces from keys are written to SEG-Y, or to SEG-D opened from " &
       "SegdOutputOptions; the output is " & $w.s.kind)
