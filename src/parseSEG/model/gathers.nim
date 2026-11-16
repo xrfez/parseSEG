@@ -10,7 +10,8 @@
 ## - one receiver and several sources: a receiver gather;
 ## - one receiver, at most one source: a shot if it is a single trace or one
 ##   trace per component; a receiver gather when the traces' times differ
-##   (repeated shots at one source point, recorded by one receiver); else
+##   (repeated shots at one source point, recorded by one receiver, also a
+##   continuous record of one receiver); else
 ##   `gkUnknown` (equal times, the keys cannot tell). Time is not part of
 ##   the source identity: a shot whose traces carry different timestamps is
 ##   still one source;

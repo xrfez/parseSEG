@@ -145,7 +145,9 @@ Things worth knowing for the overview:
 gives each trace its own source line, point, coordinates and time. `gathers` reports
 `gkReceiver` when the record has one receiver and more than one source station, and also
 when one receiver recorded repeated shots at one source point (more than one trace, the
-components do not account for them, and the times differ). Equal times stay `gkUnknown`.
+components do not account for them, and the times differ): also a continuous record of one
+receiver. A SEG-Y file of that shape (sorting 0) is a receiver gather too. Equal times stay
+`gkUnknown`.
 Time is not part of the source identity: a shot whose traces carry different timestamps
 is still one source. A record
 of only auxiliary traces (a vibrator pilot for several sweeps) is a receiver gather the

@@ -471,7 +471,8 @@ vibrator pilot recorded for several sweeps: pass `sctSourceRefPilot`, `sctSource
 another auxiliary channel type, and `tsAuxiliary`. The reader reports `gkReceiver` when a
 record has one receiver and more than one distinct source station (line, point, index and
 coordinates), and when one receiver recorded repeated shots at one source point whose times
-differ. Equal times stay unknown. Time is not folded into the source identity.
+differ: also a continuous record of one receiver. A SEG-Y file of that shape (sorting 0) is a
+receiver gather too. Equal times stay unknown. Time is not folded into the source identity.
 
 ```nim
 import parseSEG

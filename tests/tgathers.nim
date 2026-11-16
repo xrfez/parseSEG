@@ -7,7 +7,7 @@ import std/[assertions, os, math, sets, random, sequtils]
 import parseSEG/io/diskio
 import parseSEG/segy/[reader as segyreader, writer as segywriter, fields]
 import parseSEG/segd/[reader as segdreader, writer as segdwriter]
-import parseSEG/model/[traceindex, gathers]
+import parseSEG/model/[traceindex, gathers, writefile]
 import ./utils/testutils
 
 let tmp = scratchDir("parseseg_tgathers")
@@ -204,6 +204,48 @@ block repeated_shots_one_point:
   doAssert segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 1, rx = 5, comp = 13),
     key(1, sx = 1, rx = 5, comp = 14)]).gathers.kinds == @[gkShot]
   doAssert segyIndex(0, [key(1, sx = 1, rx = 5)]).gathers.kinds == @[gkShot]
+
+block continuous_one_receiver_record:
+  # Shot-gather mode (receiverGather false): one receiver, one source, four
+  # traces, component 1, times 1 s apart. Also a continuous record of one
+  # receiver: gkReceiver. The SEG-Y shape (sorting 0) is the same.
+  # Seen to fail first: the times-differ branch of classify removed (kind
+  # was gkUnknown).
+  proc cont(i: int): TraceKeys =
+    result = initTraceKeys()
+    result.record = 1
+    result.channel = float64(i + 1)
+    result.intervalUs = 1000
+    result.time = 1_700_000_000.0 + float64(i)
+    result.srcLine = 10
+    result.srcPoint = 20
+    result.srcIndex = 1
+    result.srcX = 5000
+    result.srcY = 6000
+    result.rcvLine = 500
+    result.rcvPoint = 12
+    result.rcvIndex = 1
+    result.rcvX = 1000
+    result.rcvY = 2000
+    result.status = tsLive
+    result.component = 1
+    result.sensorType = 1
+  var ks: seq[TraceKeys]
+  for i in 0 .. 3: ks.add cont(i)
+  let shape = segyIndex(0, ks).gathers
+  doAssert shape.len == 1 and shape[0].kind == gkReceiver
+  doAssert shape[0].sources == 1 and shape[0].receivers == 1
+  let path = tmp / "continuous.sgd"
+  var w = openSeismicWriter(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 2,
+    time: 1_700_000_000.0))
+  for i in 0 .. 3: w.writeTrace(ks[i], @[float32(i), float32(i + 1)])
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  let g = f.gathers
+  doAssert g.len == 1 and g[0].kind == gkReceiver, $g[0].kind
+  doAssert g[0].sources == 1 and g[0].receivers == 1
+  doAssert f.len == 4
+  f.close()
 
 block component_groups_and_single_stations:
   # One station, one source: three components make a shot, three copies of

@@ -97,8 +97,9 @@ Sorting is a selection: a sort produces a list of trace indices, and no data is 
 `gathers(f or index)`: a split into `Gather` (`kind`, a `GatherKind`: shot, receiver, cmp, offset, other or
 unknown; `traces`; `sources`; `receivers`), derived from the geometry, never assumed. One receiver
 and at most one source is a shot when it is one trace or one trace per component; repeated shots
-at that one point (times differ, components do not account for the traces) are a receiver gather.
-Equal times stay unknown. Time is not part of the source identity.
+at that one point (times differ, components do not account for the traces) are a receiver gather,
+also a continuous record of one receiver. The same shape in SEG-Y (sorting 0) is a receiver
+gather too. Equal times stay unknown. Time is not part of the source identity.
 `classify(index, range)`. `componentGroups(f or index, traces)` returns a `ComponentGroup`
 (station, traces, components) per station and source; see `isMultiComponent`.
 `componentGroupIds(f, traces)` labels each trace with its group (-1 for none).
