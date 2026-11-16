@@ -65,7 +65,7 @@
 ## and writes nothing. Caller errors (a trace out of range, another
 ## standard, a closed file, a broken SEG-D record rule) raise `ValueError`.
 
-import std/[math, options, os, sets]
+import std/[math, options, os, sets, times]
 import ../common/[diagnostics, endians, outputfile, seismickind]
 import ../io/[records, diskio]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
@@ -183,6 +183,10 @@ type
       ## CRS text written in 0x55 blocks, as the reader concatenates them (a
       ## Location Data stanza or P1/11 records). Empty: a P1/11 fragment
       ## naming `units`, or none when `units` is unknown.
+    time*: float64 = NaN
+      ## Fallback recording time, UTC POSIX seconds, for a record whose first
+      ## trace has no `keys.time`. NaN (the default) means not set. The writer
+      ## never invents a time.
 
   SegdKeyTrace = object
     keys: TraceKeys
@@ -191,6 +195,7 @@ type
     overrides: seq[HeaderOverride]
     t0Us: int32
     channel: int ## The trace number in its channel set (assigned when kept).
+    recorded: float64 ## This trace's time, or the record's when the trace has none.
 
   SegdSetChannels = object
     ## The trace numbers a record's channel set has taken.
@@ -239,6 +244,7 @@ type
     segdOpts: SegdOutputOptions
     segdHaveRec: bool     ## A record from keys is in progress (buffered).
     segdRecNo: int64
+    segdRecTime: float64 ## UTC POSIX seconds of the buffered record; NaN if none.
     segdPending: seq[SegdKeyTrace]
     segdSource: SegdSourceFix
     segdSetT0: seq[SegdSetT0]
@@ -469,6 +475,8 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
     result.s.discardOutput()
     raise
 
+proc checkRecordingTime(t: float64, what: string)
+
 proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
   ## A writer of a new SEG-D Rev 3 file at `path`, for traces built from
   ## `TraceKeys` (`writeTrace(w, keys, samples)`), grouped into records by
@@ -478,9 +486,10 @@ proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
   ## than 3.0 or 3.1, a format that revision lacks, a sample interval that
   ## is not a whole number of microseconds from 1 to 2^32-1, a sample count
   ## below 1, a window (count less one, times the interval) longer than
-  ## 2^32-1 µs, format 8015 with a count that is not a multiple of 4, or
-  ## coordinate units other than metres, feet or unknown; `IOError` when
-  ## the output cannot be created.
+  ## 2^32-1 µs, format 8015 with a count that is not a multiple of 4,
+  ## coordinate units other than metres, feet or unknown, or a `time` that
+  ## is set but not a finite UTC time in 1950-2049; `IOError` when the
+  ## output cannot be created.
   let rev = opts.revision
   if rev.major != 3 or rev.minor > 1:
     refuse("SEG-D Rev " & $rev & " cannot be written from keys (3.0 or 3.1)")
@@ -500,10 +509,11 @@ proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
     refuse("SEG-D format 8015 holds samples in groups of 4; numSamples is " & $opts.numSamples)
   if opts.units notin {cuUnknown, cuMeters, cuFeet}:
     refuse("SEG-D coordinates are in metres or feet, not " & $opts.units)
+  if not opts.time.isNaN: checkRecordingTime(opts.time, "SegdOutputOptions.time")
   var fixed = opts
   fixed.sampleIntervalUs = dt
   result = SeismicWriter(s: WriterState(kind: skSegd, path: path, tmp: createTempFor(path),
-    open: true, segdFresh: true, segdOpts: fixed))
+    open: true, segdFresh: true, segdOpts: fixed, segdRecTime: NaN))
   try:
     result.s.sink = openDiskSink(result.s.tmp)
     result.s.segd = openSegdWriter(result.s.sink, SegdWriteOptions())
@@ -852,6 +862,30 @@ proc positionBlock(x, y, z: float64, valid: bool, stanza: uint16): SegdPositionB
     blockType1: BlockTypePosition1, blockType2: BlockTypePosition2,
     blockType3: BlockTypePosition3)
 
+const
+  SegdTimeMin = -631152000.0 ## 1950-01-01T00:00:00 UTC: the earliest GH#1 year.
+  SegdTimeMax = 2524608000.0 ## 2050-01-01T00:00:00 UTC: past the latest GH#1 year.
+  BlockTypeTimestamp = 0x42'u8 ## Timestamp header: time of the trace's data.
+
+proc checkRecordingTime(t: float64, what: string) =
+  # General Header #1 holds a two-digit year read as 1950-2049. A time outside
+  # that, or one that is not finite, cannot be written.
+  if t.isNaN or t == Inf or t == -Inf:
+    refuse(what & " is not a finite recording time (" & $t & ")")
+  if t < SegdTimeMin or t >= SegdTimeMax:
+    refuse(what & " does not fit a SEG-D General Header #1 year (1950-2049), not " & $t)
+
+proc recordingTime(k: TraceKeys, opts: SegdOutputOptions, recNo: int64): float64 =
+  # The record's time: the first trace's keys, else the option. Never invented.
+  if not k.time.isNaN:
+    checkRecordingTime(k.time, "keys.time")
+    return k.time
+  if not opts.time.isNaN:
+    checkRecordingTime(opts.time, "SegdOutputOptions.time")
+    return opts.time
+  refuse("SEG-D record " & $recNo & " has no recording time: set keys.time or " &
+    "SegdOutputOptions.time")
+
 proc fileNumberOf(k: TraceKeys): int64 =
   let r = k.record
   if r.isNaN or r < 0 or r > float64(SegdExtNumMax) or r != round(r):
@@ -1008,7 +1042,7 @@ proc flushSegdKeys(s: var WriterState) =
   var traces = newSeq[SegdTrace](s.segdPending.len)
   for i, p in s.segdPending:
     let si = setOf[i]
-    let exts = 1 + (if setPos[si]: 3 else: 0)
+    let exts = 1 + (if setPos[si]: 3 else: 0) + 1 # THE#1, optional position, timestamp
     let ch = p.channel
     var t = SegdTrace(layout: slRev3, index: i, numSamples: opts.numSamples)
     var hdr = SegdTraceHeader(scanTypeNumber: 1, traceHeaderExtensions: uint8(exts),
@@ -1040,11 +1074,17 @@ proc flushSegdKeys(s: var WriterState) =
       e.setReceiverStation(p.keys.rcvLine, p.keys.rcvPoint)
       e.receiverPointIndex = int8(p.keys.rcvIndex)
     t.ext1Rev3 = some(e)
+    var extBytes = newSeq[byte]()
     if setPos[si]:
       let k = p.keys
       let pos = if k.hasReceiverXY: positionBlock(k.rcvX, k.rcvY, k.rcvZ, true, stanza)
         else: positionBlock(0, 0, NaN, false, 0)
-      t.extensions = @(pos.encoded)
+      extBytes.add pos.encoded
+    # The reader takes a trace's time from this block when it is present,
+    # ahead of General Header #3.
+    extBytes.add SegdTimestampHeader(timeZeroOfData: unixToTimestamp(p.recorded),
+      blockType: BlockTypeTimestamp).encoded
+    t.extensions = extBytes
     t.samples = p.samples
     t.overrideSegd(p.overrides)
     traces[i] = t
@@ -1063,7 +1103,12 @@ proc flushSegdKeys(s: var WriterState) =
     rec.generalBlocks.add @(positionBlock(src.x, src.y, src.z, true, stanza).encoded)
   let nOpt = rec.generalBlocks.len div SegdBlockSize
   let additional = 2 + nOpt
+  let recTime = s.segdRecTime
+  doAssert not recTime.isNaN, "a SEG-D record was buffered without a recording time"
+  let civil = fromUnix(int64(floor(recTime))).utc
   var gh1 = SegdGeneralHeader1(formatCode: ord(fmt), recordType: 8, recordLength: BcdAllF,
+    year: civil.year mod 100, julianDay: civil.yearday + 1, hour: civil.hour,
+    minute: civil.minute, second: civil.second,
     scanTypesPerRecord: 1, skewBlocks: 0, extendedHeaderBlocks: 0, externalHeaderBlocks: 0)
   var fileSmall = 0
   var fileExt = 0'u32
@@ -1093,7 +1138,8 @@ proc flushSegdKeys(s: var WriterState) =
     gh2.dominantSamplingInterval = uint32(opts.sampleIntervalUs)
   gh2.extRecordLength = uint32(span) # in range: openSeismicWriter refuses a longer window
   rec.gh2Rev3 = gh2
-  rec.gh3 = SegdGeneralHeader3(blockType: BlockTypeGeneralHeader3)
+  rec.gh3 = SegdGeneralHeader3(timeZero: unixToTimestamp(recTime),
+    blockType: BlockTypeGeneralHeader3)
   var descs: seq[SegdChannelSetDescriptorRev3] = @[]
   for j, ct in setType:
     let endUs = float64(setT0[j]) + span
@@ -1101,7 +1147,7 @@ proc flushSegdKeys(s: var WriterState) =
       channelType: uint8(ord(ct)), startTime: setT0[j], numSamples: uint32(opts.numSamples),
       descaleMultiplier: 1.0, channelsInSet: uint32(setCount[j]),
       samplingInterval: uint32(opts.sampleIntervalUs), arrayForming: 1,
-      traceHeaderExtensions: uint8(1 + (if setPos[j]: 3 else: 0)), verticalStack: 1,
+      traceHeaderExtensions: uint8(1 + (if setPos[j]: 3 else: 0) + 1), verticalStack: 1,
       blockType1: BlockTypeChannelSet1, blockType2: BlockTypeChannelSet2,
       blockType3: BlockTypeChannelSet3)
     for i in 0 ..< d.description.len: d.description[i] = ' '
@@ -1119,6 +1165,7 @@ proc flushSegdKeys(s: var WriterState) =
     raise
   s.segdPending.setLen 0
   s.segdHaveRec = false
+  s.segdRecTime = NaN
   s.segdSource = SegdSourceFix()
   s.segdSetT0.setLen 0
   s.segdChannels.setLen 0
@@ -1158,6 +1205,11 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
     refuse("receiver point index " & $k.rcvIndex & " does not fit a SEG-D Rev 3 int8")
   if hasSrc and (k.srcIndex < 0 or k.srcIndex > 255):
     refuse("source point index " & $k.srcIndex & " does not fit a SEG-D Rev 3 byte")
+  if not s.segdHaveRec:
+    s.segdRecTime = recordingTime(k, s.segdOpts, recNo)
+  elif not k.time.isNaN:
+    checkRecordingTime(k.time, "keys.time")
+  let recorded = if k.time.isNaN: s.segdRecTime else: k.time
   s.noteSource(k, hasSrc, k.hasSourceXY)
   s.noteSetT0(channelType, t0)
   # A bad override fails here, before the trace joins the record.
@@ -1171,7 +1223,7 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
     inc s.segdNoZ
   s.noteChannel(channelType, num)
   s.segdPending.add SegdKeyTrace(keys: k, channelType: channelType, samples: raw,
-    overrides: ov, t0Us: t0, channel: num)
+    overrides: ov, t0Us: t0, channel: num, recorded: recorded)
   s.segdHaveRec = true
   s.segdRecNo = recNo
 
@@ -1423,7 +1475,15 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## channel, so `tsUnknown` reads back `tsLive`. An auxiliary channel type
   ## reads back as `tsAuxiliary` (including `tsUnknown`, and `tsAuxiliary`
   ## itself), so `tsLive` or `tsDead` with one is refused, as is
-  ## `tsAuxiliary` with seismic or EM. Metres or feet are
+  ## `tsAuxiliary` with seismic or EM. The record's time is the first
+  ## trace's `keys.time` when that is set, otherwise `SegdOutputOptions.time`;
+  ## with neither, the record is refused (the message names both). It is
+  ## written in General Header #1 (year, julian day and time, to 1 s) and in
+  ## General Header #3's timestamp. The reader takes a trace's time from its
+  ## Timestamp block (0x42) when that trace has one, else from General Header
+  ## #3, so a trace's own `keys.time` is written there and reads back; a trace
+  ## without one reads back the record's time. Traces of one record may
+  ## differ. The writer never invents a time. Metres or feet are
   ## written as a P1/11 axis record when `crsText` is empty, which
   ## `summary.coordinateUnits` reads; a caller-supplied `crsText` is written
   ## in 0x55 blocks as given. Raises `ValueError` for a closed writer, a
@@ -1433,7 +1493,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## record, a station with only a line or only a point, a channel number
   ## used twice in its channel set, a window whose end does not fit the
   ## set's end time, an infinite coordinate or elevation, coordinates with
-  ## units unknown and no `crsText`, or a bad override (nothing of that
+  ## units unknown and no `crsText`, a record with no recording time, a
+  ## recording time outside 1950-2049, or a bad override (nothing of that
   ## trace is written then); `SegFormatError` for a value
   ## the format cannot hold; `IOError` on a write failure, which discards
   ## the output and closes the writer.

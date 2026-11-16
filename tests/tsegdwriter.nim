@@ -11,6 +11,8 @@
 ## - depth_index_unset_is_one: depth index left 0 (reads back 0, not 1)
 ## - unknown_status_is_live: tsUnknown stored as trace edit 1 (reads back
 ##   tsDead on a seismic channel, not tsLive)
+## - record_time: recording time not written (reads back NaN, and a record
+##   with neither keys.time nor SegdOutputOptions.time was accepted)
 
 import std/[assertions, math, os, strutils]
 import parseSEG
@@ -28,8 +30,14 @@ template expect(part: string, body: untyped) =
   except ValueError as e:
     doAssert e.msg.find(part) >= 0, e.msg
 
-proc opts(n: int, dt = 1000.0, units = cuMeters, crs = ""): SegdOutputOptions =
-  SegdOutputOptions(sampleIntervalUs: dt, numSamples: n, units: units, crsText: crs)
+const
+  # 2024-03-01 06:07:08 UTC. 2024 is a leap year, so 1 March is julian day 61
+  # (60 in a non-leap year). Year byte 0x24, julian-day bytes 0x00/0x61.
+  ShotTime = 1_709_273_228.0
+
+proc opts(n: int, dt = 1000.0, units = cuMeters, crs = "", time = ShotTime): SegdOutputOptions =
+  SegdOutputOptions(sampleIntervalUs: dt, numSamples: n, units: units, crsText: crs,
+    time: time)
 
 proc shot(record, channel: float64, seismic: bool): TraceKeys =
   result = initTraceKeys()
@@ -520,3 +528,60 @@ block unknown_status_is_live:
   doAssert f.traceField(3, "trace.traceEdit").toFloat == 1
   doAssert f.traceKeys(4).status == tsAuxiliary
   f.close()
+
+block record_time:
+  # 2024-03-01 06:07:08 UTC, picked by hand: year 24, julian day 61 (a leap
+  # year, so the day after February is 61, not 60), hour 6, minute 7, second 8.
+  # Without the write, keys.time read back NaN and General Header #1's day was 0.
+  let path = tmp / "time_keys.sgd"
+  var w = openOut(path, opts(1, time = NaN))
+  var k = shot(5, 1, true)
+  k.time = ShotTime
+  w.writeTrace(k, samples(1, 1))
+  var later = shot(5, 2, true)
+  later.time = NaN # no time of its own: the record's time
+  w.writeTrace(later, samples(1, 2))
+  var own = shot(5, 3, true)
+  own.time = ShotTime + 3600 # one hour later, stored per trace
+  w.writeTrace(own, samples(1, 3))
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.traceKeys(0).time == ShotTime
+  doAssert f.traceKeys(1).time == ShotTime
+  doAssert f.traceKeys(2).time == ShotTime + 3600
+  let gh1 = f.index.segdRecords[0].gh1
+  doAssert gh1.year == 24 and gh1.julianDay == 61
+  doAssert gh1.hour == 6 and gh1.minute == 7 and gh1.second == 8
+  doAssert gh1.raw[10] == 0x24
+  doAssert (gh1.raw[11] and 0x0F) == 0 and gh1.raw[12] == 0x61
+  doAssert gh1.raw[13] == 0x06 and gh1.raw[14] == 0x07 and gh1.raw[15] == 0x08
+  doAssert f.index.segdRecords[0].gh3.timeZero == unixToTimestamp(ShotTime)
+  f.close()
+
+  let optPath = tmp / "time_opt.sgd"
+  var o = openOut(optPath, opts(1, time = ShotTime))
+  var bare = shot(2, 1, true)
+  doAssert bare.time.isNaN
+  o.writeTrace(bare, samples(1, 1))
+  discard o.close()
+  var g = openSeismic(optPath, keys = true)
+  doAssert g.traceKeys(0).time == ShotTime
+  doAssert g.index.segdRecords[0].gh1.year == 24
+  doAssert g.index.segdRecords[0].gh1.julianDay == 61
+  g.close()
+
+  let nonePath = tmp / "time_none.sgd"
+  var n = openOut(nonePath, opts(1, time = NaN))
+  try:
+    n.writeTrace(shot(3, 1, true), samples(1, 1))
+    doAssert false, "expected a refusal"
+  except ValueError as e:
+    doAssert e.msg.find("keys.time") >= 0, e.msg
+    doAssert e.msg.find("SegdOutputOptions.time") >= 0, e.msg
+  var given = shot(3, 1, true)
+  given.time = ShotTime
+  n.writeTrace(given, samples(1, 1))
+  discard n.close()
+  var h = openSeismic(nonePath, keys = true)
+  doAssert h.traceKeys(0).time == ShotTime
+  h.close()

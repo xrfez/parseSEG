@@ -424,8 +424,12 @@ by `keys.record`, one channel set per channel type, in the order written. `Trace
 channel-type field, so pass one (`sctSeismic` when omitted; `sctTimeBreak`, `sctUpHole`,
 `sctSourceRefPilot`, `sctSourceRefSweep` and the other Rev 3 codes the reader knows). A record
 is held until the next record number or `close`, then written whole; record numbers must not
-go backwards. Metres or feet are written as a P1/11 axis record when no CRS text is given,
-which `summary.coordinateUnits` reads.
+go backwards. A record's time is its first trace's `keys.time`, or `SegdOutputOptions.time`
+when that trace has none; a record with neither is refused (the writer does not invent a
+time). The time is written in General Header #1 and General Header #3. A trace with its own
+time also gets a Timestamp block, which reads back as that trace's time; a trace without one
+reads back the record's time. Metres or feet are written as a P1/11 axis record when no CRS
+text is given, which `summary.coordinateUnits` reads.
 
 ```nim
 import parseSEG
@@ -438,7 +442,7 @@ let types = [sctTimeBreak, sctSourceRefPilot, sctUpHole, sctSeismic, sctSeismic]
 var row = newSeq[float32](n)
 var y = openSeismicWriter("one_shot.sgy", SegyOutputOptions())
 var d = openSeismicWriter("one_shot.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
-  numSamples: n))
+  numSamples: n, time: 1_478_000_000.0))
 for i in 0 ..< f.len:
   let k = f.traceKeys(i)
   for j in 0 ..< n: row[j] = x[i, j]
