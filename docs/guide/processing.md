@@ -446,6 +446,24 @@ disagree; the descriptor then carries the largest extension count. NaN or an inf
 refused, and so is rotating to north without marking the rotation applied. Read it back
 with `traceOrientation` ([the viewer guide](viewer.md#geometry-time-and-annotation)).
 
+Set `receiverGather = true` to write a receiver gather: one record is one receiver, and the
+traces are the shots that receiver recorded. The option is explicit (the default is false, a
+shot gather, byte-identical to 0.14.0, and a second source in a shot record is still refused).
+The receiver's line, point, index and coordinates must agree within the record; a trace that
+differs is refused, and the message names that trace's channel. Each trace's source line,
+point and index go in a Source Description block (0x1F) in that trace's header extensions,
+which is where the reader, and other software, take a per-trace source (the general header
+holds one source for the whole record, so it cannot). A Position block follows the
+description for that shot's coordinates. When the shot's time is not the record's time zero,
+Additional Source Info follows the description, as the standard requires; the trace's own
+time is also in its Timestamp block, which is what `traceKeys` reads back. The file keeps
+write order. Sort by source line then source point before writing (one system sorts by shot
+time); the writer does not sort. A record of only auxiliary traces is allowed, for example a
+vibrator pilot recorded for several sweeps: pass `sctSourceRefPilot`, `sctSourceRefSweep` or
+another auxiliary channel type, and `tsAuxiliary`. The reader reports `gkReceiver` when a
+record has one receiver and more than one distinct source station (line, point, index and
+coordinates). Time alone does not split sources.
+
 ```nim
 import parseSEG
 
@@ -492,6 +510,48 @@ discard w.close()
 var f = openSeismic("oriented.sgd")
 doAssert f.traceOrientation(0).get.rotationY == 0.25'f32
 doAssert f.traceOrientation(0).get.orientationType == 4
+f.close()
+```
+
+```nim
+import parseSEG
+
+proc shot(record, channel, srcPoint: float64, auxiliary: bool): TraceKeys =
+  result = initTraceKeys()
+  result.record = record
+  result.channel = channel
+  result.intervalUs = 1000
+  result.time = 1_709_273_228.0 + channel * 60
+  result.rcvLine = 500
+  result.rcvPoint = 12
+  result.rcvIndex = 1
+  result.rcvX = 1000
+  result.rcvY = 2000
+  result.status = if auxiliary: tsAuxiliary else: tsLive
+  result.component = 1
+  result.sensorType = 1
+  result.srcLine = 10
+  result.srcPoint = srcPoint
+  result.srcIndex = 1
+  result.srcX = 5000 + srcPoint
+  result.srcY = 6000
+
+var w = openSeismicWriter("receiver_gather.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
+  numSamples: 2, time: 1_709_273_228.0, receiverGather: true))
+# Write order is kept. Sort by source line then point first if that is the display order.
+w.writeTrace(shot(1, 1, 20, false), @[1'f32, 2])
+w.writeTrace(shot(1, 2, 10, false), @[3'f32, 4])
+w.writeTrace(shot(2, 1, 5, true), @[5'f32, 6], channelType = sctSourceRefPilot)
+w.writeTrace(shot(2, 2, 15, true), @[7'f32, 8], channelType = sctSourceRefSweep)
+discard w.close()
+var f = openSeismic("receiver_gather.sgd", keys = true)
+doAssert f.gathers.len == 2
+doAssert f.gathers[0].kind == gkReceiver and f.gathers[1].kind == gkReceiver
+doAssert f.traceKeys(0).srcPoint == 20 and f.traceKeys(1).srcPoint == 10
+doAssert f.traceKeys(0).rcvLine == f.traceKeys(1).rcvLine
+doAssert f.traceKeys(1).time == 1_709_273_228.0 + 120
+doAssert f.traceEntry(2).channelType == uint8(ord(sctSourceRefPilot))
+doAssert f.traceKeys(2).status == tsAuxiliary
 f.close()
 ```
 

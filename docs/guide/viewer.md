@@ -138,6 +138,14 @@ Things worth knowing for the overview:
 - Gather kinds are derived from the keys. A post-stack SEG-Y volume has no source or
   receiver to group by: in `survey.sgy`, whose traces carry CDP numbers, each trace is a
   one-trace `gkCmp` gather; a volume without them is one gather of kind `gkUnknown`.
+- A receiver-gather SEG-D file is one record per receiver. The traces are the shots that
+  receiver recorded, in file order, so display them side by side in that order. Callers
+  usually sort by source line then source point before writing; one system sorts by shot
+  time. This library's writer does not sort ([processing.md](processing.md)). `traceKeys`
+  gives each trace its own source line, point, coordinates and time. `gathers` reports
+  `gkReceiver` when the record has one receiver and more than one source station. A record
+  of only auxiliary traces (a vibrator pilot for several sweeps) is a receiver gather the
+  same way, when those traces are distinct sources.
 
 ### Gathers and multi-component stations
 
