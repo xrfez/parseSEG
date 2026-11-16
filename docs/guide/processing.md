@@ -430,6 +430,13 @@ time). The time is written in General Header #1 and General Header #3. A trace w
 time also gets a Timestamp block, which reads back as that trace's time; a trace without one
 reads back the record's time. Metres or feet are written as a P1/11 axis record when no CRS
 text is given, which `summary.coordinateUnits` reads.
+An unset depth index (0) is written, and reads back, as 1, because the standard forbids 0. A trace
+with `status` `tsUnknown` is written as a live trace and reads back `tsLive` on a seismic or EM
+channel; on an auxiliary channel type it reads back `tsAuxiliary`. A channel number that is given
+twice in one channel set is refused; NaN assigns the lowest number the set has not used. A window
+whose end does not fit the channel set's end time is refused, and so is a window longer than
+2^32 - 1 µs (refused when the writer opens). An infinite coordinate or elevation is refused, and so
+are coordinates with units unknown and no `crsText`. A recording time outside 1950-2049 is refused.
 
 ```nim
 import parseSEG
