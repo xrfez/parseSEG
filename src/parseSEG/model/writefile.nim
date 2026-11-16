@@ -476,7 +476,8 @@ proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
   ## `close`, then written whole. Raises `ValueError` for a revision other
   ## than 3.0 or 3.1, a format that revision lacks, a sample interval that
   ## is not a whole number of microseconds from 1 to 2^32-1, a sample count
-  ## below 1, format 8015 with a count that is not a multiple of 4, or
+  ## below 1, a window (count less one, times the interval) longer than
+  ## 2^32-1 µs, format 8015 with a count that is not a multiple of 4, or
   ## coordinate units other than metres, feet or unknown; `IOError` when
   ## the output cannot be created.
   let rev = opts.revision
@@ -490,6 +491,10 @@ proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
       "from 1 to " & $high(uint32) & ", not " & $opts.sampleIntervalUs)
   if opts.numSamples <= 0 or opts.numSamples > int(high(uint32)):
     refuse("SegdOutputOptions.numSamples must be at least 1, not " & $opts.numSamples)
+  let window = dt * float64(opts.numSamples - 1)
+  if window > float64(high(uint32)):
+    refuse("a window of " & $opts.numSamples & " samples at " & $dt & " µs is " & $window &
+      " µs, longer than a SEG-D Rev 3 channel set can hold (" & $high(uint32) & " µs)")
   if opts.format == sd8015 and opts.numSamples mod 4 != 0:
     refuse("SEG-D format 8015 holds samples in groups of 4; numSamples is " & $opts.numSamples)
   if opts.units notin {cuUnknown, cuMeters, cuFeet}:
@@ -1065,7 +1070,7 @@ proc flushSegdKeys(s: var WriterState) =
   if nCS > 99: gh2.extChannelSetsPerScanType = uint16(nCS)
   if gh1.baseScanInterval16 == 0xFF:
     gh2.dominantSamplingInterval = uint32(opts.sampleIntervalUs)
-  if span <= float64(high(uint32)): gh2.extRecordLength = uint32(span)
+  gh2.extRecordLength = uint32(span) # in range: openSeismicWriter refuses a longer window
   rec.gh2Rev3 = gh2
   rec.gh3 = SegdGeneralHeader3(blockType: BlockTypeGeneralHeader3)
   var descs: seq[SegdChannelSetDescriptorRev3] = @[]
@@ -1078,8 +1083,7 @@ proc flushSegdKeys(s: var WriterState) =
       traceHeaderExtensions: uint8(1 + (if setPos[j]: 3 else: 0)), verticalStack: 1,
       blockType1: BlockTypeChannelSet1, blockType2: BlockTypeChannelSet2,
       blockType3: BlockTypeChannelSet3)
-    if endUs >= float64(low(int32)) and endUs <= float64(high(int32)):
-      d.endTime = int32(endUs)
+    d.endTime = int32(endUs) # in range: writeSegdKeys refuses a window past it
     descs.add d
   rec.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: descs)]
   computeRev3Sizes(rec, traces)
@@ -1116,6 +1120,10 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   let ch = channelOf(k)
   let num = s.chNumber(channelType, ch)
   let t0 = t0Of(k)
+  let dt = s.segdOpts.sampleIntervalUs
+  if float64(t0) + dt * float64(n - 1) > float64(high(int32)):
+    refuse("a window of " & $n & " samples at " & $dt & " µs from " & $(float64(t0) / 1000) &
+      " ms does not fit a SEG-D Rev 3 channel set end time")
   let hasRcv = checkStation(k.rcvLine, k.rcvPoint, "receiver")
   let hasSrc = checkStation(k.srcLine, k.srcPoint, "source")
   if hasRcv and (k.rcvIndex < -128 or k.rcvIndex > 127):

@@ -315,3 +315,35 @@ block channel_numbers_unique:
   var f = openSeismic(auto, keys = true)
   doAssert f.len == 2 and f.traceKeys(0).channel == 2 and f.traceKeys(1).channel == 1
   f.close()
+
+block window_fits_channel_set:
+  # A channel set's end time is int32 microseconds: start + (samples - 1) *
+  # interval. Without the refusal, 2.2 million samples at 1000 µs (a window
+  # of 2 200 s) wrote an end time of 0 while the samples were written.
+  let path = tmp / "window.sgd"
+  var w = openOut(path, opts(2_200_000))
+  expect("does not fit"):
+    w.writeTrace(shot(1, 1, true), samples(2_200_000, 1))
+  expect("no traces"):
+    discard w.close() # nothing was written: the output is discarded
+  doAssert not fileExists(path)
+  # The start time may be negative, and the end time must still fit.
+  var late = shot(2, 1, true)
+  late.t0Ms = 2_147_483 # 2 147 483 000 µs: the start fits, the end does not
+  var v = openOut(tmp / "late.sgd", opts(3))
+  expect("does not fit"):
+    v.writeTrace(late, samples(3, 1))
+  expect("no traces"):
+    discard v.close()
+  late.t0Ms = 2_147_482 # ends at 2 147 483 000 µs
+  var u = openOut(tmp / "end.sgd", opts(2))
+  u.writeTrace(late, samples(2, 1))
+  discard u.close()
+  var f = openSeismic(tmp / "end.sgd", keys = true)
+  doAssert f.channelSets[0].endTimeMs == 2_147_483.0
+  f.close()
+  # A window longer than the field's 2^32 - 1 µs is refused when the writer opens.
+  expect("longer than"):
+    discard openOut(tmp / "huge.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
+      numSamples: 5_000_000))
+  doAssert not fileExists(tmp / "huge.sgd")
