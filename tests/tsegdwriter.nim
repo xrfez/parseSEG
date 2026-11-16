@@ -609,3 +609,31 @@ block gh1_time_rounds_to_microsecond:
   doAssert f.traceKeys(1).time == 1_709_273_228.4 or
     abs(f.traceKeys(1).time - 1_709_273_228.4) < 1e-6
   f.close()
+
+block nan_t0_is_written_as_zero:
+  # docs/api.md: "A NaN `t0Ms` reads back 0". The writer's t0Of maps NaN to 0.
+  let path = tmp / "nan_t0.sgd"
+  var w = openOut(path, opts(2))
+  var k = shot(1, 1, true)
+  doAssert k.t0Ms.isNaN
+  w.writeTrace(k, samples(2, 1))
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.traceKeys(0).t0Ms == 0
+  f.close()
+
+block sensor_type_with_component_zero:
+  # docs/api.md: "`component` 0 reads back as the `sensorType` value (sensor 5
+  # with component 0 reads back as 5)". Both sensorType and component read 5.
+  let path = tmp / "sensor5.sgd"
+  var w = openOut(path, opts(2))
+  var k = shot(1, 1, true)
+  k.sensorType = 5
+  k.component = 0
+  w.writeTrace(k, samples(2, 1))
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  let g = f.traceKeys(0)
+  doAssert g.sensorType == 5
+  doAssert g.component == 5
+  f.close()
