@@ -118,8 +118,9 @@ block shot_stays:
 
 block round_trip:
   # Written out of source-point order, so a sort in the writer would show.
-  # Record 4: seismic shots, one with no source of its own, one dead, one
-  # oriented. Record 8: auxiliary only (pilots, a sweep, time break, uphole).
+  # Record 4: seismic shots, one with no source of its own, one dead, every
+  # trace of the set oriented. Record 8: auxiliary only (pilots, a sweep,
+  # time break, uphole).
   let path = tmp / "nodes.sgd"
   var w = openSeismicWriter(path, rgOpts(4))
   var keys: seq[TraceKeys]
@@ -149,7 +150,7 @@ block round_trip:
   for i, k in [shots[0], shots[1], shots[2], noneSrc]:
     var row = newSeq[float32](4)
     for j in 0 ..< 4: row[j] = float32(i + 1) + float32(j) * 0.25'f32
-    keep(k, row, seis[i], if i == 0: att else: none(TraceOrientation))
+    keep(k, row, seis[i], att)
   # Six vibrator pilots, plus a sweep, a time break and an uphole: one
   # receiver, each trace its own shot, no seismic trace in the record.
   let auxTypes = [sctSourceRefPilot, sctSourceRefPilot, sctSourceRefPilot,

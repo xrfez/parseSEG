@@ -915,7 +915,8 @@ const
 func segdExtCount(hasPos, hasOrient, hasSrc, hasSrcInfo, hasSrcPos: bool): int {.inline.} =
   # THE#1, optional receiver Position (3), optional Source Description,
   # optional Additional Source Info, optional source Position (3), Timestamp,
-  # optional Orientation. A shot gather passes the source flags false.
+  # optional Orientation. The flags are the channel set's skeleton, so every
+  # trace of the set has this count. A shot gather passes the source flags false.
   1 + (if hasPos: 3 else: 0) + (if hasSrc: 1 else: 0) + (if hasSrcInfo: 1 else: 0) +
     (if hasSrcPos: 3 else: 0) + 1 + (if hasOrient: 1 else: 0)
 
@@ -1057,26 +1058,34 @@ proc noteReceiver(s: var WriterState, k: TraceKeys, hasSt, hasXY: bool, channel:
       " (" & $ct & ") has a different receiver")
 
 proc sourceExtBytes(k: TraceKeys, fileNo: int64, recorded, recTime: float64,
-    stanza: uint16): seq[byte] =
+    stanza: uint16, hasSrc, hasInfo, hasSrcPos: bool): seq[byte] =
   # This trace's source, in the order the reader and the standard use: a
-  # Source Description, Additional Source Info when the shot is not at record
-  # time zero, then the source Position. Empty when the trace names no source.
+  # Source Description, Additional Source Info, then the source Position.
+  # The flags are the channel set's skeleton, so every trace of the set
+  # carries the same blocks. A trace that does not name a source gets 0/0
+  # and an invalid position; time 0 means the shot is at record time zero.
   result = @[]
+  if not hasSrc and not hasInfo and not hasSrcPos: return
   let hasSt = knownStation(k.srcLine, k.srcPoint)
-  if not hasSt and not k.hasSourceXY: return
-  let sb = SegdSourceDescription(extFileNumber: uint32(fileNo),
-    sourceLineNumber: if hasSt: k.srcLine else: 0.0,
-    sourcePointNumber: if hasSt: k.srcPoint else: 0.0,
-    sourcePointIndex: if hasSt: uint8(k.srcIndex) else: 0'u8,
-    sourceSetNumber: 1, depthIndex: 1, blockType: 0x1F)
-  result.add sb.encoded
-  if not sameNum(recorded, recTime):
-    var info = SegdAdditionalSourceInfo(time: unixToTimestamp(recorded),
+  if hasSrc:
+    let sb = SegdSourceDescription(extFileNumber: uint32(fileNo),
+      sourceLineNumber: if hasSt: k.srcLine else: 0.0,
+      sourcePointNumber: if hasSt: k.srcPoint else: 0.0,
+      sourcePointIndex: if hasSt: uint8(k.srcIndex) else: 0'u8,
+      sourceSetNumber: 1, depthIndex: 1, blockType: 0x1F)
+    result.add sb.encoded
+  if hasInfo:
+    let atRecord = not (hasSt or k.hasSourceXY) or sameNum(recorded, recTime)
+    var info = SegdAdditionalSourceInfo(
+      time: if atRecord: 0'i64 else: unixToTimestamp(recorded),
       blockType: BlockTypeSourceInfo)
     for i in 0 ..< info.errorDescription.len: info.errorDescription[i] = ' '
     result.add info.encoded
-  if k.hasSourceXY:
-    result.add positionBlock(k.srcX, k.srcY, k.srcZ, true, stanza).encoded
+  if hasSrcPos:
+    if k.hasSourceXY:
+      result.add positionBlock(k.srcX, k.srcY, k.srcZ, true, stanza).encoded
+    else:
+      result.add positionBlock(0, 0, NaN, false, 0).encoded
 
 proc checkFinite(v: float64, what: string) =
   # NaN is an unknown coordinate; an infinite one reads back as no position.
@@ -1150,7 +1159,6 @@ proc flushSegdKeys(s: var WriterState) =
   var setCount: seq[int] = @[]
   var setT0: seq[int32] = @[]
   var setPos: seq[bool] = @[]
-  var setExt: seq[int] = @[]
   var setOf = newSeq[int](s.segdPending.len)
   for i, p in s.segdPending:
     var found = -1
@@ -1161,25 +1169,41 @@ proc flushSegdKeys(s: var WriterState) =
       setCount.add 0
       setT0.add p.t0Us
       setPos.add false
-      setExt.add 0
       found = setType.len - 1
     setOf[i] = found
     inc setCount[found]
     if p.keys.hasReceiverXY: setPos[found] = true
   let rg = opts.receiverGather
-  for i, p in s.segdPending:
-    let hasSrc = rg and (knownStation(p.keys.srcLine, p.keys.srcPoint) or p.keys.hasSourceXY)
-    let hasInfo = hasSrc and not sameNum(p.recorded, s.segdRecTime)
-    let n = segdExtCount(setPos[setOf[i]], p.orientation.isSome, hasSrc, hasInfo,
-      rg and p.keys.hasSourceXY)
-    if n > setExt[setOf[i]]: setExt[setOf[i]] = n
+  # One skeleton per channel set: Rev 3 requires every trace of a set to
+  # carry the same number of header extensions, equal to the descriptor.
+  var setSrc = newSeq[bool](setType.len)
+  var setInfo = newSeq[bool](setType.len)
+  var setSrcPos = newSeq[bool](setType.len)
+  var setOrient = newSeq[bool](setType.len)
+  for j, ct in setType:
+    var anyOrient = false
+    var missing = -1
+    for i, p in s.segdPending:
+      if setOf[i] != j: continue
+      if p.orientation.isSome: anyOrient = true
+      elif missing < 0: missing = i
+    if anyOrient and missing >= 0:
+      refuse("SEG-D channel set " & $ct &
+        ": give every trace of a channel set an orientation, or none; trace channel " &
+        $s.segdPending[missing].channel & " has none")
+    setOrient[j] = anyOrient
+    if not rg: continue
+    for i, p in s.segdPending:
+      if setOf[i] != j: continue
+      let bearing = knownStation(p.keys.srcLine, p.keys.srcPoint) or p.keys.hasSourceXY
+      if bearing: setSrc[j] = true
+      if p.keys.hasSourceXY: setSrcPos[j] = true
+      if bearing and not sameNum(p.recorded, s.segdRecTime): setInfo[j] = true
   var traces = newSeq[SegdTrace](s.segdPending.len)
   for i, p in s.segdPending:
     let si = setOf[i]
-    let hasSrc = rg and (knownStation(p.keys.srcLine, p.keys.srcPoint) or p.keys.hasSourceXY)
-    let hasInfo = hasSrc and not sameNum(p.recorded, s.segdRecTime)
-    let exts = segdExtCount(setPos[si], p.orientation.isSome, hasSrc, hasInfo,
-      rg and p.keys.hasSourceXY)
+    let exts = segdExtCount(setPos[si], setOrient[si], setSrc[si], setInfo[si],
+      setSrcPos[si])
     let ch = p.channel
     var t = SegdTrace(layout: slRev3, index: i, numSamples: opts.numSamples)
     var hdr = SegdTraceHeader(scanTypeNumber: 1, traceHeaderExtensions: uint8(exts),
@@ -1222,12 +1246,13 @@ proc flushSegdKeys(s: var WriterState) =
     # a trace's source from a Source Description in the extensions before the
     # general header, and a Position that follows it is that source's.
     if rg:
-      extBytes.add sourceExtBytes(p.keys, fileNo, p.recorded, s.segdRecTime, stanza)
+      extBytes.add sourceExtBytes(p.keys, fileNo, p.recorded, s.segdRecTime, stanza,
+        setSrc[si], setInfo[si], setSrcPos[si])
     # The reader takes a trace's time from this block when it is present,
     # ahead of General Header #3.
     extBytes.add SegdTimestampHeader(timeZeroOfData: unixToTimestamp(p.recorded),
       blockType: BlockTypeTimestamp).encoded
-    if p.orientation.isSome:
+    if setOrient[si]:
       extBytes.add orientationBlock(p.orientation.get, p.recorded).encoded
     t.extensions = extBytes
     t.samples = p.samples
@@ -1294,7 +1319,8 @@ proc flushSegdKeys(s: var WriterState) =
       channelType: uint8(ord(ct)), startTime: setT0[j], numSamples: uint32(opts.numSamples),
       descaleMultiplier: 1.0, channelsInSet: uint32(setCount[j]),
       samplingInterval: uint32(opts.sampleIntervalUs), arrayForming: 1,
-      traceHeaderExtensions: uint8(setExt[j]), verticalStack: 1,
+      traceHeaderExtensions: uint8(segdExtCount(setPos[j], setOrient[j], setSrc[j],
+        setInfo[j], setSrcPos[j])), verticalStack: 1,
       blockType1: BlockTypeChannelSet1, blockType2: BlockTypeChannelSet2,
       blockType3: BlockTypeChannelSet3)
     for i in 0 ..< d.description.len: d.description[i] = ' '
@@ -1616,9 +1642,17 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## block (0x1F) in its own header extensions, which is where the reader
   ## and other software take a per-trace source; a Position block follows
   ## it for that source's coordinates, and Additional Source Info follows
-  ## when the trace's time is not the record's time zero. The file keeps
-  ## write order. Sort by source line then source point before writing; the
-  ## writer does not sort.
+  ## the description. Rev 3 requires every trace of a channel set to carry
+  ## the same header extensions, equal to the descriptor's count, so the
+  ## set's skeleton is fixed before the first trace is written (the record
+  ## is buffered until the next record or `close`). If any trace of the set
+  ## has a source description or a source position, every trace gets those
+  ## blocks: 0/0 and an invalid position where the trace has none. If any
+  ## source-bearing trace is not at record time zero, every trace of the set
+  ## gets Additional Source Info; a shot at record time zero, or a trace
+  ## with no source, is written with time 0 (at record time zero). The file
+  ## keeps write order. Sort by source line then source point before writing;
+  ## the writer does not sort.
   ## An unset depth index (`depthIndex` 0) is written, and reads back, as 1
   ## (the standard forbids 0; 1 is the shallowest). The source description's
   ## depth index, which the keys do not carry, is written as 1. A reshoot
@@ -1655,10 +1689,11 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## Orientation header (0x60) after the Timestamp block of that trace. Its
   ## timestamp is `time` when that is set, otherwise the trace's recording
   ## time. A trace given none gets no Orientation block, so a file written
-  ## without one is unchanged. Traces of one channel set may differ: the
-  ## channel set descriptor's extension count is the largest, and a trace
-  ## with fewer is the reader's usual warning (`dcInconsistent`); each trace
-  ## header's own count is the blocks that trace carries. Metres or feet are
+  ## without one is unchanged. Every trace of a channel set must be given an
+  ## orientation, or none of them: a mix is refused, and the message names
+  ## the channel set and the first trace without one (a filler block would
+  ## be a fake attitude). A file whose channel sets were already uniform
+  ## stays byte-identical. Metres or feet are
   ## written as a P1/11 axis record when `crsText` is empty, which
   ## `summary.coordinateUnits` reads; a caller-supplied `crsText` is written
   ## in 0x55 blocks as given. Raises `ValueError` for a closed writer, a
@@ -1673,7 +1708,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## units unknown and no `crsText`, a record with no recording time, a
   ## recording time outside 1950-2049, a bad override, a NaN or infinite
   ## rotation (the message names the value), `rotationNorthApplied` without
-  ## `rotationApplied`, an orientation time that is not finite or does not
+  ## `rotationApplied`, a channel set that mixes traces with and without an
+  ## orientation, an orientation time that is not finite or does not
   ## fit a SEG-D timestamp, or an orientation passed to a writer that is not
   ## SEG-D Rev 3 (nothing of that trace is written then); `SegFormatError` for a value
   ## the format cannot hold; `IOError` on a write failure, which discards
