@@ -585,3 +585,27 @@ block record_time:
   var h = openSeismic(nonePath, keys = true)
   doAssert h.traceKeys(0).time == ShotTime
   h.close()
+
+block gh1_time_rounds_to_microsecond:
+  # General Header #1 takes its second from the time rounded to the
+  # microsecond, as General Header #3 and the trace's timestamp do. Seen to
+  # fail first with `floor(recTime)` for GH#1: 1709273228.9999995 gave second 8
+  # where the record time reads 06:07:09.
+  let path = tmp / "gh1_round.sgd"
+  var w = openOut(path, opts(1))
+  var a = shot(1, 1, true)
+  a.time = 1_709_273_228.9999995
+  w.writeTrace(a, samples(1, 1))
+  var b = shot(2, 1, true)
+  b.time = 1_709_273_228.4
+  w.writeTrace(b, samples(1, 2))
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  # 1_709_273_229 is 06:07:09 UTC: GH#1 second 9 (the floor gave 8).
+  doAssert f.index.segdRecords[0].gh1.minute == 7
+  doAssert f.index.segdRecords[0].gh1.second == 9
+  doAssert f.traceKeys(0).time == 1_709_273_229.0
+  doAssert f.index.segdRecords[1].gh1.second == 8
+  doAssert f.traceKeys(1).time == 1_709_273_228.4 or
+    abs(f.traceKeys(1).time - 1_709_273_228.4) < 1e-6
+  f.close()

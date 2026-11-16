@@ -1105,7 +1105,9 @@ proc flushSegdKeys(s: var WriterState) =
   let additional = 2 + nOpt
   let recTime = s.segdRecTime
   doAssert not recTime.isNaN, "a SEG-D record was buffered without a recording time"
-  let civil = fromUnix(int64(floor(recTime))).utc
+  # GH#1 holds whole seconds of the time as General Header #3 holds it: the
+  # time rounded to the microsecond (unixToTimestamp), read back.
+  let civil = fromUnix(int64(floor(timestampToUnix(unixToTimestamp(recTime))))).utc
   var gh1 = SegdGeneralHeader1(formatCode: ord(fmt), recordType: 8, recordLength: BcdAllF,
     year: civil.year mod 100, julianDay: civil.yearday + 1, hour: civil.hour,
     minute: civil.minute, second: civil.second,
@@ -1478,11 +1480,12 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## `tsAuxiliary` with seismic or EM. The record's time is the first
   ## trace's `keys.time` when that is set, otherwise `SegdOutputOptions.time`;
   ## with neither, the record is refused (the message names both). It is
-  ## written in General Header #1 (year, julian day and time, to 1 s) and in
-  ## General Header #3's timestamp. The reader takes a trace's time from its
-  ## Timestamp block (0x42) when that trace has one, else from General Header
-  ## #3, so a trace's own `keys.time` is written there and reads back; a trace
-  ## without one reads back the record's time. Traces of one record may
+  ## written in General Header #1 (year, julian day and the whole second of
+  ## the time rounded to the microsecond) and in General Header #3's timestamp.
+  ## The reader takes a trace's time from its Timestamp block (0x42) when that
+  ## trace has one, else from General Header #3, so a trace's own `keys.time`
+  ## is written there and reads back; a trace without one reads back the
+  ## record's time. Traces of one record may
   ## differ. The writer never invents a time. Metres or feet are
   ## written as a P1/11 axis record when `crsText` is empty, which
   ## `summary.coordinateUnits` reads; a caller-supplied `crsText` is written
