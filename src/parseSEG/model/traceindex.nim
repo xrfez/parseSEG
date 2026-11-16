@@ -1094,6 +1094,35 @@ proc startTimeMs*(f: SeismicFile, trace: int): float64 =
   f.startTimeMsInto([trace], v)
   v[0]
 
+proc traceOrientation*(f: SeismicFile, trace: int): Option[SegdOrientation] =
+  ## The SEG-D Rev 3 Orientation header (0x60) of trace `trace`; none when
+  ## the trace has no such block, including SEG-Y, SEG-2 and SEG-D before
+  ## Rev 3. Taken from the trace header extensions, wherever in them another
+  ## writer placed it: a scan of those 32-byte blocks, cheap enough to call
+  ## for every trace of a record. Raises `ValueError` for a trace out of
+  ## range, a closed file, or headers that lie outside the file, and
+  ## `SegTruncatedError` for a file cut short while open (`cutShort`).
+  f.requireTrace(trace)
+  f.requireOpen()
+  if f.idx.kind != skSegd: return
+  let e = f.idx.entries[trace]
+  if not f.idx.segdRecords[e.record].isRev3: return
+  let hb = int64(e.headerBytes)
+  if e.offset < 0 or hb < SegdTraceHeaderSize or e.offset + hb > f.mappedSize:
+    raiseOutside(trace)
+  let ext = hb - SegdTraceHeaderSize
+  if ext < SegdBlockSize: return
+  f.requireUncutFirst()
+  let start = e.offset + SegdTraceHeaderSize
+  f.withHeld(start, e.offset + hb):
+    let mem = f.unsafeMemory
+    let a = int(start)
+    let at = findBlock(mem.toOpenArray(a, a + int(ext) - 1), BlockTypeOrientation)
+    if at >= 0:
+      result = some(decodeBlock[SegdOrientation](
+        mem.toOpenArray(a + at, a + at + SegdBlockSize - 1)))
+  f.requireUncut()
+
 proc traceKeys*(f: SeismicFile, traces: openArray[int]): seq[TraceKeys] =
   ## The keys of each trace of `traces` (see `traceKeysInto`); works on a file
   ## opened without `keys = true`.
