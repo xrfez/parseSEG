@@ -637,3 +637,32 @@ block sensor_type_with_component_zero:
   doAssert g.sensorType == 5
   doAssert g.component == 5
   f.close()
+
+block four_components_at_one_station:
+  # One record, one receiver station (line 100, point 200, index 1), four
+  # sensor types: hydrophone 1, vertical geophone 2, inline geophone 3 (SV_),
+  # crossline geophone 4 (SH_), as the reader reports them (tosegd's table).
+  # Each trace's component is its sensor type, with no group index.
+  let path = tmp / "four_components.sgd"
+  var w = openOut(path, opts(4))
+  let sensors = [1'u8, 2, 3, 4]
+  var rows: seq[seq[float32]]
+  for i in 0 ..< sensors.len:
+    var k = shot(1, float64(i + 1), true)
+    k.rcvPoint = 200
+    k.sensorType = sensors[i]
+    k.component = sensors[i]
+    rows.add samples(4, float32(i + 1))
+    w.writeTrace(k, rows[i])
+  doAssert w.len == 4
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.recordCount == 1
+  for i in 0 ..< sensors.len:
+    let g = f.traceKeys(i)
+    doAssert g.sensorType == sensors[i] and g.component == sensors[i]
+    doAssert g.rcvLine == 100 and g.rcvPoint == 200 and g.rcvIndex == 1
+    doAssert g.srcLine == 1 and g.srcPoint == 99.5 and g.srcIndex == 1
+    let y = f.readTraces(i .. i)
+    for j in 0 ..< 4: doAssert y[0, j] == rows[i][j]
+  f.close()
