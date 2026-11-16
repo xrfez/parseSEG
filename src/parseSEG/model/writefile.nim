@@ -65,7 +65,7 @@
 ## and writes nothing. Caller errors (a trace out of range, another
 ## standard, a closed file, a broken SEG-D record rule) raise `ValueError`.
 
-import std/[math, options, os]
+import std/[math, options, os, sets]
 import ../common/[diagnostics, endians, outputfile, seismickind]
 import ../io/[records, diskio]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
@@ -190,7 +190,13 @@ type
     samples: seq[byte]
     overrides: seq[HeaderOverride]
     t0Us: int32
-    channel: int ## Trace number to write; -1 until assigned.
+    channel: int ## The trace number in its channel set (assigned when kept).
+
+  SegdSetChannels = object
+    ## The trace numbers a record's channel set has taken.
+    channelType: SegdChannelType
+    used: HashSet[int]
+    nextFree: int ## The lowest number not in `used`.
 
   SegdSourceFix = object
     seen, hasStation, hasXY: bool
@@ -236,6 +242,7 @@ type
     segdPending: seq[SegdKeyTrace]
     segdSource: SegdSourceFix
     segdSetT0: seq[SegdSetT0]
+    segdChannels: seq[SegdSetChannels]
     inRecord: bool
     recPath: string       ## The record in progress: its file, index and traces.
     recIndex, recFirst, recLast, nextTrace: int
@@ -928,6 +935,30 @@ proc setBcdOrExt(small: var int, ext: var uint32, n: int64, digits: int) =
     small = BcdAllF
     ext = uint32(n)
 
+proc chNumber(s: WriterState, ct: SegdChannelType, ch: int): int =
+  # The trace number for a trace of channel set `ct`: `ch` (-1 for NaN),
+  # refused when the set has it already; for NaN the lowest number the set
+  # has not used. Nothing is recorded until the trace is kept (`noteChannel`).
+  for c in s.segdChannels:
+    if c.channelType == ct:
+      if ch < 0: return c.nextFree
+      if ch in c.used:
+        refuse("channel " & $ch & " is already used in SEG-D channel set " & $ct &
+          " (a trace number is unique in a channel set)")
+      return ch
+  if ch < 0: 1 else: ch
+
+proc noteChannel(s: var WriterState, ct: SegdChannelType, n: int) =
+  var i = -1
+  for j, c in s.segdChannels:
+    if c.channelType == ct: i = j
+  if i < 0:
+    s.segdChannels.add SegdSetChannels(channelType: ct, nextFree: 1)
+    i = s.segdChannels.high
+  s.segdChannels[i].used.incl n
+  while s.segdChannels[i].nextFree in s.segdChannels[i].used:
+    inc s.segdChannels[i].nextFree
+
 proc flushSegdKeys(s: var WriterState) =
   # Writes the buffered record and forgets it. A failure while writing
   # discards the output: the record headers are already in the file.
@@ -944,7 +975,6 @@ proc flushSegdKeys(s: var WriterState) =
   var setT0: seq[int32] = @[]
   var setPos: seq[bool] = @[]
   var setOf = newSeq[int](s.segdPending.len)
-  var nextCh = newSeq[int]()
   for i, p in s.segdPending:
     var found = -1
     for j, ct in setType:
@@ -954,7 +984,6 @@ proc flushSegdKeys(s: var WriterState) =
       setCount.add 0
       setT0.add p.t0Us
       setPos.add false
-      nextCh.add 1
       found = setType.len - 1
     setOf[i] = found
     inc setCount[found]
@@ -963,10 +992,7 @@ proc flushSegdKeys(s: var WriterState) =
   for i, p in s.segdPending:
     let si = setOf[i]
     let exts = 1 + (if setPos[si]: 3 else: 0)
-    var ch = p.channel
-    if ch < 0:
-      ch = nextCh[si]
-    inc nextCh[si]
+    let ch = p.channel
     var t = SegdTrace(layout: slRev3, index: i, numSamples: opts.numSamples)
     var hdr = SegdTraceHeader(scanTypeNumber: 1, traceHeaderExtensions: uint8(exts),
       traceEdit: (if p.keys.status == tsDead: 1'u8 else: 0'u8))
@@ -1069,6 +1095,7 @@ proc flushSegdKeys(s: var WriterState) =
   s.segdHaveRec = false
   s.segdSource = SegdSourceFix()
   s.segdSetT0.setLen 0
+  s.segdChannels.setLen 0
 
 proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: openArray[T],
     overrides: openArray[HeaderOverride], channelType: SegdChannelType) =
@@ -1087,6 +1114,7 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
       " µs, the output's is " & $s.segdOpts.sampleIntervalUs)
   checkSegdStatus(k, channelType)
   let ch = channelOf(k)
+  let num = s.chNumber(channelType, ch)
   let t0 = t0Of(k)
   let hasRcv = checkStation(k.rcvLine, k.rcvPoint, "receiver")
   let hasSrc = checkStation(k.srcLine, k.srcPoint, "source")
@@ -1103,8 +1131,9 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   encodeSamples(s.segdOpts.format, samples, raw)
   var ov = newSeq[HeaderOverride](overrides.len)
   for i, o in overrides: ov[i] = o
+  s.noteChannel(channelType, num)
   s.segdPending.add SegdKeyTrace(keys: k, channelType: channelType, samples: raw,
-    overrides: ov, t0Us: t0, channel: ch)
+    overrides: ov, t0Us: t0, channel: num)
   s.segdHaveRec = true
   s.segdRecNo = recNo
 

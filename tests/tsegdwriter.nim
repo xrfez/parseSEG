@@ -290,3 +290,28 @@ block refusals:
   discard closed.close()
   expect("closed"):
     closed.writeTrace(shot(1, 1, true), @[1'f32])
+
+block channel_numbers_unique:
+  # A trace number is unique in its channel set. Without the refusal, two
+  # traces numbered 1 both read back as 1. And the automatic number advanced
+  # even for an explicit one, so channel 2 then NaN read back as 2 and 2.
+  let path = tmp / "channels.sgd"
+  var w = openOut(path, opts(1))
+  let row = samples(1, 1)
+  w.writeTrace(shot(4, 1, true), row)
+  expect("already used"):
+    w.writeTrace(shot(4, 1, true), row)
+  discard w.close()
+  let auto = tmp / "auto_channels.sgd"
+  var a = openOut(auto, opts(1))
+  a.writeTrace(shot(1, 2, true), row)
+  var nan = shot(1, 2, true)
+  nan.channel = NaN
+  a.writeTrace(nan, row) # the lowest number not yet used in the set: 1
+  var explicit = shot(1, 1, true)
+  expect("already used"):
+    a.writeTrace(explicit, row) # 1 was given to the NaN trace
+  discard a.close()
+  var f = openSeismic(auto, keys = true)
+  doAssert f.len == 2 and f.traceKeys(0).channel == 2 and f.traceKeys(1).channel == 1
+  f.close()
