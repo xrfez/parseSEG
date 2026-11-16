@@ -8,6 +8,7 @@
 ##   (srcX assert, line 104)
 ## - refusals: the record-order check and the sample-count check removed
 ##   (expected ValueError, line 22)
+## - depth_index_unset_is_one: depth index left 0 (reads back 0, not 1)
 
 import std/[assertions, math, os, strutils]
 import parseSEG
@@ -456,3 +457,29 @@ block coordinates_need_a_crs:
   var g = openSeismic(tmp / "crs_unknown.sgd", keys = true)
   doAssert g.crsText.startsWith("((SEG: Location Data ver 3.0))")
   g.close()
+
+block depth_index_unset_is_one:
+  # A source or receiver depth index is never 0 (1 = shallowest). Without
+  # the substitution, the keys' default 0 was written on Trace Header
+  # Extension #1 and on the source description, and read back as 0.
+  let path = tmp / "depth.sgd"
+  var w = openOut(path, opts(1))
+  var unset = shot(1, 1, true)
+  doAssert unset.depthIndex == 0
+  w.writeTrace(unset, samples(1, 1))
+  var deep = shot(1, 2, true)
+  deep.depthIndex = 4
+  w.writeTrace(deep, samples(1, 2))
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.traceKeys(0).depthIndex == 1
+  doAssert f.traceKeys(1).depthIndex == 4
+  var found = false
+  let area = f.index.segdRecords[0].generalBlocks
+  for at, bt in blocks(area):
+    if bt == 0x1F:
+      let s = decodeBlock[SegdSourceDescription](area.toOpenArray(at, at + 31))
+      doAssert s.depthIndex == 1
+      found = true
+  doAssert found, "the record has no source description"
+  f.close()

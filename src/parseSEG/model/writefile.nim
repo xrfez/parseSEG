@@ -930,6 +930,12 @@ proc checkSegdStatus(k: TraceKeys, ct: SegdChannelType) =
   if not segdSeismic(ct) and k.status in {tsLive, tsDead}:
     refuse("channel type " & $ct & " reads back as auxiliary, not " & $k.status)
 
+func depthIndexOf(k: TraceKeys): uint8 =
+  # A receiver depth index is never 0 (1 = shallowest). The keys leave it 0
+  # when unset. The field is a byte, as the keys hold it, so every other
+  # value fits.
+  if k.depthIndex == 0: 1'u8 else: k.depthIndex
+
 proc channelOf(k: TraceKeys): int =
   if k.channel.isNaN: return -1
   if k.channel < 1 or k.channel > float64(SegdExtNumMax) or k.channel != round(k.channel):
@@ -1025,7 +1031,7 @@ proc flushSegdKeys(s: var WriterState) =
     t.header = hdr
     var e = SegdTraceHeaderExt1Rev3(numSamples: uint32(opts.numSamples),
       sensorType: p.keys.sensorType, groupIndex: p.keys.component,
-      depthIndex: p.keys.depthIndex, reshootIndex: p.keys.reshootIndex,
+      depthIndex: depthIndexOf(p.keys), reshootIndex: p.keys.reshootIndex,
       extTraceNumber: uint32(ch), blockType: BlockTypeTraceHeaderExt1)
     if checkStation(p.keys.rcvLine, p.keys.rcvPoint, "receiver"):
       e.setReceiverStation(p.keys.rcvLine, p.keys.rcvPoint)
@@ -1043,9 +1049,12 @@ proc flushSegdKeys(s: var WriterState) =
   rec.generalBlocks = crsBlockBytes(crs)
   let src = s.segdSource
   if src.hasStation:
+    # The keys' depth index is the receiver's (THE#1). The source description
+    # has its own, which the keys do not carry, and 0 is not allowed there
+    # either: 1 is the shallowest.
     let sb = SegdSourceDescription(extFileNumber: uint32(fileNo), sourceLineNumber: src.line,
       sourcePointNumber: src.point, sourcePointIndex: uint8(src.index), sourceSetNumber: 1,
-      blockType: 0x1F)
+      depthIndex: 1, blockType: 0x1F)
     rec.generalBlocks.add @(sb.encoded)
   if src.hasXY:
     rec.generalBlocks.add @(positionBlock(src.x, src.y, src.z, true, stanza).encoded)
@@ -1391,6 +1400,12 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## Receiver line and point go in Trace Header Extension #1, source line
   ## and point in one Source Description block in the general header (one
   ## source per record; a trace that names none inherits it on read).
+  ## An unset depth index (`depthIndex` 0) is written, and reads back, as 1
+  ## (the standard forbids 0; 1 is the shallowest). The source description's
+  ## depth index, which the keys do not carry, is written as 1. A reshoot
+  ## index of 0 is the first recording, and a point index of 0 is allowed
+  ## (not recorded, or a VSP extension of the depth index), so those are
+  ## written as given.
   ## Source and receiver coordinates and elevations go in Position blocks
   ## (general header for the source, the trace extensions for a receiver;
   ## a channel set that has any receiver position gives every trace of the
