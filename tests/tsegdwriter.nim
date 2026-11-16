@@ -427,3 +427,32 @@ block elevation_without_xy_warns_once:
   var f = openSeismic(path, keys = true)
   doAssert f.traceKeys(0).rcvZ.isNaN
   f.close()
+
+block coordinates_need_a_crs:
+  # A position in the file needs a CRS (the checklist: position present, CRS
+  # present). With units unknown and no crsText, no 0x55 block was written,
+  # and the coordinates were. Now refused, and the caller is told to set
+  # units or crsText. Unknown coordinates, or a caller's crsText, are fine.
+  let path = tmp / "nocrs.sgd"
+  var w = openOut(path, opts(2, units = cuUnknown))
+  expect("units"):
+    w.writeTrace(shot(1, 1, true), samples(2, 1))
+  var bare = shot(1, 2, true)
+  bare.srcX = NaN
+  bare.srcY = NaN
+  bare.srcZ = NaN
+  bare.rcvX = NaN
+  bare.rcvY = NaN
+  bare.rcvZ = NaN
+  w.writeTrace(bare, samples(2, 1))
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.len == 1 and f.summary.coordinateUnits == cuUnknown
+  f.close()
+  let crs = "((SEG: Location Data ver 3.0))\nLocation Data Stanza ID = 1\nCRS name = local\n"
+  var c = openOut(tmp / "crs_unknown.sgd", opts(2, units = cuUnknown, crs = crs))
+  c.writeTrace(shot(1, 1, true), samples(2, 1))
+  discard c.close()
+  var g = openSeismic(tmp / "crs_unknown.sgd", keys = true)
+  doAssert g.crsText.startsWith("((SEG: Location Data ver 3.0))")
+  g.close()

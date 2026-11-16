@@ -1130,6 +1130,9 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   for (v, what) in [(k.srcX, "source X"), (k.srcY, "source Y"), (k.srcZ, "source elevation"),
       (k.rcvX, "receiver X"), (k.rcvY, "receiver Y"), (k.rcvZ, "receiver elevation")]:
     checkFinite(v, what)
+  if (k.hasSourceXY or k.hasReceiverXY) and crsToWrite(s.segdOpts).len == 0:
+    refuse("coordinates need a CRS in the file: set SegdOutputOptions.units (metres or feet) " &
+      "or crsText")
   let ch = channelOf(k)
   let num = s.chNumber(channelType, ch)
   let t0 = t0Of(k)
