@@ -368,3 +368,19 @@ block infinite_coordinates:
   doAssert f.len == 1 and f.traceKeys(0).channel == 3
   doAssert f.traceKeys(0).srcX == 500_000 and f.traceKeys(0).srcY == 6_000_000
   f.close()
+
+block descriptor_description_is_spaces:
+  # The channel set descriptor's 27-byte description is text, and the
+  # standard requires spaces. Without the fill it was 0x00 bytes, which a
+  # strict reader rejects. This reader drops NULs and logs nothing.
+  let path = tmp / "descr.sgd"
+  var w = openOut(path, opts(2))
+  w.writeTrace(shot(1, 1, true), samples(2, 1))
+  w.writeTrace(shot(1, 2, false), samples(2, 2), channelType = sctTimeBreak)
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  let descs = f.index.segdRecords[0].scanTypes[0].descriptorsRev3
+  doAssert descs.len == 2
+  for d in descs:
+    for ch in d.description: doAssert ch == ' ', "description holds " & $ord(ch)
+  f.close()

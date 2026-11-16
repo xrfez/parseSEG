@@ -1088,6 +1088,7 @@ proc flushSegdKeys(s: var WriterState) =
       traceHeaderExtensions: uint8(1 + (if setPos[j]: 3 else: 0)), verticalStack: 1,
       blockType1: BlockTypeChannelSet1, blockType2: BlockTypeChannelSet2,
       blockType3: BlockTypeChannelSet3)
+    for i in 0 ..< d.description.len: d.description[i] = ' '
     d.endTime = int32(endUs) # in range: writeSegdKeys refuses a window past it
     descs.add d
   rec.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: descs)]
