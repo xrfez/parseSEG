@@ -243,6 +243,7 @@ type
     segdSource: SegdSourceFix
     segdSetT0: seq[SegdSetT0]
     segdChannels: seq[SegdSetChannels]
+    segdNoZ: int          ## Traces whose elevation has no X/Y, so is not written.
     inRecord: bool
     recPath: string       ## The record in progress: its file, index and traces.
     recIndex, recFirst, recLast, nextTrace: int
@@ -1151,6 +1152,8 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   encodeSamples(s.segdOpts.format, samples, raw)
   var ov = newSeq[HeaderOverride](overrides.len)
   for i, o in overrides: ov[i] = o
+  if (not k.rcvZ.isNaN and not k.hasReceiverXY) or (not k.srcZ.isNaN and not k.hasSourceXY):
+    inc s.segdNoZ
   s.noteChannel(channelType, num)
   s.segdPending.add SegdKeyTrace(keys: k, channelType: channelType, samples: raw,
     overrides: ov, t0Us: t0, channel: num)
@@ -1162,6 +1165,9 @@ proc closeSegd(s: var WriterState, log: var DiagLog) =
     if s.written == 0: refuse("no traces were written")
     s.flushSegdKeys()
   elif s.inRecord: s.finishRecord()
+  if s.segdNoZ > 0:
+    log.report(sevWarning, dcValidation, "not written: an elevation without its location's " &
+      "X/Y, in " & $s.segdNoZ & " traces", loc = Location(file: s.path))
   s.segd.close()
   log.add s.segd.log
   s.sink.close()

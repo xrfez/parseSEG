@@ -403,3 +403,27 @@ block base_scan_interval_short_field:
     doAssert f.index.segdRecords[0].gh1.baseScanInterval16 == short, "interval " & $dt
     doAssert f.summary.sampleIntervalUs == dt, "interval " & $dt
     f.close()
+
+block elevation_without_xy_warns_once:
+  # An elevation is written in a position block, which needs its X and Y, so
+  # an elevation with none is not written (the reader gives NaN). Without the
+  # warning, nothing said so; the SEG-2 writer warns for the same case, once
+  # per file. Here three traces each lose their receiver elevation.
+  let path = tmp / "elev.sgd"
+  var w = openOut(path, opts(1))
+  for ch in 1 .. 3:
+    var k = shot(1, float64(ch), true)
+    k.rcvX = NaN
+    k.rcvY = NaN
+    k.rcvZ = 15
+    w.writeTrace(k, samples(1, 1))
+  let log = w.close()
+  var warnings = 0
+  for d in log:
+    if d.msg.find("elevation") >= 0:
+      doAssert d.severity == sevWarning
+      inc warnings
+  doAssert warnings == 1, "warnings about elevations: " & $warnings
+  var f = openSeismic(path, keys = true)
+  doAssert f.traceKeys(0).rcvZ.isNaN
+  f.close()
