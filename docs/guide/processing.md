@@ -441,8 +441,10 @@ Pass `orientation = some(att)` to give a trace a SEG-D Orientation header (0x60)
 rotations and the reference orientation
 in radians, the orientation type and the flags (`initTraceOrientation`). Its timestamp is
 `att.time` when that is set, otherwise the trace's recording time. A trace given none gets
-no block, so files written as in 0.14.0 stay byte-identical. Traces of one channel set may
-disagree; the descriptor then carries the largest extension count. NaN or an infinite rotation is
+no block, so files written as in 0.14.0 stay byte-identical. Every trace of a channel set
+must be given an orientation, or none of them: a mix is refused, and the message names the
+channel set and the first trace without one (a filler block would be a fake attitude).
+NaN or an infinite rotation is
 refused, and so is rotating to north without marking the rotation applied. Read it back
 with `traceOrientation` ([the viewer guide](viewer.md#geometry-time-and-annotation)).
 
@@ -454,15 +456,22 @@ differs is refused, and the message names that trace's channel. Each trace's sou
 point and index go in a Source Description block (0x1F) in that trace's header extensions,
 which is where the reader, and other software, take a per-trace source (the general header
 holds one source for the whole record, so it cannot). A Position block follows the
-description for that shot's coordinates. When the shot's time is not the record's time zero,
-Additional Source Info follows the description, as the standard requires; the trace's own
+description for that shot's coordinates. Rev 3 requires every trace of a channel set to
+carry the same header extensions, equal to the descriptor's count, so the writer fixes the
+set's skeleton before it writes the first trace (the record is buffered until the next
+record or `close`). If any trace of the set has a source description or a source position,
+every trace gets those blocks: 0/0 and an invalid position where the trace has none. If any
+source-bearing trace is not at the record's time zero, every trace of the set gets
+Additional Source Info; a shot at record time zero is written with time 0, which the
+standard reads as at record time zero. The trace's own
 time is also in its Timestamp block, which is what `traceKeys` reads back. The file keeps
 write order. Sort by source line then source point before writing (one system sorts by shot
 time); the writer does not sort. A record of only auxiliary traces is allowed, for example a
 vibrator pilot recorded for several sweeps: pass `sctSourceRefPilot`, `sctSourceRefSweep` or
 another auxiliary channel type, and `tsAuxiliary`. The reader reports `gkReceiver` when a
 record has one receiver and more than one distinct source station (line, point, index and
-coordinates). Time alone does not split sources.
+coordinates), and when one receiver recorded repeated shots at one source point whose times
+differ. Equal times stay unknown. Time is not folded into the source identity.
 
 ```nim
 import parseSEG

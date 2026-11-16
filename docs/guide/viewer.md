@@ -142,10 +142,14 @@ Things worth knowing for the overview:
   receiver recorded, in file order, so display them side by side in that order. Callers
   usually sort by source line then source point before writing; one system sorts by shot
   time. This library's writer does not sort ([processing.md](processing.md)). `traceKeys`
-  gives each trace its own source line, point, coordinates and time. `gathers` reports
-  `gkReceiver` when the record has one receiver and more than one source station. A record
-  of only auxiliary traces (a vibrator pilot for several sweeps) is a receiver gather the
-  same way, when those traces are distinct sources.
+gives each trace its own source line, point, coordinates and time. `gathers` reports
+`gkReceiver` when the record has one receiver and more than one source station, and also
+when one receiver recorded repeated shots at one source point (more than one trace, the
+components do not account for them, and the times differ). Equal times stay `gkUnknown`.
+Time is not part of the source identity: a shot whose traces carry different timestamps
+is still one source. A record
+of only auxiliary traces (a vibrator pilot for several sweeps) is a receiver gather the
+same way, when those traces are distinct sources or repeated shots at one point.
 
 ### Gathers and multi-component stations
 
@@ -823,7 +827,18 @@ doAssert abs(k.offset - 10000) < 0.01 and f.sampleIntervalUs(3) == 1000
 A node's attitude, when the file carries a SEG-D Rev 3 Orientation header (0x60), is
 `traceOrientation(i)`: an `Option[SegdOrientation]`, none when that trace has no block. It
 does not need stored keys, and it finds the block wherever another writer put it in the
-trace header extensions, so it is cheap enough to call for every trace of a record.
+trace header extensions, so it is cheap enough to call for every trace of a record. The
+first block wins; a second, different one adds one warning to `f.log`. A 0x60 in the
+general header is not that trace's attitude: the standard's text does not say the block
+applies to every trace without its own ("A block (e.g. Position 50-52, Additional Source
+Info 20, Aux Channel Ref 21) applies to the preceding Source Description block"). Read
+the record's block with `recordOrientation(record)`.
+
+A Position block in the trace extensions that does not follow a source description is the
+receiver's coordinates, even when the only source description is in the general header.
+That is how a shot gather is written, and how INOVA files are read: do not take that
+position as the source's. A source position attaches only to the source description the
+keys selected, not to a later description on the same trace.
 
 ```nim
 import std/options
