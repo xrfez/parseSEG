@@ -417,6 +417,43 @@ doAssert g.kind == skSegy and g.traceKeys(0).ensemble == 1201
 doAssert g.traceKeys(0).cmpX == k.cmpX and g.traceKeys(0).intervalUs == k.intervalUs
 ```
 
+The same keys write a SEG-D Rev 3 file. `openSeismicWriter(path, SegdOutputOptions)` takes the
+sample interval, sample count and sample format (IEEE float32, `sd8058`, by default; also the
+other demultiplexed codes, 90xx on Rev 3.1) from the options. Traces are grouped into records
+by `keys.record`, one channel set per channel type, in the order written. `TraceKeys` has no
+channel-type field, so pass one (`sctSeismic` when omitted; `sctTimeBreak`, `sctUpHole`,
+`sctSourceRefPilot`, `sctSourceRefSweep` and the other Rev 3 codes the reader knows). A record
+is held until the next record number or `close`, then written whole; record numbers must not
+go backwards. Metres or feet are written as a P1/11 axis record when no CRS text is given,
+which `summary.coordinateUnits` reads.
+
+```nim
+import parseSEG
+
+var f = openSeismic("shot.sgd", keys = true)
+let n = int(f.traceEntry(0).numSamples)
+let x = f.readTraces(0 ..< f.len)
+# shot.sgd's traces, in file order: time break, reference pilot, up hole, seismic, seismic.
+let types = [sctTimeBreak, sctSourceRefPilot, sctUpHole, sctSeismic, sctSeismic]
+var row = newSeq[float32](n)
+var y = openSeismicWriter("one_shot.sgy", SegyOutputOptions())
+var d = openSeismicWriter("one_shot.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
+  numSamples: n))
+for i in 0 ..< f.len:
+  let k = f.traceKeys(i)
+  for j in 0 ..< n: row[j] = x[i, j]
+  y.writeTrace(k, row)
+  d.writeTrace(k, row, channelType = types[i])
+discard y.close()
+discard d.close()
+var g = openSeismic("one_shot.sgd", keys = true)
+doAssert g.len == f.len and g.traceKeys(3).rcvX == f.traceKeys(3).rcvX
+doAssert g.traceKeys(0).status == tsAuxiliary and g.traceKeys(3).status == tsLive
+doAssert g.readTraces(3 .. 3)[0, 0] == x[3, 0]
+g.close()
+f.close()
+```
+
 ### Results that belong in the headers
 
 Picks, statics, or computed coordinates that fit existing header fields can be written in
