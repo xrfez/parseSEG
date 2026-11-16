@@ -9,7 +9,11 @@
 ##   source) gather;
 ## - one receiver and several sources: a receiver gather;
 ## - one receiver, at most one source: a shot if it is a single trace or one
-##   trace per component, else `gkUnknown` (the keys cannot tell);
+##   trace per component; a receiver gather when the traces' times differ
+##   (repeated shots at one source point, recorded by one receiver); else
+##   `gkUnknown` (equal times, the keys cannot tell). Time is not part of
+##   the source identity: a shot whose traces carry different timestamps is
+##   still one source;
 ## - several of both: `gkOther`.
 ##
 ## A SEG-Y sorting code of CMP/stack (2-4, 8, 9) or common offset (7) names
@@ -156,12 +160,20 @@ proc classify*(ix: TraceIndex, s: Slice[int]): Gather =
   var src, rcv: StationCount
   var n = 0
   var components: set[uint8]
+  var timeSeen = false
+  var time0: float64
+  var timesDiffer = false
   for i in s:
     if ix.isSeismic(i) or not anySeismic:
       template k: untyped = ix.keys[i]
       if knownSource(k): src.incl sourceId(k)
       if knownReceiver(k): rcv.incl receiverId(k)
       components.incl k.component
+      if not timeSeen:
+        time0 = k.time
+        timeSeen = true
+      elif not (k.time == time0 or (k.time.isNaN and time0.isNaN)):
+        timesDiffer = true
       inc n
   result.sources = src.len
   result.receivers = rcv.len
@@ -170,9 +182,13 @@ proc classify*(ix: TraceIndex, s: Slice[int]): Gather =
     elif src.len <= 1 and rcv.len > 1: gkShot
     elif rcv.len == 1 and src.len > 1: gkReceiver
     elif rcv.len == 1:
-      # One station, at most one source: a shot when it is one trace or the
-      # components of one multi-component station; else the keys do not tell.
-      if n == 1 or components.card == n: gkShot else: gkUnknown
+      # One station, at most one source. A single trace, or one trace per
+      # component, is a shot. Repeated shots at that one point, recorded by
+      # this receiver, have times that differ: a receiver gather. Equal
+      # times stay unknown. Time is not folded into the source identity.
+      if n == 1 or components.card == n: gkShot
+      elif timesDiffer: gkReceiver
+      else: gkUnknown
     else: gkOther
 
 func sameKey(a, b: TraceKeys, by: SplitKey): bool =

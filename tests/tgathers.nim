@@ -1,4 +1,7 @@
 ## Gather detection and multi-component grouping (task 6.2).
+##
+## Seen to fail first: the times-differ branch of `classify` removed
+## (six pilots at one point 30 s apart were `gkUnknown`, not `gkReceiver`).
 
 import std/[assertions, os, math, sets, random, sequtils]
 import parseSEG/io/diskio
@@ -95,6 +98,9 @@ proc refClassify(ix: TraceIndex, s: Slice[int]): (GatherKind, int, int) =
   var src, rcv: HashSet[array[5, uint64]]
   var components: set[uint8]
   var n = 0
+  var timeSeen = false
+  var time0: float64
+  var timesDiffer = false
   for i in s:
     if ix.isSeismic(i) or not anySeismic:
       let k = ix.keys[i]
@@ -105,12 +111,20 @@ proc refClassify(ix: TraceIndex, s: Slice[int]): (GatherKind, int, int) =
         rcv.incl [bits(k.rcvLine), bits(k.rcvPoint), uint64(cast[uint16](k.rcvIndex)),
           bits(k.rcvX), bits(k.rcvY)]
       components.incl k.component
+      if not timeSeen:
+        time0 = k.time
+        timeSeen = true
+      elif not (k.time == time0 or (k.time.isNaN and time0.isNaN)):
+        timesDiffer = true
       inc n
   let kind =
     if rcv.len == 0: gkUnknown
     elif src.len <= 1 and rcv.len > 1: gkShot
     elif rcv.len == 1 and src.len > 1: gkReceiver
-    elif rcv.len == 1: (if n == 1 or components.card == n: gkShot else: gkUnknown)
+    elif rcv.len == 1:
+      if n == 1 or components.card == n: gkShot
+      elif timesDiffer: gkReceiver
+      else: gkUnknown
     else: gkOther
   (kind, src.len, rcv.len)
 
@@ -154,6 +168,42 @@ block classify_counts_as_the_reference_does:
   let gs = segyIndex(4, stack).gathers
   doAssert gs.len == 50 and gs.kinds == newSeq[GatherKind](50).mapIt(gkCmp)
   doAssert gs[3].sources == 1 and gs[3].receivers == 1 and gs[7].receivers == 0
+
+block repeated_shots_one_point:
+  # Six pilot traces, one receiver, one source point, times 30 s apart.
+  # Seen to fail first: the times-differ branch removed (kind was gkUnknown).
+  proc pilot(i: int): TraceKeys =
+    result = initTraceKeys()
+    result.record = 1
+    result.channel = float64(i + 1)
+    result.time = 1_700_000_000.0 + float64(i) * 30
+    result.srcLine = 10
+    result.srcPoint = 20
+    result.srcIndex = 1
+    result.srcX = 5000
+    result.srcY = 6000
+    result.rcvLine = 500
+    result.rcvPoint = 12
+    result.rcvIndex = 1
+    result.rcvX = 1000
+    result.rcvY = 2000
+    result.status = tsAuxiliary
+    result.component = 1
+    result.sensorType = 1
+  var ks: seq[TraceKeys]
+  for i in 0 .. 5: ks.add pilot(i)
+  let ix = segyIndex(0, ks)
+  let g = ix.classify(0 .. 5)
+  doAssert g.kind == gkReceiver and g.sources == 1 and g.receivers == 1
+  # Equal times stay unknown. A shot gather, a multi-component record and a
+  # one-trace record classify as before.
+  for k in ks.mitems: k.time = 1_700_000_000.0
+  doAssert segyIndex(0, ks).gathers.kinds == @[gkUnknown]
+  doAssert segyIndex(0, [key(1, sx = 10, rx = 1), key(1, sx = 10, rx = 2)]).gathers.kinds ==
+    @[gkShot]
+  doAssert segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 1, rx = 5, comp = 13),
+    key(1, sx = 1, rx = 5, comp = 14)]).gathers.kinds == @[gkShot]
+  doAssert segyIndex(0, [key(1, sx = 1, rx = 5)]).gathers.kinds == @[gkShot]
 
 block component_groups_and_single_stations:
   # One station, one source: three components make a shot, three copies of
