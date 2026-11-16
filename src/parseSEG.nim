@@ -55,6 +55,7 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.kind, traceindex.log, traceindex.recordCount, traceindex.maxSamples,
   traceindex.traceEntry, traceindex.hasKeys, traceindex.traceKeys, traceindex.traceKeysInto,
   traceindex.startTimeMs, traceindex.startTimeMsInto, traceindex.traceOrientation,
+  traceindex.recordOrientation,
   traceindex.ensureKeys,
   traceindex.keysRevision,
   traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,

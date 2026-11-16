@@ -1094,12 +1094,54 @@ proc startTimeMs*(f: SeismicFile, trace: int): float64 =
   f.startTimeMsInto([trace], v)
   v[0]
 
-proc traceOrientation*(f: SeismicFile, trace: int): Option[SegdOrientation] =
+func sameOrientation(a, b: SegdOrientation): bool =
+  a.rotationX == b.rotationX and a.rotationY == b.rotationY and a.rotationZ == b.rotationZ and
+    a.referenceOrientation == b.referenceOrientation and a.timestamp == b.timestamp and
+    a.orientationType == b.orientationType and a.refOrientationValid == b.refOrientationValid and
+    a.rotationApplied == b.rotationApplied and a.rotationNorthApplied == b.rotationNorthApplied
+
+proc firstOrientation(area: openArray[byte]): tuple[at: int, orient: SegdOrientation,
+    secondAt: int] =
+  # The first Orientation block, and the offset of a later one that differs
+  # (-1 when there is none, or the later blocks match the first).
+  result.at = -1
+  result.secondAt = -1
+  let at = findBlock(area, BlockTypeOrientation)
+  if at < 0: return
+  result.at = at
+  result.orient = decodeBlock[SegdOrientation](area.toOpenArray(at, at + SegdBlockSize - 1))
+  var next = at + SegdBlockSize
+  while next + SegdBlockSize <= area.len:
+    let at2 = findBlock(area, BlockTypeOrientation, next)
+    if at2 < 0: return
+    let other = decodeBlock[SegdOrientation](area.toOpenArray(at2, at2 + SegdBlockSize - 1))
+    if not sameOrientation(result.orient, other):
+      result.secondAt = at2
+      return
+    next = at2 + SegdBlockSize
+
+proc noteSecondOrientation(f: var SeismicFile, record, trace: int, offset: int64) =
+  # Once per trace (or per record, when `trace` is -1): a later block lost.
+  for d in f.idx.log:
+    if d.code == dcInconsistent and d.loc.record == record and d.loc.trace == trace and
+        d.loc.field == "orientation":
+      return
+  f.idx.log.report(sevWarning, dcInconsistent,
+    "a second Orientation block differs from the first; the first is used",
+    offset, Location(file: f.path, record: record, trace: trace, field: "orientation"))
+
+proc traceOrientation*(f: var SeismicFile, trace: int): Option[SegdOrientation] =
   ## The SEG-D Rev 3 Orientation header (0x60) of trace `trace`; none when
   ## the trace has no such block, including SEG-Y, SEG-2 and SEG-D before
   ## Rev 3. Taken from the trace header extensions, wherever in them another
   ## writer placed it: a scan of those 32-byte blocks, cheap enough to call
-  ## for every trace of a record. Raises `ValueError` for a trace out of
+  ## for every trace of a record. The first block wins. A second, different
+  ## one adds one `dcInconsistent` warning to `f.log` (repeated calls do not
+  ## add it again). A 0x60 in the general header is not used here: the spec
+  ## does not say that block applies to traces without their own ("A block
+  ## (e.g. Position 50-52, Additional Source Info 20, Aux Channel Ref 21)
+  ## applies to the preceding Source Description block"), so it is
+  ## `recordOrientation`. Raises `ValueError` for a trace out of
   ## range, a closed file, or headers that lie outside the file, and
   ## `SegTruncatedError` for a file cut short while open (`cutShort`).
   f.requireTrace(trace)
@@ -1117,11 +1159,34 @@ proc traceOrientation*(f: SeismicFile, trace: int): Option[SegdOrientation] =
   f.withHeld(start, e.offset + hb):
     let mem = f.unsafeMemory
     let a = int(start)
-    let at = findBlock(mem.toOpenArray(a, a + int(ext) - 1), BlockTypeOrientation)
-    if at >= 0:
-      result = some(decodeBlock[SegdOrientation](
-        mem.toOpenArray(a + at, a + at + SegdBlockSize - 1)))
+    let found = firstOrientation(mem.toOpenArray(a, a + int(ext) - 1))
+    if found.at >= 0:
+      result = some(found.orient)
+      if found.secondAt >= 0:
+        f.noteSecondOrientation(int(e.record), trace, start + found.secondAt)
   f.requireUncut()
+
+proc recordOrientation*(f: var SeismicFile, record: int): Option[SegdOrientation] =
+  ## The first Orientation header (0x60) in SEG-D record `record`'s general
+  ## header blocks; none when that record has none, or the file is not SEG-D
+  ## Rev 3. Table 2 allows the block in the general header, but the text does
+  ## not say it applies to every trace without its own, so `traceOrientation`
+  ## does not return it. The first block wins; a second, different one adds
+  ## one `dcInconsistent` warning to `f.log`. Raises `ValueError` for a record
+  ## out of range or a closed file.
+  f.requireOpen()
+  if record notin 0 ..< f.recordCount:
+    raise newException(ValueError, "no record " & $record & " (the file has " &
+      $f.recordCount & ")")
+  if f.idx.kind != skSegd: return
+  let rec = f.idx.segdRecords[record]
+  if not rec.isRev3: return
+  let found = firstOrientation(rec.generalBlocks)
+  if found.at < 0: return
+  result = some(found.orient)
+  if found.secondAt >= 0:
+    # generalBlocks start after GH#1, GH#2 and GH#3.
+    f.noteSecondOrientation(record, -1, rec.offset + 3 * SegdBlockSize + found.secondAt)
 
 proc traceKeys*(f: SeismicFile, traces: openArray[int]): seq[TraceKeys] =
   ## The keys of each trace of `traces` (see `traceKeysInto`); works on a file
