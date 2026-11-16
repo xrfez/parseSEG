@@ -447,7 +447,8 @@ What a viewer can rely on:
   in `failedRows`). The other rows are what the file holds. `readTraces` without a log
   raises `SegTruncatedError`, as for any trace that cannot be decoded.
 - Calls that read headers, keys or raw bytes from the map (`traceHeaders`, `traceField`,
-  `traceFieldColumn`, keys on demand, `ensureKeys`, `startTimeMs`, `traceStatics`,
+  `traceFieldColumn`, keys on demand, `ensureKeys`, `startTimeMs`, `traceOrientation`,
+  `traceStatics`,
   `copyBytes`, `seg2Trace`, `sortTraces`, `exportHeaders`, `writeTrace` from the file)
   raise `SegTruncatedError` once the cut is known, also for headers before it; so does
   the call whose read first meets the cut. The index and stored keys (`keys = true`) are
@@ -809,6 +810,34 @@ echo "receiver ", k.rcvLine, "/", k.rcvPoint, " at (", k.rcvX, ", ", k.rcvY, ")"
 echo "offset ", round(k.offset, 1), ", recorded ", fromUnixFloat(k.time).utc
 echo "sample interval ", f.sampleIntervalUs(3), " us"
 doAssert abs(k.offset - 10000) < 0.01 and f.sampleIntervalUs(3) == 1000
+```
+
+A node's attitude, when the file carries a SEG-D Rev 3 Orientation header (0x60), is
+`traceOrientation(i)`: an `Option[SegdOrientation]`, none when that trace has no block. It
+does not need stored keys, and it finds the block wherever another writer put it in the
+trace header extensions, so it is cheap enough to call for every trace of a record.
+
+```nim
+import std/options
+import parseSEG
+
+var k = initTraceKeys()
+k.record = 1
+k.channel = 1
+k.intervalUs = 1000
+k.time = 1_709_273_228.0
+k.status = tsLive
+let att = initTraceOrientation(0.1'f32, -0.2'f32, 1.5'f32, orientationType = 1,
+  refOrientationValid = true, rotationApplied = true)
+var w = openSeismicWriter("node.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
+  numSamples: 4, time: k.time))
+w.writeTrace(k, @[1'f32, 2, 3, 4], orientation = some(att))
+discard w.close()
+var f = openSeismic("node.sgd")
+let o = f.traceOrientation(0)
+doAssert o.isSome and o.get.rotationZ == 1.5'f32 and o.get.orientationType == 1
+doAssert f.traceOrientation(0).get.rotationApplied == 1
+f.close()
 ```
 
 ### Inline and crossline of post-stack SEG-Y

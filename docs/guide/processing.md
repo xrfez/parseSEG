@@ -437,6 +437,14 @@ twice in one channel set is refused; NaN assigns the lowest number the set has n
 whose end does not fit the channel set's end time is refused, and so is a window longer than
 2^32 - 1 µs (refused when the writer opens). An infinite coordinate or elevation is refused, and so
 are coordinates with units unknown and no `crsText`. A recording time outside 1950-2049 is refused.
+Pass `orientation = some(att)` to give a trace a SEG-D Orientation header (0x60): the three
+rotations and the reference orientation
+in radians, the orientation type and the flags (`initTraceOrientation`). Its timestamp is
+`att.time` when that is set, otherwise the trace's recording time. A trace given none gets
+no block, so files written as in 0.14.0 stay byte-identical. Traces of one channel set may
+disagree; the descriptor then carries the largest extension count. NaN or an infinite rotation is
+refused, and so is rotating to north without marking the rotation applied. Read it back
+with `traceOrientation` ([the viewer guide](viewer.md#geometry-time-and-annotation)).
 
 ```nim
 import parseSEG
@@ -462,6 +470,28 @@ doAssert g.len == f.len and g.traceKeys(3).rcvX == f.traceKeys(3).rcvX
 doAssert g.traceKeys(0).status == tsAuxiliary and g.traceKeys(3).status == tsLive
 doAssert g.readTraces(3 .. 3)[0, 0] == x[3, 0]
 g.close()
+f.close()
+```
+
+```nim
+import std/options
+import parseSEG
+
+var k = initTraceKeys()
+k.record = 4
+k.channel = 1
+k.intervalUs = 2000
+k.time = 1_478_000_000.0
+k.status = tsLive
+let att = initTraceOrientation(0.0'f32, 0.25'f32, -0.5'f32, orientationType = 4,
+  rotationApplied = true)
+var w = openSeismicWriter("oriented.sgd", SegdOutputOptions(sampleIntervalUs: 2000,
+  numSamples: 2, time: k.time))
+w.writeTrace(k, @[1'f32, -1], orientation = some(att))
+discard w.close()
+var f = openSeismic("oriented.sgd")
+doAssert f.traceOrientation(0).get.rotationY == 0.25'f32
+doAssert f.traceOrientation(0).get.orientationType == 4
 f.close()
 ```
 
