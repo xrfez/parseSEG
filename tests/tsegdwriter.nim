@@ -384,3 +384,22 @@ block descriptor_description_is_spaces:
   for d in descs:
     for ch in d.description: doAssert ch == ' ', "description holds " & $ord(ch)
   f.close()
+
+block base_scan_interval_short_field:
+  # General Header #1's base scan interval is a short field only for 1, 2, 4
+  # ... 128 sixteenths of a millisecond (125 µs to 8 ms in steps that double,
+  # 62.5 µs for 1). Other intervals are 0xFF, with the µs value in General
+  # Header #2. Without that, 2500 µs wrote 40 in the short field; the reader
+  # read the interval from the channel set, so it did not notice.
+  for (dt, short) in [(2500.0, 0xFF'u8), (3000.0, 0xFF'u8), (10000.0, 0xFF'u8),
+      (2000.0, 32'u8), (4000.0, 64'u8)]:
+    let path = tmp / ("scan" & $int(dt) & ".sgd")
+    var w = openOut(path, opts(2, dt = dt))
+    var k = shot(1, 1, true)
+    k.intervalUs = dt
+    w.writeTrace(k, samples(2, 1))
+    discard w.close()
+    var f = openSeismic(path, keys = true)
+    doAssert f.index.segdRecords[0].gh1.baseScanInterval16 == short, "interval " & $dt
+    doAssert f.summary.sampleIntervalUs == dt, "interval " & $dt
+    f.close()

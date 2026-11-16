@@ -1062,8 +1062,11 @@ proc flushSegdKeys(s: var WriterState) =
   if nCS <= 99: gh1.channelSetsPerScanType = nCS
   else: gh1.channelSetsPerScanType = BcdAllF
   let span = opts.sampleIntervalUs * float64(max(opts.numSamples - 1, 0))
+  # The short field holds only these intervals (1/16 ms units); any other
+  # is 0xFF, with the µs value in General Header #2.
+  const ShortScanIntervals = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
   let sixteenths = opts.sampleIntervalUs / 62.5
-  if sixteenths == round(sixteenths) and sixteenths >= 1 and sixteenths <= 254:
+  if sixteenths in ShortScanIntervals:
     gh1.baseScanInterval16 = uint8(sixteenths)
   else:
     gh1.baseScanInterval16 = 0xFF
