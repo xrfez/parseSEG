@@ -40,7 +40,10 @@
 ## writes a new SEG-Y file whose file headers come from the options, and
 ## `writeTrace(w, keys, samples, overrides)` builds each trace's headers
 ## from its `TraceKeys` (e.g. a stack of SEG-D or SEG-2 data; any SEG-Y
-## writer takes these traces).
+## writer takes these traces). `openSeismicWriter(path,
+## SegdOutputOptions(...))` does the same for a new SEG-D Rev 3 file:
+## traces are grouped into records by `keys.record`, one channel set per
+## channel type, and `close` writes each record whole.
 ##
 ## SEG-D rule: records are written whole, and each record's traces in input
 ## order. A record starts with its first trace and ends when a trace of
@@ -72,6 +75,7 @@ import ../seg2/[reader as seg2reader, writer as seg2writer]
 import ../convert
 import std/strutils
 import ./[traceindex, fieldvalues, keytypes]
+from ./summary import CoordinateUnits
 from ./keys import traceKeys
 from ../survey/join import GeometryFields
 from ../survey/writeback import KeysPlan, planKeys, finishKeys
@@ -105,6 +109,98 @@ type
     traceSorting*: int16 = 0 ## Binary 3229-3230: 1 as recorded, 2 CDP ensembles, 4 stack, ...
     measurementSystem*: int16 = 0 ## Binary 3255-3256: 1 metres, 2 feet, 0 unknown.
 
+  SegdChannelType* = enum
+    ## A Rev 3 channel type (channel set descriptor byte 4). The codes are
+    ## those `channelType` reads (`docs/spec/segd_rev3_0_b.md` §4.12); none
+    ## are invented. Seismic (0x10) and electromagnetic (0x11) read back as
+    ## live or dead; every other code reads back as auxiliary. `TraceKeys`
+    ## has no channel-type field, so `writeTrace` takes one (`sctSeismic`
+    ## when omitted).
+    sctUnused = 0x00
+    sctSeismic = 0x10
+    sctEm = 0x11
+    sctTimeBreak = 0x20
+    sctClockTimeBreak = 0x21
+    sctFieldTimeBreak = 0x22
+    sctUpHole = 0x30
+    sctWaterBreak = 0x40
+    sctTimeCounter = 0x50
+    sctExternalData = 0x60
+    sctAcousticRange = 0x61
+    sctAcousticRefMeasured = 0x62
+    sctAcousticRefNominal = 0x63
+    sctOther = 0x70
+    sctSignatureUnfiltered = 0x80
+    sctSignatureFiltered = 0x90
+    sctSourceSigUnfiltered = 0x91
+    sctSourceSigFiltered = 0x92
+    sctSourceSigEstimated = 0x93
+    sctSourceSigMeasured = 0x94
+    sctSourceBasePlate = 0x95
+    sctSourceRefSweep = 0x96
+    sctSourceOther = 0x97
+    sctSourceRefPilot = 0x98
+    sctSourceMass = 0x99
+    sctSourceExcitation = 0x9A
+    sctSourceValve = 0x9B
+    sctSourceOverload = 0x9C
+    sctAuxDataTrailer = 0xA0
+    sctTrueRefSweep = 0xB0
+    sctRadioRefSweep = 0xB1
+    sctRadioSimilarity = 0xB2
+    sctWirelineRefSweep = 0xB3
+    sctDepth = 0xC0
+    sctWind = 0xC1
+    sctCurrent = 0xC2
+    sctVoltage = 0xC3
+    sctVelocity = 0xC4
+    sctAcceleration = 0xC5
+    sctPressure = 0xC6
+    sctTension = 0xC7
+    sctTilt = 0xC8
+    sctAngle = 0xC9
+    sctCalibration = 0xF0
+
+  SegdOutputOptions* = object
+    ## A SEG-D Rev 3 file not modelled on an input
+    ## (`openSeismicWriter(path, opts)`), for traces built from `TraceKeys`.
+    revision*: SegdRevision = SegdRevision(major: 3, minor: 0)
+      ## 3.0 or 3.1. The little-endian formats (9036, 9038, 9058, 9080) need 3.1.
+    format*: SegdSampleFormat = sd8058
+      ## Sample format of every trace. `sd8058` is IEEE float32, bit-exact
+      ## for float32 samples. Also 8036, 8038, 8048, 8080 (IEEE float64), the
+      ## Rev 3.1 little-endian twins, and the quantizing formats 8015, 8022,
+      ## 8024, 8042 and 8044.
+    sampleIntervalUs*: float64
+      ## Sample interval in µs, a whole number, written into every channel set.
+    numSamples*: int
+      ## Samples of every trace. A channel set has this one count.
+    units*: CoordinateUnits = cuMeters
+      ## Metres or feet. With an empty `crsText`, written as a P1/11 axis
+      ## record, which `summary.coordinateUnits` reads. Coordinates are not
+      ## rescaled.
+    crsText*: string
+      ## CRS text written in 0x55 blocks, as the reader concatenates them (a
+      ## Location Data stanza or P1/11 records). Empty: a P1/11 fragment
+      ## naming `units`, or none when `units` is unknown.
+
+  SegdKeyTrace = object
+    keys: TraceKeys
+    channelType: SegdChannelType
+    samples: seq[byte]
+    overrides: seq[HeaderOverride]
+    t0Us: int32
+    channel: int ## Trace number to write; -1 until assigned.
+
+  SegdSourceFix = object
+    seen, hasStation, hasXY: bool
+    line, point, x, y, z: float64
+    index: int16
+
+  SegdSetT0 = object
+    channelType: SegdChannelType
+    t0Us: int32
+
   NullSink {.acyclic.} = ref object of RecordSink
     ## Discards what it is given: `openSeismicWriter` validates the SEG-Y
     ## file headers with it before the first trace fixes the sample count.
@@ -133,6 +229,13 @@ type
     # SEG-D
     segd: SegdWriter
     segdFormat: Option[SegdSampleFormat] ## none: each record's own.
+    segdFresh: bool       ## Opened from `SegdOutputOptions`: traces come from keys.
+    segdOpts: SegdOutputOptions
+    segdHaveRec: bool     ## A record from keys is in progress (buffered).
+    segdRecNo: int64
+    segdPending: seq[SegdKeyTrace]
+    segdSource: SegdSourceFix
+    segdSetT0: seq[SegdSetT0]
     inRecord: bool
     recPath: string       ## The record in progress: its file, index and traces.
     recIndex, recFirst, recLast, nextTrace: int
@@ -354,6 +457,43 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
     discard openSegyWriter(NullSink(name: path), f, initSegyWriteOptions(f))
     result.s.segyFile = f
     result.s.sink = openDiskSink(result.s.tmp)
+  except CatchableError:
+    result.s.discardOutput()
+    raise
+
+proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
+  ## A writer of a new SEG-D Rev 3 file at `path`, for traces built from
+  ## `TraceKeys` (`writeTrace(w, keys, samples)`), grouped into records by
+  ## `keys.record`. The sample interval, sample count and sample format come
+  ## from `opts`; a record is buffered until the next record number or
+  ## `close`, then written whole. Raises `ValueError` for a revision other
+  ## than 3.0 or 3.1, a format that revision lacks, a sample interval that
+  ## is not a whole number of microseconds from 1 to 2^32-1, a sample count
+  ## below 1, format 8015 with a count that is not a multiple of 4, or
+  ## coordinate units other than metres, feet or unknown; `IOError` when
+  ## the output cannot be created.
+  let rev = opts.revision
+  if rev.major != 3 or rev.minor > 1:
+    refuse("SEG-D Rev " & $rev & " cannot be written from keys (3.0 or 3.1)")
+  if not opts.format.definedIn(rev):
+    refuse("SEG-D format " & $ord(opts.format) & " is not defined in Rev " & $rev)
+  let dt = wholeInterval(opts.sampleIntervalUs)
+  if dt.isNaN or dt <= 0 or dt != round(dt) or dt > float64(high(uint32)):
+    refuse("SegdOutputOptions.sampleIntervalUs must be a whole number of microseconds " &
+      "from 1 to " & $high(uint32) & ", not " & $opts.sampleIntervalUs)
+  if opts.numSamples <= 0 or opts.numSamples > int(high(uint32)):
+    refuse("SegdOutputOptions.numSamples must be at least 1, not " & $opts.numSamples)
+  if opts.format == sd8015 and opts.numSamples mod 4 != 0:
+    refuse("SEG-D format 8015 holds samples in groups of 4; numSamples is " & $opts.numSamples)
+  if opts.units notin {cuUnknown, cuMeters, cuFeet}:
+    refuse("SEG-D coordinates are in metres or feet, not " & $opts.units)
+  var fixed = opts
+  fixed.sampleIntervalUs = dt
+  result = SeismicWriter(s: WriterState(kind: skSegd, path: path, tmp: createTempFor(path),
+    open: true, segdFresh: true, segdOpts: fixed))
+  try:
+    result.s.sink = openDiskSink(result.s.tmp)
+    result.s.segd = openSegdWriter(result.s.sink, SegdWriteOptions())
   except CatchableError:
     result.s.discardOutput()
     raise
@@ -633,6 +773,9 @@ proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
 proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
     fields: GeometryFields) =
+  if s.segdFresh:
+    refuse("a writer opened from SegdOutputOptions takes traces from keys " &
+      "(writeTrace(w, keys, samples)), not template traces")
   if src.demuxPath.len > 0:
     refuse(src.path & " holds multiplexed SEG-D; convert it to a demultiplexed file first")
   let e = src.index.entries[trace]
@@ -660,8 +803,316 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   s.segd.writeTrace(t)
   s.nextTrace = trace + 1
 
+# ------------------------------------------------------- SEG-D from keys --
+
+const SegdExtNumMax = 0xFF_FFFF ## Extended file and trace numbers are 24-bit.
+
+func segdSeismic(c: SegdChannelType): bool {.inline.} =
+  c == sctSeismic or c == sctEm
+
+func crsToWrite(opts: SegdOutputOptions): string =
+  if opts.crsText.len > 0: opts.crsText
+  elif opts.units == cuMeters: "((OGP:P1/11 CRS))\nHC,1,6,1,metre\n"
+  elif opts.units == cuFeet: "((OGP:P1/11 CRS))\nHC,1,6,1,feet\n"
+  else: ""
+
+proc crsBlockBytes(text: string): seq[byte] =
+  result = @[]
+  var i = 0
+  while i < text.len:
+    let n = min(31, text.len - i)
+    var b = newSeq[byte](32)
+    for k in 0 ..< n: b[k] = byte(text[i + k])
+    for k in n .. 30: b[k] = byte(' ')
+    b[31] = BlockTypeCrs
+    result.add b
+    i += 31
+
+proc positionBlock(x, y, z: float64, valid: bool, stanza: uint16): SegdPositionBlock =
+  let zz = if z.isNaN or not valid: Inf else: z
+  let xx = if valid: x else: Inf
+  let yy = if valid: y else: Inf
+  SegdPositionBlock(tuple1Coord1: xx, tuple1Coord2: yy, tuple1Coord3: zz,
+    stanzaId1: (if valid: stanza else: 0'u16), position1Valid: uint8(ord(valid)),
+    position1Quality: uint8(ord(valid)),
+    tuple2Coord1: Inf, tuple2Coord2: Inf, tuple2Coord3: Inf,
+    blockType1: BlockTypePosition1, blockType2: BlockTypePosition2,
+    blockType3: BlockTypePosition3)
+
+proc fileNumberOf(k: TraceKeys): int64 =
+  let r = k.record
+  if r.isNaN or r < 0 or r > float64(SegdExtNumMax) or r != round(r):
+    refuse("the keys give no SEG-D file number (record " & $r &
+      "; a whole number 0.." & $SegdExtNumMax & ")")
+  int64(r)
+
+proc t0Of(k: TraceKeys): int32 =
+  if k.t0Ms.isNaN: return 0
+  let us = round(k.t0Ms * 1000)
+  if us < float64(low(int32)) or us > float64(high(int32)):
+    refuse("start time " & $k.t0Ms & " ms does not fit a SEG-D Rev 3 channel set")
+  int32(us)
+
+proc checkStation(line, point: float64, what: string): bool =
+  # True when the station is known. A line and a point that are both 0, or
+  # both NaN, are unknown (the reader gives NaN back).
+  let ln = not line.isNaN
+  let pn = not point.isNaN
+  if ln != pn:
+    refuse("a " & what & " station needs both a line and a point")
+  if not ln: return false
+  if line <= -8388608.0 or line >= 8388608.0 or point <= -8388608.0 or point >= 8388608.0:
+    refuse(what & " station " & $line & "/" & $point & " does not fit a SEG-D Rev 3 field")
+  not (line == 0 and point == 0)
+
+proc setReceiverStation(e: var SegdTraceHeaderExt1Rev3, line, point: float64) =
+  proc one(whole: var int32, ext: var float64, v: float64) =
+    let r = round(v)
+    if v == r and r >= -8388607 and r <= 8388607 and int32(r) != -1:
+      whole = int32(r)
+    else:
+      whole = -1
+      ext = v
+  if line == 0 and point == 0: return
+  one(e.receiverLineNumber, e.extReceiverLineNumber, line)
+  one(e.receiverPointNumber, e.extReceiverPointNumber, point)
+
+proc noteSetT0(s: var WriterState, ct: SegdChannelType, t0: int32) =
+  for c in s.segdSetT0:
+    if c.channelType == ct:
+      if c.t0Us != t0:
+        refuse("SEG-D channel set " & $ct & " has one start time, " &
+          $(float64(c.t0Us) / 1000) & " ms; this trace has " & $(float64(t0) / 1000) &
+          " ms (a channel set has one sample window)")
+      return
+  s.segdSetT0.add SegdSetT0(channelType: ct, t0Us: t0)
+
+proc sameNum(a, b: float64): bool {.inline.} =
+  a == b or (a.isNaN and b.isNaN)
+
+proc noteSource(s: var WriterState, k: TraceKeys, hasSt, hasXY: bool) =
+  if not hasSt and not hasXY: return
+  if not s.segdSource.seen:
+    s.segdSource = SegdSourceFix(seen: true, hasStation: hasSt, hasXY: hasXY, line: k.srcLine,
+      point: k.srcPoint, x: k.srcX, y: k.srcY, z: k.srcZ, index: k.srcIndex)
+    return
+  let src = s.segdSource
+  let stationDiff = hasSt != src.hasStation or
+    (hasSt and not (sameNum(k.srcLine, src.line) and sameNum(k.srcPoint, src.point) and
+      k.srcIndex == src.index))
+  let xyDiff = hasXY != src.hasXY or
+    (hasXY and not (sameNum(k.srcX, src.x) and sameNum(k.srcY, src.y) and sameNum(k.srcZ, src.z)))
+  if stationDiff or xyDiff:
+    refuse("SEG-D record " & $s.segdRecNo & " has one source (the general header); " &
+      "this trace's source differs")
+
+proc checkSegdStatus(k: TraceKeys, ct: SegdChannelType) =
+  if segdSeismic(ct) and k.status == tsAuxiliary:
+    refuse("an auxiliary trace needs an auxiliary SEG-D channel type, not " & $ct)
+  if not segdSeismic(ct) and k.status in {tsLive, tsDead}:
+    refuse("channel type " & $ct & " reads back as auxiliary, not " & $k.status)
+
+proc channelOf(k: TraceKeys): int =
+  if k.channel.isNaN: return -1
+  if k.channel < 1 or k.channel > float64(SegdExtNumMax) or k.channel != round(k.channel):
+    refuse("channel " & $k.channel & " is not a SEG-D trace number (a whole number 1.." &
+      $SegdExtNumMax & ")")
+  int(k.channel)
+
+proc setBcdOrExt(small: var int, ext: var uint32, n: int64, digits: int) =
+  # `digits` BCD digits, or all-F plus the extended field.
+  var lim = 1
+  for i in 1 .. digits: lim *= 10
+  if n < lim: small = int(n)
+  else:
+    small = BcdAllF
+    ext = uint32(n)
+
+proc flushSegdKeys(s: var WriterState) =
+  # Writes the buffered record and forgets it. A failure while writing
+  # discards the output: the record headers are already in the file.
+  if s.segdPending.len == 0:
+    s.segdHaveRec = false
+    return
+  let opts = s.segdOpts
+  let fileNo = s.segdRecNo
+  let fmt = opts.format
+  let crs = crsToWrite(opts)
+  let stanza: uint16 = if crs.len > 0: 1 else: 0
+  var setType: seq[SegdChannelType] = @[]
+  var setCount: seq[int] = @[]
+  var setT0: seq[int32] = @[]
+  var setPos: seq[bool] = @[]
+  var setOf = newSeq[int](s.segdPending.len)
+  var nextCh = newSeq[int]()
+  for i, p in s.segdPending:
+    var found = -1
+    for j, ct in setType:
+      if ct == p.channelType: found = j
+    if found < 0:
+      setType.add p.channelType
+      setCount.add 0
+      setT0.add p.t0Us
+      setPos.add false
+      nextCh.add 1
+      found = setType.len - 1
+    setOf[i] = found
+    inc setCount[found]
+    if p.keys.hasReceiverXY: setPos[found] = true
+  var traces = newSeq[SegdTrace](s.segdPending.len)
+  for i, p in s.segdPending:
+    let si = setOf[i]
+    let exts = 1 + (if setPos[si]: 3 else: 0)
+    var ch = p.channel
+    if ch < 0:
+      ch = nextCh[si]
+    inc nextCh[si]
+    var t = SegdTrace(layout: slRev3, index: i, numSamples: opts.numSamples)
+    var hdr = SegdTraceHeader(scanTypeNumber: 1, traceHeaderExtensions: uint8(exts),
+      traceEdit: (if p.keys.status == tsDead: 1'u8 else: 0'u8))
+    var fileSmall = 0
+    var fileExt = 0'u32
+    setBcdOrExt(fileSmall, fileExt, fileNo, 4)
+    hdr.fileNumber = fileSmall
+    hdr.extFileNumber = fileExt
+    let csNo = si + 1
+    var csSmall = 0
+    var csExt = 0'u32
+    setBcdOrExt(csSmall, csExt, int64(csNo), 2)
+    hdr.channelSetNumber = csSmall
+    hdr.extChannelSetNumber = uint16(csNo)
+    var trSmall = 0
+    var trExt = 0'u32
+    setBcdOrExt(trSmall, trExt, int64(ch), 4)
+    hdr.traceNumber = trSmall
+    t.header = hdr
+    var e = SegdTraceHeaderExt1Rev3(numSamples: uint32(opts.numSamples),
+      sensorType: p.keys.sensorType, groupIndex: p.keys.component,
+      depthIndex: p.keys.depthIndex, reshootIndex: p.keys.reshootIndex,
+      extTraceNumber: uint32(ch), blockType: BlockTypeTraceHeaderExt1)
+    if checkStation(p.keys.rcvLine, p.keys.rcvPoint, "receiver"):
+      e.setReceiverStation(p.keys.rcvLine, p.keys.rcvPoint)
+      e.receiverPointIndex = int8(p.keys.rcvIndex)
+    t.ext1Rev3 = some(e)
+    if setPos[si]:
+      let k = p.keys
+      let pos = if k.hasReceiverXY: positionBlock(k.rcvX, k.rcvY, k.rcvZ, true, stanza)
+        else: positionBlock(0, 0, NaN, false, 0)
+      t.extensions = @(pos.encoded)
+    t.samples = p.samples
+    t.overrideSegd(p.overrides)
+    traces[i] = t
+  var rec = SegdRecord(layout: slRev3, format: some(fmt), revision: opts.revision)
+  rec.generalBlocks = crsBlockBytes(crs)
+  let src = s.segdSource
+  if src.hasStation:
+    let sb = SegdSourceDescription(extFileNumber: uint32(fileNo), sourceLineNumber: src.line,
+      sourcePointNumber: src.point, sourcePointIndex: uint8(src.index), sourceSetNumber: 1,
+      blockType: 0x1F)
+    rec.generalBlocks.add @(sb.encoded)
+  if src.hasXY:
+    rec.generalBlocks.add @(positionBlock(src.x, src.y, src.z, true, stanza).encoded)
+  let nOpt = rec.generalBlocks.len div SegdBlockSize
+  let additional = 2 + nOpt
+  var gh1 = SegdGeneralHeader1(formatCode: ord(fmt), recordType: 8, recordLength: BcdAllF,
+    scanTypesPerRecord: 1, skewBlocks: 0, extendedHeaderBlocks: 0, externalHeaderBlocks: 0)
+  var fileSmall = 0
+  var fileExt = 0'u32
+  setBcdOrExt(fileSmall, fileExt, fileNo, 4)
+  gh1.fileNumber = fileSmall
+  if additional <= 14: gh1.additionalGhBlocks = uint8(additional)
+  else: gh1.additionalGhBlocks = 0xF
+  let nCS = setType.len
+  if nCS <= 99: gh1.channelSetsPerScanType = nCS
+  else: gh1.channelSetsPerScanType = BcdAllF
+  let span = opts.sampleIntervalUs * float64(max(opts.numSamples - 1, 0))
+  let sixteenths = opts.sampleIntervalUs / 62.5
+  if sixteenths == round(sixteenths) and sixteenths >= 1 and sixteenths <= 254:
+    gh1.baseScanInterval16 = uint8(sixteenths)
+  else:
+    gh1.baseScanInterval16 = 0xFF
+  rec.gh1 = gh1
+  var gh2 = SegdGeneralHeader2Rev3(extFileNumber: uint32(fileNo),
+    revisionMajor: opts.revision.major, revisionMinor: opts.revision.minor,
+    blockType: BlockTypeGeneralHeader2)
+  if additional > 14: gh2.extAdditionalGhBlocks = uint16(additional)
+  if nCS > 99: gh2.extChannelSetsPerScanType = uint16(nCS)
+  if gh1.baseScanInterval16 == 0xFF:
+    gh2.dominantSamplingInterval = uint32(opts.sampleIntervalUs)
+  if span <= float64(high(uint32)): gh2.extRecordLength = uint32(span)
+  rec.gh2Rev3 = gh2
+  rec.gh3 = SegdGeneralHeader3(blockType: BlockTypeGeneralHeader3)
+  var descs: seq[SegdChannelSetDescriptorRev3] = @[]
+  for j, ct in setType:
+    let endUs = float64(setT0[j]) + span
+    var d = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: uint16(j + 1),
+      channelType: uint8(ord(ct)), startTime: setT0[j], numSamples: uint32(opts.numSamples),
+      descaleMultiplier: 1.0, channelsInSet: uint32(setCount[j]),
+      samplingInterval: uint32(opts.sampleIntervalUs), arrayForming: 1,
+      traceHeaderExtensions: uint8(1 + (if setPos[j]: 3 else: 0)), verticalStack: 1,
+      blockType1: BlockTypeChannelSet1, blockType2: BlockTypeChannelSet2,
+      blockType3: BlockTypeChannelSet3)
+    if endUs >= float64(low(int32)) and endUs <= float64(high(int32)):
+      d.endTime = int32(endUs)
+    descs.add d
+  rec.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: descs)]
+  computeRev3Sizes(rec, traces)
+  rec.traceCount = traces.len
+  try:
+    s.segd.writeRecordHeaders(rec)
+    for t in traces: s.segd.writeTrace(t)
+    s.segd.endRecord()
+  except CatchableError:
+    s.discardOutput()
+    raise
+  s.segdPending.setLen 0
+  s.segdHaveRec = false
+  s.segdSource = SegdSourceFix()
+  s.segdSetT0.setLen 0
+
+proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: openArray[T],
+    overrides: openArray[HeaderOverride], channelType: SegdChannelType) =
+  let n = s.segdOpts.numSamples
+  if samples.len != n:
+    refuse("a SEG-D channel set has one sample count, " & $n &
+      " (SegdOutputOptions.numSamples); this trace has " & $samples.len)
+  let recNo = fileNumberOf(k)
+  if s.segdHaveRec and recNo < s.segdRecNo:
+    refuse("SEG-D records are written in order; record " & $recNo & " follows record " &
+      $s.segdRecNo)
+  if s.segdHaveRec and recNo > s.segdRecNo: s.flushSegdKeys()
+  if not s.open: return
+  if not k.intervalUs.isNaN and wholeInterval(k.intervalUs) != s.segdOpts.sampleIntervalUs:
+    refuse("the keys' sample interval is " & $wholeInterval(k.intervalUs) &
+      " µs, the output's is " & $s.segdOpts.sampleIntervalUs)
+  checkSegdStatus(k, channelType)
+  let ch = channelOf(k)
+  let t0 = t0Of(k)
+  let hasRcv = checkStation(k.rcvLine, k.rcvPoint, "receiver")
+  let hasSrc = checkStation(k.srcLine, k.srcPoint, "source")
+  if hasRcv and (k.rcvIndex < -128 or k.rcvIndex > 127):
+    refuse("receiver point index " & $k.rcvIndex & " does not fit a SEG-D Rev 3 int8")
+  if hasSrc and (k.srcIndex < 0 or k.srcIndex > 255):
+    refuse("source point index " & $k.srcIndex & " does not fit a SEG-D Rev 3 byte")
+  s.noteSource(k, hasSrc, k.hasSourceXY)
+  s.noteSetT0(channelType, t0)
+  # A bad override fails here, before the trace joins the record.
+  var probe = SegdTrace(layout: slRev3, ext1Rev3: some(SegdTraceHeaderExt1Rev3()))
+  probe.overrideSegd(overrides)
+  var raw = newSeq[byte](dataBytes(s.segdOpts.format, n))
+  encodeSamples(s.segdOpts.format, samples, raw)
+  var ov = newSeq[HeaderOverride](overrides.len)
+  for i, o in overrides: ov[i] = o
+  s.segdPending.add SegdKeyTrace(keys: k, channelType: channelType, samples: raw,
+    overrides: ov, t0Us: t0, channel: ch)
+  s.segdHaveRec = true
+  s.segdRecNo = recNo
+
 proc closeSegd(s: var WriterState, log: var DiagLog) =
-  if s.inRecord: s.finishRecord()
+  if s.segdFresh:
+    if s.written == 0: refuse("no traces were written")
+    s.flushSegdKeys()
+  elif s.inRecord: s.finishRecord()
   s.segd.close()
   log.add s.segd.log
   s.sink.close()
@@ -830,12 +1281,14 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   w.writeLike(src, trace, p.toOpenArray(0, n - 1), overrides, addr keys, fields)
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: openArray[T],
-    overrides: openArray[HeaderOverride] = []) =
-  ## Writes a SEG-Y trace whose headers are built from `keys` (no template
+    overrides: openArray[HeaderOverride] = [], channelType: SegdChannelType = sctSeismic) =
+  ## Writes a trace whose headers are built from `keys` (no template
   ## trace), with `samples`, then `overrides` applied: a stacked or derived
-  ## trace of any input standard. The output must be SEG-Y (from
-  ## `openSeismicWriter(path, SegyOutputOptions)`, or `like` a SEG-Y file).
-  ## The fields are those of the standard layout, which `openSeismic`
+  ## trace of any input standard. The output is SEG-Y (from
+  ## `openSeismicWriter(path, SegyOutputOptions)`, or `like` a SEG-Y file)
+  ## or SEG-D Rev 3 (from `SegdOutputOptions`). `channelType` is the SEG-D
+  ## channel type (`sctSeismic` when omitted); a SEG-Y writer ignores it.
+  ## The SEG-Y fields are those of the standard layout, which `openSeismic`
   ## reads back into the same keys (`record`, `channel`, `ensemble`,
   ## `offset`, `srcPoint`, coordinates, elevations and midpoint, `t0Ms`,
   ## `intervalUs`, `time`, and from Rev 1 `inline` and `crossline`):
@@ -862,15 +1315,53 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   kept as 1.001 ms and multiplied back is 1000.9999999999999).
   ##
   ## A file `like` an input whose Layout stanza moves these fields reads
-  ## them elsewhere: write from keys into `SegyOutputOptions` files. Raises
-  ## `ValueError` for a closed or non-SEG-Y writer, keys without a positive
-  ## interval (`intervalUs`), a fractional interval or one over 65535 µs
-  ## before Rev 2, a `t0Ms` beyond ±32767 ms in Rev 0, a count
-  ## the output cannot take, or a bad override (nothing is written then);
-  ## `SegFormatError` for a value the format cannot hold; `IOError` on a
-  ## write failure, which discards the output and closes the writer.
+  ## them elsewhere: write from keys into `SegyOutputOptions` files. For
+  ## SEG-Y, raises `ValueError` for a closed writer, keys without a positive
+  ## interval, a fractional interval or one over 65535 µs before Rev 2, a
+  ## `t0Ms` beyond ±32767 ms in Rev 0, a count the output cannot take, or a
+  ## bad override (nothing is written then).
+  ##
+  ## SEG-D Rev 3 (a writer from `SegdOutputOptions`) groups traces into
+  ## records by `keys.record` (the file number), in the order written, and
+  ## writes a record when a higher number arrives or on `close`. Records
+  ## must not go backwards. One channel set per channel type in a record,
+  ## in the order that type first appears; every trace of a set has
+  ## `numSamples` samples and the options' interval (a keys `intervalUs`
+  ## that differs is refused, a NaN one is left to the options). `channel`
+  ## is the trace number (NaN assigns 1, 2, ... within the channel set).
+  ## Receiver line and point go in Trace Header Extension #1, source line
+  ## and point in one Source Description block in the general header (one
+  ## source per record; a trace that names none inherits it on read).
+  ## Source and receiver coordinates and elevations go in Position blocks
+  ## (general header for the source, the trace extensions for a receiver;
+  ## a channel set that has any receiver position gives every trace of the
+  ## set one, invalid where the coordinates are missing). A station of 0/0,
+  ## or NaN, reads back NaN. `status` of `tsDead` sets the trace edit flag
+  ## (byte 12 = 1) on a seismic or EM channel; an auxiliary channel type
+  ## reads back as `tsAuxiliary`, so `tsLive` or `tsDead` with one is
+  ## refused, as is `tsAuxiliary` with seismic or EM. Metres or feet are
+  ## written as a P1/11 axis record when `crsText` is empty, which
+  ## `summary.coordinateUnits` reads; a caller-supplied `crsText` is written
+  ## in 0x55 blocks as given. Raises `ValueError` for a closed writer, a
+  ## SEG-D writer not opened from `SegdOutputOptions`, a SEG-2 writer, a
+  ## record number going backwards, a sample count other than the options',
+  ## a start time that differs inside a channel set, a second source in a
+  ## record, a station with only a line or only a point, or a bad override
+  ## (nothing of that trace is written then); `SegFormatError` for a value
+  ## the format cannot hold; `IOError` on a write failure, which discards
+  ## the output and closes the writer.
   if not w.s.open: refuse("the writer is closed")
-  if w.s.kind != skSegy: refuse("traces from keys are written to SEG-Y, the output is " & $w.s.kind)
+  if w.s.segdFresh:
+    try:
+      w.s.writeSegdKeys(keys, samples, overrides, channelType)
+    except IOError:
+      w.s.discardOutput()
+      raise
+    inc w.s.written
+    return
+  if w.s.kind != skSegy:
+    refuse("traces from keys are written to SEG-Y, or to SEG-D opened from " &
+      "SegdOutputOptions; the output is " & $w.s.kind)
   try:
     w.s.writeSegyKeys(keys, samples, overrides)
   except IOError:
@@ -883,7 +1374,8 @@ proc close*(w: var SeismicWriter): DiagLog =
   ## SEG-Y trailer and final counts or the SEG-2 trace pointers, and renames
   ## the temporary file to the output path. Returns the writer's
   ## diagnostics: warnings only, since every failure raises and discards
-  ## the output (`ValueError` for an incomplete SEG-D record,
+  ## the output (`ValueError` for an incomplete SEG-D record, a SEG-D file
+  ## from keys with no traces,
   ## `SegFormatError` for output the writer refuses, e.g. a SEG-2 file
   ## without traces, `IOError` when the last bytes cannot be written or the
   ## file cannot be moved into place). Raises `ValueError` when already
