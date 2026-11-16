@@ -1,0 +1,292 @@
+## SEG-D Rev 3 written from `TraceKeys` (`SegdOutputOptions`).
+##
+## Seen to fail first, by breaking the writer and restoring it:
+## - round_trip_records: channel type forced to 0x10 (status assert, line 110)
+## - dead_feet_and_caller_crs: trace edit forced to 0 (same status assert)
+## - metres/feet: CRS text not written (coordinateUnits assert, line 96)
+## - without_coordinates: a 0,0 position block written for a missing source
+##   (srcX assert, line 104)
+## - refusals: the record-order check and the sample-count check removed
+##   (expected ValueError, line 22)
+
+import std/[assertions, math, os, strutils]
+import parseSEG
+import ./utils/testutils
+
+let tmp = scratchDir("parseseg_tsegdwriter")
+
+proc same(a, b: float64): bool {.inline.} =
+  (a.isNaN and b.isNaN) or a == b
+
+template expect(part: string, body: untyped) =
+  try:
+    body
+    doAssert false, "expected ValueError containing: " & part
+  except ValueError as e:
+    doAssert e.msg.find(part) >= 0, e.msg
+
+proc opts(n: int, dt = 1000.0, units = cuMeters, crs = ""): SegdOutputOptions =
+  SegdOutputOptions(sampleIntervalUs: dt, numSamples: n, units: units, crsText: crs)
+
+proc shot(record, channel: float64, seismic: bool): TraceKeys =
+  result = initTraceKeys()
+  result.record = record
+  result.channel = channel
+  result.intervalUs = 1000
+  result.srcLine = 1
+  result.srcPoint = 99.5
+  result.srcIndex = 1
+  result.srcX = 500_000
+  result.srcY = 6_000_000
+  result.srcZ = 12.5
+  if seismic:
+    result.rcvLine = 100
+    result.rcvPoint = 200 + channel
+    result.rcvIndex = 1
+    result.rcvX = 506_000 + 50 * channel
+    result.rcvY = 6_008_000
+    result.rcvZ = 10
+    result.status = tsLive
+    result.component = 2
+    result.sensorType = 2
+  else:
+    result.status = tsAuxiliary
+
+proc samples(n: int, seed: float32): seq[float32] =
+  result = newSeq[float32](n)
+  for i in 0 ..< n: result[i] = seed + float32(i) * 0.25'f32 - 1.5'f32
+
+proc openOut(path: string, o: SegdOutputOptions): SeismicWriter =
+  openSeismicWriter(path, o)
+
+block round_trip_records:
+  # Two records: seismic, a dead seismic trace, time break and a reference
+  # sweep, with coordinates; then a record with stations and no coordinates.
+  let path = tmp / "shots.sgd"
+  var w = openOut(path, opts(4))
+  var rows: seq[seq[float32]]
+  var keys: seq[TraceKeys]
+  var types: seq[SegdChannelType]
+  var dead = shot(2, 2, true)
+  dead.status = tsDead
+  let plan = [
+    (shot(2, 1, true), sctSeismic),
+    (dead, sctSeismic),
+    (shot(2, 1, false), sctTimeBreak),
+    (shot(2, 1, false), sctSourceRefSweep),
+    (shot(7, 1, true), sctSeismic)]
+  # Record 7: stations only, no coordinates.
+  var bare = plan[4][0]
+  bare.srcX = NaN
+  bare.srcY = NaN
+  bare.srcZ = NaN
+  bare.rcvX = NaN
+  bare.rcvY = NaN
+  bare.rcvZ = NaN
+  for i, item in plan:
+    var k = item[0]
+    if i == 4: k = bare
+    let row = samples(4, float32(i + 1))
+    w.writeTrace(k, row, channelType = item[1])
+    keys.add k
+    rows.add row
+    types.add item[1]
+  doAssert w.len == 5
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.kind == skSegd and f.len == 5 and f.recordCount == 2
+  doAssert f.summary.coordinateUnits == cuMeters and f.summary.crsFormat == ctP1_11
+  doAssert f.crsText.find("HC,1,6,1,metre") >= 0
+  doAssert f.summary.formatCode == 8058 and f.summary.sampleIntervalUs == 1000
+  for i, k in keys:
+    let g = f.traceKeys(i)
+    doAssert same(g.record, k.record) and same(g.channel, k.channel)
+    doAssert same(g.srcLine, k.srcLine) and same(g.srcPoint, k.srcPoint)
+    doAssert g.srcIndex == k.srcIndex
+    doAssert same(g.srcX, k.srcX) and same(g.srcY, k.srcY) and same(g.srcZ, k.srcZ)
+    doAssert same(g.rcvLine, k.rcvLine) and same(g.rcvPoint, k.rcvPoint)
+    doAssert same(g.rcvX, k.rcvX) and same(g.rcvY, k.rcvY) and same(g.rcvZ, k.rcvZ)
+    let want = if types[i] == sctSeismic and k.status == tsDead: tsDead
+      elif types[i] == sctSeismic: tsLive
+      else: tsAuxiliary
+    doAssert g.status == want
+    doAssert int(f.traceEntry(i).channelType) == ord(types[i])
+    if k.component != 0: doAssert g.component == k.component
+    let y = f.readTraces(i .. i)
+    for j in 0 ..< 4: doAssert y[0, j] == rows[i][j]
+  # Channel sets: seismic, time break, reference sweep in record 0; seismic in record 1.
+  var got: seq[int]
+  for c in f.channelSets: got.add c.channelType
+  doAssert got == @[0x10, 0x20, 0x96, 0x10]
+  f.close()
+
+block dead_feet_and_caller_crs:
+  let path = tmp / "feet.sgd"
+  let crs = "((SEG: Location Data ver 3.0))\nLocation Data Stanza ID = 1\nCRS name = local\n"
+  var w = openOut(path, opts(2, units = cuFeet, crs = crs))
+  var k = shot(1, 1, true)
+  k.status = tsDead
+  w.writeTrace(k, @[1'f32, -2])
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  # A Location Data stanza is not P1/11: the reader does not take units from it.
+  doAssert f.summary.coordinateUnits == cuUnknown and f.summary.crsFormat == ctStanza
+  doAssert f.crsText.startsWith("((SEG: Location Data ver 3.0))")
+  doAssert f.traceKeys(0).status == tsDead
+  doAssert f.traceField(0, "trace.traceEdit").toFloat == 1
+  f.close()
+  let metres = tmp / "metres.sgd"
+  var m = openOut(metres, opts(2))
+  var live = shot(3, 1, true)
+  m.writeTrace(live, @[4'f32, 5])
+  discard m.close()
+  var g = openSeismic(metres)
+  doAssert g.summary.coordinateUnits == cuMeters and g.crsText.find("metre") >= 0
+  g.close()
+
+block without_coordinates:
+  let path = tmp / "nostation.sgd"
+  var w = openOut(path, opts(3))
+  var k = initTraceKeys()
+  k.record = 9
+  k.channel = 1
+  k.intervalUs = 1000
+  k.status = tsLive
+  w.writeTrace(k, @[0'f32, 1, -1])
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  let t = f.traceKeys(0)
+  doAssert t.srcX.isNaN and t.srcY.isNaN and t.rcvX.isNaN and t.rcvY.isNaN
+  doAssert t.srcZ.isNaN and t.rcvZ.isNaN and t.srcLine.isNaN and t.rcvLine.isNaN
+  doAssert t.offset.isNaN and t.status == tsLive
+  f.close()
+
+block same_keys_both_formats:
+  # One shot, the same keys and samples, as SEG-Y and as SEG-D.
+  var f = openSeismic(demoDir() / "shot.sgd", keys = true)
+  let n = int(f.traceEntry(0).numSamples)
+  let x = f.readTraces(0 ..< f.len)
+  let types = [sctTimeBreak, sctSourceRefPilot, sctUpHole, sctSeismic, sctSeismic]
+  var row = newSeq[float32](n)
+  var y = openSeismicWriter(tmp / "shot.sgy", SegyOutputOptions())
+  var d = openOut(tmp / "shot.sgd", opts(n))
+  for i in 0 ..< f.len:
+    let k = f.traceKeys(i)
+    for j in 0 ..< n: row[j] = x[i, j]
+    y.writeTrace(k, row)
+    d.writeTrace(k, row, channelType = types[i])
+  discard y.close()
+  discard d.close()
+  var g = openSeismic(tmp / "shot.sgd", keys = true)
+  doAssert g.len == f.len and g.recordCount == 1
+  for i in 0 ..< f.len:
+    let a = f.traceKeys(i)
+    let b = g.traceKeys(i)
+    doAssert same(a.record, b.record) and same(a.channel, b.channel)
+    doAssert same(a.srcLine, b.srcLine) and same(a.srcPoint, b.srcPoint)
+    doAssert same(a.srcX, b.srcX) and same(a.srcY, b.srcY) and same(a.srcZ, b.srcZ)
+    doAssert same(a.rcvLine, b.rcvLine) and same(a.rcvPoint, b.rcvPoint)
+    doAssert same(a.rcvX, b.rcvX) and same(a.rcvY, b.rcvY) and same(a.rcvZ, b.rcvZ)
+    doAssert b.status == a.status
+    doAssert int(g.traceEntry(i).channelType) == ord(types[i])
+    let z = g.readTraces(i .. i)
+    for j in 0 ..< n: doAssert z[0, j] == x[i, j]
+  var sy = openSeismic(tmp / "shot.sgy", keys = true)
+  doAssert sy.kind == skSegy and sy.len == f.len
+  doAssert sy.traceKeys(3).rcvX == f.traceKeys(3).rcvX
+  sy.close()
+  g.close()
+  f.close()
+
+block auto_channel_and_gap:
+  let path = tmp / "auto.sgd"
+  var w = openOut(path, opts(1, dt = 500))
+  var a = initTraceKeys()
+  a.record = 1
+  a.intervalUs = 500
+  a.status = tsLive
+  var b = a
+  b.record = 4 # a gap is allowed
+  w.writeTrace(a, @[1'f32])
+  w.writeTrace(a, @[2'f32])
+  w.writeTrace(b, @[3'f32])
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.traceKeys(0).channel == 1 and f.traceKeys(1).channel == 2
+  doAssert f.traceKeys(2).record == 4 and f.traceKeys(2).channel == 1
+  doAssert f.summary.sampleIntervalUs == 500
+  f.close()
+
+block refusals:
+  let path = tmp / "bad.sgd"
+  expect("3.0 or 3.1"):
+    discard openOut(path, SegdOutputOptions(revision: SegdRevision(major: 2, minor: 0),
+      sampleIntervalUs: 1000, numSamples: 4))
+  expect("not defined in Rev"):
+    discard openOut(path, SegdOutputOptions(revision: SegdRevision(major: 3, minor: 0),
+      format: sd9058, sampleIntervalUs: 1000, numSamples: 4))
+  expect("whole number of microseconds"):
+    discard openOut(path, SegdOutputOptions(sampleIntervalUs: 1000.5, numSamples: 4))
+  expect("at least 1"):
+    discard openOut(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 0))
+  expect("groups of 4"):
+    discard openOut(path, SegdOutputOptions(format: sd8015, sampleIntervalUs: 1000, numSamples: 2))
+  expect("metres or feet"):
+    discard openOut(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 1,
+      units: cuDegrees))
+  var w = openOut(path, opts(4))
+  let row = samples(4, 1)
+  var k = shot(3, 1, true)
+  w.writeTrace(k, row)
+  var back = k
+  back.record = 1
+  expect("written in order"):
+    w.writeTrace(back, row)
+  doAssert w.len == 1 # the refused trace was not kept
+  var other = samples(2, 1)
+  expect("one sample count"):
+    w.writeTrace(k, other)
+  var aux = shot(3, 2, false)
+  aux.status = tsLive
+  expect("reads back as auxiliary"):
+    w.writeTrace(aux, row, channelType = sctTimeBreak)
+  var seis = shot(3, 3, true)
+  seis.status = tsAuxiliary
+  expect("auxiliary SEG-D channel type"):
+    w.writeTrace(seis, row)
+  var half = shot(3, 4, true)
+  half.rcvPoint = NaN
+  expect("both a line and a point"):
+    w.writeTrace(half, row)
+  var otherSrc = shot(3, 5, true)
+  otherSrc.srcPoint = 10
+  expect("one source"):
+    w.writeTrace(otherSrc, row)
+  var late = shot(3, 6, true)
+  late.t0Ms = 12
+  expect("one start time"):
+    w.writeTrace(late, row)
+  var drift = shot(3, 7, true)
+  drift.intervalUs = 2000
+  expect("sample interval"):
+    w.writeTrace(drift, row)
+  # Still usable after the refusals.
+  w.writeTrace(shot(3, 8, true), row)
+  w.writeTrace(shot(8, 1, true), row) # a later record
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.len == 3 and f.traceKeys(0).record == 3 and f.traceKeys(2).record == 8
+  f.close()
+  var empty = openOut(tmp / "empty.sgd", opts(1))
+  expect("no traces"):
+    discard empty.close()
+  doAssert not fileExists(tmp / "empty.sgd")
+  block:
+    var dropped = openOut(tmp / "dropped.sgd", opts(1))
+    dropped.writeTrace(shot(1, 1, true), @[1'f32])
+  doAssert not fileExists(tmp / "dropped.sgd")
+  var closed = openOut(tmp / "closed.sgd", opts(1))
+  closed.writeTrace(shot(1, 1, true), @[1'f32])
+  discard closed.close()
+  expect("closed"):
+    closed.writeTrace(shot(1, 1, true), @[1'f32])
