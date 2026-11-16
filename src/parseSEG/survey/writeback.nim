@@ -32,7 +32,7 @@
 ## |---|---|
 ## | SEG-Y | through the file's layout (`layoutOf`): `sht_x`/`sht_y`, `rec_x`/`rec_y`, `cdp_x`/`cdp_y` (`coor4`, with the coordinate scalar `co_scal`), `selev`/`relev` (`elev4`, `ed_scal`), `offset`; the source point in `espnum` and `sp` (`spnum4`, `sp_scal`); Rev 2 Trace Header Extension 1 `ieee64` copies where they are in use (non-zero); line, point and index in `sht_line`, `sht_point`, `sht_index`, `rec_line`, `rec_point`, `rec_index` where a Layout stanza defines them (e.g. the `PSEGD001` header `convertFile` writes) |
 ## | SEG-D Rev 1/2 | THE#1 receiver line, point and point index (the extended fixed-point fields when the integer ones are `FFFFFF` or cannot hold the value); no coordinate fields |
-## | SEG-D Rev 3 | THE#1 as above; the receiver's and the source's Position blocks and the source's Source Description block, only where they already are in the trace header extensions |
+## | SEG-D Rev 3 | THE#1 as above; the receiver's and the source's Position blocks and the source's Source Description block, only where they already are in the trace header extensions. A source position follows the description `sourceFrom` selects |
 ##
 ## The SEG-Y coordinate scalar: the file's own when it holds every value of
 ## the trace's `coor4` fields exactly in 4 bytes, else the coarsest of 1,
@@ -542,6 +542,20 @@ proc planSegy(p: var Planner, trace: int, k: TraceKeys, buf: var seq[byte]): set
 
 func isSourceBlock(t: uint8): bool {.inline.} = t in {0x15'u8..0x19'u8, 0x1F'u8}
 
+func namesStation(line, point: float64): bool {.inline.} =
+  # A line and a point that are both 0 are a header left empty, not a station.
+  # The same rule `sourceFrom` uses.
+  not (line == 0.0 and point == 0.0)
+
+proc selectedSourceAt(area: openArray[byte]): int =
+  # Offset of the Source Description `sourceFrom` selects: the first that
+  # names a station, or -1. A later description is not selected.
+  result = -1
+  for at, bt in blocks(area):
+    if isSourceBlock(bt):
+      let s = decodeBlock[SegdSourceDescription](area.toOpenArray(at, at + SegdBlockSize - 1))
+      if namesStation(s.sourceLineNumber, s.sourcePointNumber): return at
+
 func finite(x: float64): bool {.inline.} = not x.isNaN and x != Inf and x != -Inf
 
 proc setStation(num: var int32, ext: var float64, v: float64) =
@@ -575,11 +589,17 @@ proc writeExt1[T](p: var Planner, buf: var seq[byte], trace: int, k: TraceKeys):
 proc positionBlocks(area: openArray[byte], rcv, src: var int) =
   # The receiver's and the source's Position block in a Rev 3 trace's
   # extension area (as `traceKeys` reads them: a Position block describes
-  # the block it follows); the first usable one of each, else the first.
+  # the block it follows). A source position attaches only to the source
+  # description `sourceFrom` selects; a later description's position is not
+  # the source's. When no description names a station, a position after a
+  # source description is still that source's (coordinates with no station).
+  # The first usable one of each, else the first.
   rcv = -1
   src = -1
   var rcvUsable, srcUsable = false
   var after = 0'u8
+  var describedAt = -1
+  let srcAt = selectedSourceAt(area)
   for at, bt in blocks(area):
     if bt == 0x50:
       if after != 0x61 and at + 96 <= area.len and area[at + 63] == 0x51 and
@@ -590,10 +610,13 @@ proc positionBlocks(area: openArray[byte], rcv, src: var int) =
           (pb.position2Valid == 1 and pb.position2Quality != 3 and
           finite(pb.tuple2Coord1) and finite(pb.tuple2Coord2))
         if isSourceBlock(after):
-          if src < 0 or (usable and not srcUsable): (src, srcUsable) = (at, usable)
+          let selected = describedAt == srcAt and srcAt >= 0
+          if selected or srcAt < 0:
+            if src < 0 or (usable and not srcUsable): (src, srcUsable) = (at, usable)
         elif rcv < 0 or (usable and not rcvUsable): (rcv, rcvUsable) = (at, usable)
     elif bt notin {0x51'u8, 0x52'u8, 0x56'u8, 0x20'u8, 0x1A'u8, 0x21'u8}:
       after = bt
+      describedAt = at
 
 proc writePosition(p: var Planner, buf: var seq[byte], at: int, x, y, z: float64,
     trace: int, xy, zv: Value, changed: var set[Value]) =

@@ -840,7 +840,7 @@ A Position block in the trace extensions that does not follow a source descripti
 receiver's coordinates, even when the only source description is in the general header.
 That is how a shot gather is written, and how INOVA files are read: do not take that
 position as the source's. A source position attaches only to the source description the
-keys selected, not to a later description on the same trace.
+keys selected, not to a later description on the same trace. Write-back uses that rule.
 
 ```nim
 import std/options

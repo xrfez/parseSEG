@@ -406,6 +406,122 @@ block segy_in_place_from_the_open_file:
   e.close()
   doAssert bytesOf(path) == original
 
+proc posBlock(x, y: float64): SegdPositionBlock =
+  SegdPositionBlock(position1Valid: 1, position1Quality: 1, tuple1Coord1: x,
+    tuple1Coord2: y, tuple1Coord3: Inf, blockType1: 0x50, blockType2: 0x51,
+    blockType3: 0x52)
+
+proc srcDesc(line, point: float64, index: uint8): SegdSourceDescription =
+  SegdSourceDescription(sourceLineNumber: line, sourcePointNumber: point,
+    sourcePointIndex: index, blockType: 0x1F)
+
+proc writeRev3(path: string, extensions: seq[byte]) =
+  # One seismic trace whose header extensions are `extensions` (after THE#1).
+  var r = SegdRecord(layout: slRev3, format: some(sd8058),
+    revision: SegdRevision(major: 3, minor: 0))
+  let the = uint8(1 + extensions.len div SegdBlockSize)
+  r.gh1 = SegdGeneralHeader1(fileNumber: 1, formatCode: 8058, year: 24,
+    additionalGhBlocks: 2, julianDay: 61, hour: 6, minute: 7, second: 8,
+    baseScanInterval16: 16, recordType: 8, recordLength: BcdAllF,
+    scanTypesPerRecord: 1, channelSetsPerScanType: 1)
+  r.gh2Rev3 = SegdGeneralHeader2Rev3(extFileNumber: 1, revisionMajor: 3, revisionMinor: 0,
+    extRecordLength: 1000, blockType: BlockTypeGeneralHeader2)
+  r.gh3 = SegdGeneralHeader3(timeZero: unixToTimestamp(1_700_000_000.0),
+    blockType: BlockTypeGeneralHeader3)
+  var d = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: 1,
+    channelType: 0x10, endTime: 1000, numSamples: 1, descaleMultiplier: 1.0,
+    channelsInSet: 1, samplingInterval: 1000, arrayForming: 1, traceHeaderExtensions: the,
+    verticalStack: 1, blockType1: BlockTypeChannelSet1, blockType2: BlockTypeChannelSet2,
+    blockType3: BlockTypeChannelSet3)
+  for i in 0 ..< d.description.len: d.description[i] = ' '
+  r.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: @[d])]
+  var t = SegdTrace(layout: slRev3, index: 0, numSamples: 1)
+  t.header = SegdTraceHeader(fileNumber: 1, scanTypeNumber: 1, channelSetNumber: 1,
+    traceNumber: 1, traceHeaderExtensions: the)
+  t.ext1Rev3 = some(SegdTraceHeaderExt1Rev3(receiverLineNumber: 100,
+    receiverPointNumber: 200, receiverPointIndex: 1, numSamples: 1, sensorType: 1,
+    depthIndex: 1, blockType: BlockTypeTraceHeaderExt1))
+  t.extensions = extensions
+  t.samples = newSeq[byte](dataBytes(sd8058, 1))
+  encodeSamples(sd8058, [1.0'f32], t.samples)
+  computeRev3Sizes(r, [t])
+  r.traceCount = 1
+  let sink = openDiskSink(path)
+  var w = openSegdWriter(sink)
+  w.writeRecordHeaders(r)
+  w.writeTrace(t)
+  w.endRecord()
+  w.close()
+  sink.close()
+
+proc positionCoords(f: SeismicFile): seq[(float64, float64)] =
+  let e = f.traceEntry(0)
+  let raw = f.copyBytes(e.offset, int(e.headerBytes))
+  let start = SegdTraceHeaderSize + SegdBlockSize
+  for at, bt in blocks(raw.toOpenArray(start, raw.len - 1)):
+    if bt == 0x50 and at + 96 <= raw.len - start:
+      let p = decodeBlock[SegdPositionBlock](raw.toOpenArray(start + at, start + at + 95))
+      result.add (p.tuple1Coord1, p.tuple1Coord2)
+
+block position_after_a_later_description_is_not_the_source:
+  # 0x1F 1/10, 0x1F 2/20, then a position: a join / write-back does not write
+  # source XY into it. A receiver position ahead of those descriptions is
+  # written, and what is written reads back.
+  # Seen to fail first: positionBlocks attached any following position
+  # (source X/Y was written into 999/888; the block read back 5000/6000).
+  let path = tmp / "later_pos.sgd"
+  var ext = newSeq[byte]()
+  ext.add posBlock(111, 222).encoded
+  ext.add srcDesc(1, 10, 1).encoded
+  ext.add srcDesc(2, 20, 2).encoded
+  ext.add posBlock(999, 888).encoded
+  writeRev3(path, ext)
+  var f = openSeismic(path, keys = true)
+  doAssert f.traceKeys(0).srcLine == 1 and f.traceKeys(0).srcPoint == 10
+  doAssert f.traceKeys(0).srcX.isNaN and f.traceKeys(0).rcvX == 111
+  var g: GeometryTable
+  g.addSource(1, 10, 1, 5000, 6000)
+  g.addReceiver(100, 200, 1, 7000, 8000)
+  doAssert f.applyGeometry(g, overwrite = true) == 1
+  doAssert f.traceKeys(0).srcX == 5000 and f.traceKeys(0).rcvX == 7000
+  var ed = openEditor(move f, tmp / "later_pos.nif")
+  let ch = ed.writeGeometry()
+  doAssert ch.sourceXy == 0 and ch.receiverXy == 1, $ch
+  doAssert ed.log.has("no source Position block", sevWarning), $ed.log
+  ed.close()
+  var o = openSeismic(path, keys = true)
+  let coords = o.positionCoords
+  doAssert coords.len == 2, $coords.len
+  doAssert coords[0] == (7000.0, 8000.0), $coords[0]
+  doAssert coords[1] == (999.0, 888.0), $coords[1]
+  let k = o.traceKeys(0)
+  doAssert k.rcvX == 7000 and k.rcvY == 8000, $k
+  doAssert k.srcX.isNaN and k.srcY.isNaN and k.srcLine == 1 and k.srcPoint == 10, $k
+  doAssert o.readTraces(0 .. 0)[0, 0] == 1'f32
+  o.close()
+  # The position that follows the description sourceFrom selects is written,
+  # and reads back.
+  let selected = tmp / "selected_pos.sgd"
+  ext.setLen 0
+  ext.add srcDesc(1, 10, 1).encoded
+  ext.add posBlock(50, 60).encoded
+  ext.add srcDesc(2, 20, 2).encoded
+  writeRev3(selected, ext)
+  var f2 = openSeismic(selected, keys = true)
+  doAssert f2.traceKeys(0).srcX == 50
+  var g2: GeometryTable
+  g2.addSource(1, 10, 1, 5000, 6000)
+  doAssert f2.applyGeometry(g2, overwrite = true) == 1
+  var ed2 = openEditor(move f2, tmp / "selected_pos.nif")
+  let ch2 = ed2.writeGeometry()
+  doAssert ch2.sourceXy == 1, $ch2
+  ed2.close()
+  var o2 = openSeismic(selected, keys = true)
+  doAssert o2.positionCoords == @[(5000.0, 6000.0)], $o2.positionCoords
+  doAssert o2.traceKeys(0).srcX == 5000 and o2.traceKeys(0).srcY == 6000
+  doAssert o2.traceKeys(0).srcLine == 1 and o2.traceKeys(0).srcPoint == 10
+  o2.close()
+
 when defined(linux):
   import std/posix
 
