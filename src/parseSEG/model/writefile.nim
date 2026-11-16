@@ -1012,7 +1012,10 @@ proc flushSegdKeys(s: var WriterState) =
     let ch = p.channel
     var t = SegdTrace(layout: slRev3, index: i, numSamples: opts.numSamples)
     var hdr = SegdTraceHeader(scanTypeNumber: 1, traceHeaderExtensions: uint8(exts),
-      traceEdit: (if p.keys.status == tsDead: 1'u8 else: 0'u8))
+      traceEdit: case p.keys.status
+        of tsDead: 1'u8
+        of tsUnknown: 0'u8 # stored as live: SEG-D has no unknown seismic status
+        of tsLive, tsAuxiliary: 0'u8)
     var fileSmall = 0
     var fileExt = 0'u32
     setBcdOrExt(fileSmall, fileExt, fileNo, 4)
@@ -1414,9 +1417,13 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## reads back as the `sensorType` value. An elevation with no X/Y is not
   ## written; `close` warns once for the file. `status` of `tsDead` sets the
   ## trace edit flag
-  ## (byte 12 = 1) on a seismic or EM channel; an auxiliary channel type
-  ## reads back as `tsAuxiliary`, so `tsLive` or `tsDead` with one is
-  ## refused, as is `tsAuxiliary` with seismic or EM. Metres or feet are
+  ## (byte 12 = 1) on a seismic or EM channel and reads back `tsDead`;
+  ## `tsLive` reads back `tsLive`. `tsUnknown` is stored as a live trace
+  ## (trace edit 0), on purpose: SEG-D has no unknown status for a seismic
+  ## channel, so `tsUnknown` reads back `tsLive`. An auxiliary channel type
+  ## reads back as `tsAuxiliary` (including `tsUnknown`, and `tsAuxiliary`
+  ## itself), so `tsLive` or `tsDead` with one is refused, as is
+  ## `tsAuxiliary` with seismic or EM. Metres or feet are
   ## written as a P1/11 axis record when `crsText` is empty, which
   ## `summary.coordinateUnits` reads; a caller-supplied `crsText` is written
   ## in 0x55 blocks as given. Raises `ValueError` for a closed writer, a

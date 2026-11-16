@@ -9,6 +9,8 @@
 ## - refusals: the record-order check and the sample-count check removed
 ##   (expected ValueError, line 22)
 ## - depth_index_unset_is_one: depth index left 0 (reads back 0, not 1)
+## - unknown_status_is_live: tsUnknown stored as trace edit 1 (reads back
+##   tsDead on a seismic channel, not tsLive)
 
 import std/[assertions, math, os, strutils]
 import parseSEG
@@ -482,4 +484,39 @@ block depth_index_unset_is_one:
       doAssert s.depthIndex == 1
       found = true
   doAssert found, "the record has no source description"
+  f.close()
+
+block unknown_status_is_live:
+  # SEG-D has no "unknown" for a seismic channel, so tsUnknown is stored as
+  # a live trace (trace edit 0) and reads back tsLive. An auxiliary channel
+  # type reads back tsAuxiliary whatever the edit. Forcing trace edit 1 for
+  # tsUnknown made the seismic trace read back tsDead, and its edit byte 1.
+  let path = tmp / "unknown.sgd"
+  var w = openOut(path, opts(1))
+  var seis = shot(1, 1, true)
+  seis.status = tsUnknown
+  w.writeTrace(seis, samples(1, 1))
+  var aux = shot(1, 1, false)
+  aux.status = tsUnknown
+  w.writeTrace(aux, samples(1, 2), channelType = sctTimeBreak)
+  var live = shot(1, 2, true)
+  live.status = tsLive
+  w.writeTrace(live, samples(1, 3))
+  var dead = shot(1, 3, true)
+  dead.status = tsDead
+  w.writeTrace(dead, samples(1, 4))
+  var auxKnown = shot(1, 2, false)
+  auxKnown.status = tsAuxiliary
+  w.writeTrace(auxKnown, samples(1, 5), channelType = sctUpHole)
+  discard w.close()
+  var f = openSeismic(path, keys = true)
+  doAssert f.traceKeys(0).status == tsLive
+  doAssert f.traceField(0, "trace.traceEdit").toFloat == 0
+  doAssert f.traceKeys(1).status == tsAuxiliary
+  doAssert f.traceField(1, "trace.traceEdit").toFloat == 0
+  doAssert int(f.traceEntry(1).channelType) == ord(sctTimeBreak)
+  doAssert f.traceKeys(2).status == tsLive
+  doAssert f.traceKeys(3).status == tsDead
+  doAssert f.traceField(3, "trace.traceEdit").toFloat == 1
+  doAssert f.traceKeys(4).status == tsAuxiliary
   f.close()
