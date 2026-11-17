@@ -12,7 +12,9 @@
 ## checks.
 
 import std/[assertions, atomics, os, times]
+
 import parseSEG
+
 import ./utils/testutils
 
 proc openFile(path: string): SeismicFile =
@@ -41,14 +43,7 @@ proc closeLastInBlock(path: string) {.gcsafe.} =
   {.cast(gcsafe).}:
     discard p.close()
 
-let path = demoDir() / "survey.sgy"
-let traces = block:
-  var f = openSeismic(path)
-  f.len
-
-block a_gcsafe_proc:
-  doAssert readAll(path) == traces + 2
-  closeLastInBlock(path)
+var path: typeof(demoDir() / "survey.sgy")
 
 var taken: Atomic[int]
 
@@ -61,10 +56,23 @@ proc job(path: string) {.thread.} =
   # the guide says.
   GC_runOrc()
 
-block a_thread:
-  var t: Thread[string]
-  createThread(t, job, path)
-  joinThread(t)
-  doAssert taken.load == traces + 2, $taken.load
+proc main*() =
+  path = demoDir() / "survey.sgy"
 
-echo "tgcsafe: ok"
+  let traces = block:
+    var f = openSeismic(path)
+    f.len
+
+  block a_gcsafe_proc:
+    doAssert readAll(path) == traces + 2
+    closeLastInBlock(path)
+
+  block a_thread:
+    var t: Thread[string]
+    createThread(t, job, path)
+    joinThread(t)
+    doAssert taken.load == traces + 2, $taken.load
+
+  echo "tgcsafe: ok"
+
+when isMainModule: main()

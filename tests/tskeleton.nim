@@ -10,10 +10,12 @@
 ##   (checksum of the bare file was not 1797920802)
 
 import std/[assertions, math, os, strutils]
+
 import parseSEG
+
 import ./utils/testutils
 
-let tmp = scratchDir("parseseg_tskeleton")
+var tmp: typeof(scratchDir("parseseg_tskeleton"))
 
 const ShotTime = 1_709_273_228.0
 
@@ -100,78 +102,6 @@ proc strictWalk(path: string, rows: seq[seq[float32]]) =
   doAssert off == raw.len and n == rows.len
   f.close()
 
-block strict_receiver_gather:
-  # Shots at T, T+60s, T+120s, plus a trace with no source, every trace
-  # oriented. Before the skeleton the counts were 10, 11, 11, 6.
-  let path = tmp / "rg.sgd"
-  var w = openSeismicWriter(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 2,
-    time: ShotTime, receiverGather: true))
-  let att = some(initTraceOrientation(0.1'f32, 0.2'f32, 0.3'f32, orientationType = 1,
-    rotationApplied = true))
-  let keys = [node(1, 30, 0, true), node(2, 40, 60, true), node(3, 50, 120, true),
-    node(4, 0, 90, false)]
-  var rows: seq[seq[float32]]
-  for i, k in keys:
-    let row = @[float32(i + 1), float32(10 + i)]
-    w.writeTrace(k, row, orientation = att)
-    rows.add row
-  discard w.close()
-  strictWalk(path, rows)
-  var f = openSeismic(path, keys = true)
-  doAssert f.len == 4
-  let the = f.traceField(0, "trace.traceHeaderExtensions").intVal
-  doAssert the == 11
-  for i in 0 .. 3:
-    doAssert f.traceField(i, "trace.traceHeaderExtensions").intVal == the
-  doAssert f.traceKeys(0).srcPoint == 30 and f.traceKeys(2).srcPoint == 50
-  doAssert f.traceKeys(3).srcLine.isNaN and f.traceKeys(3).srcX.isNaN
-  doAssert f.traceKeys(1).time == ShotTime + 60
-  doAssert f.traceOrientation(3).get.rotationZ == 0.3'f32
-  # The shot at record time carries Additional Source Info with time 0.
-  let raw = readFile(path)
-  let rec = f.index.segdRecords[0]
-  var off = int(rec.headerBytes)
-  var sawZero, sawLater = false
-  for i in 0 .. 3:
-    let ext = off + SegdTraceHeaderSize
-    for b in 0 ..< the:
-      let at = ext + b * SegdBlockSize
-      if raw[at + SegdBlockSize - 1] == char(0x20):
-        var time = 0'i64
-        for k in 0 .. 7: time = (time shl 8) or int64(uint8(raw[at + k]))
-        if i == 0: sawZero = time == 0
-        elif time != 0: sawLater = true
-    off += SegdTraceHeaderSize + SegdBlockSize * int(the) + dataBytes(sd8058, 2)
-  doAssert sawZero and sawLater
-  f.close()
-
-block mixed_orientation:
-  let path = tmp / "mix.sgd"
-  var w = openSeismicWriter(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 1,
-    time: ShotTime))
-  let att = some(initTraceOrientation(0.1'f32, 0, 0, orientationType = 1, rotationApplied = true))
-  w.writeTrace(shot(1, 1, true), @[1'f32], orientation = att)
-  w.writeTrace(shot(1, 2, true), @[2'f32])
-  try:
-    discard w.close()
-    doAssert false, "expected ValueError"
-  except ValueError as e:
-    doAssert e.msg.find("sctSeismic") >= 0, e.msg
-    doAssert e.msg.find("trace channel 2") >= 0, e.msg
-    doAssert e.msg.find("give every trace of a channel set an orientation, or none") >= 0, e.msg
-  doAssert not fileExists(path)
-  # A receiver gather, the first trace the one without an orientation.
-  var r = openSeismicWriter(tmp / "mixrg.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
-    numSamples: 1, time: ShotTime, receiverGather: true))
-  r.writeTrace(node(3, 10, 0, true), @[1'f32])
-  r.writeTrace(node(4, 20, 60, true), @[2'f32], orientation = att)
-  try:
-    discard r.close()
-    doAssert false, "expected ValueError"
-  except ValueError as e:
-    doAssert e.msg.find("trace channel 3") >= 0, e.msg
-    doAssert e.msg.find("give every trace of a channel set an orientation, or none") >= 0, e.msg
-
 proc optsOf(name: string): SegdOutputOptions =
   result = SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 4, time: ShotTime)
   if name == "feet": result.units = cuFeet
@@ -184,89 +114,166 @@ proc writeOpt(name: string, body: proc(w: var SeismicWriter)) =
   body(w)
   discard w.close()
 
-block uniform_option_sets:
-  # Shot gathers that were already uniform, checksummed before the skeleton.
-  const want = [
-    ("bare", 972'i64, 1797920802'u32),
-    ("norcv", 584'i64, 2504485534'u32),
-    ("nosrc", 680'i64, 1976239584'u32),
-    ("feet", 580'i64, 1458858163'u32),
-    ("crs", 580'i64, 1497106906'u32),
-    ("tworec", 1160'i64, 714115694'u32),
-    ("dead", 580'i64, 1427291309'u32),
-    ("natime", 580'i64, 2461025836'u32),
-    ("fmt", 580'i64, 3097374429'u32),
-    ("aux", 584'i64, 1424156037'u32),
-    ("frac", 580'i64, 3562719808'u32),
-    ("units", 324'i64, 3743733315'u32),
-    ("three", 972'i64, 303919689'u32)]
-  writeOpt("bare"):
-    proc (w: var SeismicWriter) =
-      w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
-      w.writeTrace(shot(2, 2, true), @[5'f32, 6, 7, 8])
-      w.writeTrace(shot(2, 3, false), @[9'f32, 10, 11, 12], channelType = sctTimeBreak)
-  writeOpt("norcv"):
-    proc (w: var SeismicWriter) =
-      var a = shot(2, 1, true)
-      a.rcvX = NaN; a.rcvY = NaN; a.rcvZ = NaN
-      var b = shot(2, 2, true)
-      b.rcvX = NaN; b.rcvY = NaN; b.rcvZ = NaN
-      w.writeTrace(a, @[1'f32, 2, 3, 4])
-      w.writeTrace(b, @[5'f32, 6, 7, 8])
-  writeOpt("nosrc"):
-    proc (w: var SeismicWriter) =
-      var a = shot(2, 1, true)
-      a.srcX = NaN; a.srcY = NaN; a.srcZ = NaN
-      var b = shot(2, 2, true)
-      b.srcX = NaN; b.srcY = NaN; b.srcZ = NaN
-      w.writeTrace(a, @[1'f32, 2, 3, 4])
-      w.writeTrace(b, @[5'f32, 6, 7, 8])
-  writeOpt("feet"):
-    proc (w: var SeismicWriter) =
-      w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
-  writeOpt("crs"):
-    proc (w: var SeismicWriter) =
-      w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
-  writeOpt("tworec"):
-    proc (w: var SeismicWriter) =
-      w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
-      w.writeTrace(shot(5, 1, true), @[5'f32, 6, 7, 8])
-  writeOpt("dead"):
-    proc (w: var SeismicWriter) =
-      var a = shot(2, 1, true)
-      a.status = tsDead
-      w.writeTrace(a, @[1'f32, 2, 3, 4])
-  writeOpt("natime"):
-    proc (w: var SeismicWriter) =
-      var a = shot(2, 1, true)
-      a.time = NaN
-      w.writeTrace(a, @[1'f32, 2, 3, 4])
-  writeOpt("fmt"):
-    proc (w: var SeismicWriter) =
-      w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
-  writeOpt("aux"):
-    proc (w: var SeismicWriter) =
-      w.writeTrace(shot(2, 1, false), @[1'f32, 2, 3, 4], channelType = sctTimeBreak)
-      w.writeTrace(shot(2, 2, false), @[5'f32, 6, 7, 8], channelType = sctTimeBreak)
-  writeOpt("frac"):
-    proc (w: var SeismicWriter) =
-      var a = shot(2, 1, true)
-      a.rcvPoint = 200.25
-      w.writeTrace(a, @[1'f32, 2, 3, 4])
-  writeOpt("units"):
-    proc (w: var SeismicWriter) =
-      var a = shot(2, 1, true)
-      a.srcX = NaN; a.srcY = NaN; a.srcZ = NaN
-      a.rcvX = NaN; a.rcvY = NaN; a.rcvZ = NaN
-      w.writeTrace(a, @[1'f32, 2, 3, 4])
-  writeOpt("three"):
-    proc (w: var SeismicWriter) =
-      w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
-      w.writeTrace(shot(2, 1, false), @[5'f32, 6, 7, 8], channelType = sctTimeBreak)
-      w.writeTrace(shot(2, 1, false), @[9'f32, 10, 11, 12], channelType = sctUpHole)
-  for (name, size, sum) in want:
-    let path = tmp / (name & ".sgd")
-    doAssert getFileSize(path) == size, name & " " & $getFileSize(path)
-    doAssert fileSum(path) == sum, name & " " & $fileSum(path)
+proc main*() =
+  tmp = scratchDir("parseseg_tskeleton")
 
-echo "tskeleton ok"
+  block strict_receiver_gather:
+    # Shots at T, T+60s, T+120s, plus a trace with no source, every trace
+    # oriented. Before the skeleton the counts were 10, 11, 11, 6.
+    let path = tmp / "rg.sgd"
+    var w = openSeismicWriter(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 2,
+      time: ShotTime, receiverGather: true))
+    let att = some(initTraceOrientation(0.1'f32, 0.2'f32, 0.3'f32, orientationType = 1,
+      rotationApplied = true))
+    let keys = [node(1, 30, 0, true), node(2, 40, 60, true), node(3, 50, 120, true),
+      node(4, 0, 90, false)]
+    var rows: seq[seq[float32]]
+    for i, k in keys:
+      let row = @[float32(i + 1), float32(10 + i)]
+      w.writeTrace(k, row, orientation = att)
+      rows.add row
+    discard w.close()
+    strictWalk(path, rows)
+    var f = openSeismic(path, keys = true)
+    doAssert f.len == 4
+    let the = f.traceField(0, "trace.traceHeaderExtensions").intVal
+    doAssert the == 11
+    for i in 0 .. 3:
+      doAssert f.traceField(i, "trace.traceHeaderExtensions").intVal == the
+    doAssert f.traceKeys(0).srcPoint == 30 and f.traceKeys(2).srcPoint == 50
+    doAssert f.traceKeys(3).srcLine.isNaN and f.traceKeys(3).srcX.isNaN
+    doAssert f.traceKeys(1).time == ShotTime + 60
+    doAssert f.traceOrientation(3).get.rotationZ == 0.3'f32
+    # The shot at record time carries Additional Source Info with time 0.
+    let raw = readFile(path)
+    let rec = f.index.segdRecords[0]
+    var off = int(rec.headerBytes)
+    var sawZero, sawLater = false
+    for i in 0 .. 3:
+      let ext = off + SegdTraceHeaderSize
+      for b in 0 ..< the:
+        let at = ext + b * SegdBlockSize
+        if raw[at + SegdBlockSize - 1] == char(0x20):
+          var time = 0'i64
+          for k in 0 .. 7: time = (time shl 8) or int64(uint8(raw[at + k]))
+          if i == 0: sawZero = time == 0
+          elif time != 0: sawLater = true
+      off += SegdTraceHeaderSize + SegdBlockSize * int(the) + dataBytes(sd8058, 2)
+    doAssert sawZero and sawLater
+    f.close()
+
+  block mixed_orientation:
+    let path = tmp / "mix.sgd"
+    var w = openSeismicWriter(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 1,
+      time: ShotTime))
+    let att = some(initTraceOrientation(0.1'f32, 0, 0, orientationType = 1, rotationApplied = true))
+    w.writeTrace(shot(1, 1, true), @[1'f32], orientation = att)
+    w.writeTrace(shot(1, 2, true), @[2'f32])
+    try:
+      discard w.close()
+      doAssert false, "expected ValueError"
+    except ValueError as e:
+      doAssert e.msg.find("sctSeismic") >= 0, e.msg
+      doAssert e.msg.find("trace channel 2") >= 0, e.msg
+      doAssert e.msg.find("give every trace of a channel set an orientation, or none") >= 0, e.msg
+    doAssert not fileExists(path)
+    # A receiver gather, the first trace the one without an orientation.
+    var r = openSeismicWriter(tmp / "mixrg.sgd", SegdOutputOptions(sampleIntervalUs: 1000,
+      numSamples: 1, time: ShotTime, receiverGather: true))
+    r.writeTrace(node(3, 10, 0, true), @[1'f32])
+    r.writeTrace(node(4, 20, 60, true), @[2'f32], orientation = att)
+    try:
+      discard r.close()
+      doAssert false, "expected ValueError"
+    except ValueError as e:
+      doAssert e.msg.find("trace channel 3") >= 0, e.msg
+      doAssert e.msg.find("give every trace of a channel set an orientation, or none") >= 0, e.msg
+
+  block uniform_option_sets:
+    # Shot gathers that were already uniform, checksummed before the skeleton.
+    const want = [
+      ("bare", 972'i64, 1797920802'u32),
+      ("norcv", 584'i64, 2504485534'u32),
+      ("nosrc", 680'i64, 1976239584'u32),
+      ("feet", 580'i64, 1458858163'u32),
+      ("crs", 580'i64, 1497106906'u32),
+      ("tworec", 1160'i64, 714115694'u32),
+      ("dead", 580'i64, 1427291309'u32),
+      ("natime", 580'i64, 2461025836'u32),
+      ("fmt", 580'i64, 3097374429'u32),
+      ("aux", 584'i64, 1424156037'u32),
+      ("frac", 580'i64, 3562719808'u32),
+      ("units", 324'i64, 3743733315'u32),
+      ("three", 972'i64, 303919689'u32)]
+    writeOpt("bare"):
+      proc (w: var SeismicWriter) =
+        w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
+        w.writeTrace(shot(2, 2, true), @[5'f32, 6, 7, 8])
+        w.writeTrace(shot(2, 3, false), @[9'f32, 10, 11, 12], channelType = sctTimeBreak)
+    writeOpt("norcv"):
+      proc (w: var SeismicWriter) =
+        var a = shot(2, 1, true)
+        a.rcvX = NaN; a.rcvY = NaN; a.rcvZ = NaN
+        var b = shot(2, 2, true)
+        b.rcvX = NaN; b.rcvY = NaN; b.rcvZ = NaN
+        w.writeTrace(a, @[1'f32, 2, 3, 4])
+        w.writeTrace(b, @[5'f32, 6, 7, 8])
+    writeOpt("nosrc"):
+      proc (w: var SeismicWriter) =
+        var a = shot(2, 1, true)
+        a.srcX = NaN; a.srcY = NaN; a.srcZ = NaN
+        var b = shot(2, 2, true)
+        b.srcX = NaN; b.srcY = NaN; b.srcZ = NaN
+        w.writeTrace(a, @[1'f32, 2, 3, 4])
+        w.writeTrace(b, @[5'f32, 6, 7, 8])
+    writeOpt("feet"):
+      proc (w: var SeismicWriter) =
+        w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
+    writeOpt("crs"):
+      proc (w: var SeismicWriter) =
+        w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
+    writeOpt("tworec"):
+      proc (w: var SeismicWriter) =
+        w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
+        w.writeTrace(shot(5, 1, true), @[5'f32, 6, 7, 8])
+    writeOpt("dead"):
+      proc (w: var SeismicWriter) =
+        var a = shot(2, 1, true)
+        a.status = tsDead
+        w.writeTrace(a, @[1'f32, 2, 3, 4])
+    writeOpt("natime"):
+      proc (w: var SeismicWriter) =
+        var a = shot(2, 1, true)
+        a.time = NaN
+        w.writeTrace(a, @[1'f32, 2, 3, 4])
+    writeOpt("fmt"):
+      proc (w: var SeismicWriter) =
+        w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
+    writeOpt("aux"):
+      proc (w: var SeismicWriter) =
+        w.writeTrace(shot(2, 1, false), @[1'f32, 2, 3, 4], channelType = sctTimeBreak)
+        w.writeTrace(shot(2, 2, false), @[5'f32, 6, 7, 8], channelType = sctTimeBreak)
+    writeOpt("frac"):
+      proc (w: var SeismicWriter) =
+        var a = shot(2, 1, true)
+        a.rcvPoint = 200.25
+        w.writeTrace(a, @[1'f32, 2, 3, 4])
+    writeOpt("units"):
+      proc (w: var SeismicWriter) =
+        var a = shot(2, 1, true)
+        a.srcX = NaN; a.srcY = NaN; a.srcZ = NaN
+        a.rcvX = NaN; a.rcvY = NaN; a.rcvZ = NaN
+        w.writeTrace(a, @[1'f32, 2, 3, 4])
+    writeOpt("three"):
+      proc (w: var SeismicWriter) =
+        w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])
+        w.writeTrace(shot(2, 1, false), @[5'f32, 6, 7, 8], channelType = sctTimeBreak)
+        w.writeTrace(shot(2, 1, false), @[9'f32, 10, 11, 12], channelType = sctUpHole)
+    for (name, size, sum) in want:
+      let path = tmp / (name & ".sgd")
+      doAssert getFileSize(path) == size, name & " " & $getFileSize(path)
+      doAssert fileSum(path) == sum, name & " " & $fileSum(path)
+
+  echo "tskeleton ok"
+
+when isMainModule: main()

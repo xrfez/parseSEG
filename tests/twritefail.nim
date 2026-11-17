@@ -7,10 +7,12 @@
 ## that the write fails with EFBIG instead of ending the process): POSIX only.
 
 import std/[assertions, os, strutils]
+
 import parseSEG
+
 import ./utils/testutils
 
-let tmp = scratchDir("parseseg_twritefail")
+var tmp: typeof(scratchDir("parseseg_twritefail"))
 
 proc noTempFiles() =
   for p in walkDir(tmp):
@@ -25,101 +27,6 @@ proc isEmptyDir(dir: string): bool =
   result = dirExists(dir)
   for _ in walkDir(dir): return false
 
-block a_directory_as_destination_is_refused_before_any_work:
-  let dir = tmp / "taken.sgy"
-  createDir(dir)
-  doAssertRaises(IOError): discard openSeismicWriter(dir, SegyOutputOptions())
-  for name in ["survey.sgy", "shot.sgd", "line.sg2"]:
-    var f = openSeismic(demoDir() / name)
-    doAssertRaises(IOError): discard openSeismicWriter(dir, like = f)
-    for target in [skSegy, skSegd, skSeg2]:
-      if not (name == "survey.sgy" and target == skSegd): # SEG-Y to SEG-D: unsupported
-        var calls = 0
-        let log = convertFile(demoDir() / name, dir, ConvertOptions(target: target),
-          proc (done, total: int64): bool =
-            inc calls
-            true)
-        doAssert log.isFatal and log.has("is a directory", sevFatal), name & ": " & $log
-        doAssert calls == 0, name & " to " & $target & ": the input was read first"
-  doAssert isEmptyDir(dir)
-  noTempFiles()
-
-block a_failed_rename_leaves_no_temporary_file:
-  # The destination turns into a directory while the file is written.
-  let dst = tmp / "late.sgy"
-  var w = openSeismicWriter(dst, SegyOutputOptions())
-  w.writeTrace(liveKeys(), newSeq[float32](100))
-  createDir(dst)
-  # One error channel: `close` raises for this as for every other failure.
-  try:
-    discard w.close()
-    doAssert false, "close returned"
-  except IOError as e:
-    doAssert "cannot move the output into place" in e.msg, e.msg
-  doAssertRaises(ValueError): discard w.close() # closed
-  doAssert isEmptyDir(dst)
-  noTempFiles()
-  removeDir(dst)
-
-block segd_writer_calls_out_of_order_are_value_errors:
-  let src = openDiskSource(demoDir() / "record.sgd")
-  var r = openSegd(src)
-  doAssert r.nextRecord()
-  var t: SegdTrace
-  doAssert r.readTrace(t)
-  let sink = openDiskSink(tmp / "order.sgd")
-  var w = openSegdWriter(sink)
-  doAssertRaises(ValueError): w.writeTrace(t)        # no record in progress
-  doAssertRaises(ValueError): w.endRecord()
-  doAssertRaises(ValueError): w.setRev3Trailer(@[])
-  w.writeRecordHeaders(r.record)
-  doAssertRaises(ValueError): w.writeRecordHeaders(r.record) # a record inside a record
-  doAssertRaises(ValueError): w.setRev3Trailer(@[])   # a Rev 2 record
-  doAssertRaises(ValueError): w.close()
-  w.writeTrace(t)
-  w.endRecord()
-  w.close()
-  sink.close()
-  src.close()
-  doAssert readFile(tmp / "order.sgd") == readFile(demoDir() / "record.sgd")
-
-block an_abandoned_seg2_writer_writes_no_pointers:
-  var fdb = initSeg2File()
-  fdb.traceCount = 2
-  let path = tmp / "abandoned.sg2"
-  var w = openSeg2Writer(path, fdb)
-  let t = Seg2Trace(formatCode: 4)
-  w.writeTrace(t, [1'f32, 2])
-  w.abandon()
-  w.abandon() # a closed writer: nothing to do
-  w.close()
-  doAssertRaises(ValueError): w.writeTrace(t, [1'f32])
-  let b = readFile(path)
-  doAssert b[6] == '\0' and b[7] == '\0' # the trace count was never written
-  removeFile(path)
-
-block disk_sink_collects_records:
-  # Records go out in 1 MiB writes: the file holds them all, in order, once
-  # the sink is closed.
-  let path = tmp / "sink.bin"
-  let sink = openDiskSink(path)
-  var want = ""
-  var seed = 1'u32
-  for n in [0, 1, 239, 240, 8240, SinkBufferSize - 9000, 5, SinkBufferSize, SinkBufferSize + 7,
-      3, 2 * SinkBufferSize, 70000]:
-    var rec = newSeq[byte](n)
-    for b in rec.mitems:
-      seed = seed * 1664525'u32 + 1013904223'u32
-      b = byte(seed shr 24)
-    sink.writeRecord(rec)
-    for b in rec: want.add char(b)
-    doAssert sink.offset == want.len
-  sink.writeTapeMark() # not stored
-  doAssert getFileSize(path) < want.len # the tail is still in the buffer
-  sink.close()
-  sink.close() # closed: nothing to do
-  doAssert readFile(path) == want
-
 when defined(posix):
   import std/posix
 
@@ -132,8 +39,6 @@ when defined(posix):
     doAssert getrlimit(RLIMIT_FSIZE, lim) == 0
     lim.rlim_cur = if bytes < 0: lim.rlim_max else: bytes
     doAssert setrlimit(RLIMIT_FSIZE, lim) == 0
-
-  signal(SIGXFSZ, SIG_IGN)
 
   template failsUnder(limit: int, dst: string, body: untyped) =
     ## `body` writes `dst` through to its `close`: under a file size limit of
@@ -157,102 +62,208 @@ when defined(posix):
     let x = f.readTraces(0 ..< f.len)
     for i in 0 ..< f.len: w.writeTrace(f, i, x, i)
     discard w.close()
+else:
+  discard
 
-  block a_failed_last_flush_raises_and_installs_nothing:
-    # The file is some hundred bytes short of the space it needs, so the
-    # writes fit the buffers and only the last flush fails.
-    block segy_from_keys:
-      const traces = 10
-      const ns = 1000
-      let dst = tmp / "full.sgy"
-      let x = newSeq[float32](ns)
-      failsUnder(3600 + traces * (240 + 4 * ns) - 900, dst):
-        var w = openSeismicWriter(dst,
-          SegyOutputOptions(revision: SegyRevision(major: 1, minor: 0)))
-        for t in 0 ..< traces: w.writeTrace(liveKeys(), x)
-        discard w.close()
+proc main*() =
+  tmp = scratchDir("parseseg_twritefail")
+
+  block a_directory_as_destination_is_refused_before_any_work:
+    let dir = tmp / "taken.sgy"
+    createDir(dir)
+    doAssertRaises(IOError): discard openSeismicWriter(dir, SegyOutputOptions())
     for name in ["survey.sgy", "shot.sgd", "line.sg2"]:
-      let src = demoDir() / name
-      let dst = tmp / ("like_" & name)
-      writeLike(src, dst)
-      let size = int(getFileSize(dst))
-      doAssert size == getFileSize(src), name
-      removeFile(dst)
-      failsUnder(size - 900, dst): writeLike(src, dst)
+      var f = openSeismic(demoDir() / name)
+      doAssertRaises(IOError): discard openSeismicWriter(dir, like = f)
+      for target in [skSegy, skSegd, skSeg2]:
+        if not (name == "survey.sgy" and target == skSegd): # SEG-Y to SEG-D: unsupported
+          var calls = 0
+          let log = convertFile(demoDir() / name, dir, ConvertOptions(target: target),
+            proc (done, total: int64): bool =
+              inc calls
+              true)
+          doAssert log.isFatal and log.has("is a directory", sevFatal), name & ": " & $log
+          doAssert calls == 0, name & " to " & $target & ": the input was read first"
+    doAssert isEmptyDir(dir)
+    noTempFiles()
 
-  block a_failed_last_flush_is_fatal_for_convertFile:
-    for (name, target) in [("survey.sgy", skSegy), ("record.sgd", skSegd), ("shot.sgd", skSegd),
-        ("survey.sgy", skSeg2), ("line.sg2", skSegy)]:
-      let src = demoDir() / name
-      let dst = tmp / ("conv_" & name & "." & $target)
-      let opts = ConvertOptions(target: target)
-      doAssert not convertFile(src, dst, opts).isFatal, dst
-      let size = int(getFileSize(dst))
-      removeFile(dst)
-      limitFileSize(size - 900)
-      let log = convertFile(src, dst, opts)
-      limitFileSize(-1)
-      doAssert log.isFatal, dst & ": a file " & $(size - 900) & " bytes short is not fatal"
-      doAssert not fileExists(dst), dst
-      noTempFiles()
+  block a_failed_rename_leaves_no_temporary_file:
+    # The destination turns into a directory while the file is written.
+    let dst = tmp / "late.sgy"
+    var w = openSeismicWriter(dst, SegyOutputOptions())
+    w.writeTrace(liveKeys(), newSeq[float32](100))
+    createDir(dst)
+    # One error channel: `close` raises for this as for every other failure.
+    try:
+      discard w.close()
+      doAssert false, "close returned"
+    except IOError as e:
+      doAssert "cannot move the output into place" in e.msg, e.msg
+    doAssertRaises(ValueError): discard w.close() # closed
+    doAssert isEmptyDir(dst)
+    noTempFiles()
+    removeDir(dst)
 
-  block a_failed_write_discards_the_output:
-    # `writeTrace` raises `IOError` when the disk fills up; a `close` after
-    # that (say, from a `finally`) must not install the torn file.
-    block from_keys:
-      let dst = tmp / "torn.sgy"
-      var w = openSeismicWriter(dst, SegyOutputOptions())
-      let x = newSeq[float32](1000)
-      var failedAt = -1
-      limitFileSize(3 shl 19) # 1.5 MiB
-      try:
-        for t in 0 ..< 1000:
-          if failedAt < 0:
-            try: w.writeTrace(liveKeys(), x)
-            except IOError: failedAt = t
-      finally:
+  block segd_writer_calls_out_of_order_are_value_errors:
+    let src = openDiskSource(demoDir() / "record.sgd")
+    var r = openSegd(src)
+    doAssert r.nextRecord()
+    var t: SegdTrace
+    doAssert r.readTrace(t)
+    let sink = openDiskSink(tmp / "order.sgd")
+    var w = openSegdWriter(sink)
+    doAssertRaises(ValueError): w.writeTrace(t)        # no record in progress
+    doAssertRaises(ValueError): w.endRecord()
+    doAssertRaises(ValueError): w.setRev3Trailer(@[])
+    w.writeRecordHeaders(r.record)
+    doAssertRaises(ValueError): w.writeRecordHeaders(r.record) # a record inside a record
+    doAssertRaises(ValueError): w.setRev3Trailer(@[])   # a Rev 2 record
+    doAssertRaises(ValueError): w.close()
+    w.writeTrace(t)
+    w.endRecord()
+    w.close()
+    sink.close()
+    src.close()
+    doAssert readFile(tmp / "order.sgd") == readFile(demoDir() / "record.sgd")
+
+  block an_abandoned_seg2_writer_writes_no_pointers:
+    var fdb = initSeg2File()
+    fdb.traceCount = 2
+    let path = tmp / "abandoned.sg2"
+    var w = openSeg2Writer(path, fdb)
+    let t = Seg2Trace(formatCode: 4)
+    w.writeTrace(t, [1'f32, 2])
+    w.abandon()
+    w.abandon() # a closed writer: nothing to do
+    w.close()
+    doAssertRaises(ValueError): w.writeTrace(t, [1'f32])
+    let b = readFile(path)
+    doAssert b[6] == '\0' and b[7] == '\0' # the trace count was never written
+    removeFile(path)
+
+  block disk_sink_collects_records:
+    # Records go out in 1 MiB writes: the file holds them all, in order, once
+    # the sink is closed.
+    let path = tmp / "sink.bin"
+    let sink = openDiskSink(path)
+    var want = ""
+    var seed = 1'u32
+    for n in [0, 1, 239, 240, 8240, SinkBufferSize - 9000, 5, SinkBufferSize, SinkBufferSize + 7,
+        3, 2 * SinkBufferSize, 70000]:
+      var rec = newSeq[byte](n)
+      for b in rec.mitems:
+        seed = seed * 1664525'u32 + 1013904223'u32
+        b = byte(seed shr 24)
+      sink.writeRecord(rec)
+      for b in rec: want.add char(b)
+      doAssert sink.offset == want.len
+    sink.writeTapeMark() # not stored
+    doAssert getFileSize(path) < want.len # the tail is still in the buffer
+    sink.close()
+    sink.close() # closed: nothing to do
+    doAssert readFile(path) == want
+
+  when defined(posix):
+    signal(SIGXFSZ, SIG_IGN)
+
+    block a_failed_last_flush_raises_and_installs_nothing:
+      # The file is some hundred bytes short of the space it needs, so the
+      # writes fit the buffers and only the last flush fails.
+      block segy_from_keys:
+        const traces = 10
+        const ns = 1000
+        let dst = tmp / "full.sgy"
+        let x = newSeq[float32](ns)
+        failsUnder(3600 + traces * (240 + 4 * ns) - 900, dst):
+          var w = openSeismicWriter(dst,
+            SegyOutputOptions(revision: SegyRevision(major: 1, minor: 0)))
+          for t in 0 ..< traces: w.writeTrace(liveKeys(), x)
+          discard w.close()
+      for name in ["survey.sgy", "shot.sgd", "line.sg2"]:
+        let src = demoDir() / name
+        let dst = tmp / ("like_" & name)
+        writeLike(src, dst)
+        let size = int(getFileSize(dst))
+        doAssert size == getFileSize(src), name
+        removeFile(dst)
+        failsUnder(size - 900, dst): writeLike(src, dst)
+
+    block a_failed_last_flush_is_fatal_for_convertFile:
+      for (name, target) in [("survey.sgy", skSegy), ("record.sgd", skSegd), ("shot.sgd", skSegd),
+          ("survey.sgy", skSeg2), ("line.sg2", skSegy)]:
+        let src = demoDir() / name
+        let dst = tmp / ("conv_" & name & "." & $target)
+        let opts = ConvertOptions(target: target)
+        doAssert not convertFile(src, dst, opts).isFatal, dst
+        let size = int(getFileSize(dst))
+        removeFile(dst)
+        limitFileSize(size - 900)
+        let log = convertFile(src, dst, opts)
         limitFileSize(-1)
-      doAssert failedAt > 0, "4 MB were written under a limit of 1.5 MiB"
-      doAssertRaises(ValueError): w.writeTrace(liveKeys(), x)
-      doAssertRaises(ValueError): discard w.close()
-      doAssert not fileExists(dst)
-      noTempFiles()
-    block like_an_input:
-      let dst = tmp / "torn_like.sgy"
-      var f = openSeismic(demoDir() / "survey.sgy")
-      let x = f.readTraces(0 ..< f.len)
-      var w = openSeismicWriter(dst, like = f)
-      var failed = false
+        doAssert log.isFatal, dst & ": a file " & $(size - 900) & " bytes short is not fatal"
+        doAssert not fileExists(dst), dst
+        noTempFiles()
+
+    block a_failed_write_discards_the_output:
+      # `writeTrace` raises `IOError` when the disk fills up; a `close` after
+      # that (say, from a `finally`) must not install the torn file.
+      block from_keys:
+        let dst = tmp / "torn.sgy"
+        var w = openSeismicWriter(dst, SegyOutputOptions())
+        let x = newSeq[float32](1000)
+        var failedAt = -1
+        limitFileSize(3 shl 19) # 1.5 MiB
+        try:
+          for t in 0 ..< 1000:
+            if failedAt < 0:
+              try: w.writeTrace(liveKeys(), x)
+              except IOError: failedAt = t
+        finally:
+          limitFileSize(-1)
+        doAssert failedAt > 0, "4 MB were written under a limit of 1.5 MiB"
+        doAssertRaises(ValueError): w.writeTrace(liveKeys(), x)
+        doAssertRaises(ValueError): discard w.close()
+        doAssert not fileExists(dst)
+        noTempFiles()
+      block like_an_input:
+        let dst = tmp / "torn_like.sgy"
+        var f = openSeismic(demoDir() / "survey.sgy")
+        let x = f.readTraces(0 ..< f.len)
+        var w = openSeismicWriter(dst, like = f)
+        var failed = false
+        limitFileSize(3 shl 19)
+        try:
+          for pass in 0 ..< 3: # 1.65 MB each
+            for i in 0 ..< f.len:
+              if not failed:
+                try: w.writeTrace(f, i, x, i)
+                except IOError: failed = true
+        finally:
+          limitFileSize(-1)
+        doAssert failed, "5 MB were written under a limit of 1.5 MiB"
+        doAssertRaises(ValueError): discard w.close()
+        doAssert not fileExists(dst)
+        noTempFiles()
+
+    block a_disk_sink_that_failed_stays_failed:
+      let path = tmp / "sink_full.bin"
+      let sink = openDiskSink(path)
+      let rec = newSeq[byte](300_000)
+      var failedAt = -1
       limitFileSize(3 shl 19)
       try:
-        for pass in 0 ..< 3: # 1.65 MB each
-          for i in 0 ..< f.len:
-            if not failed:
-              try: w.writeTrace(f, i, x, i)
-              except IOError: failed = true
+        for i in 0 ..< 12:
+          if failedAt < 0:
+            try: sink.writeRecord(rec)
+            except IOError: failedAt = i
       finally:
         limitFileSize(-1)
-      doAssert failed, "5 MB were written under a limit of 1.5 MiB"
-      doAssertRaises(ValueError): discard w.close()
-      doAssert not fileExists(dst)
-      noTempFiles()
-  block a_disk_sink_that_failed_stays_failed:
-    let path = tmp / "sink_full.bin"
-    let sink = openDiskSink(path)
-    let rec = newSeq[byte](300_000)
-    var failedAt = -1
-    limitFileSize(3 shl 19)
-    try:
-      for i in 0 ..< 12:
-        if failedAt < 0:
-          try: sink.writeRecord(rec)
-          except IOError: failedAt = i
-    finally:
-      limitFileSize(-1)
-    doAssert failedAt > 0, "3.6 MB were written under a limit of 1.5 MiB"
-    # With room again, the missing bytes are still missing.
-    doAssertRaises(IOError): sink.writeRecord(rec)
-    doAssertRaises(IOError): sink.close()
-    removeFile(path)
-else:
-  echo "twritefail: the disk-full blocks need POSIX (RLIMIT_FSIZE); skipped"
+      doAssert failedAt > 0, "3.6 MB were written under a limit of 1.5 MiB"
+      # With room again, the missing bytes are still missing.
+      doAssertRaises(IOError): sink.writeRecord(rec)
+      doAssertRaises(IOError): sink.close()
+      removeFile(path)
+  else:
+    echo "twritefail: the disk-full blocks need POSIX (RLIMIT_FSIZE); skipped"
+
+when isMainModule: main()

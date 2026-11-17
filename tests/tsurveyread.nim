@@ -9,10 +9,14 @@
 ## without the binary test.
 
 import std/[assertions, math, os, streams, strutils]
+
 when defined(posix):
   import std/posix
+
 import parseSEG
+
 import parseSEG/survey/cards # column helpers (internal)
+
 import ./utils/testutils
 
 proc rec(first: char, fields: openArray[(int, string)]): string =
@@ -31,8 +35,7 @@ const
   H00v1 = "H00 SPS format version number   SPS001,12.10.90;"
   p1a = " CLT4960            12340B17543354N110445881E  155590  161670  85779197065028   "
 
-let tmp = scratchDir("parseseg_tsurveyread")
-createDir(tmp)
+var tmp: typeof(scratchDir("parseseg_tsurveyread"))
 
 proc spsFile(points: int): string =
   ## An SPS 2.1 receiver file of `points` records, about 82 bytes each.
@@ -80,8 +83,6 @@ proc progress_and_cancel_sps() =
       true)
   doAssert s.points.len == 20_000 and totals.len >= 2 and totals[0] == -1
 
-progress_and_cancel_sps()
-
 proc progress_and_cancel_p1() =
   # A proc, not a block: the hooks are closures over its locals.
   var lines = @["H0100SURVEY AREA         test"]
@@ -102,115 +103,6 @@ proc progress_and_cancel_p1() =
   doAssert g.log.isFatal and g.log.has("cancelled", sevFatal)
   doAssert g.files.len == 0 or g.files[0].records.len < 40_000
 
-progress_and_cancel_p1()
-
-block looks_like_sps_from_headers_only:
-  # A file list sniffs a head: SPS headers often fill more than 4 KiB, so
-  # the head may hold header records only. An H00 that names SPS decides.
-  var head = @[H00]
-  for i in 1 .. 60: head.add "H26 " & repeat('x', 70)
-  doAssert looksLikeSps(newStringStream(head.join("\n")))
-  doAssert looksLikeSps(newStringStream(H00v1 & "\n" & "H01 area"))
-
-  doAssert not looksLikeSps(newStringStream("H00 SPS format version number   unknown\nH01 x"))
-  doAssert not looksLikeSps(newStringStream("H01 Description\nH02 x\nH26 y"))
-  doAssert not looksLikeSps(newStringStream("H0100SURVEY AREA         test\nH0200x"))
-  doAssert not looksLikeSps(newStringStream(""))
-  # Data records still decide over the H00: P1 data under an SPS H00 is P1.
-  doAssert not looksLikeSps(newStringStream([H00, p1a, p1a].join("\n")))
-
-block over_long_lines_are_one_line:
-  # A line of 3 x 64 KiB + 10 bytes is cut into 4 records, all of line 1;
-  # the line after it is line 2, in the records and in diagnostics.
-  let long = 'R' & repeat('7', 3 * MaxLineBytes + 9)
-  let text = [H00, long, point('R', 1, 2, 3.0, 4.0)].join("\n") & "\n"
-  var indices: seq[int]
-  for r in textRecords(newStringStream(text), tlLines): indices.add r.index
-  doAssert indices == @[0, 1, 1, 1, 1, 2], $indices
-  let f = parseSps(text)
-  # The first piece reads as an R record, the others as unknown records; all warned about.
-  doAssert f.points.len == 2 and f.others.len == 3, $f.points.len & " " & $f.others.len
-  for d in f.log:
-    if d.loc.record >= 0: doAssert d.loc.record in [1, 2], $d
-  doAssert f.log.has("cut into records", sevWarning)
-  # A stream with no line end at all: pieces, each of line 0.
-  var n = 0
-  for r in textRecords(newStringStream(repeat('a', 5 * MaxLineBytes)), tlLines):
-    doAssert r.index == 0
-    inc n
-  doAssert n == 5
-
-block junk_is_bounded:
-  # Records, then 8 MiB of lines that are no SPS records, then records: with
-  # a bound of 1 MiB the read stops in the junk and says from where; `others`
-  # holds about the bound. Without one, everything is read (and kept).
-  var lines = @[H00, point('S', 1, 1, 1.0, 2.0)]
-  let junkFrom = lines.join("\n").len + 1
-  for i in 0 ..< 100_000: lines.add "#junk line " & $i & repeat('-', 70)
-  lines.add point('S', 1, 2, 1.0, 2.0)
-  let text = lines.join("\n") & "\n"
-  let bounded = parseSps(text, "j.s", SpsOptions(maxJunkBytes: 1 shl 20))
-  doAssert bounded.points.len == 1
-  var kept = 0
-  for o in bounded.others: kept += o.len
-  doAssert kept <= (1 shl 20) + 1000, $kept
-  doAssert bounded.log.has("turns into other data", sevError), $bounded.log
-  var said = false
-  for d in bounded.log:
-    if "turns into other data" in d.msg:
-      said = d.offset == int64(junkFrom)
-  doAssert said
-  let all = parseSps(text, "j.s")
-  doAssert all.points.len == 2 and all.others.len == 100_000
-  # Blank lines neither end a run of junk nor count in it; a record ends it.
-  var mixed = @[H00]
-  for i in 0 ..< 3:
-    for k in 0 ..< 6000: mixed.add "?" & repeat('j', 99)
-    mixed.add ""
-    mixed.add point('R', 1, i, 1.0, 2.0)
-  let m = parseSps(mixed.join("\n"), "m.r", SpsOptions(maxJunkBytes: 1 shl 20))
-  doAssert m.points.len == 3 and not m.log.has("turns into other data", sevError)
-
-block binary_lines_passed_by:
-  # Lines with bytes no text holds: with `skipBinary` they are not read as
-  # records, one warning counts them, and a run of them is junk.
-  var bin = newString(200)
-  for i in 0 ..< bin.len: bin[i] = char((i * 37 + 11) mod 256)
-  bin = bin.replace("\n", "x").replace("\r", "y")
-  let text = [H00, point('R', 1, 1, 1.0, 2.0), "R" & bin, "S\0\0\0", point('R', 1, 2, 1.0, 2.0)].join("\n")
-  let plain = parseSps(text)
-  doAssert plain.points.len == 4 # read as (bad) records, as before
-  let skipped = parseSps(text, opts = SpsOptions(skipBinary: true))
-  doAssert skipped.points.len == 2 and skipped.others.len == 2
-  doAssert skipped.others[0] == "" and skipped.others[1] == ""
-  doAssert skipped.log.has("2 lines hold binary data", sevWarning), $skipped.log
-  # 20 MiB of binary bytes (some of them line ends): read up to the bound
-  # only, nothing of them kept.
-  var blob = newString(20 shl 20)
-  for i in 0 ..< blob.len: blob[i] = char((i * 131 + 7) mod 251)
-  let b = parseSps(H00 & "\n" & blob, "b.r", SpsOptions(skipBinary: true,
-    maxJunkBytes: 2 shl 20))
-  var keptBytes = 0
-  for o in b.others: keptBytes += o.len
-  doAssert b.points.len == 0 and keptBytes == 0 and b.log.has("turns into other data", sevError)
-  var lines = 0
-  for c in blob: (if c in {'\n', '\r'}: inc lines)
-  doAssert b.order.len < lines div 8, $b.order.len & " of " & $lines # stopped after 2 of 20 MiB
-  # The same bytes without line ends at all: 64 KiB pieces, the same stop.
-  let noEnds = blob.replace("\n", "x").replace("\r", "y")
-  let c = parseSps(H00 & "\n" & noEnds, "c.r", SpsOptions(skipBinary: true,
-    maxJunkBytes: 2 shl 20))
-  doAssert c.order.len <= 40 and c.log.has("turns into other data", sevError), $c.order.len
-
-block hostile_inputs:
-  for text in ["", "\n", "\r", "\r\n\r\n", "\0\0\0\0", repeat('\r', 100_000), "H00",
-      repeat("R\n", 10_000), repeat('\xFF', 70_000), "EOF"]:
-    let f = parseSps(text, "h.s", SpsOptions(skipBinary: true, maxJunkBytes: 4096))
-    doAssert not f.log.isFatal, $f.log
-    discard looksLikeSps(newStringStream(text))
-    let p = parseP1(text, "h.p1")
-    doAssert not p.log.isFatal
-
 proc binary_lines_are_named() =
   # Each line passed by is named with its line number (the first few, as
   # every kind of problem is), and one warning counts them all.
@@ -224,8 +116,6 @@ proc binary_lines_are_named() =
   doAssert named == @[2, 3], $f.log
   doAssert f.log.has("2 lines hold binary data", sevWarning) and f.log.count(sevWarning) == 3,
     $f.log
-
-binary_lines_are_named()
 
 proc high_bytes_are_text() =
   # Bytes above 127 are text in some encoding (UTF-8, Latin-1, CP1251): they
@@ -245,8 +135,6 @@ proc high_bytes_are_text() =
   doAssert looksBinary("R\0") and looksBinary("R\x1A") and looksBinary("R\x7F")
   doAssert not looksBinary("R\t\f\r x")
 
-high_bytes_are_text()
-
 proc junk_stop_ends_progress() =
   # A read the junk bound stops still gets its final progress call.
   var lines = @[H00, point('S', 1, 1, 1.0, 2.0)]
@@ -259,8 +147,6 @@ proc junk_stop_ends_progress() =
   doAssert f.log.has("turns into other data", sevError) and not f.log.isFatal, $f.log
   doAssert calls.len >= 2 and calls[^1] == (-1'i64, -1'i64), $calls
 
-junk_stop_ends_progress()
-
 type CountingStream = ref object of StreamObj
   ## A string stream that counts the bytes read from it.
   inner: StringStream
@@ -272,7 +158,9 @@ proc csReadData(s: Stream, buffer: pointer, bufLen: int): int =
   c.read += result
 
 proc csSetPosition(s: Stream, pos: int) = CountingStream(s).inner.setPosition(pos)
+
 proc csGetPosition(s: Stream): int = CountingStream(s).inner.getPosition
+
 proc csAtEnd(s: Stream): bool = CountingStream(s).inner.atEnd
 
 proc newCountingStream(text: string): CountingStream =
@@ -305,8 +193,6 @@ proc revision_scan_is_bounded() =
   doAssert tAtFirst in 0'i64 .. 8 shl 20, "read before the first progress call, no line " &
     "ends: " & $tAtFirst & " bytes"
 
-revision_scan_is_bounded()
-
 proc reserve_is_capped() =
   # A file of several GiB that starts with SPS records (sparse here: zeros
   # after them, which the junk bound stops at) reserves room for at most
@@ -327,8 +213,6 @@ proc reserve_is_capped() =
   else:
     echo "tsurveyread: reserve_is_capped skipped (a sparse file needs POSIX ftruncate)"
 
-reserve_is_capped()
-
 proc h00_revision_columns() =
   # The revision is read from an H00's data, columns 33 on (as `data` holds
   # it), by `readSps` and `looksLikeSps` alike.
@@ -337,6 +221,134 @@ proc h00_revision_columns() =
   doAssert f.revisionDeclared and f.revision == sps10, $f.revision & " " & $f.log
   doAssert looksLikeSps(newStringStream(far & "\nH26 x"))
 
-h00_revision_columns()
+proc main*() =
+  tmp = scratchDir("parseseg_tsurveyread")
 
-echo "tsurveyread: ok"
+  createDir(tmp)
+
+  progress_and_cancel_sps()
+
+  progress_and_cancel_p1()
+
+  block looks_like_sps_from_headers_only:
+    # A file list sniffs a head: SPS headers often fill more than 4 KiB, so
+    # the head may hold header records only. An H00 that names SPS decides.
+    var head = @[H00]
+    for i in 1 .. 60: head.add "H26 " & repeat('x', 70)
+    doAssert looksLikeSps(newStringStream(head.join("\n")))
+    doAssert looksLikeSps(newStringStream(H00v1 & "\n" & "H01 area"))
+
+    doAssert not looksLikeSps(newStringStream("H00 SPS format version number   unknown\nH01 x"))
+    doAssert not looksLikeSps(newStringStream("H01 Description\nH02 x\nH26 y"))
+    doAssert not looksLikeSps(newStringStream("H0100SURVEY AREA         test\nH0200x"))
+    doAssert not looksLikeSps(newStringStream(""))
+    # Data records still decide over the H00: P1 data under an SPS H00 is P1.
+    doAssert not looksLikeSps(newStringStream([H00, p1a, p1a].join("\n")))
+
+  block over_long_lines_are_one_line:
+    # A line of 3 x 64 KiB + 10 bytes is cut into 4 records, all of line 1;
+    # the line after it is line 2, in the records and in diagnostics.
+    let long = 'R' & repeat('7', 3 * MaxLineBytes + 9)
+    let text = [H00, long, point('R', 1, 2, 3.0, 4.0)].join("\n") & "\n"
+    var indices: seq[int]
+    for r in textRecords(newStringStream(text), tlLines): indices.add r.index
+    doAssert indices == @[0, 1, 1, 1, 1, 2], $indices
+    let f = parseSps(text)
+    # The first piece reads as an R record, the others as unknown records; all warned about.
+    doAssert f.points.len == 2 and f.others.len == 3, $f.points.len & " " & $f.others.len
+    for d in f.log:
+      if d.loc.record >= 0: doAssert d.loc.record in [1, 2], $d
+    doAssert f.log.has("cut into records", sevWarning)
+    # A stream with no line end at all: pieces, each of line 0.
+    var n = 0
+    for r in textRecords(newStringStream(repeat('a', 5 * MaxLineBytes)), tlLines):
+      doAssert r.index == 0
+      inc n
+    doAssert n == 5
+
+  block junk_is_bounded:
+    # Records, then 8 MiB of lines that are no SPS records, then records: with
+    # a bound of 1 MiB the read stops in the junk and says from where; `others`
+    # holds about the bound. Without one, everything is read (and kept).
+    var lines = @[H00, point('S', 1, 1, 1.0, 2.0)]
+    let junkFrom = lines.join("\n").len + 1
+    for i in 0 ..< 100_000: lines.add "#junk line " & $i & repeat('-', 70)
+    lines.add point('S', 1, 2, 1.0, 2.0)
+    let text = lines.join("\n") & "\n"
+    let bounded = parseSps(text, "j.s", SpsOptions(maxJunkBytes: 1 shl 20))
+    doAssert bounded.points.len == 1
+    var kept = 0
+    for o in bounded.others: kept += o.len
+    doAssert kept <= (1 shl 20) + 1000, $kept
+    doAssert bounded.log.has("turns into other data", sevError), $bounded.log
+    var said = false
+    for d in bounded.log:
+      if "turns into other data" in d.msg:
+        said = d.offset == int64(junkFrom)
+    doAssert said
+    let all = parseSps(text, "j.s")
+    doAssert all.points.len == 2 and all.others.len == 100_000
+    # Blank lines neither end a run of junk nor count in it; a record ends it.
+    var mixed = @[H00]
+    for i in 0 ..< 3:
+      for k in 0 ..< 6000: mixed.add "?" & repeat('j', 99)
+      mixed.add ""
+      mixed.add point('R', 1, i, 1.0, 2.0)
+    let m = parseSps(mixed.join("\n"), "m.r", SpsOptions(maxJunkBytes: 1 shl 20))
+    doAssert m.points.len == 3 and not m.log.has("turns into other data", sevError)
+
+  block binary_lines_passed_by:
+    # Lines with bytes no text holds: with `skipBinary` they are not read as
+    # records, one warning counts them, and a run of them is junk.
+    var bin = newString(200)
+    for i in 0 ..< bin.len: bin[i] = char((i * 37 + 11) mod 256)
+    bin = bin.replace("\n", "x").replace("\r", "y")
+    let text = [H00, point('R', 1, 1, 1.0, 2.0), "R" & bin, "S\0\0\0", point('R', 1, 2, 1.0, 2.0)].join("\n")
+    let plain = parseSps(text)
+    doAssert plain.points.len == 4 # read as (bad) records, as before
+    let skipped = parseSps(text, opts = SpsOptions(skipBinary: true))
+    doAssert skipped.points.len == 2 and skipped.others.len == 2
+    doAssert skipped.others[0] == "" and skipped.others[1] == ""
+    doAssert skipped.log.has("2 lines hold binary data", sevWarning), $skipped.log
+    # 20 MiB of binary bytes (some of them line ends): read up to the bound
+    # only, nothing of them kept.
+    var blob = newString(20 shl 20)
+    for i in 0 ..< blob.len: blob[i] = char((i * 131 + 7) mod 251)
+    let b = parseSps(H00 & "\n" & blob, "b.r", SpsOptions(skipBinary: true,
+      maxJunkBytes: 2 shl 20))
+    var keptBytes = 0
+    for o in b.others: keptBytes += o.len
+    doAssert b.points.len == 0 and keptBytes == 0 and b.log.has("turns into other data", sevError)
+    var lines = 0
+    for c in blob: (if c in {'\n', '\r'}: inc lines)
+    doAssert b.order.len < lines div 8, $b.order.len & " of " & $lines # stopped after 2 of 20 MiB
+    # The same bytes without line ends at all: 64 KiB pieces, the same stop.
+    let noEnds = blob.replace("\n", "x").replace("\r", "y")
+    let c = parseSps(H00 & "\n" & noEnds, "c.r", SpsOptions(skipBinary: true,
+      maxJunkBytes: 2 shl 20))
+    doAssert c.order.len <= 40 and c.log.has("turns into other data", sevError), $c.order.len
+
+  block hostile_inputs:
+    for text in ["", "\n", "\r", "\r\n\r\n", "\0\0\0\0", repeat('\r', 100_000), "H00",
+        repeat("R\n", 10_000), repeat('\xFF', 70_000), "EOF"]:
+      let f = parseSps(text, "h.s", SpsOptions(skipBinary: true, maxJunkBytes: 4096))
+      doAssert not f.log.isFatal, $f.log
+      discard looksLikeSps(newStringStream(text))
+      let p = parseP1(text, "h.p1")
+      doAssert not p.log.isFatal
+
+  binary_lines_are_named()
+
+  high_bytes_are_text()
+
+  junk_stop_ends_progress()
+
+  revision_scan_is_bounded()
+
+  reserve_is_capped()
+
+  h00_revision_columns()
+
+  echo "tsurveyread: ok"
+
+when isMainModule: main()

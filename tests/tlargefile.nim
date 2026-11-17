@@ -6,17 +6,20 @@
 ## take 4.3 GB each), and off POSIX systems.
 
 import std/[assertions, os, strutils]
+
 import parseSEG/common/[diagnostics, endians]
+
 import parseSEG/segy/[reader as segyreader]
+
 import parseSEG/segd/[reader as segdreader]
+
 import parseSEG/model/[traceindex, prefetch, edit]
+
 import ./utils/testutils
 
 const
   FourGiB = 4_294_967_296'i64
   MaxAllocated = 256'i64 shl 20 # more than this means the holes were filled
-
-let tmp = scratchDir("parseseg_tlargefile")
 
 when defined(posix):
   import std/posix
@@ -73,51 +76,6 @@ proc makeSegy(path: string): bool =
   writeSparse(path, YSize, [(0'i64, head), (3600'i64, segyTrace(1, 5, ramp(YSamples, 0.5))),
     (lastAt, segyTrace(YTraces, 4242, ramp(YSamples, -2)))])
 
-block segy_larger_than_4_gib:
-  let path = tmp / "big.sgy"
-  if not makeSegy(path):
-    echo "tlargefile: the file system does not keep sparse files; SEG-Y part skipped"
-  else:
-    try:
-      var f = openSeismic(path)
-      doAssert f.kind == skSegy and f.len == YTraces
-      doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0
-      # The zero headers in the holes disagree with the binary header: five
-      # warnings, then one summary (not 17,898 warnings).
-      doAssert f.log.count(sevWarning) == 5 and f.log.count(sevInfo) == 1, $f.log.len
-      let last = f.index.entries[^1]
-      doAssert last.offset == YSize - YTraceBytes and last.offset > FourGiB
-      let want = ramp(YSamples, -2)
-      let t = f.readTraces(YTraces - 2 ..< YTraces)
-      for j in [0, 1, 4567, YSamples - 1]:
-        doAssert t[1, j] == want[j] and t[0, j] == 0
-      # Read-ahead near the end.
-      var p = newPrefetcher[float32](f, YTraces - 3 ..< f.len, chunkTraces = 2, depth = 2)
-      var c: PrefetchChunk[float32]
-      doAssert p.next(c) and c.first == YTraces - 3 and p.next(c) and c.first == YTraces - 1
-      doAssert c.samples[0, YSamples - 1] == want[YSamples - 1] and not p.next(c)
-      p.close()
-      f.close()
-      # Headers through a plain disk source: the skips seek past 4 GB.
-      let h = readSegyHeaders(path)
-      doAssert h.traces.len == YTraces and h.traces[^1].header.sourceX == 4242
-      doAssert h.traces[^1].offset > FourGiB
-      # An in-place edit near the end, and its rollback.
-      let journal = path & ".edits.nif"
-      if fileExists(journal): removeFile(journal)
-      var ed = openEditor(path)
-      doAssert ed.setTraceField(YTraces - 1, "trace.sourceX", -77)
-      let at = ed.file.index.entries[^1].offset
-      doAssert decodeTraceHeader(ed.file.copyBytes(at, TraceHeaderSize), boBig).sourceX == -77
-      ed.close()
-      doAssert ("(edit " & $(at + 72) & " ") in readFile(journal)
-      doAssert readSegyHeaders(path).traces[^1].header.sourceX == -77
-      doAssert rollbackJournal(path, journal).len == 0
-      doAssert readSegyHeaders(path).traces[^1].header.sourceX == 4242
-      removeFile(journal)
-    finally:
-      removeFile(path)
-
 # ------------------------------------------------------------------ SEG-D --
 
 const
@@ -150,34 +108,84 @@ proc makeSegd(path: string): bool =
     pieces.add (int64(DHeader) + int64(k) * DTraceBytes, th)
   writeSparse(path, DSize, pieces)
 
-sampleBlock segd_larger_than_4_gib:
-  let path = tmp / "big.sgd"
-  if not makeSegd(path):
-    echo "tlargefile: the file system does not keep sparse files; SEG-D part skipped"
-  else:
-    try:
-      var f = openSeismic(path)
-      doAssert f.kind == skSegd and f.len == DTraces
-      doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0, $f.log.len
-      let last = f.index.entries[^1]
-      doAssert last.offset == DSize - DTraceBytes and last.offset > FourGiB
-      doAssert last.numSamples == DSamples
-      var t = newTraceTensor[float32](2, 1000)
-      doAssert f.readTracesInto(DTraces - 2 ..< DTraces, t) == 0
-      let want = ramp(1000, float32(DTraces))
-      for j in [0, 1, 999]: doAssert t[1, j] == want[j] and t[0, j] == 0
-      f.close()
-      let h = readSegdHeaders(path)
-      doAssert h.records.len == 1 and h.records[0].traces.len == DTraces
-      doAssert h.records[0].traces[^1].offset > FourGiB
-      let journal = path & ".edits.nif"
-      if fileExists(journal): removeFile(journal)
-      var ed = openEditor(path)
-      doAssert ed.setTraceField(DTraces - 1, "ext1.receiverPointNumber", 31337)
-      ed.close()
-      doAssert readSegdHeaders(path).records[0].traces[^1].ext1.get.receiverPointNumber == 31337
-      doAssert rollbackJournal(path, journal).len == 0
-      doAssert readSegdHeaders(path).records[0].traces[^1].ext1.get.receiverPointNumber == 104
-      removeFile(journal)
-    finally:
-      removeFile(path)
+proc main*() =
+  let tmp = scratchDir("parseseg_tlargefile")
+
+  block segy_larger_than_4_gib:
+    let path = tmp / "big.sgy"
+    if not makeSegy(path):
+      echo "tlargefile: the file system does not keep sparse files; SEG-Y part skipped"
+    else:
+      try:
+        var f = openSeismic(path)
+        doAssert f.kind == skSegy and f.len == YTraces
+        doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0
+        # The zero headers in the holes disagree with the binary header: five
+        # warnings, then one summary (not 17,898 warnings).
+        doAssert f.log.count(sevWarning) == 5 and f.log.count(sevInfo) == 1, $f.log.len
+        let last = f.index.entries[^1]
+        doAssert last.offset == YSize - YTraceBytes and last.offset > FourGiB
+        let want = ramp(YSamples, -2)
+        let t = f.readTraces(YTraces - 2 ..< YTraces)
+        for j in [0, 1, 4567, YSamples - 1]:
+          doAssert t[1, j] == want[j] and t[0, j] == 0
+        # Read-ahead near the end.
+        var p = newPrefetcher[float32](f, YTraces - 3 ..< f.len, chunkTraces = 2, depth = 2)
+        var c: PrefetchChunk[float32]
+        doAssert p.next(c) and c.first == YTraces - 3 and p.next(c) and c.first == YTraces - 1
+        doAssert c.samples[0, YSamples - 1] == want[YSamples - 1] and not p.next(c)
+        p.close()
+        f.close()
+        # Headers through a plain disk source: the skips seek past 4 GB.
+        let h = readSegyHeaders(path)
+        doAssert h.traces.len == YTraces and h.traces[^1].header.sourceX == 4242
+        doAssert h.traces[^1].offset > FourGiB
+        # An in-place edit near the end, and its rollback.
+        let journal = path & ".edits.nif"
+        if fileExists(journal): removeFile(journal)
+        var ed = openEditor(path)
+        doAssert ed.setTraceField(YTraces - 1, "trace.sourceX", -77)
+        let at = ed.file.index.entries[^1].offset
+        doAssert decodeTraceHeader(ed.file.copyBytes(at, TraceHeaderSize), boBig).sourceX == -77
+        ed.close()
+        doAssert ("(edit " & $(at + 72) & " ") in readFile(journal)
+        doAssert readSegyHeaders(path).traces[^1].header.sourceX == -77
+        doAssert rollbackJournal(path, journal).len == 0
+        doAssert readSegyHeaders(path).traces[^1].header.sourceX == 4242
+        removeFile(journal)
+      finally:
+        removeFile(path)
+
+  sampleBlock segd_larger_than_4_gib:
+    let path = tmp / "big.sgd"
+    if not makeSegd(path):
+      echo "tlargefile: the file system does not keep sparse files; SEG-D part skipped"
+    else:
+      try:
+        var f = openSeismic(path)
+        doAssert f.kind == skSegd and f.len == DTraces
+        doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0, $f.log.len
+        let last = f.index.entries[^1]
+        doAssert last.offset == DSize - DTraceBytes and last.offset > FourGiB
+        doAssert last.numSamples == DSamples
+        var t = newTraceTensor[float32](2, 1000)
+        doAssert f.readTracesInto(DTraces - 2 ..< DTraces, t) == 0
+        let want = ramp(1000, float32(DTraces))
+        for j in [0, 1, 999]: doAssert t[1, j] == want[j] and t[0, j] == 0
+        f.close()
+        let h = readSegdHeaders(path)
+        doAssert h.records.len == 1 and h.records[0].traces.len == DTraces
+        doAssert h.records[0].traces[^1].offset > FourGiB
+        let journal = path & ".edits.nif"
+        if fileExists(journal): removeFile(journal)
+        var ed = openEditor(path)
+        doAssert ed.setTraceField(DTraces - 1, "ext1.receiverPointNumber", 31337)
+        ed.close()
+        doAssert readSegdHeaders(path).records[0].traces[^1].ext1.get.receiverPointNumber == 31337
+        doAssert rollbackJournal(path, journal).len == 0
+        doAssert readSegdHeaders(path).records[0].traces[^1].ext1.get.receiverPointNumber == 104
+        removeFile(journal)
+      finally:
+        removeFile(path)
+
+when isMainModule: main()

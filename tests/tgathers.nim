@@ -4,13 +4,16 @@
 ## (six pilots at one point 30 s apart were `gkUnknown`, not `gkReceiver`).
 
 import std/[assertions, os, math, sets, random, sequtils]
-import parseSEG/io/diskio
-import parseSEG/segy/[reader as segyreader, writer as segywriter, fields]
-import parseSEG/segd/[reader as segdreader, writer as segdwriter]
-import parseSEG/model/[traceindex, gathers, writefile]
-import ./utils/testutils
 
-let tmp = scratchDir("parseseg_tgathers")
+import parseSEG/io/diskio
+
+import parseSEG/segy/[reader as segyreader, writer as segywriter, fields]
+
+import parseSEG/segd/[reader as segdreader, writer as segdwriter]
+
+import parseSEG/model/[traceindex, gathers, writefile]
+
+import ./utils/testutils
 
 proc key(record = NaN, ensemble = NaN, offset = NaN, sx = NaN, rx = NaN,
     comp = 0'u8): TraceKeys =
@@ -34,57 +37,6 @@ proc writeSegdFile(d: SegdData, path: string) =
   let sink = openDiskSink(path)
   try: doAssert writeSegd(sink, d).len == 0
   finally: sink.close()
-
-sampleBlock sample_files:
-  for (n, want) in [("63.sgd", gkShot), ("inova_rev30_5traces.sgd", gkShot),
-      ("Sweep0.sgy", gkUnknown), ("BO_3D-Inglewood_rev21_v7.sgy", gkUnknown)]:
-    var f = openSeismic(exampleDir / n, keys = true)
-    doAssert f.index.keys.len == f.len
-    let gs = f.index.gathers
-    doAssert gs.len == 1 and gs[0].kind == want and gs[0].traces == 0..<f.len, n
-    f.close()
-  # The INOVA record: 3 auxiliary traces are ignored, 2 seismic receivers.
-  var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd", keys = true)
-  let g = f.index.gathers[0]
-  doAssert g.sources == 1 and g.receivers == 2
-  doAssert not f.index.isSeismic(0) and f.index.isSeismic(3)
-  let cg = f.index.componentGroups(0..<f.len)
-  doAssert cg.len == 2 and cg[0].traces == @[3] and not cg[0].isMultiComponent
-  doAssert f.index.keys[3].srcLine == 129 and f.index.keys[3].srcPoint == 113
-  f.close()
-
-block segy_split_and_classify:
-  # No sorting code: split on field record, classify from the geometry.
-  let shots = segyIndex(0, [key(1, sx = 10, rx = 1), key(1, sx = 10, rx = 2),
-    key(2, sx = 20, rx = 1), key(2, sx = 20, rx = 2)])
-  doAssert shots.gathers.kinds == @[gkShot, gkShot]
-  doAssert shots.gathers[1].traces == 2..3
-  # Receiver gathers packed with minimal header changes: the field record
-  # number counts receivers, the sources vary inside it.
-  let rcv = segyIndex(0, [key(7, sx = 10, rx = 5), key(7, sx = 20, rx = 5),
-    key(7, sx = 30, rx = 5), key(8, sx = 10, rx = 6), key(8, sx = 20, rx = 6)])
-  doAssert rcv.gathers.kinds == @[gkReceiver, gkReceiver]
-  doAssert rcv.gathers[0].sources == 3 and rcv.gathers[0].receivers == 1
-  # Sort 6 splits on the ensemble number ...
-  let s6 = segyIndex(6, [key(ensemble = 1, sx = 1, rx = 5), key(ensemble = 1, sx = 2, rx = 5),
-    key(ensemble = 2, sx = 1, rx = 6), key(ensemble = 2, sx = 2, rx = 6)])
-  doAssert s6.gathers.kinds == @[gkReceiver, gkReceiver]
-  # ... and, when it never changes, on the receiver station.
-  let s6b = segyIndex(6, [key(ensemble = 0, sx = 1, rx = 5), key(ensemble = 0, sx = 2, rx = 5),
-    key(ensemble = 0, sx = 1, rx = 6)])
-  doAssert s6b.gathers.len == 2 and s6b.gathers[1].traces == 2..2
-  # Declared CMP and common-offset sorts name gathers the geometry cannot.
-  let cmp = segyIndex(2, [key(ensemble = 1, sx = 1, rx = 9), key(ensemble = 1, sx = 2, rx = 8),
-    key(ensemble = 2, sx = 3, rx = 7)])
-  doAssert cmp.gathers.kinds == @[gkCmp, gkCmp]
-  let off = segyIndex(7, [key(offset = 100, sx = 1, rx = 2), key(offset = 100, sx = 2, rx = 3),
-    key(offset = 200, sx = 1, rx = 3)])
-  doAssert off.gathers.kinds == @[gkOffset, gkOffset]
-  # Several sources and receivers without a declared sort.
-  doAssert segyIndex(0, [key(1, sx = 1, rx = 1), key(1, sx = 2, rx = 2)]).gathers.kinds ==
-    @[gkOther]
-  # NaN keys compare equal to each other: unknown records form one gather.
-  doAssert segyIndex(0, [key(sx = 1, rx = 1), key(sx = 1, rx = 2)]).gathers.kinds == @[gkShot]
 
 proc refClassify(ix: TraceIndex, s: Slice[int]): (GatherKind, int, int) =
   # The counting rule with a hash set of whole stations for sources and
@@ -128,285 +80,341 @@ proc refClassify(ix: TraceIndex, s: Slice[int]): (GatherKind, int, int) =
     else: gkOther
   (kind, src.len, rcv.len)
 
-block classify_counts_as_the_reference_does:
-  # One trace, a few stations (compared directly) and many (a hash set from
-  # the ninth on): the same kind and counts as the reference, for random
-  # stations with unknown parts, signed zeros, repeats and auxiliary traces.
-  var rng = initRand(606)
-  let pool = [NaN, 0.0, -0.0, 1.0, 2.0, 3.5]
-  proc pick(wide: bool): float64 =
-    if wide and rng.rand(2) > 0: float64(rng.rand(40)) else: pool[rng.rand(pool.high)]
-  var kinds: set[GatherKind]
-  var single, large = 0
-  for round in 0 ..< 3000:
-    let wide = round mod 3 == 0 # many distinct stations in a third of the rounds
-    var ks = newSeq[TraceKeys](rng.rand(1 .. 40))
-    for k in ks.mitems:
-      k = initTraceKeys()
-      k.record = 1
-      (k.srcLine, k.srcPoint, k.srcX, k.srcY) = (pick(false), pick(wide), pick(false), NaN)
-      (k.rcvLine, k.rcvPoint, k.rcvX, k.rcvY) = (pick(false), pick(wide), NaN, pick(false))
-      k.srcIndex = int16(rng.rand(1))
-      k.rcvIndex = int16(rng.rand(-1 .. 1))
-      k.component = uint8(rng.rand(3))
-      if rng.rand(5) == 0: k.status = tsAuxiliary
-    let ix = segyIndex(0, ks)
-    for trial in 0 ..< 6:
-      let a = rng.rand(ks.high)
-      let b = if trial == 0: a elif trial == 1: ks.high else: rng.rand(a .. ks.high)
-      let g = ix.classify((if trial == 1: 0 else: a) .. b)
-      let want = refClassify(ix, g.traces)
-      doAssert (g.kind, g.sources, g.receivers) == want, $round & " " & $g & " " & $want
-      kinds.incl g.kind
-      if g.traces.len == 1: inc single
-      if g.receivers > 8 or g.sources > 8: inc large
-  doAssert kinds == {gkUnknown, gkShot, gkReceiver, gkOther} and single > 3000 and large > 100
-  # A post-stack volume: one trace per ensemble, declared CMP.
-  var stack: seq[TraceKeys]
-  for i in 0 ..< 50: stack.add key(ensemble = float64(i + 1), sx = float64(i), rx = float64(i))
-  stack[7].rcvX = NaN # no receiver known
-  let gs = segyIndex(4, stack).gathers
-  doAssert gs.len == 50 and gs.kinds == newSeq[GatherKind](50).mapIt(gkCmp)
-  doAssert gs[3].sources == 1 and gs[3].receivers == 1 and gs[7].receivers == 0
+proc main*() =
+  let tmp = scratchDir("parseseg_tgathers")
 
-block repeated_shots_one_point:
-  # Six pilot traces, one receiver, one source point, times 30 s apart.
-  # Seen to fail first: the times-differ branch removed (kind was gkUnknown).
-  proc pilot(i: int): TraceKeys =
-    result = initTraceKeys()
-    result.record = 1
-    result.channel = float64(i + 1)
-    result.time = 1_700_000_000.0 + float64(i) * 30
-    result.srcLine = 10
-    result.srcPoint = 20
-    result.srcIndex = 1
-    result.srcX = 5000
-    result.srcY = 6000
-    result.rcvLine = 500
-    result.rcvPoint = 12
-    result.rcvIndex = 1
-    result.rcvX = 1000
-    result.rcvY = 2000
-    result.status = tsAuxiliary
-    result.component = 1
-    result.sensorType = 1
-  var ks: seq[TraceKeys]
-  for i in 0 .. 5: ks.add pilot(i)
-  let ix = segyIndex(0, ks)
-  let g = ix.classify(0 .. 5)
-  doAssert g.kind == gkReceiver and g.sources == 1 and g.receivers == 1
-  # Equal times stay unknown. A shot gather, a multi-component record and a
-  # one-trace record classify as before.
-  for k in ks.mitems: k.time = 1_700_000_000.0
-  doAssert segyIndex(0, ks).gathers.kinds == @[gkUnknown]
-  doAssert segyIndex(0, [key(1, sx = 10, rx = 1), key(1, sx = 10, rx = 2)]).gathers.kinds ==
-    @[gkShot]
-  doAssert segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 1, rx = 5, comp = 13),
-    key(1, sx = 1, rx = 5, comp = 14)]).gathers.kinds == @[gkShot]
-  doAssert segyIndex(0, [key(1, sx = 1, rx = 5)]).gathers.kinds == @[gkShot]
-
-block continuous_one_receiver_record:
-  # Shot-gather mode (receiverGather false): one receiver, one source, four
-  # traces, component 1, times 1 s apart. Also a continuous record of one
-  # receiver: gkReceiver. The SEG-Y shape (sorting 0) is the same.
-  # Seen to fail first: the times-differ branch of classify removed (kind
-  # was gkUnknown).
-  proc cont(i: int): TraceKeys =
-    result = initTraceKeys()
-    result.record = 1
-    result.channel = float64(i + 1)
-    result.intervalUs = 1000
-    result.time = 1_700_000_000.0 + float64(i)
-    result.srcLine = 10
-    result.srcPoint = 20
-    result.srcIndex = 1
-    result.srcX = 5000
-    result.srcY = 6000
-    result.rcvLine = 500
-    result.rcvPoint = 12
-    result.rcvIndex = 1
-    result.rcvX = 1000
-    result.rcvY = 2000
-    result.status = tsLive
-    result.component = 1
-    result.sensorType = 1
-  var ks: seq[TraceKeys]
-  for i in 0 .. 3: ks.add cont(i)
-  let shape = segyIndex(0, ks).gathers
-  doAssert shape.len == 1 and shape[0].kind == gkReceiver
-  doAssert shape[0].sources == 1 and shape[0].receivers == 1
-  let path = tmp / "continuous.sgd"
-  var w = openSeismicWriter(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 2,
-    time: 1_700_000_000.0))
-  for i in 0 .. 3: w.writeTrace(ks[i], @[float32(i), float32(i + 1)])
-  discard w.close()
-  var f = openSeismic(path, keys = true)
-  let g = f.gathers
-  doAssert g.len == 1 and g[0].kind == gkReceiver, $g[0].kind
-  doAssert g[0].sources == 1 and g[0].receivers == 1
-  doAssert f.len == 4
-  f.close()
-
-block component_groups_and_single_stations:
-  # One station, one source: three components make a shot, three copies of
-  # one component cannot be told apart.
-  let mc = segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 1, rx = 5, comp = 13),
-    key(1, sx = 1, rx = 5, comp = 14)])
-  doAssert mc.gathers.kinds == @[gkShot]
-  let cg = mc.componentGroups(0..2)
-  doAssert cg.len == 1 and cg[0].isMultiComponent and cg[0].components == @[12'u8, 13, 14]
-  doAssert segyIndex(0, [key(1, sx = 1, rx = 5), key(1, sx = 1, rx = 5)]).gathers.kinds ==
-    @[gkUnknown]
-  # Same station, different sources: separate groups (one per shot).
-  let two = segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 2, rx = 5, comp = 12)])
-  doAssert two.componentGroups(0..1).len == 2
-
-sampleBlock segy_end_to_end:
-  # Sweep0 copied into a sorted receiver-gather file with component codes.
-  let d0 = readSegy(exampleDir / "Sweep0.sgy")
-  var d = d0
-  d.traces.setLen 0
-  d.file.binary.traceSorting = 6
-  for i in 0..5:
-    var t = d0.traces[0]
-    t.header.ensembleNumber = int32(1 + i div 3)
-    t.header.groupX = int32(1000 + 100 * (i div 3))
-    t.header.groupY = 50
-    t.header.sourceX = int32(10 * (i mod 3) + 1)
-    t.header.sourceY = 7
-    t.header.coordinateScalar = 1
-    t.header.traceIdCode = 12
-    d.traces.add t
-  let path = tmp / "rcv.sgy"
-  let sink = openDiskSink(path)
-  var w = openSegyWriter(sink, d.file, initSegyWriteOptions(d.file))
-  for t in d.traces: w.writeTrace(t)
-  w.close()
-  sink.close()
-  var f = openSeismic(path, keys = true)
-  let gs = f.index.gathers
-  doAssert gs.kinds == @[gkReceiver, gkReceiver] and gs[1].traces == 3..5
-  doAssert f.index.keys[4].rcvX == 1100 and f.index.keys[4].component == 12
-  f.close()
-
-sampleBlock segd_rev2_multicomponent:
-  # 63.sgd's trace repeated: 2 stations x 3 sensor types (geophone V/I/X).
-  var d = readSegd(exampleDir / "63.sgd")
-  var rd = d.records[0]
-  let t0 = rd.traces[0]
-  rd.traces.setLen 0
-  for i in 0..5:
-    var t = t0
-    t.header.traceNumber = i + 1
-    t.ext1.get.receiverPointNumber = int32(104 + i div 3)
-    t.ext1.get.sensorType = uint8(2 + i mod 3)
-    rd.traces.add t
-  rd.record.scanTypes[0].descriptors[0].channelCount = 6
-  rd.record.traceCount = 6
-  d.records[0] = rd
-  writeSegdFile(d, tmp / "mc.sgd")
-  var f = openSeismic(tmp / "mc.sgd", keys = true)
-  doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0
-  doAssert f.len == 6 and f.index.gathers.kinds == @[gkShot]
-  let cg = f.index.componentGroups(0..5)
-  doAssert cg.len == 2 and cg[1].traces == @[3, 4, 5]
-  doAssert cg[0].isMultiComponent and cg[0].components == @[2'u8, 3, 4]
-  doAssert cg[1].station.rcvPoint == 105
-  f.close()
-
-sampleBlock segd_rev3_receiver_gather:
-  # The INOVA record turned into a receiver gather: both seismic traces get
-  # the same receiver and their own Source Description block (0x16) in place
-  # of the first vendor extension.
-  var d = readSegd(exampleDir / "inova_rev30_5traces.sgd")
-  var rd = d.records[0]
-  for i in 3..4:
-    var src = SegdSourceDescription(sourceLineNumber: 129, sourcePointNumber: float64(200 + i),
-      blockType: 0x16)
-    let b = src.encoded
-    for k in 0..<32: rd.traces[i].extensions[k] = b[k]
-    let e3 = rd.traces[3].ext1Rev3.get
-    template e: untyped = rd.traces[i].ext1Rev3.get
-    e.receiverLineNumber = e3.receiverLineNumber
-    e.receiverPointNumber = e3.receiverPointNumber
-    e.extReceiverLineNumber = e3.extReceiverLineNumber
-    e.extReceiverPointNumber = e3.extReceiverPointNumber
-  d.records[0] = rd
-  writeSegdFile(d, tmp / "rg.sgd")
-  var f = openSeismic(tmp / "rg.sgd", keys = true)
-  let g = f.index.gathers
-  doAssert g.len == 1 and g[0].kind == gkReceiver and g[0].sources == 2 and g[0].receivers == 1
-  doAssert f.index.keys[4].srcPoint == 204
-  # Traces without their own source block fall back to the record's.
-  doAssert f.index.keys[0].srcPoint == 113
-  f.close()
-
-sampleBlock segd_rev3_positions_offsets_and_midpoints:
-  # Task 8.5: Rev 3 Position blocks give coordinates; the record-level one
-  # (INOVA writes it before the Source Description) is the source's.
-  var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd", keys = true)
-  let k = f.index.keys[3]
-  doAssert k.rcvX == 1826232.375 and k.rcvY == 446233.8125 and k.rcvZ == 1061.800048828125
-  doAssert k.srcX == 1834704.375 and k.srcY == 445679.53125
-  doAssert abs(k.offset - hypot(1834704.375 - 1826232.375, 445679.53125 - 446233.8125)) < 1e-9
-  doAssert k.cmpX == (k.srcX + k.rcvX) / 2 and k.cmpY == (k.srcY + k.rcvY) / 2
-  # Auxiliary traces' Position blocks are flagged invalid: no receiver coordinates.
-  doAssert f.index.keys[0].rcvX.isNaN and f.index.keys[0].offset.isNaN
-  f.close()
-
-sampleBlock external_geometry_joins_on_stations:
-  # SEG-D 2.x has no coordinates: join them from a table (SPS in Phase 10).
-  var f = openSeismic(exampleDir / "63.sgd", keys = true)
-  let k0 = f.index.keys[0]
-  doAssert k0.rcvX.isNaN and k0.srcX.isNaN and k0.offset.isNaN
-  var g: GeometryTable
-  g.addSource(13, 99.5, 1, 1000, 2000, 5)
-  g.addReceiver(13, 104, 0, 1300, 2400) # index 0 matches any point index
-  doAssert f.applyGeometry(g) == 1
-  let k = f.index.keys[0]
-  doAssert k.srcX == 1000 and k.srcZ == 5 and k.rcvX == 1300 and k.rcvZ.isNaN
-  doAssert k.offset == 500 and k.cmpX == 1150 and k.cmpY == 2200
-  doAssert f.applyGeometry(g) == 0 # already filled, not overwritten
-  g.addReceiver(13, 104, 1, 1000, 2000)  # an exact index wins over the wildcard
-  doAssert f.applyGeometry(g, overwrite = true) == 1
-  doAssert f.index.keys[0].offset == 0 and f.index.keys[0].cmpX == 1000
-  f.close()
-  # SEG-Y: the header's CDP coordinates are the midpoint.
-  var y = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy", keys = true)
-  let d = readSegyHeaders(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
-  for i in [0, 57, 199]:
-    let gm = d.file.geometry(d.traces[i]) # Inglewood's Layout maps cdp_x to byte 73
-    doAssert y.index.keys[i].cmpX == gm.cdpX and y.index.keys[i].cmpY == gm.cdpY
-  y.close()
-
-sampleBlock component_group_ids_match_the_groups:
-  # Task 13.2 (review R2-3): ids come from one table, not from the groups;
-  # they must still number the groups in order of first appearance.
-  for name in ["inova_rev30_5traces.sgd", "BO_3D-Inglewood_rev21_v7.sgy", "63.sgd"]:
-    let p = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles" / name
-    var f = openSeismic(p, keys = true)
-    for span in [0 ..< f.len, (f.len div 2) ..< f.len, 0 .. -1]:
-      let groups = f.componentGroups(span)
-      var want = newSeq[int](span.len)
-      for k in 0 ..< want.len: want[k] = -1
-      for g, grp in groups:
-        for i in grp.traces: want[i - span.a] = g
-      doAssert f.componentGroupIds(span) == want, name
+  sampleBlock sample_files:
+    for (n, want) in [("63.sgd", gkShot), ("inova_rev30_5traces.sgd", gkShot),
+        ("Sweep0.sgy", gkUnknown), ("BO_3D-Inglewood_rev21_v7.sgy", gkUnknown)]:
+      var f = openSeismic(exampleDir / n, keys = true)
+      doAssert f.index.keys.len == f.len
+      let gs = f.index.gathers
+      doAssert gs.len == 1 and gs[0].kind == want and gs[0].traces == 0..<f.len, n
+      f.close()
+    # The INOVA record: 3 auxiliary traces are ignored, 2 seismic receivers.
+    var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd", keys = true)
+    let g = f.index.gathers[0]
+    doAssert g.sources == 1 and g.receivers == 2
+    doAssert not f.index.isSeismic(0) and f.index.isSeismic(3)
+    let cg = f.index.componentGroups(0..<f.len)
+    doAssert cg.len == 2 and cg[0].traces == @[3] and not cg[0].isMultiComponent
+    doAssert f.index.keys[3].srcLine == 129 and f.index.keys[3].srcPoint == 113
     f.close()
 
-# Phase 6 review (I/O, index and gathers).
-block p6_a5_segd_gathers_are_not_assumed_to_be_shots:
-  # One receiver, the same record-level source on three traces of one
-  # sensor type: the keys cannot tell, so the gather stays unknown.
-  var ix = TraceIndex(kind: skSegd)
-  for _ in 0..2:
-    var k = initTraceKeys()
-    k.srcLine = 10
-    k.srcPoint = 5
-    k.rcvLine = 7
-    k.rcvPoint = 42
-    k.sensorType = 2
-    k.component = 2
-    ix.keys.add k
-    ix.entries.add TraceEntry(channelSet: NoChannelSet, scanType: -1)
-  doAssert ix.gathers.len == 1 and ix.gathers[0].kind == gkUnknown
+  block segy_split_and_classify:
+    # No sorting code: split on field record, classify from the geometry.
+    let shots = segyIndex(0, [key(1, sx = 10, rx = 1), key(1, sx = 10, rx = 2),
+      key(2, sx = 20, rx = 1), key(2, sx = 20, rx = 2)])
+    doAssert shots.gathers.kinds == @[gkShot, gkShot]
+    doAssert shots.gathers[1].traces == 2..3
+    # Receiver gathers packed with minimal header changes: the field record
+    # number counts receivers, the sources vary inside it.
+    let rcv = segyIndex(0, [key(7, sx = 10, rx = 5), key(7, sx = 20, rx = 5),
+      key(7, sx = 30, rx = 5), key(8, sx = 10, rx = 6), key(8, sx = 20, rx = 6)])
+    doAssert rcv.gathers.kinds == @[gkReceiver, gkReceiver]
+    doAssert rcv.gathers[0].sources == 3 and rcv.gathers[0].receivers == 1
+    # Sort 6 splits on the ensemble number ...
+    let s6 = segyIndex(6, [key(ensemble = 1, sx = 1, rx = 5), key(ensemble = 1, sx = 2, rx = 5),
+      key(ensemble = 2, sx = 1, rx = 6), key(ensemble = 2, sx = 2, rx = 6)])
+    doAssert s6.gathers.kinds == @[gkReceiver, gkReceiver]
+    # ... and, when it never changes, on the receiver station.
+    let s6b = segyIndex(6, [key(ensemble = 0, sx = 1, rx = 5), key(ensemble = 0, sx = 2, rx = 5),
+      key(ensemble = 0, sx = 1, rx = 6)])
+    doAssert s6b.gathers.len == 2 and s6b.gathers[1].traces == 2..2
+    # Declared CMP and common-offset sorts name gathers the geometry cannot.
+    let cmp = segyIndex(2, [key(ensemble = 1, sx = 1, rx = 9), key(ensemble = 1, sx = 2, rx = 8),
+      key(ensemble = 2, sx = 3, rx = 7)])
+    doAssert cmp.gathers.kinds == @[gkCmp, gkCmp]
+    let off = segyIndex(7, [key(offset = 100, sx = 1, rx = 2), key(offset = 100, sx = 2, rx = 3),
+      key(offset = 200, sx = 1, rx = 3)])
+    doAssert off.gathers.kinds == @[gkOffset, gkOffset]
+    # Several sources and receivers without a declared sort.
+    doAssert segyIndex(0, [key(1, sx = 1, rx = 1), key(1, sx = 2, rx = 2)]).gathers.kinds ==
+      @[gkOther]
+    # NaN keys compare equal to each other: unknown records form one gather.
+    doAssert segyIndex(0, [key(sx = 1, rx = 1), key(sx = 1, rx = 2)]).gathers.kinds == @[gkShot]
+
+  block classify_counts_as_the_reference_does:
+    # One trace, a few stations (compared directly) and many (a hash set from
+    # the ninth on): the same kind and counts as the reference, for random
+    # stations with unknown parts, signed zeros, repeats and auxiliary traces.
+    var rng = initRand(606)
+    let pool = [NaN, 0.0, -0.0, 1.0, 2.0, 3.5]
+    proc pick(wide: bool): float64 =
+      if wide and rng.rand(2) > 0: float64(rng.rand(40)) else: pool[rng.rand(pool.high)]
+    var kinds: set[GatherKind]
+    var single, large = 0
+    for round in 0 ..< 3000:
+      let wide = round mod 3 == 0 # many distinct stations in a third of the rounds
+      var ks = newSeq[TraceKeys](rng.rand(1 .. 40))
+      for k in ks.mitems:
+        k = initTraceKeys()
+        k.record = 1
+        (k.srcLine, k.srcPoint, k.srcX, k.srcY) = (pick(false), pick(wide), pick(false), NaN)
+        (k.rcvLine, k.rcvPoint, k.rcvX, k.rcvY) = (pick(false), pick(wide), NaN, pick(false))
+        k.srcIndex = int16(rng.rand(1))
+        k.rcvIndex = int16(rng.rand(-1 .. 1))
+        k.component = uint8(rng.rand(3))
+        if rng.rand(5) == 0: k.status = tsAuxiliary
+      let ix = segyIndex(0, ks)
+      for trial in 0 ..< 6:
+        let a = rng.rand(ks.high)
+        let b = if trial == 0: a elif trial == 1: ks.high else: rng.rand(a .. ks.high)
+        let g = ix.classify((if trial == 1: 0 else: a) .. b)
+        let want = refClassify(ix, g.traces)
+        doAssert (g.kind, g.sources, g.receivers) == want, $round & " " & $g & " " & $want
+        kinds.incl g.kind
+        if g.traces.len == 1: inc single
+        if g.receivers > 8 or g.sources > 8: inc large
+    doAssert kinds == {gkUnknown, gkShot, gkReceiver, gkOther} and single > 3000 and large > 100
+    # A post-stack volume: one trace per ensemble, declared CMP.
+    var stack: seq[TraceKeys]
+    for i in 0 ..< 50: stack.add key(ensemble = float64(i + 1), sx = float64(i), rx = float64(i))
+    stack[7].rcvX = NaN # no receiver known
+    let gs = segyIndex(4, stack).gathers
+    doAssert gs.len == 50 and gs.kinds == newSeq[GatherKind](50).mapIt(gkCmp)
+    doAssert gs[3].sources == 1 and gs[3].receivers == 1 and gs[7].receivers == 0
+
+  block repeated_shots_one_point:
+    # Six pilot traces, one receiver, one source point, times 30 s apart.
+    # Seen to fail first: the times-differ branch removed (kind was gkUnknown).
+    proc pilot(i: int): TraceKeys =
+      result = initTraceKeys()
+      result.record = 1
+      result.channel = float64(i + 1)
+      result.time = 1_700_000_000.0 + float64(i) * 30
+      result.srcLine = 10
+      result.srcPoint = 20
+      result.srcIndex = 1
+      result.srcX = 5000
+      result.srcY = 6000
+      result.rcvLine = 500
+      result.rcvPoint = 12
+      result.rcvIndex = 1
+      result.rcvX = 1000
+      result.rcvY = 2000
+      result.status = tsAuxiliary
+      result.component = 1
+      result.sensorType = 1
+    var ks: seq[TraceKeys]
+    for i in 0 .. 5: ks.add pilot(i)
+    let ix = segyIndex(0, ks)
+    let g = ix.classify(0 .. 5)
+    doAssert g.kind == gkReceiver and g.sources == 1 and g.receivers == 1
+    # Equal times stay unknown. A shot gather, a multi-component record and a
+    # one-trace record classify as before.
+    for k in ks.mitems: k.time = 1_700_000_000.0
+    doAssert segyIndex(0, ks).gathers.kinds == @[gkUnknown]
+    doAssert segyIndex(0, [key(1, sx = 10, rx = 1), key(1, sx = 10, rx = 2)]).gathers.kinds ==
+      @[gkShot]
+    doAssert segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 1, rx = 5, comp = 13),
+      key(1, sx = 1, rx = 5, comp = 14)]).gathers.kinds == @[gkShot]
+    doAssert segyIndex(0, [key(1, sx = 1, rx = 5)]).gathers.kinds == @[gkShot]
+
+  block continuous_one_receiver_record:
+    # Shot-gather mode (receiverGather false): one receiver, one source, four
+    # traces, component 1, times 1 s apart. Also a continuous record of one
+    # receiver: gkReceiver. The SEG-Y shape (sorting 0) is the same.
+    # Seen to fail first: the times-differ branch of classify removed (kind
+    # was gkUnknown).
+    proc cont(i: int): TraceKeys =
+      result = initTraceKeys()
+      result.record = 1
+      result.channel = float64(i + 1)
+      result.intervalUs = 1000
+      result.time = 1_700_000_000.0 + float64(i)
+      result.srcLine = 10
+      result.srcPoint = 20
+      result.srcIndex = 1
+      result.srcX = 5000
+      result.srcY = 6000
+      result.rcvLine = 500
+      result.rcvPoint = 12
+      result.rcvIndex = 1
+      result.rcvX = 1000
+      result.rcvY = 2000
+      result.status = tsLive
+      result.component = 1
+      result.sensorType = 1
+    var ks: seq[TraceKeys]
+    for i in 0 .. 3: ks.add cont(i)
+    let shape = segyIndex(0, ks).gathers
+    doAssert shape.len == 1 and shape[0].kind == gkReceiver
+    doAssert shape[0].sources == 1 and shape[0].receivers == 1
+    let path = tmp / "continuous.sgd"
+    var w = openSeismicWriter(path, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 2,
+      time: 1_700_000_000.0))
+    for i in 0 .. 3: w.writeTrace(ks[i], @[float32(i), float32(i + 1)])
+    discard w.close()
+    var f = openSeismic(path, keys = true)
+    let g = f.gathers
+    doAssert g.len == 1 and g[0].kind == gkReceiver, $g[0].kind
+    doAssert g[0].sources == 1 and g[0].receivers == 1
+    doAssert f.len == 4
+    f.close()
+
+  block component_groups_and_single_stations:
+    # One station, one source: three components make a shot, three copies of
+    # one component cannot be told apart.
+    let mc = segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 1, rx = 5, comp = 13),
+      key(1, sx = 1, rx = 5, comp = 14)])
+    doAssert mc.gathers.kinds == @[gkShot]
+    let cg = mc.componentGroups(0..2)
+    doAssert cg.len == 1 and cg[0].isMultiComponent and cg[0].components == @[12'u8, 13, 14]
+    doAssert segyIndex(0, [key(1, sx = 1, rx = 5), key(1, sx = 1, rx = 5)]).gathers.kinds ==
+      @[gkUnknown]
+    # Same station, different sources: separate groups (one per shot).
+    let two = segyIndex(0, [key(1, sx = 1, rx = 5, comp = 12), key(1, sx = 2, rx = 5, comp = 12)])
+    doAssert two.componentGroups(0..1).len == 2
+
+  sampleBlock segy_end_to_end:
+    # Sweep0 copied into a sorted receiver-gather file with component codes.
+    let d0 = readSegy(exampleDir / "Sweep0.sgy")
+    var d = d0
+    d.traces.setLen 0
+    d.file.binary.traceSorting = 6
+    for i in 0..5:
+      var t = d0.traces[0]
+      t.header.ensembleNumber = int32(1 + i div 3)
+      t.header.groupX = int32(1000 + 100 * (i div 3))
+      t.header.groupY = 50
+      t.header.sourceX = int32(10 * (i mod 3) + 1)
+      t.header.sourceY = 7
+      t.header.coordinateScalar = 1
+      t.header.traceIdCode = 12
+      d.traces.add t
+    let path = tmp / "rcv.sgy"
+    let sink = openDiskSink(path)
+    var w = openSegyWriter(sink, d.file, initSegyWriteOptions(d.file))
+    for t in d.traces: w.writeTrace(t)
+    w.close()
+    sink.close()
+    var f = openSeismic(path, keys = true)
+    let gs = f.index.gathers
+    doAssert gs.kinds == @[gkReceiver, gkReceiver] and gs[1].traces == 3..5
+    doAssert f.index.keys[4].rcvX == 1100 and f.index.keys[4].component == 12
+    f.close()
+
+  sampleBlock segd_rev2_multicomponent:
+    # 63.sgd's trace repeated: 2 stations x 3 sensor types (geophone V/I/X).
+    var d = readSegd(exampleDir / "63.sgd")
+    var rd = d.records[0]
+    let t0 = rd.traces[0]
+    rd.traces.setLen 0
+    for i in 0..5:
+      var t = t0
+      t.header.traceNumber = i + 1
+      t.ext1.get.receiverPointNumber = int32(104 + i div 3)
+      t.ext1.get.sensorType = uint8(2 + i mod 3)
+      rd.traces.add t
+    rd.record.scanTypes[0].descriptors[0].channelCount = 6
+    rd.record.traceCount = 6
+    d.records[0] = rd
+    writeSegdFile(d, tmp / "mc.sgd")
+    var f = openSeismic(tmp / "mc.sgd", keys = true)
+    doAssert f.log.count(sevError) + f.log.count(sevFatal) == 0
+    doAssert f.len == 6 and f.index.gathers.kinds == @[gkShot]
+    let cg = f.index.componentGroups(0..5)
+    doAssert cg.len == 2 and cg[1].traces == @[3, 4, 5]
+    doAssert cg[0].isMultiComponent and cg[0].components == @[2'u8, 3, 4]
+    doAssert cg[1].station.rcvPoint == 105
+    f.close()
+
+  sampleBlock segd_rev3_receiver_gather:
+    # The INOVA record turned into a receiver gather: both seismic traces get
+    # the same receiver and their own Source Description block (0x16) in place
+    # of the first vendor extension.
+    var d = readSegd(exampleDir / "inova_rev30_5traces.sgd")
+    var rd = d.records[0]
+    for i in 3..4:
+      var src = SegdSourceDescription(sourceLineNumber: 129, sourcePointNumber: float64(200 + i),
+        blockType: 0x16)
+      let b = src.encoded
+      for k in 0..<32: rd.traces[i].extensions[k] = b[k]
+      let e3 = rd.traces[3].ext1Rev3.get
+      template e: untyped = rd.traces[i].ext1Rev3.get
+      e.receiverLineNumber = e3.receiverLineNumber
+      e.receiverPointNumber = e3.receiverPointNumber
+      e.extReceiverLineNumber = e3.extReceiverLineNumber
+      e.extReceiverPointNumber = e3.extReceiverPointNumber
+    d.records[0] = rd
+    writeSegdFile(d, tmp / "rg.sgd")
+    var f = openSeismic(tmp / "rg.sgd", keys = true)
+    let g = f.index.gathers
+    doAssert g.len == 1 and g[0].kind == gkReceiver and g[0].sources == 2 and g[0].receivers == 1
+    doAssert f.index.keys[4].srcPoint == 204
+    # Traces without their own source block fall back to the record's.
+    doAssert f.index.keys[0].srcPoint == 113
+    f.close()
+
+  sampleBlock segd_rev3_positions_offsets_and_midpoints:
+    # Task 8.5: Rev 3 Position blocks give coordinates; the record-level one
+    # (INOVA writes it before the Source Description) is the source's.
+    var f = openSeismic(exampleDir / "inova_rev30_5traces.sgd", keys = true)
+    let k = f.index.keys[3]
+    doAssert k.rcvX == 1826232.375 and k.rcvY == 446233.8125 and k.rcvZ == 1061.800048828125
+    doAssert k.srcX == 1834704.375 and k.srcY == 445679.53125
+    doAssert abs(k.offset - hypot(1834704.375 - 1826232.375, 445679.53125 - 446233.8125)) < 1e-9
+    doAssert k.cmpX == (k.srcX + k.rcvX) / 2 and k.cmpY == (k.srcY + k.rcvY) / 2
+    # Auxiliary traces' Position blocks are flagged invalid: no receiver coordinates.
+    doAssert f.index.keys[0].rcvX.isNaN and f.index.keys[0].offset.isNaN
+    f.close()
+
+  sampleBlock external_geometry_joins_on_stations:
+    # SEG-D 2.x has no coordinates: join them from a table (SPS in Phase 10).
+    var f = openSeismic(exampleDir / "63.sgd", keys = true)
+    let k0 = f.index.keys[0]
+    doAssert k0.rcvX.isNaN and k0.srcX.isNaN and k0.offset.isNaN
+    var g: GeometryTable
+    g.addSource(13, 99.5, 1, 1000, 2000, 5)
+    g.addReceiver(13, 104, 0, 1300, 2400) # index 0 matches any point index
+    doAssert f.applyGeometry(g) == 1
+    let k = f.index.keys[0]
+    doAssert k.srcX == 1000 and k.srcZ == 5 and k.rcvX == 1300 and k.rcvZ.isNaN
+    doAssert k.offset == 500 and k.cmpX == 1150 and k.cmpY == 2200
+    doAssert f.applyGeometry(g) == 0 # already filled, not overwritten
+    g.addReceiver(13, 104, 1, 1000, 2000)  # an exact index wins over the wildcard
+    doAssert f.applyGeometry(g, overwrite = true) == 1
+    doAssert f.index.keys[0].offset == 0 and f.index.keys[0].cmpX == 1000
+    f.close()
+    # SEG-Y: the header's CDP coordinates are the midpoint.
+    var y = openSeismic(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy", keys = true)
+    let d = readSegyHeaders(exampleDir / "BO_3D-Inglewood_rev21_v7.sgy")
+    for i in [0, 57, 199]:
+      let gm = d.file.geometry(d.traces[i]) # Inglewood's Layout maps cdp_x to byte 73
+      doAssert y.index.keys[i].cmpX == gm.cdpX and y.index.keys[i].cmpY == gm.cdpY
+    y.close()
+
+  sampleBlock component_group_ids_match_the_groups:
+    # Task 13.2 (review R2-3): ids come from one table, not from the groups;
+    # they must still number the groups in order of first appearance.
+    for name in ["inova_rev30_5traces.sgd", "BO_3D-Inglewood_rev21_v7.sgy", "63.sgd"]:
+      let p = currentSourcePath().parentDir / ".." / "SEG Spec" / "exampleFiles" / name
+      var f = openSeismic(p, keys = true)
+      for span in [0 ..< f.len, (f.len div 2) ..< f.len, 0 .. -1]:
+        let groups = f.componentGroups(span)
+        var want = newSeq[int](span.len)
+        for k in 0 ..< want.len: want[k] = -1
+        for g, grp in groups:
+          for i in grp.traces: want[i - span.a] = g
+        doAssert f.componentGroupIds(span) == want, name
+      f.close()
+
+  # Phase 6 review (I/O, index and gathers).
+  block p6_a5_segd_gathers_are_not_assumed_to_be_shots:
+    # One receiver, the same record-level source on three traces of one
+    # sensor type: the keys cannot tell, so the gather stays unknown.
+    var ix = TraceIndex(kind: skSegd)
+    for _ in 0..2:
+      var k = initTraceKeys()
+      k.srcLine = 10
+      k.srcPoint = 5
+      k.rcvLine = 7
+      k.rcvPoint = 42
+      k.sensorType = 2
+      k.component = 2
+      ix.keys.add k
+      ix.entries.add TraceEntry(channelSet: NoChannelSet, scanType: -1)
+    doAssert ix.gathers.len == 1 and ix.gathers[0].kind == gkUnknown
+
+when isMainModule: main()

@@ -2,10 +2,13 @@
 ## accessors once copied a ref, and ORC reference counts are not atomic).
 
 import std/[typedthreads, os, strutils]
+
 import parseSEG
+
 import ./utils/testutils
-let path = sampleOr("BO_3D-Inglewood_rev21_v7.sgy") # or the demo survey.sgy
-var f = openSeismic(path)
+
+var path: typeof(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
+
 proc work(p: ptr SeismicFile) {.thread.} =
   var t = newTensor[float32](4, p[].maxSamples)
   var log: DiagLog
@@ -17,11 +20,6 @@ proc work(p: ptr SeismicFile) {.thread.} =
       {.cast(gcsafe).}:
         p[].traceKeysInto((i mod 190) ..< (i mod 190) + 4, keys)
         doAssert keys[0].inline > 0 and p[].startTimeMs(i mod 190) == keys[0].t0Ms
-var th: array[8, Thread[ptr SeismicFile]]
-for i in 0..<th.len: createThread(th[i], work, addr f)
-joinThreads(th)
-f.close()
-echo "tsharedreads: ok"
 
 # Prefetchers of one file, made and closed on several threads at once (a
 # background job beside the UI thread's read-ahead): each pins and unpins the
@@ -49,18 +47,47 @@ proc prefetchWork(p: ptr SeismicFile) {.thread.} =
       doAssert q.next(c) and c.count == 32 and c.rows.traceKeys(31).inline > 0
       if i mod 2 == 0: q.close() # else destroyed without close
 
-var g = openSeismic(path, keys = true)
-var workers: array[4, Thread[ptr SeismicFile]]
-for i in 0 ..< workers.len: createThread(workers[i], prefetchWork, addr g)
-prefetchWork(addr g) # the file's own thread does the same meanwhile
-joinThreads(workers)
-# The other threads are done with the file: its own thread may close it, also
-# before a prefetcher of its own, which keeps the map until its close.
-var last = newPrefetcher[float32](g, 0 ..< 64, chunkTraces = 32, cols = 16)
-g.close()
-doAssert mapped()
 var c: PrefetchChunk[float32]
-doAssert last.next(c) and c.count == 32
-last.close()
-when defined(linux): doAssert not mapped()
-echo "prefetchers on several threads: ok"
+
+proc main*() =
+  path = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
+
+  var f = openSeismic(path)
+
+  var th: array[8, Thread[ptr SeismicFile]]
+
+  for i in 0..<th.len: createThread(th[i], work, addr f)
+
+  joinThreads(th)
+
+  f.close()
+
+  echo "tsharedreads: ok"
+
+  var g = openSeismic(path, keys = true)
+
+  var workers: array[4, Thread[ptr SeismicFile]]
+
+  for i in 0 ..< workers.len: createThread(workers[i], prefetchWork, addr g)
+
+  prefetchWork(addr g) # the file's own thread does the same meanwhile
+
+  joinThreads(workers)
+
+  # The other threads are done with the file: its own thread may close it, also
+  # before a prefetcher of its own, which keeps the map until its close.
+  var last = newPrefetcher[float32](g, 0 ..< 64, chunkTraces = 32, cols = 16)
+
+  g.close()
+
+  doAssert mapped()
+
+  doAssert last.next(c) and c.count == 32
+
+  last.close()
+
+  when defined(linux): doAssert not mapped()
+
+  echo "prefetchers on several threads: ok"
+
+when isMainModule: main()

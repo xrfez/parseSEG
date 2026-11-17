@@ -6,13 +6,21 @@
 ## truncation checks that guard the unchecked loops.
 
 import std/[assertions, math, random]
+
 import std/macros
+
 import parseSEG/common/[endians, ibmfloat, errors, fieldlayout]
+
 import parseSEG/segy/[traceheader, binheader]
+
 import parseSEG/segd/headers as segdheaders
+
 import parseSEG/seg2/headers as seg2headers
+
 import parseSEG/segy/samples
+
 import parseSEG/segd/samples as segdsamples
+
 import parseSEG/seg2/samples as seg2samples
 
 func ldexp(x: float64, e: cint): float64 {.importc: "ldexp", header: "<math.h>".}
@@ -28,73 +36,11 @@ proc sameBits[T: float32 | float64](a, b: T): bool =
   when T is float32: cast[uint32](a) == cast[uint32](b)
   else: cast[uint64](a) == cast[uint64](b)
 
-var rng = initRand(1302)
+var rng: typeof(initRand(1302))
 
 proc randomBytes(n: int): seq[byte] =
   result = newSeq[byte](n)
   for b in result.mitems: b = byte(rng.rand(255))
-
-block ibm_float_matches_the_ldexp_reference:
-  var checked = 0
-  for e in 0'u32..255'u32:
-    for frac in [0'u32, 1, 2, 0xF, 0x10, 0xFFFF, 0x10_0000, 0x7F_FFFF, 0x80_0000, 0xFF_FFFF,
-        0x12_3456]:
-      let bits = (e shl 24) or frac
-      doAssert sameBits(ibmToFloat64(bits), refIbm64(bits)), $bits
-      doAssert sameBits(ibmToFloat32(bits), float32(refIbm64(bits))), $bits
-      inc checked
-  for _ in 1..200_000:
-    let bits = uint32(rng.rand(int(high(uint32))))
-    doAssert sameBits(ibmToFloat32(bits), float32(refIbm64(bits))), $bits
-    doAssert sameBits(ibmToFloat64(bits), refIbm64(bits)), $bits
-  # Edge results: zero of either sign, the largest magnitude, Inf, subnormals.
-  doAssert ibmToFloat32(0x8000_0000'u32) == 0 and not signbit(ibmToFloat32(0x8000_0000'u32))
-  doAssert ibmToFloat32(0x7FFF_FFFF'u32) == Inf and ibmToFloat32(0xFFFF_FFFF'u32) == -Inf
-  doAssert ibmToFloat64(0x7FFF_FFFF'u32) == refIbm64(0x7FFF_FFFF'u32)
-  doAssert ibmToFloat32(0x0000_0001'u32) == 0                  # 2^-280: rounds to zero
-  doAssert ibmToFloat32(0x2110_0000'u32) == ldexp(1.0, -128)   # a float32 subnormal
-  doAssert ibmToFloat32(0x4110_0000'u32) == 1.0 and ibmToFloat32(0xC276_A000'u32) == -118.625
-  doAssert checked == 256 * 11
-
-block ibm_float32_kernel_is_bit_identical:
-  # `ibmToFloat32Fast` (two multiplies by powers of two, no table: the loop
-  # the decoders run 8 wide when the build targets AVX2) against
-  # `ibmToFloat32`: every sign and exponent byte with fractions at the edges
-  # of the rounding cases and a few thousand random ones, and random words.
-  # Then through the decoders themselves, in every byte order and from odd
-  # offsets and lengths (run this file with --passC:-march=x86-64-v3 as well:
-  # only then do the decoders use the kernel).
-  var fracs = @[0'u32, 1, 2, 3, 5, 0x7FFFFF, 0x800000, 0x800001, 0xFFFFFE, 0xFFFFFF, 0x100000,
-    0x0FFFFF, 0x555555, 0xAAAAAA]
-  for i in 0 ..< 24:
-    fracs.add 1'u32 shl i
-    fracs.add (1'u32 shl i) + 1
-    fracs.add 0xFFFFFF'u32 shr i
-  for i in 0 ..< 4000: fracs.add uint32(rng.rand(0xFFFFFF))
-  var words: seq[uint32]
-  for se in 0'u32 .. 255:
-    for f in fracs: words.add (se shl 24) or f
-  for i in 0 ..< 1_000_000: words.add uint32(rng.next() shr 32)
-  doAssert words.len == 256 * 4086 + 1_000_000
-  var want = newSeq[float32](words.len)
-  for i, w in words:
-    want[i] = ibmToFloat32(w)
-    doAssert sameBits(ibmToFloat32Fast(w), want[i]), $w
-  var got = newSeq[float32](words.len)
-  for o in ByteOrder:
-    var bytes = newSeq[byte](4 * words.len)
-    for i, w in words: putNum(bytes, 4 * i, w, o)
-    decodeSamples(sfIbm32, bytes, got, o)
-    for i in 0 ..< words.len: doAssert sameBits(got[i], want[i]), $o & " " & $words[i]
-    if o == boBig:
-      decodeSamples(sd8048, bytes, got)
-      for i in 0 ..< words.len: doAssert sameBits(got[i], want[i]), "8048 " & $words[i]
-    # Odd starts and lengths: the vector loop's head and tail.
-    for first in 0 ..< 9:
-      for n in [1, 2, 7, 8, 9, 15, 16, 17, 31, 33, 100]:
-        var part = newSeq[float32](n)
-        decodeSamples(sfIbm32, bytes.toOpenArray(4 * first, 4 * (first + n) - 1), part, o)
-        for i in 0 ..< n: doAssert sameBits(part[i], want[first + i]), $o & " " & $first
 
 proc refSegy[T](f: SampleFormat, b: openArray[byte], n: int, o: ByteOrder): seq[T] =
   # One sample at a time through the checked `getNum` accessors.
@@ -131,24 +77,6 @@ proc checkSegy[T](f: SampleFormat, o: ByteOrder, n: int) =
   for i in 0..<n:
     doAssert sameBits(got[i], want[i]) or (got[i].isNaN and want[i].isNaN),
       $f & " " & $o & " " & $T & " sample " & $i
-
-block segy_formats_orders_and_types:
-  for f in definedSampleFormats:
-    for o in ByteOrder:
-      if not (o == boPairSwapped and f in {sfInt24, sfUInt24}):
-        for n in [0, 1, 3, 7, 64, 1001]:
-          checkSegy[float32](f, o, n)
-          checkSegy[float64](f, o, n)
-
-block segy_length_checks_still_guard_the_loops:
-  var dst = newSeq[float32](10)
-  let short = newSeq[byte](39)
-  for f in [sfFloat32, sfIbm32, sfInt32]:
-    doAssertRaises(SegTruncatedError): decodeSamples(f, short, dst, boBig)
-    doAssertRaises(SegTruncatedError): decodeSamples(f, short, dst, boLittle)
-  doAssertRaises(SegFormatError): decodeSamples(sfInt24, newSeq[byte](30), dst, boPairSwapped)
-  var none: seq[float32]
-  decodeSamples(sfFloat32, short.toOpenArray(0, -1), none, boBig) # empty: no access
 
 func ones(q, mask: uint32, neg: bool): float64 =
   if neg: float64(-int((not q) and mask)) else: float64(q) # an integer: never -0
@@ -203,16 +131,6 @@ proc checkSegd[T](f: SegdSampleFormat, n: int, twos: bool) =
     doAssert sameBits(got[i], want[i]) or (got[i].isNaN and want[i].isNaN),
       $f & " " & $T & " sample " & $i & ": " & $got[i] & " vs " & $want[i]
 
-block segd_formats_and_types:
-  for f in segdSampleFormats:
-    for n in [0, 1, 2, 3, 4, 5, 7, 8, 1001]:
-      for twos in [false, true]:
-        checkSegd[float32](f, n, twos)
-        checkSegd[float64](f, n, twos)
-  var dst = newSeq[float32](8)
-  doAssertRaises(SegTruncatedError): decodeSamples(sd8015, newSeq[byte](19), dst)
-  doAssertRaises(SegTruncatedError): decodeSamples(sd9058, newSeq[byte](31), dst)
-
 proc checkSeg2[T](f: Seg2SampleFormat, o: ByteOrder, n: int, twos: bool) =
   let b = randomBytes(dataBytes(f, n) + 2)
   var got = newSeq[T](n)
@@ -233,58 +151,153 @@ proc checkSeg2[T](f: Seg2SampleFormat, o: ByteOrder, n: int, twos: bool) =
         T(float64(m * (1 shl int(e))))
     doAssert sameBits(got[i], want) or (got[i].isNaN and want.isNaN), $f & " " & $o & " " & $i
 
-block seg2_formats_orders_and_types:
-  for f in Seg2SampleFormat:
-    for o in [boLittle, boBig]:
-      for n in [0, 1, 4, 5, 999]:
-        for twos in [false, true]:
-          checkSeg2[float32](f, o, n, twos)
-          checkSeg2[float64](f, o, n, twos)
-  var dst = newSeq[float64](4)
-  doAssertRaises(SegTruncatedError):
-    decodeSamples(s2Float64, newSeq[byte](31), dst, boLittle)
+proc main*() =
+  rng = initRand(1302)
 
-echo "tfastcodecs: ok"
+  block ibm_float_matches_the_ldexp_reference:
+    var checked = 0
+    for e in 0'u32..255'u32:
+      for frac in [0'u32, 1, 2, 0xF, 0x10, 0xFFFF, 0x10_0000, 0x7F_FFFF, 0x80_0000, 0xFF_FFFF,
+          0x12_3456]:
+        let bits = (e shl 24) or frac
+        doAssert sameBits(ibmToFloat64(bits), refIbm64(bits)), $bits
+        doAssert sameBits(ibmToFloat32(bits), float32(refIbm64(bits))), $bits
+        inc checked
+    for _ in 1..200_000:
+      let bits = uint32(rng.rand(int(high(uint32))))
+      doAssert sameBits(ibmToFloat32(bits), float32(refIbm64(bits))), $bits
+      doAssert sameBits(ibmToFloat64(bits), refIbm64(bits)), $bits
+    # Edge results: zero of either sign, the largest magnitude, Inf, subnormals.
+    doAssert ibmToFloat32(0x8000_0000'u32) == 0 and not signbit(ibmToFloat32(0x8000_0000'u32))
+    doAssert ibmToFloat32(0x7FFF_FFFF'u32) == Inf and ibmToFloat32(0xFFFF_FFFF'u32) == -Inf
+    doAssert ibmToFloat64(0x7FFF_FFFF'u32) == refIbm64(0x7FFF_FFFF'u32)
+    doAssert ibmToFloat32(0x0000_0001'u32) == 0                  # 2^-280: rounds to zero
+    doAssert ibmToFloat32(0x2110_0000'u32) == ldexp(1.0, -128)   # a float32 subnormal
+    doAssert ibmToFloat32(0x4110_0000'u32) == 1.0 and ibmToFloat32(0xC276_A000'u32) == -118.625
+    doAssert checked == 256 * 11
 
-block decode_fields_unchecked_loads_match_get_num:
-  # 15.3-3: `decodeFields` loads `at` fields unchecked, with the byte order
-  # picked once; compare each field with the checked `getNum`, in every order.
-  doAssert layoutBytes(SegyTraceHeader, 1) == TraceHeaderSize
-  doAssert layoutBytes(SegyBinaryHeader, 3201) <= BinaryHeaderSize
-  doAssert layoutBytes(Seg2TraceFixed, 0) == 13 # 0-based: bytes 0..12
-  doAssert layoutBytes(SegdGeneralHeader1, 1) == 32
-  proc check[T](firstByte: static int, size: int) =
+  block ibm_float32_kernel_is_bit_identical:
+    # `ibmToFloat32Fast` (two multiplies by powers of two, no table: the loop
+    # the decoders run 8 wide when the build targets AVX2) against
+    # `ibmToFloat32`: every sign and exponent byte with fractions at the edges
+    # of the rounding cases and a few thousand random ones, and random words.
+    # Then through the decoders themselves, in every byte order and from odd
+    # offsets and lengths (run this file with --passC:-march=x86-64-v3 as well:
+    # only then do the decoders use the kernel).
+    var fracs = @[0'u32, 1, 2, 3, 5, 0x7FFFFF, 0x800000, 0x800001, 0xFFFFFE, 0xFFFFFF, 0x100000,
+      0x0FFFFF, 0x555555, 0xAAAAAA]
+    for i in 0 ..< 24:
+      fracs.add 1'u32 shl i
+      fracs.add (1'u32 shl i) + 1
+      fracs.add 0xFFFFFF'u32 shr i
+    for i in 0 ..< 4000: fracs.add uint32(rng.rand(0xFFFFFF))
+    var words: seq[uint32]
+    for se in 0'u32 .. 255:
+      for f in fracs: words.add (se shl 24) or f
+    for i in 0 ..< 1_000_000: words.add uint32(rng.next() shr 32)
+    doAssert words.len == 256 * 4086 + 1_000_000
+    var want = newSeq[float32](words.len)
+    for i, w in words:
+      want[i] = ibmToFloat32(w)
+      doAssert sameBits(ibmToFloat32Fast(w), want[i]), $w
+    var got = newSeq[float32](words.len)
     for o in ByteOrder:
-      for _ in 0..<200:
-        let b = randomBytes(size)
-        var h: T
-        decodeFields(h, b, firstByte, o)
-        for _, v in fieldPairs(h):
-          when v.hasCustomPragma(at) and v isnot array:
-            const pos = v.getCustomPragmaVal(at) - firstByte
-            doAssert v == getNum[typeof(v)](b, pos, o) or (v != v) # NaN floats
-  check[SegyTraceHeader](1, TraceHeaderSize)
-  check[SegyTraceHeaderExt1](1, TraceHeaderSize)
-  check[SegyBinaryHeader](3201, BinaryHeaderSize)
-  check[Seg2TraceFixed](0, Seg2FixedSize)
-  var h: SegyTraceHeader
-  doAssertRaises(SegTruncatedError): decodeFields(h, newSeq[byte](239), 1, boBig)
+      var bytes = newSeq[byte](4 * words.len)
+      for i, w in words: putNum(bytes, 4 * i, w, o)
+      decodeSamples(sfIbm32, bytes, got, o)
+      for i in 0 ..< words.len: doAssert sameBits(got[i], want[i]), $o & " " & $words[i]
+      if o == boBig:
+        decodeSamples(sd8048, bytes, got)
+        for i in 0 ..< words.len: doAssert sameBits(got[i], want[i]), "8048 " & $words[i]
+      # Odd starts and lengths: the vector loop's head and tail.
+      for first in 0 ..< 9:
+        for n in [1, 2, 7, 8, 9, 15, 16, 17, 31, 33, 100]:
+          var part = newSeq[float32](n)
+          decodeSamples(sfIbm32, bytes.toOpenArray(4 * first, 4 * (first + n) - 1), part, o)
+          for i in 0 ..< n: doAssert sameBits(part[i], want[first + i]), $o & " " & $first
 
-block host_order_copy_is_exact:
-  # 15.3-5: a plain loop under AVX2 (`-march=x86-64-v3`), `copyMem` otherwise;
-  # both must copy every byte, from any source alignment, and nothing more.
-  var r = initRand(5)
-  var src = newSeq[byte](4 * 1100 + 3)
-  for b in src.mitems: b = byte(r.rand(255))
-  for shift in 0..3:
-    for words in [0, 1, 7, 8, 9, 31, 64, 1000, 1100]:
-      if shift + 4 * words > src.len: continue
-      var dst = newSeq[uint32](words + 1)
-      dst[words] = 0xDEADBEEF'u32
-      if words > 0:
-        copyHostOrder(addr dst[0], byteBuf(src.toOpenArray(shift, src.len - 1)), 4 * words)
-      for i in 0..<words:
-        var want: uint32
-        copyMem(addr want, addr src[shift + 4 * i], 4)
-        doAssert dst[i] == want
-      doAssert dst[words] == 0xDEADBEEF'u32
+  block segy_formats_orders_and_types:
+    for f in definedSampleFormats:
+      for o in ByteOrder:
+        if not (o == boPairSwapped and f in {sfInt24, sfUInt24}):
+          for n in [0, 1, 3, 7, 64, 1001]:
+            checkSegy[float32](f, o, n)
+            checkSegy[float64](f, o, n)
+
+  block segy_length_checks_still_guard_the_loops:
+    var dst = newSeq[float32](10)
+    let short = newSeq[byte](39)
+    for f in [sfFloat32, sfIbm32, sfInt32]:
+      doAssertRaises(SegTruncatedError): decodeSamples(f, short, dst, boBig)
+      doAssertRaises(SegTruncatedError): decodeSamples(f, short, dst, boLittle)
+    doAssertRaises(SegFormatError): decodeSamples(sfInt24, newSeq[byte](30), dst, boPairSwapped)
+    var none: seq[float32]
+    decodeSamples(sfFloat32, short.toOpenArray(0, -1), none, boBig) # empty: no access
+
+  block segd_formats_and_types:
+    for f in segdSampleFormats:
+      for n in [0, 1, 2, 3, 4, 5, 7, 8, 1001]:
+        for twos in [false, true]:
+          checkSegd[float32](f, n, twos)
+          checkSegd[float64](f, n, twos)
+    var dst = newSeq[float32](8)
+    doAssertRaises(SegTruncatedError): decodeSamples(sd8015, newSeq[byte](19), dst)
+    doAssertRaises(SegTruncatedError): decodeSamples(sd9058, newSeq[byte](31), dst)
+
+  block seg2_formats_orders_and_types:
+    for f in Seg2SampleFormat:
+      for o in [boLittle, boBig]:
+        for n in [0, 1, 4, 5, 999]:
+          for twos in [false, true]:
+            checkSeg2[float32](f, o, n, twos)
+            checkSeg2[float64](f, o, n, twos)
+    var dst = newSeq[float64](4)
+    doAssertRaises(SegTruncatedError):
+      decodeSamples(s2Float64, newSeq[byte](31), dst, boLittle)
+
+  echo "tfastcodecs: ok"
+
+  block decode_fields_unchecked_loads_match_get_num:
+    # 15.3-3: `decodeFields` loads `at` fields unchecked, with the byte order
+    # picked once; compare each field with the checked `getNum`, in every order.
+    doAssert layoutBytes(SegyTraceHeader, 1) == TraceHeaderSize
+    doAssert layoutBytes(SegyBinaryHeader, 3201) <= BinaryHeaderSize
+    doAssert layoutBytes(Seg2TraceFixed, 0) == 13 # 0-based: bytes 0..12
+    doAssert layoutBytes(SegdGeneralHeader1, 1) == 32
+    proc check[T](firstByte: static int, size: int) =
+      for o in ByteOrder:
+        for _ in 0..<200:
+          let b = randomBytes(size)
+          var h: T
+          decodeFields(h, b, firstByte, o)
+          for _, v in fieldPairs(h):
+            when v.hasCustomPragma(at) and v isnot array:
+              const pos = v.getCustomPragmaVal(at) - firstByte
+              doAssert v == getNum[typeof(v)](b, pos, o) or (v != v) # NaN floats
+    check[SegyTraceHeader](1, TraceHeaderSize)
+    check[SegyTraceHeaderExt1](1, TraceHeaderSize)
+    check[SegyBinaryHeader](3201, BinaryHeaderSize)
+    check[Seg2TraceFixed](0, Seg2FixedSize)
+    var h: SegyTraceHeader
+    doAssertRaises(SegTruncatedError): decodeFields(h, newSeq[byte](239), 1, boBig)
+
+  block host_order_copy_is_exact:
+    # 15.3-5: a plain loop under AVX2 (`-march=x86-64-v3`), `copyMem` otherwise;
+    # both must copy every byte, from any source alignment, and nothing more.
+    var r = initRand(5)
+    var src = newSeq[byte](4 * 1100 + 3)
+    for b in src.mitems: b = byte(r.rand(255))
+    for shift in 0..3:
+      for words in [0, 1, 7, 8, 9, 31, 64, 1000, 1100]:
+        if shift + 4 * words > src.len: continue
+        var dst = newSeq[uint32](words + 1)
+        dst[words] = 0xDEADBEEF'u32
+        if words > 0:
+          copyHostOrder(addr dst[0], byteBuf(src.toOpenArray(shift, src.len - 1)), 4 * words)
+        for i in 0..<words:
+          var want: uint32
+          copyMem(addr want, addr src[shift + 4 * i], 4)
+          doAssert dst[i] == want
+        doAssert dst[words] == 0xDEADBEEF'u32
+
+when isMainModule: main()

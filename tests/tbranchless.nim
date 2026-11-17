@@ -5,8 +5,11 @@
 ## 8015 complements, both SEG-2 byte orders, and every 16-bit word.
 
 import std/[assertions, random]
+
 import parseSEG/common/endians
+
 import parseSEG/segd/samples as segdsamples
+
 import parseSEG/seg2/samples as seg2samples
 
 const
@@ -60,7 +63,7 @@ func sameBits[T: float32 | float64](a, b: T): bool =
   when T is float32: cast[uint32](a) == cast[uint32](b)
   else: cast[uint64](a) == cast[uint64](b)
 
-var rng = initRand(1532)
+var rng: typeof(initRand(1532))
 
 proc randomBytes(n: int): seq[byte] =
   result = newSeq[byte](n)
@@ -102,31 +105,36 @@ proc checkFloat20[T](b: openArray[byte], o: ByteOrder, twos: bool) =
 
 const RandomBytes = 5_000_000 # 2 M samples of 8015, 2.5 M of 8024, 5 M of 8022
 
-block segd_random_words:
-  let b = randomBytes(RandomBytes)
-  for f in [sd8015, sd8022, sd8024, sd8042, sd8044]:
-    for twos in (if f == sd8015: @[false, true] else: @[false]):
-      checkSegd[float32](f, b, twos)
-      checkSegd[float64](f, b, twos)
+proc main*() =
+  rng = initRand(1532)
 
-block segd_every_word:
-  # Every word in every slot; the shifted view also puts each byte in both
-  # halves of a word.
-  let b = everyWord()
-  for f in [sd8015, sd8022, sd8024, sd8042, sd8044]:
-    for twos in (if f == sd8015: @[false, true] else: @[false]):
-      checkSegd[float32](f, b, twos)
-      checkSegd[float64](f, b, twos)
-      checkSegd[float32](f, b.toOpenArray(2, b.len - 1), twos)
+  block segd_random_words:
+    let b = randomBytes(RandomBytes)
+    for f in [sd8015, sd8022, sd8024, sd8042, sd8044]:
+      for twos in (if f == sd8015: @[false, true] else: @[false]):
+        checkSegd[float32](f, b, twos)
+        checkSegd[float64](f, b, twos)
 
-block seg2_float20_random_words:
-  let b = randomBytes(RandomBytes)
-  for o in [boLittle, boBig]:
-    for twos in [false, true]:
-      checkFloat20[float32](b, o, twos)
-      checkFloat20[float64](b, o, twos)
-  let w = everyWord()
-  for o in [boLittle, boBig]:
-    for twos in [false, true]:
-      checkFloat20[float32](w, o, twos)
-      checkFloat20[float32](w.toOpenArray(2, w.len - 1), o, twos)
+  block segd_every_word:
+    # Every word in every slot; the shifted view also puts each byte in both
+    # halves of a word.
+    let b = everyWord()
+    for f in [sd8015, sd8022, sd8024, sd8042, sd8044]:
+      for twos in (if f == sd8015: @[false, true] else: @[false]):
+        checkSegd[float32](f, b, twos)
+        checkSegd[float64](f, b, twos)
+        checkSegd[float32](f, b.toOpenArray(2, b.len - 1), twos)
+
+  block seg2_float20_random_words:
+    let b = randomBytes(RandomBytes)
+    for o in [boLittle, boBig]:
+      for twos in [false, true]:
+        checkFloat20[float32](b, o, twos)
+        checkFloat20[float64](b, o, twos)
+    let w = everyWord()
+    for o in [boLittle, boBig]:
+      for twos in [false, true]:
+        checkFloat20[float32](w, o, twos)
+        checkFloat20[float32](w.toOpenArray(2, w.len - 1), o, twos)
+
+when isMainModule: main()

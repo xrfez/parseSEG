@@ -9,17 +9,20 @@
 ## with an info diagnostic. Demultiplexed copies are not cached (tsegdmux).
 
 import std/[assertions, os, strutils, times]
+
 import parseSEG
+
 from parseSEG/model/traceindex import mindex # the tests corrupt the index
+
 import parseSEG/common/binstore
+
 import ./utils/testutils
 
-let tmp = scratchDir("parseseg_tindexcache")
+var tmp: typeof(scratchDir("parseseg_tindexcache"))
 
-let
-  d63 = sampleOr("63.sgd")
-  inova = sampleOr("inova_rev30_5traces.sgd")
-  bo = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
+var d63: typeof(sampleOr("63.sgd"))
+var inova: typeof(sampleOr("inova_rev30_5traces.sgd"))
+var bo: typeof(sampleOr("BO_3D-Inglewood_rev21_v7.sgy"))
 
 proc convert(src, name: string, o: ConvertOptions): string =
   result = tmp / name
@@ -75,66 +78,6 @@ proc sameIndex(a, b: SeismicFile, what: string) =
 proc reopen(p, cache: string, keys = false): SeismicFile =
   openSeismic(p, keys = keys, opts = OpenOptions(cache: cache))
 
-# ---------------------------------------------------------------- round trip --
-
-block cached_index_equals_rebuilt:
-  for p in fixtures():
-    for keys in [false, true]:
-      let what = p.extractFilename & (if keys: " keys" else: "")
-      let cache = tmp / (p.extractFilename & ".pidx")
-      removeFile(cache)
-      var built = openSeismic(p, keys = keys, opts = OpenOptions(cache: cache))
-      doAssert not built.fromCache and built.log.has(dcIndexCache, "there is no such file"), what
-      built.saveIndex(cache)
-      var walked = openSeismic(p, keys = keys) # without the cache diagnostic
-      var c = reopen(p, cache, keys)
-      doAssert c.fromCache, what & ": " & $c.log
-      doAssert not c.log.has(dcIndexCache), what
-      sameIndex(c, walked, what)
-      doAssert c.hasKeys == keys or c.len == 0, what
-      # Reads, summaries and header listings work alike.
-      if c.len > 0 and c.index.contiguous:
-        var la, lb: DiagLog
-        let n = min(c.len, 50)
-        doAssert c.readTraces(0 ..< n, la) == walked.readTraces(0 ..< n, lb), what
-        doAssert $c.traceHeaders(n - 1) == $walked.traceHeaders(n - 1), what
-      doAssert $c.summary == $walked.summary, what
-      if not keys:
-        # A cache with keys serves an open without them.
-        let kc = tmp / "withkeys.pidx"
-        var k = openSeismic(p, keys = true)
-        k.saveIndex(kc)
-        var nk = reopen(p, kc)
-        doAssert nk.fromCache and (not nk.hasKeys or nk.len == 0), what
-        # Keys no longer make the open walk: the index and its log are those
-        # of the default open (sampled for a fixed-length SEG-Y file).
-        var plain = openSeismic(p)
-        sameIndex(nk, plain, what & " from a keys cache")
-        plain.close()
-        nk.close()
-        k.close()
-      c.close()
-      walked.close()
-      built.close()
-
-block progress_on_a_cached_open:
-  let cache = tmp / "bo.pidx"
-  var f = openSeismic(bo)
-  f.saveIndex(cache)
-  f.close()
-  let calls = new seq[(int64, int64)]
-  proc recorder(calls: ref seq[(int64, int64)]): Progress =
-    # A hook must be gcsafe: it captures a parameter, not a global.
-    proc (d, t: int64): bool =
-      calls[].add (d, t)
-      true
-  var c = openSeismic(bo, progress = recorder(calls), opts = OpenOptions(cache: cache))
-  doAssert c.fromCache and calls[] == @[(getFileSize(bo), getFileSize(bo))]
-  c.close()
-  doAssertRaises(SegCancelledError):
-    let cancel: Progress = proc (d, t: int64): bool = false
-    discard openSeismic(bo, progress = cancel, opts = OpenOptions(cache: cache))
-
 # ----------------------------------------------------------------- staleness --
 
 proc fresh(name: string): (string, string) =
@@ -164,120 +107,192 @@ proc patch(p: string, at: int64, b: byte, keepTime = true) =
   writeFile(p, s)
   if keepTime: setLastModificationTime(p, t)
 
-block stale_size:
-  let (p, cache) = fresh("size.sgy")
-  let f = open(p, fmAppend)
-  f.write "x"
-  f.close()
-  rebuiltBecause(p, cache, "the file changed")
+proc main*() =
+  tmp = scratchDir("parseseg_tindexcache")
 
-block stale_mtime:
-  let (p, cache) = fresh("mtime.sgy")
-  setLastModificationTime(p, getLastModificationTime(p) + initDuration(seconds = 5))
-  rebuiltBecause(p, cache, "the file changed")
+  d63 = sampleOr("63.sgd")
 
-block stale_first_and_last_bytes:
-  # Same size and time: the hashed ends catch it.
-  let (p, cache) = fresh("head.sgy")
-  patch(p, 3300, 0x55) # binary header
-  rebuiltBecause(p, cache, "the file changed")
-  let (q, qc) = fresh("tail.sgy")
-  patch(q, -2, 0x55) # last sample
-  rebuiltBecause(q, qc, "the file changed")
+  inova = sampleOr("inova_rev30_5traces.sgd")
 
-block stale_options_and_path:
-  let (p, cache) = fresh("opts.sgy")
-  rebuiltBecause(p, cache, "twosComplement8015", twos = true)
-  rebuiltBecause(p, cache, "without trace keys", keys = true)
-  let other = tmp / "other.sgy"
-  copyFile(p, other)
-  setLastModificationTime(other, getLastModificationTime(p))
-  rebuiltBecause(other, cache, "another file")
+  bo = sampleOr("BO_3D-Inglewood_rev21_v7.sgy")
 
-block stale_version_or_schema:
-  let (p, cache) = fresh("version.sgy")
-  let s = readFile(cache)
-  doAssert "(version 3)" in s
-  writeFile(cache, s.replace("(version 3)", "(version 4)"))
-  rebuiltBecause(p, cache, "another version")
-  let i = s.find("(schema \"") + 9
-  var t = s
-  t[i] = (if t[i] == '0': '1' else: '0')
-  writeFile(cache, t)
-  rebuiltBecause(p, cache, "another version")
-  writeFile(cache, s.replace("(library ", "(library \"0\" "))
-  rebuiltBecause(p, cache, "another version")
+  # ---------------------------------------------------------------- round trip --
 
-block damaged_caches:
-  let (p, cache) = fresh("damage.sgy")
-  let s = readFile(cache)
-  writeFile(cache, s[0 ..< s.len - 1])
-  rebuiltBecause(p, cache, "truncated")
-  writeFile(cache, s[0 ..< s.len div 2])
-  rebuiltBecause(p, cache, "truncated")
-  var t = s
-  t[s.len - 100] = char(ord(t[s.len - 100]) xor 1)
-  writeFile(cache, t)
-  rebuiltBecause(p, cache, "corrupt")
-  var u = s
-  let body = s.find('\0') + 64
-  u[body] = char(ord(u[body]) xor 0x80)
-  writeFile(cache, u)
-  rebuiltBecause(p, cache, "corrupt")
-  writeFile(cache, "")
-  rebuiltBecause(p, cache, "no header")
-  # A cache that starts with NUL: what a crash between `saveIndex`'s rename
-  # and its data reaching the disk can leave (a zero-filled file).
-  writeFile(cache, newString(4096))
-  rebuiltBecause(p, cache, "no header")
-  writeFile(cache, "\0")
-  rebuiltBecause(p, cache, "no header")
-  writeFile(cache, "(.nif27)\n(diagnostics)\n\0garbage")
-  rebuiltBecause(p, cache, "not an index cache")
-  removeFile(cache)
-  createDir(cache)
-  rebuiltBecause(p, cache, "")
-  removeDir(cache)
-  # The rebuilt index saves a cache without the miss diagnostic.
-  var f = openSeismic(p, opts = OpenOptions(cache: cache))
-  doAssert f.log.has(dcIndexCache)
-  f.saveIndex(cache)
-  var g = openSeismic(p, opts = OpenOptions(cache: cache))
-  doAssert g.fromCache and not g.log.has(dcIndexCache), $g.log
-  f.close()
-  g.close()
+  block cached_index_equals_rebuilt:
+    for p in fixtures():
+      for keys in [false, true]:
+        let what = p.extractFilename & (if keys: " keys" else: "")
+        let cache = tmp / (p.extractFilename & ".pidx")
+        removeFile(cache)
+        var built = openSeismic(p, keys = keys, opts = OpenOptions(cache: cache))
+        doAssert not built.fromCache and built.log.has(dcIndexCache, "there is no such file"), what
+        built.saveIndex(cache)
+        var walked = openSeismic(p, keys = keys) # without the cache diagnostic
+        var c = reopen(p, cache, keys)
+        doAssert c.fromCache, what & ": " & $c.log
+        doAssert not c.log.has(dcIndexCache), what
+        sameIndex(c, walked, what)
+        doAssert c.hasKeys == keys or c.len == 0, what
+        # Reads, summaries and header listings work alike.
+        if c.len > 0 and c.index.contiguous:
+          var la, lb: DiagLog
+          let n = min(c.len, 50)
+          doAssert c.readTraces(0 ..< n, la) == walked.readTraces(0 ..< n, lb), what
+          doAssert $c.traceHeaders(n - 1) == $walked.traceHeaders(n - 1), what
+        doAssert $c.summary == $walked.summary, what
+        if not keys:
+          # A cache with keys serves an open without them.
+          let kc = tmp / "withkeys.pidx"
+          var k = openSeismic(p, keys = true)
+          k.saveIndex(kc)
+          var nk = reopen(p, kc)
+          doAssert nk.fromCache and (not nk.hasKeys or nk.len == 0), what
+          # Keys no longer make the open walk: the index and its log are those
+          # of the default open (sampled for a fixed-length SEG-Y file).
+          var plain = openSeismic(p)
+          sameIndex(nk, plain, what & " from a keys cache")
+          plain.close()
+          nk.close()
+          k.close()
+        c.close()
+        walked.close()
+        built.close()
 
-# ---------------------------------------------------------------- refusals --
+  block progress_on_a_cached_open:
+    let cache = tmp / "bo.pidx"
+    var f = openSeismic(bo)
+    f.saveIndex(cache)
+    f.close()
+    let calls = new seq[(int64, int64)]
+    proc recorder(calls: ref seq[(int64, int64)]): Progress =
+      # A hook must be gcsafe: it captures a parameter, not a global.
+      proc (d, t: int64): bool =
+        calls[].add (d, t)
+        true
+    var c = openSeismic(bo, progress = recorder(calls), opts = OpenOptions(cache: cache))
+    doAssert c.fromCache and calls[] == @[(getFileSize(bo), getFileSize(bo))]
+    c.close()
+    doAssertRaises(SegCancelledError):
+      let cancel: Progress = proc (d, t: int64): bool = false
+      discard openSeismic(bo, progress = cancel, opts = OpenOptions(cache: cache))
 
-block save_refusals:
-  let (p, cache) = fresh("refuse.sgy")
-  var f = openSeismic(p, keys = true)
-  doAssertRaises(ValueError): f.saveIndex(p)
-  # A join that changes no trace leaves the file's own index: it is saved.
-  doAssert f.applyGeometry(GeometryTable()) == 0
-  f.saveIndex(cache)
-  # One that changes a trace's keys does not.
-  var t: GeometryTable
-  t.addReceiver(7, 8, 0, 1234.5, 6789.5)
-  (f.mindex.keys[0].rcvLine, f.mindex.keys[0].rcvPoint) = (7.0, 8.0)
-  doAssert f.applyGeometry(t, overwrite = true) == 1
-  doAssertRaises(ValueError): f.saveIndex(cache)
-  f.close()
-  doAssertRaises(ValueError): f.saveIndex(cache)
-  var g = openSeismic(p)
-  setLastModificationTime(p, getLastModificationTime(p) + initDuration(seconds = 3))
-  doAssertRaises(ValueError): g.saveIndex(cache)
-  g.close()
-  writeFile(tmp / "junk.bin", repeat('j', 5000))
-  var j = openSeismic(tmp / "junk.bin")
-  doAssertRaises(ValueError): j.saveIndex(tmp / "junk.pidx")
-  j.close()
-  doAssertRaises(IOError):
-    var h = openSeismic(p)
-    try: h.saveIndex(tmp / "no" / "such" / "dir.pidx")
-    finally: h.close()
-  for x in walkDir(tmp):
-    doAssert not x.path.endsWith(".tmp"), x.path
+  block stale_size:
+    let (p, cache) = fresh("size.sgy")
+    let f = open(p, fmAppend)
+    f.write "x"
+    f.close()
+    rebuiltBecause(p, cache, "the file changed")
 
-removeDir(tmp)
-echo "tindexcache: ok"
+  block stale_mtime:
+    let (p, cache) = fresh("mtime.sgy")
+    setLastModificationTime(p, getLastModificationTime(p) + initDuration(seconds = 5))
+    rebuiltBecause(p, cache, "the file changed")
+
+  block stale_first_and_last_bytes:
+    # Same size and time: the hashed ends catch it.
+    let (p, cache) = fresh("head.sgy")
+    patch(p, 3300, 0x55) # binary header
+    rebuiltBecause(p, cache, "the file changed")
+    let (q, qc) = fresh("tail.sgy")
+    patch(q, -2, 0x55) # last sample
+    rebuiltBecause(q, qc, "the file changed")
+
+  block stale_options_and_path:
+    let (p, cache) = fresh("opts.sgy")
+    rebuiltBecause(p, cache, "twosComplement8015", twos = true)
+    rebuiltBecause(p, cache, "without trace keys", keys = true)
+    let other = tmp / "other.sgy"
+    copyFile(p, other)
+    setLastModificationTime(other, getLastModificationTime(p))
+    rebuiltBecause(other, cache, "another file")
+
+  block stale_version_or_schema:
+    let (p, cache) = fresh("version.sgy")
+    let s = readFile(cache)
+    doAssert "(version 3)" in s
+    writeFile(cache, s.replace("(version 3)", "(version 4)"))
+    rebuiltBecause(p, cache, "another version")
+    let i = s.find("(schema \"") + 9
+    var t = s
+    t[i] = (if t[i] == '0': '1' else: '0')
+    writeFile(cache, t)
+    rebuiltBecause(p, cache, "another version")
+    writeFile(cache, s.replace("(library ", "(library \"0\" "))
+    rebuiltBecause(p, cache, "another version")
+
+  block damaged_caches:
+    let (p, cache) = fresh("damage.sgy")
+    let s = readFile(cache)
+    writeFile(cache, s[0 ..< s.len - 1])
+    rebuiltBecause(p, cache, "truncated")
+    writeFile(cache, s[0 ..< s.len div 2])
+    rebuiltBecause(p, cache, "truncated")
+    var t = s
+    t[s.len - 100] = char(ord(t[s.len - 100]) xor 1)
+    writeFile(cache, t)
+    rebuiltBecause(p, cache, "corrupt")
+    var u = s
+    let body = s.find('\0') + 64
+    u[body] = char(ord(u[body]) xor 0x80)
+    writeFile(cache, u)
+    rebuiltBecause(p, cache, "corrupt")
+    writeFile(cache, "")
+    rebuiltBecause(p, cache, "no header")
+    # A cache that starts with NUL: what a crash between `saveIndex`'s rename
+    # and its data reaching the disk can leave (a zero-filled file).
+    writeFile(cache, newString(4096))
+    rebuiltBecause(p, cache, "no header")
+    writeFile(cache, "\0")
+    rebuiltBecause(p, cache, "no header")
+    writeFile(cache, "(.nif27)\n(diagnostics)\n\0garbage")
+    rebuiltBecause(p, cache, "not an index cache")
+    removeFile(cache)
+    createDir(cache)
+    rebuiltBecause(p, cache, "")
+    removeDir(cache)
+    # The rebuilt index saves a cache without the miss diagnostic.
+    var f = openSeismic(p, opts = OpenOptions(cache: cache))
+    doAssert f.log.has(dcIndexCache)
+    f.saveIndex(cache)
+    var g = openSeismic(p, opts = OpenOptions(cache: cache))
+    doAssert g.fromCache and not g.log.has(dcIndexCache), $g.log
+    f.close()
+    g.close()
+
+  # ---------------------------------------------------------------- refusals --
+
+  block save_refusals:
+    let (p, cache) = fresh("refuse.sgy")
+    var f = openSeismic(p, keys = true)
+    doAssertRaises(ValueError): f.saveIndex(p)
+    # A join that changes no trace leaves the file's own index: it is saved.
+    doAssert f.applyGeometry(GeometryTable()) == 0
+    f.saveIndex(cache)
+    # One that changes a trace's keys does not.
+    var t: GeometryTable
+    t.addReceiver(7, 8, 0, 1234.5, 6789.5)
+    (f.mindex.keys[0].rcvLine, f.mindex.keys[0].rcvPoint) = (7.0, 8.0)
+    doAssert f.applyGeometry(t, overwrite = true) == 1
+    doAssertRaises(ValueError): f.saveIndex(cache)
+    f.close()
+    doAssertRaises(ValueError): f.saveIndex(cache)
+    var g = openSeismic(p)
+    setLastModificationTime(p, getLastModificationTime(p) + initDuration(seconds = 3))
+    doAssertRaises(ValueError): g.saveIndex(cache)
+    g.close()
+    writeFile(tmp / "junk.bin", repeat('j', 5000))
+    var j = openSeismic(tmp / "junk.bin")
+    doAssertRaises(ValueError): j.saveIndex(tmp / "junk.pidx")
+    j.close()
+    doAssertRaises(IOError):
+      var h = openSeismic(p)
+      try: h.saveIndex(tmp / "no" / "such" / "dir.pidx")
+      finally: h.close()
+    for x in walkDir(tmp):
+      doAssert not x.path.endsWith(".tmp"), x.path
+
+  removeDir(tmp)
+
+  echo "tindexcache: ok"
+
+when isMainModule: main()

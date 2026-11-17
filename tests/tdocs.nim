@@ -14,7 +14,9 @@
 ## It also checks the umbrella's allowlists against `docs/api.md`.
 
 import std/[algorithm, assertions, os, osproc, sets, strutils]
+
 import ./utils/srcnames
+
 import ../tools/demofiles
 
 const
@@ -74,68 +76,77 @@ proc nimPaths(): string =
     if s.startsWith("--path:"):
       result.add " --path:" & quoteShell(root / s["--path:".len .. ^1].strip(chars = {'"'}))
 
-block umbrella_allowlists_match_api_md:
-  # `src/parseSEG.nim` re-exports these modules by name. Every name a module
-  # exports is either on its allowlist or one of its internals listed here,
-  # every allowlisted name is documented in docs/api.md, and no internal
-  # name is (except where a public overload shares it).
-  let umbrella = readFile(srcDir / "parseSEG.nim")
-  let api = toHashSet(words(readFile(root / "docs" / "api.md")))
-  const sharedWithPublic = ["flush"] # memsource and the writers' `flush`
-  const allowlisted = [
-    ("traceindex", "model/traceindex.nim", @["MapPin", "pinMap", "openSeismicRw",
-      "remapWritable", "requireOpen", "requireTrace", "requireKind", "unsafeMemory",
-      "mappedSize", "flush", "segyIntervalOf", "refreshKeys", "refreshSegyInterval", "mindex",
-      "requireUncut", "requireUncutFirst", "cutSeen", "unsafeGuard", "unsafeCache", "holdBytes",
-      "coverBytes", "coverSeg2Block", "coverHeaders", "seg2FileBlockEnd", "writeFileBytes",
-      "withHeld"]),
-    ("headerfields", "model/headerfields.nim", newSeq[string]()),
-    ("edit", "model/edit.nim", @["logVar", "writeBytes", "batching", "flushPending"]),
-    ("tosegy", "convert/tosegy.nim", @["GeometryJoin", "convertSegdToSegyJoined"]),
-    ("convert", "convert.nim", @["convertJoined"])]
-  for (module, file, internal) in allowlisted:
-    let listed = allowlist(umbrella, module)
-    let exported = exportedNames(readFile(srcDir / "parseSEG" / file))
-    doAssert listed.len > 0, module & ": no allowlist in src/parseSEG.nim"
-    for n in listed:
-      doAssert n in exported, module & "." & n & " is allowlisted but not exported"
-      doAssert n in api, module & "." & n & " is exported by parseSEG but not in docs/api.md"
-      doAssert n notin internal, module & "." & n & " is both allowlisted and internal"
-    for n in exported:
-      doAssert n in listed or n in internal, module & "." & n &
-        " is neither on the umbrella's allowlist nor a listed internal"
-    for n in internal:
-      doAssert n in exported, module & "." & n & " is listed as internal but not exported"
-      doAssert n notin api or n in sharedWithPublic,
-        module & "." & n & " is internal but docs/api.md lists it"
-  echo "tdocs: umbrella allowlists ok"
+proc main*() =
+  block umbrella_allowlists_match_api_md:
+    # `src/parseSEG.nim` re-exports these modules by name. Every name a module
+    # exports is either on its allowlist or one of its internals listed here,
+    # every allowlisted name is documented in docs/api.md, and no internal
+    # name is (except where a public overload shares it).
+    let umbrella = readFile(srcDir / "parseSEG.nim")
+    let api = toHashSet(words(readFile(root / "docs" / "api.md")))
+    const sharedWithPublic = ["flush"] # memsource and the writers' `flush`
+    const allowlisted = [
+      ("traceindex", "model/traceindex.nim", @["MapPin", "pinMap", "openSeismicRw",
+        "remapWritable", "requireOpen", "requireTrace", "requireKind", "unsafeMemory",
+        "mappedSize", "flush", "segyIntervalOf", "refreshKeys", "refreshSegyInterval", "mindex",
+        "requireUncut", "requireUncutFirst", "cutSeen", "unsafeGuard", "unsafeCache", "holdBytes",
+        "coverBytes", "coverSeg2Block", "coverHeaders", "seg2FileBlockEnd", "writeFileBytes",
+        "withHeld"]),
+      ("headerfields", "model/headerfields.nim", newSeq[string]()),
+      ("edit", "model/edit.nim", @["logVar", "writeBytes", "batching", "flushPending"]),
+      ("tosegy", "convert/tosegy.nim", @["GeometryJoin", "convertSegdToSegyJoined"]),
+      ("convert", "convert.nim", @["convertJoined"])]
+    for (module, file, internal) in allowlisted:
+      let listed = allowlist(umbrella, module)
+      let exported = exportedNames(readFile(srcDir / "parseSEG" / file))
+      doAssert listed.len > 0, module & ": no allowlist in src/parseSEG.nim"
+      for n in listed:
+        doAssert n in exported, module & "." & n & " is allowlisted but not exported"
+        doAssert n in api, module & "." & n & " is exported by parseSEG but not in docs/api.md"
+        doAssert n notin internal, module & "." & n & " is both allowlisted and internal"
+      for n in exported:
+        doAssert n in listed or n in internal, module & "." & n &
+          " is neither on the umbrella's allowlist nor a listed internal"
+      for n in internal:
+        doAssert n in exported, module & "." & n & " is listed as internal but not exported"
+        doAssert n notin api or n in sharedWithPublic,
+          module & "." & n & " is internal but docs/api.md lists it"
+    echo "tdocs: umbrella allowlists ok"
 
-let tmp = getTempDir() / "parseseg_tdocs"
-createDir(tmp)
+  let tmp = getTempDir() / "parseseg_tdocs"
 
-var all: seq[Snippet]
-var pages: seq[string]
-for f in walkFiles(guideDir / "*.md"): pages.add f
-pages.sort()
-for f in pages: all.add snippets(f)
-doAssert all.len > 0, "no examples found in " & guideDir
+  createDir(tmp)
 
-block nim_examples:
-  let gen = tmp / "nim"
-  removeDir(gen)
-  createDir(gen)
-  var main = "## Generated by tests/tdocs.nim: runs every Nim example of docs/guide.\n"
-  var n = 0
-  for s in all:
-    inc n
-    let name = "doc_" & ident(s.page) & "_" & $s.line
-    writeFile(gen / name & ".nim", "# docs/guide/" & s.page & ".md, line " & $s.line & "\n" &
-      s.code)
-    main.add "import " & name & "\n"
-  writeFile(gen / "docs_main.nim", main)
-  let exe = gen / "docs_main".addFileExt(ExeExt)
-  mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --warnings:off" & nimPaths() &
-    " --nimcache:" & quoteShell(tmp / "nimcache") & " -o:" & quoteShell(exe) & " " &
-    quoteShell(gen / "docs_main.nim"), "compiling the Nim examples")
-  mustRun(quoteShell(exe), "running the Nim examples", newRunDir(tmp))
-  echo "tdocs: ", n, " Nim examples ok"
+  var all: seq[Snippet]
+
+  var pages: seq[string]
+
+  for f in walkFiles(guideDir / "*.md"): pages.add f
+
+  pages.sort()
+
+  for f in pages: all.add snippets(f)
+
+  doAssert all.len > 0, "no examples found in " & guideDir
+
+  block nim_examples:
+    let gen = tmp / "nim"
+    removeDir(gen)
+    createDir(gen)
+    var main = "## Generated by tests/tdocs.nim: runs every Nim example of docs/guide.\n"
+    var n = 0
+    for s in all:
+      inc n
+      let name = "doc_" & ident(s.page) & "_" & $s.line
+      writeFile(gen / name & ".nim", "# docs/guide/" & s.page & ".md, line " & $s.line & "\n" &
+        s.code)
+      main.add "import " & name & "\n"
+    writeFile(gen / "docs_main.nim", main)
+    let exe = gen / "docs_main".addFileExt(ExeExt)
+    mustRun(getCurrentCompilerExe().quoteShell & " c --hints:off --warnings:off" & nimPaths() &
+      " --nimcache:" & quoteShell(tmp / "nimcache") & " -o:" & quoteShell(exe) & " " &
+      quoteShell(gen / "docs_main.nim"), "compiling the Nim examples")
+    mustRun(quoteShell(exe), "running the Nim examples", newRunDir(tmp))
+    echo "tdocs: ", n, " Nim examples ok"
+
+when isMainModule: main()

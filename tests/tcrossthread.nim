@@ -12,10 +12,10 @@
 ## runs this file under ASan/LSan; it also passes under TSan.
 
 import std/[assertions, atomics, os]
-import parseSEG
-import ./utils/testutils
 
-let survey = demoDir() / "survey.sgy"
+import parseSEG
+
+import ./utils/testutils
 
 type
   Job = object
@@ -57,104 +57,109 @@ proc release(slot: ptr SeismicFile) =
   reset(slot[]) # destroys the file here: the map, the source, the index
   deallocShared(slot)
 
-block open_on_a_thread_close_on_another:
-  for (prefetch, keys) in [(false, false), (true, false), (false, true), (true, true)]:
-    let (slot, roots) = openOn(survey, prefetch, keys)
-    doAssert roots == 0, "the opening thread lists " & $roots & " possible cycle roots"
-    doAssert slot[].len == 200 and slot[].readTraces(0 ..< 4).shape == [4, 2001]
+proc main*() =
+  let survey = demoDir() / "survey.sgy"
+
+  block open_on_a_thread_close_on_another:
+    for (prefetch, keys) in [(false, false), (true, false), (false, true), (true, true)]:
+      let (slot, roots) = openOn(survey, prefetch, keys)
+      doAssert roots == 0, "the opening thread lists " & $roots & " possible cycle roots"
+      doAssert slot[].len == 200 and slot[].readTraces(0 ..< 4).shape == [4, 2001]
+      slot[].close()
+      release(slot)
+
+  block prefetcher_on_the_releasing_thread:
+    # Opened on a job thread; read ahead, closed and released here, the file
+    # first, so the prefetcher's pin releases the map.
+    let (slot, roots) = openOn(survey, false, false)
+    doAssert roots == 0
+    var p = newPrefetcher[float32](slot[], 0 ..< slot[].len, chunkTraces = 32, workers = 2)
+    var c: PrefetchChunk[float32]
+    doAssert p.next(c) and c.count == 32
     slot[].close()
     release(slot)
+    var n = c.count
+    while p.next(c): n += c.count
+    doAssert n == 200
+    p.close()
 
-block prefetcher_on_the_releasing_thread:
-  # Opened on a job thread; read ahead, closed and released here, the file
-  # first, so the prefetcher's pin releases the map.
-  let (slot, roots) = openOn(survey, false, false)
-  doAssert roots == 0
-  var p = newPrefetcher[float32](slot[], 0 ..< slot[].len, chunkTraces = 32, workers = 2)
-  var c: PrefetchChunk[float32]
-  doAssert p.next(c) and c.count == 32
-  slot[].close()
-  release(slot)
-  var n = c.count
-  while p.next(c): n += c.count
-  doAssert n == 200
-  p.close()
+  block released_without_close:
+    # Dropped (not closed) on another thread than the one that opened it.
+    let (slot, roots) = openOn(survey, true, true)
+    doAssert roots == 0
+    release(slot)
 
-block released_without_close:
-  # Dropped (not closed) on another thread than the one that opened it.
-  let (slot, roots) = openOn(survey, true, true)
-  doAssert roots == 0
-  release(slot)
+  block sources_and_sinks_on_a_thread:
+    # The record sources and sinks themselves, made on a thread and released
+    # here.
+    type Made = object
+      disk: DiskSource
+      mem: MemFileSource
+      tapeIn: TapeImageSource
+      sink: DiskSink
+      tapeOut: TapeImageSink
+      roots: Atomic[int]
+    let dir = getTempDir() / "parseseg_tcrossthread"
+    createDir(dir)
+    copyFile(survey, dir / "survey.sgy") # `demoDir` is a global: not for the thread
+    proc make(m: ptr Made) {.thread.} =
+      {.cast(gcsafe).}:
+        let d = getTempDir() / "parseseg_tcrossthread"
+        let survey = d / "survey.sgy"
+        m.disk = openDiskSource(survey)
+        m.mem = openMemFileSource(survey)
+        m.sink = openDiskSink(d / "out.bin")
+        m.tapeOut = openTapeImageSink(d / "out.tap")
+        m.tapeOut.writeRecord([1'u8, 2, 3])
+        m.tapeOut.close()
+        m.tapeIn = openTapeImageSource(d / "out.tap")
+        var buf: seq[byte]
+        doAssert m.disk.readRecord(buf, 4096) == rkData
+        doAssert m.mem.readRecord(buf, 4096) == rkData
+        # A second reference to each, dropped again, as a reader's cursor does:
+        # ORC lists a ref it may think cyclic as a root when such a drop leaves
+        # it alive.
+        proc touch(x: RecordSource): int {.noinline.} =
+          var held = @[x] # a counted copy of the ref (a plain `let` is a borrow)
+          held[0].name.len
+        proc touch(x: RecordSink): int {.noinline.} =
+          var held = @[x]
+          held[0].name.len
+        var n = 0
+        for _ in 1 .. 3:
+          n += touch(m.disk) + touch(m.mem) + touch(m.tapeIn) + touch(m.sink) + touch(m.tapeOut)
+        doAssert n > 0
+      m.roots.store(GC_prepareOrc())
+    let m = createShared(Made)
+    var th: Thread[ptr Made]
+    createThread(th, make, m)
+    joinThread(th)
+    doAssert m.roots.load() == 0, $m.roots.load()
+    m.disk.close()
+    m.mem.close()
+    m.sink.close()
+    m.tapeIn.close()
+    reset(m[])
+    deallocShared(m)
 
-block sources_and_sinks_on_a_thread:
-  # The record sources and sinks themselves, made on a thread and released
-  # here.
-  type Made = object
-    disk: DiskSource
-    mem: MemFileSource
-    tapeIn: TapeImageSource
-    sink: DiskSink
-    tapeOut: TapeImageSink
-    roots: Atomic[int]
-  let dir = getTempDir() / "parseseg_tcrossthread"
-  createDir(dir)
-  copyFile(survey, dir / "survey.sgy") # `demoDir` is a global: not for the thread
-  proc make(m: ptr Made) {.thread.} =
-    {.cast(gcsafe).}:
-      let d = getTempDir() / "parseseg_tcrossthread"
-      let survey = d / "survey.sgy"
-      m.disk = openDiskSource(survey)
-      m.mem = openMemFileSource(survey)
-      m.sink = openDiskSink(d / "out.bin")
-      m.tapeOut = openTapeImageSink(d / "out.tap")
-      m.tapeOut.writeRecord([1'u8, 2, 3])
-      m.tapeOut.close()
-      m.tapeIn = openTapeImageSource(d / "out.tap")
-      var buf: seq[byte]
-      doAssert m.disk.readRecord(buf, 4096) == rkData
-      doAssert m.mem.readRecord(buf, 4096) == rkData
-      # A second reference to each, dropped again, as a reader's cursor does:
-      # ORC lists a ref it may think cyclic as a root when such a drop leaves
-      # it alive.
-      proc touch(x: RecordSource): int {.noinline.} =
-        var held = @[x] # a counted copy of the ref (a plain `let` is a borrow)
-        held[0].name.len
-      proc touch(x: RecordSink): int {.noinline.} =
-        var held = @[x]
-        held[0].name.len
-      var n = 0
-      for _ in 1 .. 3:
-        n += touch(m.disk) + touch(m.mem) + touch(m.tapeIn) + touch(m.sink) + touch(m.tapeOut)
-      doAssert n > 0
-    m.roots.store(GC_prepareOrc())
-  let m = createShared(Made)
-  var th: Thread[ptr Made]
-  createThread(th, make, m)
-  joinThread(th)
-  doAssert m.roots.load() == 0, $m.roots.load()
-  m.disk.close()
-  m.mem.close()
-  m.sink.close()
-  m.tapeIn.close()
-  reset(m[])
-  deallocShared(m)
+  block a_failed_open_leaks_nothing:
+    # 1000 opens of a missing file: each raises, and nothing stays allocated
+    # (a `MapRef`, 96 bytes, stayed per open; LSan checks it under `nim asan`).
+    proc failedOpens(n: int) =
+      for _ in 1 .. n:
+        try:
+          discard openSeismic(getTempDir() / "parseseg_no_such_file.sgy")
+          doAssert false
+        except IOError, OSError:
+          discard
+    failedOpens(10) # warm up
+    GC_fullCollect()
+    let before = getOccupiedMem()
+    failedOpens(1000)
+    GC_fullCollect()
+    let grown = getOccupiedMem() - before
+    doAssert grown < 1000 * 48, "1000 failed opens left " & $grown & " bytes"
 
-block a_failed_open_leaks_nothing:
-  # 1000 opens of a missing file: each raises, and nothing stays allocated
-  # (a `MapRef`, 96 bytes, stayed per open; LSan checks it under `nim asan`).
-  proc failedOpens(n: int) =
-    for _ in 1 .. n:
-      try:
-        discard openSeismic(getTempDir() / "parseseg_no_such_file.sgy")
-        doAssert false
-      except IOError, OSError:
-        discard
-  failedOpens(10) # warm up
-  GC_fullCollect()
-  let before = getOccupiedMem()
-  failedOpens(1000)
-  GC_fullCollect()
-  let grown = getOccupiedMem() - before
-  doAssert grown < 1000 * 48, "1000 failed opens left " & $grown & " bytes"
+  echo "tcrossthread: ok"
 
-echo "tcrossthread: ok"
+when isMainModule: main()

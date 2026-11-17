@@ -10,10 +10,6 @@
 
 import std/[assertions, os, osproc, sets, strutils]
 
-when not defined(posix):
-  echo "tmapguardc: skipped: the guard is POSIX only"
-  quit 0
-
 const root = currentSourcePath().parentDir.parentDir
 
 proc nimPaths(): string =
@@ -24,43 +20,9 @@ proc nimPaths(): string =
     if s.startsWith("--path:"):
       result.add " --path:" & quoteShell(root / s["--path:".len .. ^1].strip(chars = {'"'}))
 
-let tmp = getTempDir() / "parseseg_tmapguardc"
-removeDir(tmp)
-createDir(tmp)
-let main = tmp / "guardmain.nim"
-writeFile(main, "import std/os\nimport parseSEG\nvar f = openSeismic(paramStr(1))\nf.close()\n")
-let cache = tmp / "nimcache"
-let (o, code) = execCmdEx(getCurrentCompilerExe().quoteShell & " c --compileOnly" &
-  " --hints:off --warnings:off --skipParentCfg --skipUserCfg --stackTrace:on" &
-  " --lineTrace:on --checks:on" &
-  (when defined(parseSegNoMapGuard): " -d:parseSegNoMapGuard" else: "") & nimPaths() & " --nimcache:" & quoteShell(cache) & " " &
-  quoteShell(main))
-doAssert code == 0, o
-
-var cFile = ""
-for path in walkFiles(cache / "*mapguard.nim.c"): cFile = path
-doAssert cFile.len > 0, "no C file for private/mapguard"
-
 # Every function defined in the file: its name (before the `__` of the
 # module suffix) and its body.
 type Fn = tuple[name, body: string]
-var fns: seq[Fn]
-let lines = readFile(cFile).splitLines
-var i = 0
-while i < lines.len:
-  let l = lines[i]
-  if (l.startsWith("static N_INLINE(") or l.startsWith("N_LIB_PRIVATE N_")) and
-      l.endsWith(") {"):
-    # `N_NOCONV(void, onBus_u0__...)(int sig_p0, ...) {`
-    let a = l.find(", ") + 2
-    let name = l[a ..< l.find(')', a)]
-    var body: seq[string]
-    inc i
-    while i < lines.len and lines[i] != "}":
-      body.add lines[i]
-      inc i
-    fns.add (name, body.join("\n"))
-  inc i
 
 iterator callees(body: string): string =
   ## The names called in `body`: identifiers followed by `(`.
@@ -85,28 +47,89 @@ func short(name: string): string =
   let k = name.find("__", 1)
   if k < 0: name else: name[0 ..< k]
 
-when defined(parseSegNoMapGuard):
-  for f in fns:
-    doAssert f.name.short.split('_')[0] notin ["onBus", "chain", "install"],
-      "a handler function without the guard: " & f.name
-    doAssert "sigaction(" notin f.body, f.name & " calls sigaction without the guard"
-  echo "tmapguardc: ok (no handler: -d:parseSegNoMapGuard)"
-else:
-  let handler = ["onBus", "chain", "lowerCut", "sentByTheKernel"]
-  let allowed = toHashSet(["__atomic_load_n", "__atomic_store_n", "__atomic_compare_exchange_n",
-    "__atomic_add_fetch",
-    "fstat", "mmap",
-    "sigaction", "sigemptyset", "raise", "nimZeroMem", "nimErrorFlag", "NIM_UNLIKELY",
-    "if", "while", "sizeof"])
-  var seen = 0
-  for f in fns:
-    let n = f.name.short
-    if n.split('_')[0] notin handler: continue
-    inc seen
-    doAssert "nimfr_" notin f.body and "nimFrame" notin f.body, n & " has a stack frame"
-    for c in f.body.callees:
-      let callee = c.short
-      if callee.split('_')[0] in handler or callee in allowed or callee.isLocal: continue
-      doAssert false, n & " calls " & callee
-  doAssert seen == handler.len, "found " & $seen & " of the handler's functions in " & cFile
-  echo "tmapguardc: ok"
+proc main*() =
+  when not defined(posix):
+    echo "tmapguardc: skipped: the guard is POSIX only"
+
+    quit 0
+
+  let tmp = getTempDir() / "parseseg_tmapguardc"
+
+  removeDir(tmp)
+
+  createDir(tmp)
+
+  let main = tmp / "guardmain.nim"
+
+  writeFile(main, "import std/os\nimport parseSEG\nvar f = openSeismic(paramStr(1))\nf.close()\n")
+
+  let cache = tmp / "nimcache"
+
+  let (o, code) = execCmdEx(getCurrentCompilerExe().quoteShell & " c --compileOnly" &
+    " --hints:off --warnings:off --skipParentCfg --skipUserCfg --stackTrace:on" &
+    " --lineTrace:on --checks:on" &
+    (when defined(parseSegNoMapGuard): " -d:parseSegNoMapGuard" else: "") & nimPaths() & " --nimcache:" & quoteShell(cache) & " " &
+    quoteShell(main))
+
+  doAssert code == 0, o
+
+  var cFile = ""
+
+  for path in walkFiles(cache / "*mapguard.nim.c"): cFile = path
+
+  doAssert cFile.len > 0, "no C file for private/mapguard"
+
+  var fns: seq[Fn]
+
+  let lines = readFile(cFile).splitLines
+
+  var i = 0
+
+  while i < lines.len:
+    let l = lines[i]
+    if (l.startsWith("static N_INLINE(") or l.startsWith("N_LIB_PRIVATE N_")) and
+        l.endsWith(") {"):
+      # `N_NOCONV(void, onBus_u0__...)(int sig_p0, ...) {`
+      let a = l.find(", ") + 2
+      let name = l[a ..< l.find(')', a)]
+      var body: seq[string]
+      inc i
+      while i < lines.len and lines[i] != "}":
+        body.add lines[i]
+        inc i
+      fns.add (name, body.join("\n"))
+    inc i
+
+  when defined(parseSegNoMapGuard):
+    for f in fns:
+      doAssert f.name.short.split('_')[0] notin ["onBus", "chain", "install"],
+        "a handler function without the guard: " & f.name
+      doAssert "sigaction(" notin f.body, f.name & " calls sigaction without the guard"
+
+    echo "tmapguardc: ok (no handler: -d:parseSegNoMapGuard)"
+  else:
+    let handler = ["onBus", "chain", "lowerCut", "sentByTheKernel"]
+
+    let allowed = toHashSet(["__atomic_load_n", "__atomic_store_n", "__atomic_compare_exchange_n",
+      "__atomic_add_fetch",
+      "fstat", "mmap",
+      "sigaction", "sigemptyset", "raise", "nimZeroMem", "nimErrorFlag", "NIM_UNLIKELY",
+      "if", "while", "sizeof"])
+
+    var seen = 0
+
+    for f in fns:
+      let n = f.name.short
+      if n.split('_')[0] notin handler: continue
+      inc seen
+      doAssert "nimfr_" notin f.body and "nimFrame" notin f.body, n & " has a stack frame"
+      for c in f.body.callees:
+        let callee = c.short
+        if callee.split('_')[0] in handler or callee in allowed or callee.isLocal: continue
+        doAssert false, n & " calls " & callee
+
+    doAssert seen == handler.len, "found " & $seen & " of the handler's functions in " & cFile
+
+    echo "tmapguardc: ok"
+
+when isMainModule: main()

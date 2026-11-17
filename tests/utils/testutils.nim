@@ -1,5 +1,6 @@
 ## Helpers shared by the test files (`import ./utils/testutils`). Kept out of
-## `tests/t*.nim`, so `tester.nim` does not run it as a test.
+## `tests/t*.nim`, so `tester.nim` does not run it as a test. A test's checks
+## live in `proc main*()`; the file ends with `when isMainModule: main()`.
 
 import std/[os, strutils]
 import parseSEG/common/diagnostics

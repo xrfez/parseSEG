@@ -6,11 +6,17 @@
 ## every byte order, and on every trace of the sample files.
 
 import std/[assertions, math, options, os, random, strutils, times]
+
 import parseSEG
+
 import parseSEG/common/[endians, ibmfloat, years]
+
 import parseSEG/io/memsource
+
 import parseSEG/model/traceindex
+
 import parseSEG/private/[segykeys, segywalk]
+
 import ./utils/testutils
 
 # ------------------------------------------------- the reference (15.3-8) --
@@ -207,7 +213,7 @@ proc checkTrace(f: SegyFile, gr: GeometryReader, t: SegyTrace, raw: RawHeaders, 
   doAssert sameKeys(gr.traceKeys(t), k), what
   doAssert sameKeys(segyKeys(gr, raw), k), what & " (raw)"
 
-var rng = initRand(1539)
+var rng: typeof(initRand(1539))
 
 proc randomLayout(): TraceLayout =
   # Entries of every type at random positions in the standard header,
@@ -233,183 +239,188 @@ proc randomHeader(b: var array[TraceHeaderSize, byte]) =
   if rng.rand(1) == 0:
     b[rng.rand(TraceHeaderSize - 1)] = byte(rng.rand(5))
 
-block encode_decode_round_trip:
-  # The raw path reads the bytes the reader decoded; the old path re-encoded
-  # the decoded header. They agree because the codec is a byte-exact round
-  # trip of all 240 bytes (standard and Extension 1).
-  for order in [boBig, boLittle, boPairSwapped]:
-    for n in 0..<2000:
-      var b, back: array[TraceHeaderSize, byte]
-      for x in b.mitems: x = byte(rng.rand(255))
-      decodeTraceHeader(b, order).encode(back, order)
-      doAssert back == b, $order
-      decodeTraceHeaderExt1(b, order).encode(back, order)
-      doAssert back == b, $order
-
-block random_headers_through_random_layouts:
-  for order in [boBig, boLittle, boPairSwapped]:
-    for rev in [0'u8, 1, 2]:
-      for round in 0..<40:
-        var f = SegyFile(byteOrder: order, revision: SegyRevision(major: rev))
-        f.binary.timeBasisCode = int16(rng.rand(6))
-        # The revision's standard layout, a stanza over it (some fields
-        # moved, some of their bytes reused), or nothing standard at all.
-        let standard = standardLayout(SegyRevision(major: rev, minor: 0))
-        f.layout = if round mod 4 == 0: standard
-                   elif round mod 4 == 1: merge(standard, randomLayout())
-                   else: randomLayout()
-        let gr = initGeometryReader(f)
-        for n in 0..<50:
-          var std, ext1: array[TraceHeaderSize, byte]
-          randomHeader(std)
-          randomHeader(ext1)
-          var t = SegyTrace(header: decodeTraceHeader(std, order), hasExt1: rng.rand(3) > 0,
-            ext1: decodeTraceHeaderExt1(ext1, order))
-          if rng.rand(2) == 0: # dates that resolve
-            t.header.year = int16(rng.rand(0..120))
-            t.header.dayOfYear = int16(rng.rand(0..367))
-            t.header.timeBasisCode = int16(rng.rand(0..6))
-            t.header.encode(std, order)
-          for p in 0..<rng.rand(3):
-            var block240: array[TraceHeaderSize, byte]
-            randomHeader(block240)
-            let name = ["PROP0001", "PROP0002", "XYZ00009"][rng.rand(2)]
-            for i, c in name: block240[232 + i] = byte(c)
-            t.proprietary.add block240
-          let raw = RawHeaders(std: cast[ByteBuf](addr std[0]),
-            ext1: if t.hasExt1: cast[ByteBuf](addr ext1[0]) else: nil,
-            prop: byteBuf(t.proprietary), propLen: t.proprietary.len)
-          checkTrace(f, gr, t, raw, $order & " rev " & $rev & " round " & $round)
-
-block fields_a_layout_stanza_moved:
-  # A stanza that keeps the trace code, the delay with its scalar and the
-  # date elsewhere and uses their standard bytes for other things; and one
-  # that only takes the bytes away.
-  proc keysOf(xml: string, std: array[TraceHeaderSize, byte]): TraceKeys =
-    var f = SegyFile(byteOrder: boBig, revision: SegyRevision(major: 2, minor: 1))
-    f.layout = merge(standardLayout(f.revision), parseLayout(xml))
-    var h = std
-    segyKeys(initGeometryReader(f), RawHeaders(std: cast[ByteBuf](addr h[0])))
-  var b: array[TraceHeaderSize, byte]
-  template put16(at, v: int) = putNum(b, at - 1, int16(v), boBig)
-  put16(29, 2)       # standard trace code: dead
-  put16(109, 100)    # standard delay
-  put16(215, 10)     # standard time scalar
-  put16(157, 2020); put16(159, 1); put16(161, 0); put16(163, 0); put16(165, 5); put16(167, 4)
-  put16(13 + 2, 9)   # channel 9 (bytes 13-16)
-  put16(181, 12)     # moved trace code: a vertical component
-  put16(183, 30)     # moved delay
-  put16(185, -10)    # moved time scalar
-  put16(187, 2021); put16(189, 2); put16(191, 1); put16(193, 2); put16(195, 3); put16(197, 4)
-  let standard = keysOf("<segy-layout/>", b)
-  doAssert standard.traceCode == 2 and standard.status == tsDead and standard.component == 0
-  doAssert standard.t0Ms == 1000 and standard.channel == 9
-  doAssert standard.time == 1577836805.0 # 2020-01-01 00:00:05 UTC
-  let moved = keysOf("""<segy-layout>
-    <entry name="other" byte="29" type="int2"/> <entry name="trctype" byte="181" type="int2"/>
-    <entry name="other2" byte="109" type="int2"/> <entry name="delay" byte="183" type="time2"/>
-    <entry name="other3" byte="215" type="int2"/> <entry name="tm_scal" byte="185" type="int2"/>
-    <entry name="year" byte="187" type="int2"/> <entry name="day" byte="189" type="int2"/>
-    <entry name="hour" byte="191" type="int2"/> <entry name="minute" byte="193" type="int2"/>
-    <entry name="second" byte="195" type="int2"/> <entry name="timebase" byte="197" type="int2"/>
-    </segy-layout>""", b)
-  doAssert moved.traceCode == 12 and moved.status == tsLive and moved.component == 12
-  doAssert moved.t0Ms == 3 and moved.channel == 9
-  doAssert moved.time == 1609459200.0 + 86400 + 3723 # 2021-01-02 01:02:03 UTC
-  let gone = keysOf("""<segy-layout>
-    <entry name="other" byte="29" type="int2"/> <entry name="other2" byte="109" type="int2"/>
-    <entry name="other3" byte="157" type="int2"/> <entry name="iline" byte="13" type="int4"/>
-    </segy-layout>""", b)
-  doAssert gone.traceCode == 0 and gone.status == tsUnknown and gone.t0Ms.isNaN
-  doAssert gone.time.isNaN and gone.channel.isNaN and gone.inline == 9
-  doAssert gone.intervalUs == standard.intervalUs # read where the reader reads it
-
 func sameValues(a, b: array[GeometryField, float64]): bool =
   result = true
   for g in GeometryField:
     if not same(a[g], b[g]): return false
 
-block direct_loads_equal_the_layout_walk:
-  # A standard layout is read with direct loads from fixed bytes instead of
-  # an entry walk per name. Both must give the same values and keys, bit for
-  # bit: random headers in every byte order and revision, then every trace
-  # of the demo, sample and (when present) bench files.
-  for order in [boBig, boLittle, boPairSwapped]:
-    for rev in [0'u8, 1, 2]:
-      var f = SegyFile(byteOrder: order, revision: SegyRevision(major: rev))
-      f.layout = standardLayout(f.revision)
-      f.binary.timeBasisCode = 4
-      let gr = initGeometryReader(f)
-      doAssert gr.usesDirectLoads, $rev
-      let walk = gr.withoutDirect
-      doAssert not walk.usesDirectLoads
-      for n in 0 ..< 2000:
-        var std, ext1: array[TraceHeaderSize, byte]
-        randomHeader(std)
-        randomHeader(ext1)
-        let raw = RawHeaders(std: cast[ByteBuf](addr std[0]),
-          ext1: if n mod 3 == 0: cast[ByteBuf](addr ext1[0]) else: nil)
-        doAssert sameValues(geometryValues(gr, raw), geometryValues(walk, raw)), $order
-        doAssert sameKeys(segyKeys(gr, raw), segyKeys(walk, raw)), $order & " rev " & $rev
-  # One name moved, a scalar moved, a proprietary entry: not the standard layout.
-  for xml in ["""<segy-layout><entry name="ffid" byte="233" type="int4"/></segy-layout>""",
-      """<segy-layout><entry name="co_scal" byte="233" type="int2"/></segy-layout>""",
-      """<segy-layout><entry name="other" byte="71" type="int2"/></segy-layout>""",
-      """<segy-layout><entry name="offset" byte="37" type="int4" if-non-zero="1"/>
-         </segy-layout>""",
-      """<segy-layout><extension name="PROP0001"><entry name="cdp" byte="1" type="int4"/>
-         </extension></segy-layout>"""]:
-    var f = SegyFile(byteOrder: boBig, revision: SegyRevision(major: 1))
-    f.layout = merge(standardLayout(f.revision), parseLayout(xml))
-    doAssert not initGeometryReader(f).usesDirectLoads, xml
-  var files = @[demoDir() / "survey.sgy"]
-  if haveSamples:
-    for name in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy"]: files.add exampleDir / name
-  let benchDir = currentSourcePath().parentDir.parentDir / "bench" / "data"
-  for path in walkFiles(benchDir / "*.sgy"): files.add path
-  var direct, traces = 0
-  for path in files:
-    var sf = openSeismic(path, opts = OpenOptions(access: faMapped)) # read from the map below
-    let gr = initGeometryReader(sf.index.segy)
-    let walk = gr.withoutDirect
-    if gr.usesDirectLoads: inc direct
-    let mem = sf.unsafeMemory
-    for i in 0 ..< sf.len:
-      let e = sf.index.entries[i]
-      let a = int(e.offset)
-      let hb = int(e.headerBytes)
-      let raw = RawHeaders(std: cast[ByteBuf](addr mem[a]),
-        ext1: if hb >= 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + TraceHeaderSize]) else: nil,
-        prop: if hb > 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + 2 * TraceHeaderSize])
-              else: nil,
-        propLen: max(hb - 2 * TraceHeaderSize, 0))
-      doAssert sameKeys(segyKeys(gr, raw), segyKeys(walk, raw)), path & " trace " & $i
-      inc traces
-    sf.close()
-  doAssert traces >= 200
-  # Sweep0.sgy is plain Rev 0; the two with a Layout stanza are not direct.
-  if haveSamples: doAssert direct >= 1, $direct
+proc main*() =
+  rng = initRand(1539)
 
-sampleBlock sample_files:
-  # Every trace of the sample SEG-Y files: the reference, the public calls,
-  # the walk's raw headers and the stored keys agree.
-  for name in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy"]:
-    let path = exampleDir / name
-    let src = openMemFileSource(path)
-    var r = openSegyWalk(src)
-    let gr = initGeometryReader(r.file)
-    let fullSrc = openMemFileSource(path)
-    var full = openSegy(fullSrc)
-    var sf = openSeismic(path, keys = true)
-    var t, ft: SegyTrace
-    var i = 0
-    while r.readTrace(t):
-      doAssert full.readTrace(ft)
-      doAssert t.numSamples == ft.numSamples and t.sampleInterval == ft.sampleInterval
-      checkTrace(full.file, gr, ft, r.walkHeaders(t), name & " trace " & $i)
-      doAssert sameKeys(sf.traceKeys(i), refKeys(full.file, ft)), name
-      inc i
-    doAssert i == sf.len and i > 0
-    sf.close()
-    src.close()
-    fullSrc.close()
+  block encode_decode_round_trip:
+    # The raw path reads the bytes the reader decoded; the old path re-encoded
+    # the decoded header. They agree because the codec is a byte-exact round
+    # trip of all 240 bytes (standard and Extension 1).
+    for order in [boBig, boLittle, boPairSwapped]:
+      for n in 0..<2000:
+        var b, back: array[TraceHeaderSize, byte]
+        for x in b.mitems: x = byte(rng.rand(255))
+        decodeTraceHeader(b, order).encode(back, order)
+        doAssert back == b, $order
+        decodeTraceHeaderExt1(b, order).encode(back, order)
+        doAssert back == b, $order
+
+  block random_headers_through_random_layouts:
+    for order in [boBig, boLittle, boPairSwapped]:
+      for rev in [0'u8, 1, 2]:
+        for round in 0..<40:
+          var f = SegyFile(byteOrder: order, revision: SegyRevision(major: rev))
+          f.binary.timeBasisCode = int16(rng.rand(6))
+          # The revision's standard layout, a stanza over it (some fields
+          # moved, some of their bytes reused), or nothing standard at all.
+          let standard = standardLayout(SegyRevision(major: rev, minor: 0))
+          f.layout = if round mod 4 == 0: standard
+                     elif round mod 4 == 1: merge(standard, randomLayout())
+                     else: randomLayout()
+          let gr = initGeometryReader(f)
+          for n in 0..<50:
+            var std, ext1: array[TraceHeaderSize, byte]
+            randomHeader(std)
+            randomHeader(ext1)
+            var t = SegyTrace(header: decodeTraceHeader(std, order), hasExt1: rng.rand(3) > 0,
+              ext1: decodeTraceHeaderExt1(ext1, order))
+            if rng.rand(2) == 0: # dates that resolve
+              t.header.year = int16(rng.rand(0..120))
+              t.header.dayOfYear = int16(rng.rand(0..367))
+              t.header.timeBasisCode = int16(rng.rand(0..6))
+              t.header.encode(std, order)
+            for p in 0..<rng.rand(3):
+              var block240: array[TraceHeaderSize, byte]
+              randomHeader(block240)
+              let name = ["PROP0001", "PROP0002", "XYZ00009"][rng.rand(2)]
+              for i, c in name: block240[232 + i] = byte(c)
+              t.proprietary.add block240
+            let raw = RawHeaders(std: cast[ByteBuf](addr std[0]),
+              ext1: if t.hasExt1: cast[ByteBuf](addr ext1[0]) else: nil,
+              prop: byteBuf(t.proprietary), propLen: t.proprietary.len)
+            checkTrace(f, gr, t, raw, $order & " rev " & $rev & " round " & $round)
+
+  block fields_a_layout_stanza_moved:
+    # A stanza that keeps the trace code, the delay with its scalar and the
+    # date elsewhere and uses their standard bytes for other things; and one
+    # that only takes the bytes away.
+    proc keysOf(xml: string, std: array[TraceHeaderSize, byte]): TraceKeys =
+      var f = SegyFile(byteOrder: boBig, revision: SegyRevision(major: 2, minor: 1))
+      f.layout = merge(standardLayout(f.revision), parseLayout(xml))
+      var h = std
+      segyKeys(initGeometryReader(f), RawHeaders(std: cast[ByteBuf](addr h[0])))
+    var b: array[TraceHeaderSize, byte]
+    template put16(at, v: int) = putNum(b, at - 1, int16(v), boBig)
+    put16(29, 2)       # standard trace code: dead
+    put16(109, 100)    # standard delay
+    put16(215, 10)     # standard time scalar
+    put16(157, 2020); put16(159, 1); put16(161, 0); put16(163, 0); put16(165, 5); put16(167, 4)
+    put16(13 + 2, 9)   # channel 9 (bytes 13-16)
+    put16(181, 12)     # moved trace code: a vertical component
+    put16(183, 30)     # moved delay
+    put16(185, -10)    # moved time scalar
+    put16(187, 2021); put16(189, 2); put16(191, 1); put16(193, 2); put16(195, 3); put16(197, 4)
+    let standard = keysOf("<segy-layout/>", b)
+    doAssert standard.traceCode == 2 and standard.status == tsDead and standard.component == 0
+    doAssert standard.t0Ms == 1000 and standard.channel == 9
+    doAssert standard.time == 1577836805.0 # 2020-01-01 00:00:05 UTC
+    let moved = keysOf("""<segy-layout>
+      <entry name="other" byte="29" type="int2"/> <entry name="trctype" byte="181" type="int2"/>
+      <entry name="other2" byte="109" type="int2"/> <entry name="delay" byte="183" type="time2"/>
+      <entry name="other3" byte="215" type="int2"/> <entry name="tm_scal" byte="185" type="int2"/>
+      <entry name="year" byte="187" type="int2"/> <entry name="day" byte="189" type="int2"/>
+      <entry name="hour" byte="191" type="int2"/> <entry name="minute" byte="193" type="int2"/>
+      <entry name="second" byte="195" type="int2"/> <entry name="timebase" byte="197" type="int2"/>
+      </segy-layout>""", b)
+    doAssert moved.traceCode == 12 and moved.status == tsLive and moved.component == 12
+    doAssert moved.t0Ms == 3 and moved.channel == 9
+    doAssert moved.time == 1609459200.0 + 86400 + 3723 # 2021-01-02 01:02:03 UTC
+    let gone = keysOf("""<segy-layout>
+      <entry name="other" byte="29" type="int2"/> <entry name="other2" byte="109" type="int2"/>
+      <entry name="other3" byte="157" type="int2"/> <entry name="iline" byte="13" type="int4"/>
+      </segy-layout>""", b)
+    doAssert gone.traceCode == 0 and gone.status == tsUnknown and gone.t0Ms.isNaN
+    doAssert gone.time.isNaN and gone.channel.isNaN and gone.inline == 9
+    doAssert gone.intervalUs == standard.intervalUs # read where the reader reads it
+
+  block direct_loads_equal_the_layout_walk:
+    # A standard layout is read with direct loads from fixed bytes instead of
+    # an entry walk per name. Both must give the same values and keys, bit for
+    # bit: random headers in every byte order and revision, then every trace
+    # of the demo, sample and (when present) bench files.
+    for order in [boBig, boLittle, boPairSwapped]:
+      for rev in [0'u8, 1, 2]:
+        var f = SegyFile(byteOrder: order, revision: SegyRevision(major: rev))
+        f.layout = standardLayout(f.revision)
+        f.binary.timeBasisCode = 4
+        let gr = initGeometryReader(f)
+        doAssert gr.usesDirectLoads, $rev
+        let walk = gr.withoutDirect
+        doAssert not walk.usesDirectLoads
+        for n in 0 ..< 2000:
+          var std, ext1: array[TraceHeaderSize, byte]
+          randomHeader(std)
+          randomHeader(ext1)
+          let raw = RawHeaders(std: cast[ByteBuf](addr std[0]),
+            ext1: if n mod 3 == 0: cast[ByteBuf](addr ext1[0]) else: nil)
+          doAssert sameValues(geometryValues(gr, raw), geometryValues(walk, raw)), $order
+          doAssert sameKeys(segyKeys(gr, raw), segyKeys(walk, raw)), $order & " rev " & $rev
+    # One name moved, a scalar moved, a proprietary entry: not the standard layout.
+    for xml in ["""<segy-layout><entry name="ffid" byte="233" type="int4"/></segy-layout>""",
+        """<segy-layout><entry name="co_scal" byte="233" type="int2"/></segy-layout>""",
+        """<segy-layout><entry name="other" byte="71" type="int2"/></segy-layout>""",
+        """<segy-layout><entry name="offset" byte="37" type="int4" if-non-zero="1"/>
+           </segy-layout>""",
+        """<segy-layout><extension name="PROP0001"><entry name="cdp" byte="1" type="int4"/>
+           </extension></segy-layout>"""]:
+      var f = SegyFile(byteOrder: boBig, revision: SegyRevision(major: 1))
+      f.layout = merge(standardLayout(f.revision), parseLayout(xml))
+      doAssert not initGeometryReader(f).usesDirectLoads, xml
+    var files = @[demoDir() / "survey.sgy"]
+    if haveSamples:
+      for name in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy"]: files.add exampleDir / name
+    let benchDir = currentSourcePath().parentDir.parentDir / "bench" / "data"
+    for path in walkFiles(benchDir / "*.sgy"): files.add path
+    var direct, traces = 0
+    for path in files:
+      var sf = openSeismic(path, opts = OpenOptions(access: faMapped)) # read from the map below
+      let gr = initGeometryReader(sf.index.segy)
+      let walk = gr.withoutDirect
+      if gr.usesDirectLoads: inc direct
+      let mem = sf.unsafeMemory
+      for i in 0 ..< sf.len:
+        let e = sf.index.entries[i]
+        let a = int(e.offset)
+        let hb = int(e.headerBytes)
+        let raw = RawHeaders(std: cast[ByteBuf](addr mem[a]),
+          ext1: if hb >= 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + TraceHeaderSize]) else: nil,
+          prop: if hb > 2 * TraceHeaderSize: cast[ByteBuf](addr mem[a + 2 * TraceHeaderSize])
+                else: nil,
+          propLen: max(hb - 2 * TraceHeaderSize, 0))
+        doAssert sameKeys(segyKeys(gr, raw), segyKeys(walk, raw)), path & " trace " & $i
+        inc traces
+      sf.close()
+    doAssert traces >= 200
+    # Sweep0.sgy is plain Rev 0; the two with a Layout stanza are not direct.
+    if haveSamples: doAssert direct >= 1, $direct
+
+  sampleBlock sample_files:
+    # Every trace of the sample SEG-Y files: the reference, the public calls,
+    # the walk's raw headers and the stored keys agree.
+    for name in ["BO_3D-Inglewood_rev21_v7.sgy", "Sweep0.sgy"]:
+      let path = exampleDir / name
+      let src = openMemFileSource(path)
+      var r = openSegyWalk(src)
+      let gr = initGeometryReader(r.file)
+      let fullSrc = openMemFileSource(path)
+      var full = openSegy(fullSrc)
+      var sf = openSeismic(path, keys = true)
+      var t, ft: SegyTrace
+      var i = 0
+      while r.readTrace(t):
+        doAssert full.readTrace(ft)
+        doAssert t.numSamples == ft.numSamples and t.sampleInterval == ft.sampleInterval
+        checkTrace(full.file, gr, ft, r.walkHeaders(t), name & " trace " & $i)
+        doAssert sameKeys(sf.traceKeys(i), refKeys(full.file, ft)), name
+        inc i
+      doAssert i == sf.len and i > 0
+      sf.close()
+      src.close()
+      fullSrc.close()
+
+when isMainModule: main()

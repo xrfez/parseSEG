@@ -10,25 +10,36 @@
 ## failing without the count (`unguard` returning at once): "close did not
 ## wait for the handler inside the slot".
 
+# test-separate: needs -d:parseSegGuardTestHook from tguardslot.nims
+
 import std/[assertions, atomics, monotimes, os, posix, strutils, times, volatile]
+
 import parseSEG
+
 from parseSEG/model/traceindex import unsafeMemory, mappedSize
+
 import parseSEG/private/mapguard
+
 import ./utils/testutils
 
 when not defined(linux) or not mapsGuarded:
-  echo "tguardslot: skipped: needs the guard (Linux, without -d:parseSegNoMapGuard)"
-  quit 0
+  discard
 else:
   var holdHandler {.importc: "parsesegHoldHandler".}: cint # in mapguard's C (the hook)
+
   var inHandler {.importc: "parsesegInHandler".}: cint
+
   proc atomicStore(p: ptr cint, v: cint, order: cint) {.importc: "__atomic_store_n", nodecl.}
+
   proc atomicLoad(p: ptr cint, order: cint): cint {.importc: "__atomic_load_n", nodecl.}
+
   const SeqCst = 5 # __ATOMIC_SEQ_CST
+
   proc store(p: ptr cint, v: cint) = atomicStore(p, v, SeqCst)
+
   proc load(p: ptr cint): cint = atomicLoad(p, SeqCst)
 
-  let tmp = scratchDir("parseseg_tguardslot")
+  var tmp: typeof(scratchDir("parseseg_tguardslot"))
 
   proc mappedAt(a: uint): bool =
     ## Some mapping of this process holds address `a`.
@@ -38,8 +49,11 @@ else:
     false
 
   var reader: Thread[pointer]
+
   var done: Atomic[bool]
+
   var seen: Atomic[int]
+
   proc readPastTheCut(p: pointer) {.thread.} =
     # One load of a page wholly past the cut: it faults, and the handler holds
     # inside the map's slot. Nothing else of the map is read (a reader racing
@@ -83,25 +97,35 @@ else:
     doAssert done.load and seen.load == 0 # the read went on over a zero page
     (ms, stillMapped)
 
-  block a_handler_that_leaves_the_slot_is_waited_for:
-    # Let go 50 ms into the close: the close waits for it, then unmaps.
-    let (ms, mapped) = run(50)
-    doAssert ms >= 40, "close did not wait for the handler inside the slot (" & $ms & " ms)"
-    doAssert ms < float(UnguardWaitMs), $ms
-    doAssert not mapped, "a map whose handler left was not unmapped"
+proc main*() =
+  when not defined(linux) or not mapsGuarded:
+    echo "tguardslot: skipped: needs the guard (Linux, without -d:parseSegNoMapGuard)"
 
-  block a_handler_that_stays_keeps_the_map:
-    # Held past `UnguardWaitMs`: the close returns, the map stays (a leak),
-    # and the handler's zero pages land on it, not on memory reused since.
-    let (ms, mapped) = run(-1)
-    doAssert ms >= float(UnguardWaitMs) * 0.9, "close did not wait for the handler (" & $ms &
-      " ms)"
-    doAssert ms < float(UnguardWaitMs) * 5, "close waited without a bound (" & $ms & " ms)"
-    doAssert mapped, "the map was unmapped under a handler still inside its slot"
+    quit 0
+  else:
+    tmp = scratchDir("parseseg_tguardslot")
 
-  block other_files_still_work:
-    var g = openSeismic(demoDir() / "survey.sgy", opts = OpenOptions(access: faMapped))
-    doAssert g.readTraces(0 ..< g.len).shape[0] == g.len
-    g.close()
+    block a_handler_that_leaves_the_slot_is_waited_for:
+      # Let go 50 ms into the close: the close waits for it, then unmaps.
+      let (ms, mapped) = run(50)
+      doAssert ms >= 40, "close did not wait for the handler inside the slot (" & $ms & " ms)"
+      doAssert ms < float(UnguardWaitMs), $ms
+      doAssert not mapped, "a map whose handler left was not unmapped"
 
-  echo "tguardslot: ok"
+    block a_handler_that_stays_keeps_the_map:
+      # Held past `UnguardWaitMs`: the close returns, the map stays (a leak),
+      # and the handler's zero pages land on it, not on memory reused since.
+      let (ms, mapped) = run(-1)
+      doAssert ms >= float(UnguardWaitMs) * 0.9, "close did not wait for the handler (" & $ms &
+        " ms)"
+      doAssert ms < float(UnguardWaitMs) * 5, "close waited without a bound (" & $ms & " ms)"
+      doAssert mapped, "the map was unmapped under a handler still inside its slot"
+
+    block other_files_still_work:
+      var g = openSeismic(demoDir() / "survey.sgy", opts = OpenOptions(access: faMapped))
+      doAssert g.readTraces(0 ..< g.len).shape[0] == g.len
+      g.close()
+
+    echo "tguardslot: ok"
+
+when isMainModule: main()
