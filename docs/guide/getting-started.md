@@ -10,7 +10,8 @@ on a fresh clone run `atlas rep atlas.lock`). From Nim, add `src/` to the search
 `import parseSEG`: the umbrella module re-exports the whole public API (`docs/api.md`).
 
 ```sh
-nim test                # the test suite, these guides' examples included
+nim test                # the test suite, compiled once; these guides' examples included
+nim c -r tests/tfoo.nim # one test file
 nim cli                 # bin/parseSEG (command line tool)
 ```
 

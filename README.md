@@ -230,11 +230,13 @@ To use parseSEG well from generated code:
 
 ```sh
 atlas rep atlas.lock   # fetch the pinned dependencies into deps/
-nim test               # the test suite (nim testRelease: release and danger builds; nim asan: ASan/LSan)
+nim test               # the test suite, compiled once (nim testRelease: release and danger; nim asan: ASan/LSan)
+nim c -r tests/tfoo.nim   # one test
 nim bench              # benchmarks (docs/benchmarks.md)
 nim docs               # API docs into htmldocs/
 ```
 
+- **Tests:** a file `tests/t*.nim` keeps its checks in `proc main*()` and ends with `when isMainModule: main()`, so `nim c -r tests/tfoo.nim` runs it and the suite can import it without running it. The runner compiles the suite once and runs each test in its own process. A test that must be its own program (its own compiler defines, a libc interposition, or it re-executes itself) has one `# test-separate: <reason>` line; that file is compiled alone. `PARSESEG_TEST_SEPARATE=1 nim test` compiles every file alone, as before.
 - **Sample files:** the real-world sample files are not distributed. Tests that need them are skipped when `SEG Spec/exampleFiles/` is absent, and everything else, including the guide examples and CI, runs on files that `tools/demofiles.nim` generates.
 - **Layout:**
   - `src/parseSEG.nim` is the umbrella module;
