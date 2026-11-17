@@ -121,8 +121,8 @@ proc main*() =
     let rec = recordWith(@[], join(module(1, 1), module(2, 4)))
     doAssert reg.decodeVendorAreas(rec, log).names == @["ext#2"]
     var t = SegdTrace(layout: slRev2, extensions: join(module(1, 5), module(7, 6), module(7, 8)))
-    doAssert reg.decodeVendorAreas(rec, t, log).names == @["tany#3", "tany#4"]
-    # Extension 3 is module(7, 6): no (extension 3) target match, its bytes differ in byte 4.
+    # Extension 3 is module(7, 6): both targets hold, each is a block of its own.
+    doAssert reg.decodeVendorAreas(rec, t, log).names == @["t3#3", "tany#3", "tany#4"]
     doAssert log.len == 0
 
   block modules_do_not_disturb_old_position_maps:
@@ -348,7 +348,7 @@ proc main*() =
     # A match past the end of a block, a short block, an empty area.
     let reg = regOf("""(vendormap "h" (match (format segd))
   (target (kind extendedHeader) (name late) (match (at 30) (bytes 1 2 3 4 5)) (field a (at 1) (enc u8)))
-  (target (kind extendedHeader) (name deep) (match (at 1000000) (bytes 1)) (field a (at 1) (enc u8))))""")
+  (target (kind extendedHeader) (name deep) (match (at 1000000) (bytes 1)) (field b (at 1) (enc u8))))""")
     var log: DiagLog
     doAssert reg.decodeVendorAreas(recordWith(module(1, 1)), log).len == 0
     doAssert reg.decodeVendorAreas(recordWith(module(1, 1)[0 .. 2]), log).len == 0
@@ -383,5 +383,171 @@ proc main*() =
   (field c (at 2) (enc u8) (when (byte 1) (is 2)))))""")
     let notes = m.checkVendorMap
     doAssert notes.len == 1 and "beyond" in notes[0] and "field b" in notes[0], $notes
+
+  block condition_limits_refuse_hostile_maps:
+    var many = "(vendormap \"a\" (target (kind block) (group"
+    for i in 0 ..< 17: many.add " (when (byte 1) (is 1))"
+    expectError(many & " (field x (at 1) (enc u8)))))", "more than 16")
+    var nested = "(vendormap \"a\" (target (kind block) "
+    for i in 0 ..< 9: nested.add "(group (when (byte 1) (is 1)) (when (byte 2) (is 1)) "
+    expectError(nested & "(field x (at 1) (enc u8))" & ")".repeat(11), "more than 16")
+    # 16 conditions on thousands of fields: refused by the running total.
+    var wide = "(vendormap \"a\" (target (kind block) (group"
+    for i in 0 ..< 16: wide.add " (when (byte 1) (is 1))"
+    for i in 0 ..< 5000: wide.add " (field f" & $i & " (at 1) (enc u8))"
+    expectError(wide & ")))", "over all its fields")
+    # At the limits it loads.
+    var okMap = "(vendormap \"a\" (target (kind block) (group"
+    for i in 0 ..< 16: okMap.add " (when (byte 1) (is 1))"
+    discard loadVendorMap("(.nif27)\n" & okMap & " (field x (at 1) (enc u8)))))")
+
+  block low_nibble_past_the_end_is_reported:
+    let m = loadVendorMap("""(.nif27)
+(vendormap "n" (target (kind block) (name n)
+  (field a (at 3) (nibble low) (len 2n) (enc unibble))
+  (field b (at 3) (nibble low) (len 1n) (enc unibble))))""")
+    var blk: VendorBlock
+    var problems: seq[string]
+    m.targets[0].decodeTarget([1'u8, 2, 0x3F], boBig, blk, problems)
+    doAssert "a" notin blk and blk["b"].intVal == 0xF
+    doAssert problems.len == 1 and "field a lies beyond" in problems[0], $problems
+    expectError("(vendormap \"a\" (target (kind block) (repeat (count 1) (stride 1) (at 1) " &
+      "(field v (at 1) (nibble low) (len 2n) (enc unibble)))))", "exceeds the stride")
+
+  block rev3_trailer_content_match:
+    let reg = regOf("""(vendormap "t" (match (format segd))
+  (target (kind trailer) (name tr) (match (at 1) (bytes 0x56)) (field x (at 2) (enc u8))))""")
+    var log: DiagLog
+    let a3 = VendorArea(kind: vtTrailer, blockIndex: -1, blockType: 1, extIndex: -1)
+    doAssert reg.decode(ctxZeta(), a3, [0x56'u8, 9], log).get["x"].intVal == 9
+    doAssert reg.decode(ctxZeta(), a3, [0x57'u8, 9], log).isNone
+    # The whole trailer area of Rev 0-2 is not a block.
+    doAssert reg.decode(ctxZeta(), VendorArea(kind: vtTrailer, blockIndex: -1, blockType: -1,
+      extIndex: -1), [0x56'u8, 9], log).isNone
+    var rec = SegdRecord(layout: slRev3)
+    var desc = SegdTrailerDescription(trailerBlockType: 1, asciiOrBinary: 2, blockSize: 1,
+      blockType: 0x70)
+    rec.trailerRev3 = @(desc.encoded)
+    var data = newSeq[byte](32)
+    data[0] = 0x56; data[1] = 4
+    rec.trailerRev3.add data
+    doAssert reg.decodeVendorAreas(rec, log).names == @["tr#-1"]
+    doAssert log.len == 0
+
+  block conditions_on_absent_fields_fail:
+    # Two layouts selected by byte 1; the conditions of the second layout read
+    # a field that exists only in the first.
+    let reg = regOf("""(vendormap "l" (match (format segd))
+  (target (kind extendedHeader) (blockIndex 1) (name l)
+    (field layout (at 1) (enc u8))
+    (group (when (field layout) (is 1))
+      (field kind (at 2) (enc u8))
+      (field a (at 3) (enc u8) (when (field kind) (is 7))))
+    (field b (at 3) (enc u8) (when (field kind) (is 7)))))""")
+    var log: DiagLog
+    proc run(layout, kind: byte): VendorBlock =
+      var b = newSeq[byte](32)
+      b[0] = layout; b[1] = kind; b[2] = 5
+      reg.decodeVendorAreas(recordWith(b), log)[0]
+    var r = run(1, 7)
+    doAssert "kind" in r and "a" in r and "b" in r
+    r = run(2, 7) # kind is absent, though its raw byte is 7
+    doAssert "kind" notin r and "a" notin r and "b" notin r
+    r = run(1, 6)
+    doAssert "kind" in r and "a" notin r and "b" notin r
+
+  block one_block_per_matched_target:
+    let reg = regOf("""(vendormap "d" (match (format segd))
+  (target (kind extendedHeader) (blockIndex 1) (name pos) (field v (at 5) (enc u8)))
+  (target (kind extendedHeader) (name m1) (match (at 4) (bytes 1)) (field v (at 5) (enc u8)))
+  (target (kind extendedHeader) (name m2) (match (at 4) (bytes 1)) (field w (at 5) (enc u8))))""")
+    var log: DiagLog
+    let r = reg.decodeVendorAreas(recordWith(join(module(1, 4), module(2, 4), module(1, 6))), log)
+    doAssert r.names == @["pos#1", "m1#1", "m2#1", "m1#3", "m2#3"], $r.names
+    doAssert r[0].fields.len == 1 and r[1]["v"].intVal == 4 and r[3]["v"].intVal == 6
+    let notes = reg.maps[0].checkVendorMap
+    doAssert notes.len == 1 and "pos and m1" in notes[0] and "field v" in notes[0], $notes
+    doAssert regOf(modules).maps[0].checkVendorMap.len == 0 # disjoint byte runs
+    # `decode` still gives the first block.
+    var ctx = ctxZeta()
+    doAssert reg.decode(ctx, VendorArea(kind: vtExtendedHeader, blockIndex: 1, blockType: -1, extIndex: -1),
+      module(1, 4), log).get.name == "pos"
+
+  block check_notes_for_record_conditions:
+    let m = loadVendorMap("""(.nif27)
+(vendormap "k" (target (kind traceExt)
+  (field a (at 1) (enc u8) (when (record extendedHeader (match (at 1) (bytes 1)) (byte 33)) (is 1)))
+  (field b (at 2) (enc u8) (when (record extendedHeader (match (at 30) (bytes 1 2 3 4)) (byte 1)) (is 1)))))""")
+    let notes = m.checkVendorMap
+    doAssert notes.len == 2 and "field a" in notes[0] and "byte 33" in notes[0], $notes
+    doAssert "field b" in notes[1] and "never holds" in notes[1], $notes
+
+  block match_has_one_at_and_one_bytes:
+    expectError("(vendormap \"a\" (target (kind block) (match (at 1) (at 2) (bytes 1))))", "two (at)")
+    expectError("(vendormap \"a\" (target (kind block) (match (at 1) (bytes 1) (bytes 2))))",
+      "two (bytes)")
+
+  block first_matching_module_is_read:
+    let reg = regOf("""(vendormap "r" (match (format segd) (manufacturer 77))
+  (target (kind traceExt) (extension 2) (name tx)
+    (field v3only (at 2) (enc u8)
+      (when (record extendedHeader (match (at 1) (bytes 0x5A 0 0 6)) (byte 5)) (is 3)))))""")
+    let t = SegdTrace(layout: slRev2, extensions: module(1, 0, [1'u8, 2]))
+    var log: DiagLog
+    let a = reg.decodeVendorAreas(recordWith(join(module(6, 3), module(6, 2))), t, log)
+    doAssert "v3only" in a[0]
+    let b = reg.decodeVendorAreas(recordWith(join(module(6, 2), module(6, 3))), t, log)
+    doAssert "v3only" notin b[0]
+    # The overload with a context built once per record gives the same.
+    let rec = recordWith(join(module(6, 3)))
+    let ctx = vendorContext(rec, reg.usesRecordBlocks)
+    doAssert ctx.extended.len == 32
+    doAssert reg.decodeVendorAreas(ctx, rec, t, log)[0].fields.len == 1
+    doAssert vendorContext(rec, false).extended.len == 0
+    # A map built in code reports its use of record blocks too.
+    var built = VendorMap(name: "b")
+    doAssert not built.usesRecordBlocks
+    built.match.blocks.add VendorBlockMatch(area: vtExtendedHeader)
+    doAssert built.usesRecordBlocks
+
+  block rev3_record_blocks_and_typed_matches:
+    let reg = regOf("""(vendormap "r3" (match (format segd) (manufacturer 77)
+    (hasBlock generalHeader (match (at 1) (bytes 8 8))))
+  (target (kind block) (type 0xB0) (where generalHeader) (name hit) (match (at 1) (bytes 7 7))
+    (field x (at 3) (enc u8))))""")
+    var rec = SegdRecord(layout: slRev3)
+    rec.gh1.manufacturerCode = 77
+    var g = newSeq[byte](96)
+    g[0] = 7; g[1] = 7; g[2] = 41; g[31] = 0xB0     # matches
+    g[32] = 8; g[33] = 8; g[34] = 42; g[63] = 0xB0  # type matches, bytes do not
+    g[64] = 7; g[65] = 7; g[66] = 43; g[95] = 0xB0  # a second one
+    rec.generalBlocks = g
+    var log: DiagLog
+    let r = reg.decodeVendorAreas(rec, log)
+    doAssert r.len == 2 and r[0]["x"].intVal == 41 and r[1]["x"].intVal == 43, $r.names
+    doAssert vendorContext(rec).general.len == 96
+    rec.generalBlocks[32] = 9 # the block that identifies the map is gone: the map does not apply
+    doAssert reg.decodeVendorAreas(rec, log).len == 0
+    doAssert log.len == 0
+
+  block documented_examples_load:
+    for src in [
+        """(vendormap "a" (match (format segd) (manufacturer 9)
+  (hasBlock extendedHeader (match (at 1) (bytes 0x09 0 0 1 1)))) (target (kind block) (field x (at 1) (enc u8))))""",
+        """(vendormap "a" (target (kind extendedHeader) (name acmeSource)
+  (match (at 1) (bytes 0x09 0 0 2))          ; bytes 1-4 of the block
+  (field shot (at 6) (enc u32))))""",
+        """(vendormap "a" (target (kind traceExt) (name t) (field layout (at 1) (enc u8))
+(field orientation (at 26) (enc u8) (when (field layout) (is 2)))
+(group (when (byte 30) (in 1 2))              ; one condition for several fields
+  (field a (at 2) (enc u8))
+  (field b (at 3) (enc u16)))))""",
+        """(vendormap "a" (target (kind traceExt) (name t)
+(field flags  (at 12) (nibble high) (len 1n) (enc unibble))   ; high 4 bits
+(field mode   (at 12) (nibble low)  (len 1n) (enc unibble))   ; low 4 bits
+(field digit  (at 13) (nibble low)  (len 1n) (enc bcd))       ; one BCD digit
+(field wide   (at 14) (len 3n) (enc unibble))                 ; 12 bits: nibbles 1-3 of bytes 14-15
+(field wide2  (at 14) (nibble low) (len 3n) (enc unibble))))"""]:
+      discard loadVendorMap("(.nif27)\n" & src) # the nibble example overlaps on purpose
 
 when isMainModule: main()

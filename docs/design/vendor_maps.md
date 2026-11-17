@@ -67,6 +67,14 @@ not where it is:
   the 32-byte GH blocks, and each trace header extension (`traceExt`, with or without
   `(extension k)`). A run that reaches past the block's end does not match; `vendormap check`
   notes it. The other kinds (`block`, `trailer`, SEG-Y) get the area as it is offered.
+- **One block per matched target.** The targets without `match` that hold for a block give one
+  `VendorBlock` together, as before. Each target with `match` that holds gives a block of
+  its own (`decodeAll`; `decode` returns the first), so a positional and a matched target
+  never merge their fields. `vendormap check` warns when two targets of a map can decode one
+  block and both give a field of the same name.
+- **Rev 3 trailer.** A target `(kind trailer)` with `match` and no `blockIndex` is tried on
+  the data of each Rev 3 trailer description block (matched from its first byte, not limited
+  to 32 bytes); the whole trailer area of Rev 0-2 is never offered to it.
 - Existing maps are unaffected: a target without `match` behaves as before.
 
 ## Conditions: `(when)` and `(group)`
@@ -92,6 +100,11 @@ all have to hold.
   version byte of an extended-header module. With no such block the condition is false.
   `decodeVendorAreas` fills the context blocks only when a loaded map uses them
   (`VendorMap.usesRecordBlocks`).
+- A condition on `(field x)` fails when `x` is itself absent because its own conditions (or its
+  group's) failed, so two alternative layouts do not read each other's bytes. (A field absent
+  by its sentinel still counts by its raw value.)
+- At most 16 `(when)` clauses per field (its own plus its groups'), and 65,536 in a map;
+  more is a map error.
 - `(when)` is not supported inside `(repeat)`.
 
 ## Narrow fields

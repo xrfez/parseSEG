@@ -822,6 +822,11 @@ and `fields`. What a viewer should expect from maps that find blocks by content:
 - A field can be absent from `fields` without any message: its sentinel value, or a `(when)`
   condition of the map that does not hold (e.g. a layout that another byte excludes). Look
   fields up with `name in blk` before `blk["name"]`, which raises `KeyError`.
+- A map can give several blocks for one area block (one per matched target, same
+  `blockNumber`): show each by `name`.
+- For a SEG-D record, build `let ctx = vendorContext(rec, reg.usesRecordBlocks)` once and
+  call `decodeVendorAreas(reg, ctx, rec, trace, log)` for each trace. The overload without
+  `ctx` rebuilds it (copying the record's header blocks when a map reads them) on every call.
 - `VendorContext.extended`, `external` and `general` are copied only when a loaded map needs
   them (`hasBlock`, `(when (record ...))`); `vendorContext(rec)` always fills them, so
   `map.applies(ctx)` is exact.

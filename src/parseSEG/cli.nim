@@ -770,10 +770,11 @@ proc vendormap(a: Args): int =
         while r.nextRecord():
           echo " (record ", r.record.index
           printBlocks("  ", decodeVendorAreas(reg, r.record, log, path))
+          let ctx = vendorContext(r.record, reg.usesRecordBlocks)
           var t: SegdTrace
           while r.readTrace(t):
             if k < n and want[k]:
-              let blocks = decodeVendorAreas(reg, r.record, t, log, path)
+              let blocks = decodeVendorAreas(reg, ctx, r.record, t, log, path)
               if blocks.len > 0:
                 echo "  (trace ", k
                 printBlocks("   ", blocks)

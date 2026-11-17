@@ -21,12 +21,31 @@
 ##   `;` starts a comment. Maps are limited to 1 MB, nesting depth 64 and
 ##   offsets/lengths/counts of 1,000,000.
 ## - Encodings: `u8 u16 u24 u32 u64 i8 i16 i24 i32 i64 f32 f64 ibm32 bcd
-##   fixedpt ascii ebcdic raw` (`fixedpt` = `i24.u16`, 5 bytes).
+##   fixedpt ascii ebcdic raw unibble inibble` (`fixedpt` = `i24.u16`, 5 bytes;
+##   `unibble`/`inibble` = unsigned/signed binary of `(len N n)` nibbles, 1..16,
+##   from the high or the `(nibble low)` nibble: 4-bit and 12-bit fields).
 ## - Per field: `byteOrder` (big/little; default: the file's), `scale`,
 ##   `offset`, `unit`, `enum`, `bits`, `sentinel` (a raw value meaning "absent"),
 ##   `trim` (left/right/both, text).
 ## - `repeat` decodes a group `count` times (a number or `(ref field)`), at
 ##   `at + i * stride`; its fields are named `name[i]`.
+##
+## - `(match (at N) (bytes b...))` in a target: the block must hold those
+##   bytes. Without `blockIndex` the target applies to every block of its area
+##   (32-byte blocks of the SEG-D extended and external header, each general
+##   header block and trace header extension) that holds them, wherever it
+##   sits; each such target gives a `VendorBlock` of its own (`decodeAll`).
+## - `(when <source> <test>)` on a field, and `(group (when ...) (field ...)...)`
+##   for several: the field is decoded only if the source has the value;
+##   otherwise it is absent, without a diagnostic. Source: `(field earlier)`,
+##   `(byte N)`, `(highNibble N)`, `(lowNibble N)`, or the same byte in a block
+##   of the record's extended/external/general headers,
+##   `(record <area> (match ...) (byte N))`. Test: `(is v)`, `(in v...)`,
+##   `(range lo hi)`. A field whose own conditions failed is absent for the
+##   conditions that name it.
+## - In the map's `(match ...)`: `(hasBlock <area> (match ...))` requires such a
+##   block in `extendedHeader`, `externalHeader` or `generalHeader`; each counts
+##   one in the specificity.
 ##
 ## Loading compiles each map into flat field plans, so decoding is a loop
 ## over precomputed offsets. Nothing here is fatal: malformed maps and fields
@@ -78,30 +97,30 @@ type
   VendorBytesMatch* = object
     ## A compiled `(match (at N) (bytes b...))`: the block must hold `bytes` from
     ## `byteOff`. A block too short for it does not match.
-    byteOff*: int       ## 0-based offset within the block.
+    byteOff*: int ## 0-based offset within the block.
     bytes*: seq[byte]
 
   VendorCondSource* = enum
     ## What a `(when ...)` condition reads.
-    csField           ## The raw value of an earlier field of the same target.
-    csByte            ## A raw byte of the block.
-    csHighNibble      ## The high nibble of a raw byte.
-    csLowNibble       ## The low nibble of a raw byte.
+    csField ## The raw value of an earlier field of the same target.
+    csByte ## A raw byte of the block.
+    csHighNibble ## The high nibble of a raw byte.
+    csLowNibble ## The low nibble of a raw byte.
 
   VendorCondition* = object
     ## A compiled `(when <source> <test>)`. Several conditions on a field all
     ## have to hold; a field whose condition fails is absent, without a diagnostic.
     source*: VendorCondSource
-    fieldName*: string       ## `csField`: the field read.
-    fieldIndex*: int         ## `csField`: its index in the target's `fields`.
-    byteOff*: int            ## Other sources: 0-based byte offset.
+    fieldName*: string ## `csField`: the field read.
+    fieldIndex*: int ## `csField`: its index in the target's `fields`.
+    byteOff*: int ## Other sources: 0-based byte offset.
     recordArea*: Option[VendorTargetKind] ## Some: read the byte in the first block of
                              ## this record-level area (see `VendorContext`) holding `recordMatch`.
     recordMatch*: seq[VendorBytesMatch]
-    isRange*: bool           ## `(range lo hi)`; otherwise `(is v)` or `(in v...)` in `values`.
+    isRange*: bool ## `(range lo hi)`; otherwise `(is v)` or `(in v...)` in `values`.
     values*: seq[int64]
     lo*, hi*: int64
-    line*: int               ## Line in the map, for messages.
+    line*: int ## Line in the map, for messages.
 
   VendorFieldPlan* = object
     ## A compiled field.
@@ -175,8 +194,6 @@ type
     source*: string      ## File the map was loaded from.
     match*: VendorMatch
     targets*: seq[VendorTarget]
-    usesRecordBlocks*: bool ## Set by `loadVendorMap`: the map reads record-level blocks
-                         ## (`hasBlock`, `(when (record ...))`), so `VendorContext` needs them.
 
   VendorContext* = object
     ## Facts about a file that maps are matched against.
@@ -224,7 +241,7 @@ type
     ## Decoded vendor data, beside the raw bytes the readers keep.
     mapName*: string     ## The map (or code decoder) that decoded it.
     name*: string        ## The target's name.
-    blockNumber*: int    ## The block it was decoded from: its 1-based number in the area
+    blockNumber*: int = -1 ## The block it was decoded from: its 1-based number in the area
                          ## (general header: GH#N), or the trace header extension number;
                          ## -1 for a whole area or a block with no number.
     fields*: seq[VendorField]
@@ -257,6 +274,8 @@ const
   MaxMatchBytes = 64     ## Longest `(bytes ...)` list.
   MaxMatchesPerTarget = 16
   MaxCondValues = 256    ## Longest `(in ...)` list.
+  MaxCondsPerField = 16  ## `(when)` clauses on a field, its own and those of its groups.
+  MaxCondsPerMap = 65_536 ## `(when)` clauses stored in a map, over all fields.
   MaxMapBytes = 1 shl 20 ## Larger map files are refused.
   MaxDepth = 64          ## Deeper nesting is refused.
   MaxOffset = 1_000_000  ## Bound for offsets, lengths, counts and strides.
@@ -472,9 +491,11 @@ proc compileBytesMatch(n: NNode): VendorBytesMatch =
   for k in n.trees:
     case k.tag
     of "at":
+      if atSeen: mapError("(match) has two (at)", k.line)
       result.byteOff = k.boundedAtom(1) - 1
       atSeen = true
     of "bytes":
+      if bytesSeen: mapError("(match) has two (bytes)", k.line)
       let vals = k.intAtoms
       if vals.len != k.atoms.len or vals.len == 0:
         mapError("(bytes) needs byte values 0..255", k.line)
@@ -646,7 +667,7 @@ proc compileRepeat(n: NNode): VendorRepeatPlan =
   if result.stride == 0: mapError("(repeat) needs (stride)", n.line)
   # Fields inside a repeat use 1-based offsets within the element.
   for f in result.fields:
-    if f.byteOff + (f.nibbles + 1) div 2 > result.stride:
+    if (2 * f.byteOff + ord(f.lowNibble) + f.nibbles + 1) div 2 > result.stride:
       mapError("repeat field " & f.name & " exceeds the stride", n.line)
 
 func isIntEncoding(e: VendorEncoding): bool =
@@ -654,10 +675,17 @@ func isIntEncoding(e: VendorEncoding): bool =
     veINib}
 
 proc addField(t: var VendorTarget, f: sink VendorFieldPlan, inherited: seq[VendorCondition],
-    line: int) =
+    total: var int, line: int) =
   # Adds a field with the conditions of its enclosing groups, resolving each
   # `(when (field x))` to an earlier integer field of the target.
   var f = f
+  if f.conds.len + inherited.len > MaxCondsPerField:
+    mapError("field " & f.name & " has more than " & $MaxCondsPerField & " (when) conditions" &
+      " (its own and its groups')", line)
+  total += f.conds.len + inherited.len
+  if total > MaxCondsPerMap:
+    mapError("the map holds more than " & $MaxCondsPerMap & " (when) conditions over all its fields",
+      line)
   f.conds.add inherited
   for c in f.conds.mitems:
     if c.source == csField:
@@ -672,19 +700,23 @@ proc addField(t: var VendorTarget, f: sink VendorFieldPlan, inherited: seq[Vendo
           ")) needs an integer or bcd field", c.line)
   t.fields.add f
 
-proc compileGroup(t: var VendorTarget, n: NNode, inherited: seq[VendorCondition]) =
+proc compileGroup(t: var VendorTarget, n: NNode, inherited: seq[VendorCondition],
+    total: var int) =
   # `(group (when ...)... (field ...)... (group ...))`: the conditions apply to every field.
   var conds = inherited
   for k in n.trees:
-    if k.tag == "when": conds.add compileCond(k)
+    if k.tag == "when":
+      if conds.len >= MaxCondsPerField:
+        mapError("a group has more than " & $MaxCondsPerField & " (when) conditions", k.line)
+      conds.add compileCond(k)
   for k in n.trees:
     case k.tag
     of "when": discard
-    of "field": t.addField(compileField(k), conds, k.line)
-    of "group": t.compileGroup(k, conds)
+    of "field": t.addField(compileField(k), conds, total, k.line)
+    of "group": t.compileGroup(k, conds, total)
     else: mapError("unknown (group) attribute (" & k.tag & ")", k.line)
 
-proc compileTarget(n: NNode): VendorTarget =
+proc compileTarget(n: NNode, condTotal: var int): VendorTarget =
   result = VendorTarget(blockIndex: -1, blockType: -1, extIndex: -1)
   var kindSeen = false
   for k in n.trees:
@@ -700,8 +732,8 @@ proc compileTarget(n: NNode): VendorTarget =
     of "headerName": result.headerName = k.textAtom
     of "stanza": result.stanza = k.textAtom
     of "extension": result.extIndex = k.boundedAtom(1)
-    of "field": result.addField(compileField(k), @[], k.line)
-    of "group": result.compileGroup(k, @[])
+    of "field": result.addField(compileField(k), @[], condTotal, k.line)
+    of "group": result.compileGroup(k, @[], condTotal)
     of "match":
       if result.matches.len >= MaxMatchesPerTarget:
         mapError("a target holds at most " & $MaxMatchesPerTarget & " (match) clauses", k.line)
@@ -719,6 +751,15 @@ proc compileTarget(n: NNode): VendorTarget =
     if r.countRef.len > 0 and r.countRef notin names:
       mapError("(ref " & r.countRef & ") names no field of target " & result.name, n.line)
 
+func usesRecordBlocks*(m: VendorMap): bool =
+  ## True when the map reads the record-level blocks of `VendorContext`
+  ## (`hasBlock`, `(when (record ...))`).
+  if m.match.blocks.len > 0: return true
+  for t in m.targets:
+    for f in t.fields:
+      for c in f.conds:
+        if c.recordArea.isSome: return true
+
 proc loadVendorMap*(nif: string, source = ""): VendorMap =
   ## Parses and compiles one vendor map. Raises `ValueError` (with a line
   ## number) for a malformed map.
@@ -730,6 +771,7 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
       found = i
   if found < 0: mapError("no (vendormap ...) in the file")
   let m = roots[found]
+  var condTotal = 0
   result = VendorMap(name: m.textAtom, source: source,
     match: VendorMatch(serialMin: -1, serialMax: -1))
   for k in m.trees:
@@ -763,14 +805,33 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
           if bm.matches.len == 0: mapError("(hasBlock) needs a (match)", c.line)
           result.match.blocks.add bm
         else: mapError("unknown match clause (" & c.tag & ")", c.line)
-    of "target": result.targets.add compileTarget(k)
+    of "target": result.targets.add compileTarget(k, condTotal)
     else: mapError("unknown vendormap attribute (" & k.tag & ")", k.line)
   if result.targets.len == 0: mapError("vendor map " & result.name & " has no target")
-  result.usesRecordBlocks = result.match.blocks.len > 0
-  for t in result.targets:
-    for f in t.fields:
-      for c in f.conds:
-        if c.recordArea.isSome: result.usesRecordBlocks = true
+
+func contradicts(a, b: seq[VendorBytesMatch]): bool =
+  # True when some byte is required to have two values.
+  for x in a:
+    for y in b:
+      for i, u in x.bytes:
+        let j = x.byteOff + i - y.byteOff
+        if j >= 0 and j < y.bytes.len and y.bytes[j] != u: return true
+
+func mayShareBlock(a, b: VendorTarget): bool =
+  # Could one block be decoded by both targets?
+  if a.kind != b.kind: return false
+  if a.blockIndex >= 0 and b.blockIndex >= 0 and a.blockIndex != b.blockIndex: return false
+  if a.kind in {vtExtendedHeader, vtExternalHeader, vtTrailer}:
+    # A whole area and a block of it are different offers.
+    let wa = a.blockIndex < 0 and a.matches.len == 0
+    let wb = b.blockIndex < 0 and b.matches.len == 0
+    if wa != wb: return false
+  if a.blockType >= 0 and b.blockType >= 0 and a.blockType != b.blockType: return false
+  if a.where.len > 0 and b.where.len > 0 and cmpIgnoreCase(a.where, b.where) != 0: return false
+  if a.extIndex >= 0 and b.extIndex >= 0 and a.extIndex != b.extIndex: return false
+  if a.headerName.len > 0 and b.headerName.len > 0 and a.headerName != b.headerName: return false
+  if a.stanza.len > 0 and b.stanza.len > 0 and a.stanza != b.stanza: return false
+  not contradicts(a.matches, b.matches)
 
 func blockKind(k: VendorTargetKind): bool =
   # Areas handed over in 32-byte blocks.
@@ -781,7 +842,8 @@ proc checkVendorMap*(m: VendorMap): seq[string] =
   ## a target (bit-level reuse is sometimes intended; fields under `(when)`
   ## are not compared, as they may exclude each other), and content
   ## `match` clauses and conditions that read beyond the 32-byte blocks of
-  ## SEG-D (they can never hold, or the field is never decoded).
+  ## SEG-D (they can never hold, or the field is never decoded), and two
+  ## targets that can decode one block and give the same field name.
   for t in m.targets:
     for i, a in t.fields:
       for b in t.fields[i + 1 .. ^1]:
@@ -800,6 +862,26 @@ proc checkVendorMap*(m: VendorMap): seq[string] =
           if c.recordArea.isNone and c.source != csField and c.byteOff >= VendorBlockSize:
             result.add "target " & t.name & ": field " & f.name & " is conditioned on byte " &
               $(c.byteOff + 1) & ", beyond the " & $VendorBlockSize & "-byte block"
+  for t in m.targets:
+    for f in t.fields:
+      for c in f.conds:
+        if c.recordArea.isSome:
+          if c.byteOff >= VendorBlockSize:
+            result.add "target " & t.name & ": field " & f.name & " reads byte " & $(c.byteOff + 1) &
+              " of a record block, beyond the " & $VendorBlockSize & "-byte block"
+          for x in c.recordMatch:
+            if x.byteOff + x.bytes.len > VendorBlockSize:
+              result.add "target " & t.name & ": field " & f.name &
+                " has a (record) (match) beyond the " & $VendorBlockSize & "-byte block;" &
+                " it never holds"
+  for i, a in m.targets:
+    for b in m.targets[i + 1 .. ^1]:
+      if a.mayShareBlock(b):
+        for fa in a.fields:
+          for fb in b.fields:
+            if fa.name == fb.name:
+              result.add "targets " & a.name & " and " & b.name & " can decode the same block " &
+                "and both give field " & fa.name
   for hb in m.match.blocks:
     for x in hb.matches:
       if x.byteOff + x.bytes.len > VendorBlockSize:
@@ -898,10 +980,12 @@ func headerKey(name: string): string =
 
 func targetMatches(t: VendorTarget, a: VendorArea, b: openArray[byte]): bool =
   # With `match` clauses and no `blockIndex`, the target is for every block of
-  # the area (never for the whole area of a 32-byte block kind).
+  # the area (never for the whole area of a 32-byte block kind; a Rev 3 trailer
+  # description block's data has a block type and counts as one block).
   let indexOk =
     if t.blockIndex >= 0 or t.matches.len == 0: t.blockIndex == a.blockIndex
-    else: a.blockIndex >= 0 or t.kind notin {vtExtendedHeader, vtExternalHeader, vtTrailer}
+    else: a.blockIndex >= 0 or t.kind notin {vtExtendedHeader, vtExternalHeader, vtTrailer} or
+      (t.kind == vtTrailer and a.blockType >= 0) # a Rev 3 trailer block's data
   t.kind == a.kind and
     indexOk and
     b.holds(t.matches) and
@@ -1037,10 +1121,12 @@ func testHolds(c: VendorCondition, v: int64): bool =
   if c.isRange: v >= c.lo and v <= c.hi else: v in c.values
 
 func condHolds(c: VendorCondition, t: VendorTarget, b: openArray[byte], order: ByteOrder,
-    ctx: VendorContext): bool =
-  # False when the source is missing (no such field or block, byte past the end).
+    ctx: VendorContext, off: openArray[bool]): bool =
+  # False when the source is missing (no such field or block, byte past the end,
+  # or a field `off` by its own conditions).
   var v: int64
   if c.source == csField:
+    if c.fieldIndex < off.len and off[c.fieldIndex]: return false
     if not t.fields[c.fieldIndex].readRaw(b, order, v): return false
     return c.testHolds(v)
   var x = -1
@@ -1061,20 +1147,25 @@ proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
     blk: var VendorBlock, problems: var seq[string], ctx: VendorContext = VendorContext()) =
   ## Decodes `t`'s fields from `b` into `blk`; fields that do not fit are
   ## listed in `problems` (sentinel values and fields whose `(when)` fails
-  ## are simply absent). `ctx` supplies the record-level blocks of
+  ## are simply absent; a condition on a field that is absent for its own
+  ## conditions fails). `ctx` supplies the record-level blocks of
   ## `(when (record ...))` conditions.
   blk.name = t.name
-  for f in t.fields:
+  var off: seq[bool] # fields whose own conditions failed (allocated at the first)
+  for i, f in t.fields:
     var on = true
     for c in f.conds:
-      if not c.condHolds(t, b, order, ctx):
+      if not c.condHolds(t, b, order, ctx, off):
         on = false
         break
-    if not on: continue
+    if not on:
+      if off.len == 0: off = newSeq[bool](t.fields.len)
+      off[i] = true
+      continue
     let v = decodeField(f, b, 0, order)
     if v.isSome:
       blk.fields.add VendorField(name: f.name, value: v.get)
-    elif f.byteOff + (f.nibbles + 1) div 2 > b.len:
+    elif (2 * f.byteOff + ord(f.lowNibble) + f.nibbles + 1) div 2 > b.len:
       problems.add "field " & f.name & " lies beyond the " & $b.len & "-byte area"
   for r in t.repeats:
     var count = r.count
@@ -1102,12 +1193,15 @@ func applies*(m: VendorMap, ctx: VendorContext): bool =
   ## True when every clause of the map's `match` holds for `ctx`.
   specificity(m.match, ctx) >= 0
 
-proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: openArray[byte],
-    log: var DiagLog, loc = Location()): Option[VendorBlock] =
+proc decodeAll*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
+    bytes: openArray[byte], log: var DiagLog, loc = Location()): seq[VendorBlock] =
   ## Decodes a vendor area: a registered code decoder for (manufacturer,
   ## kind) first, then the most specific matching map with a target for the
-  ## area. None when nothing applies (the caller keeps the raw bytes and may
-  ## report `dcVendorBlock`). Problems become diagnostics.
+  ## area. Empty when nothing applies (the caller keeps the raw bytes and may
+  ## report `dcVendorBlock`). The targets without `match` give one block
+  ## together (first); each target with `match` that holds gives a block of
+  ## its own, so two targets never merge their fields. Problems become
+  ## diagnostics.
   let blockNumber = if area.blockIndex >= 0: area.blockIndex else: area.extIndex
   for d in reg.decoders:
     if d.kind == area.kind and (d.manufacturer < 0 or d.manufacturer == ctx.manufacturer):
@@ -1116,7 +1210,7 @@ proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: o
         if b.isSome:
           b.get.mapName = d.name
           b.get.blockNumber = blockNumber
-          return b
+          return @[b.get]
       except CatchableError as e:
         log.report(sevWarning, dcVendorMap, "vendor decoder " & d.name & " failed: " & e.msg,
           loc = loc)
@@ -1137,19 +1231,34 @@ proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: o
         elif s == bestSpec:
           tie = true
   if best < 0:
-    return none(VendorBlock)
+    return @[]
   template m: untyped = reg.maps[best]
   if tie:
     log.report(sevWarning, dcVendorMap, "several vendor maps match this " & $area.kind &
       " equally; using " & m.name, loc = loc)
-  var blk = VendorBlock(mapName: m.name, blockNumber: blockNumber)
   var problems: seq[string]
+  var positional = VendorBlock(mapName: m.name, blockNumber: blockNumber)
+  var havePositional = false
+  var matched: seq[VendorBlock]
   for t in m.targets:
     if targetMatches(t, area, bytes):
-      t.decodeTarget(bytes, ctx.byteOrder, blk, problems, ctx)
+      if t.matches.len == 0:
+        havePositional = true
+        t.decodeTarget(bytes, ctx.byteOrder, positional, problems, ctx)
+      else:
+        matched.add VendorBlock(mapName: m.name, blockNumber: blockNumber)
+        t.decodeTarget(bytes, ctx.byteOrder, matched[^1], problems, ctx)
+  if havePositional: result.add positional
+  result.add matched
   for p in problems:
     log.report(sevWarning, dcVendorMap, m.name & ": " & p, loc = loc)
-  some(blk)
+
+proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: openArray[byte],
+    log: var DiagLog, loc = Location()): Option[VendorBlock] =
+  ## `decodeAll`'s first block, or none when nothing applies. Use
+  ## `decodeAll` when a map has several targets with `match`.
+  let all = reg.decodeAll(ctx, area, bytes, log, loc)
+  if all.len > 0: some(all[0]) else: none(VendorBlock)
 
 func `[]`*(blk: VendorBlock, name: string): lent VendorValue =
   ## The value of field `name`. Raises `KeyError` if it was not decoded.

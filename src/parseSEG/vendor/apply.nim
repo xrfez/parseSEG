@@ -27,7 +27,8 @@ func vendorContext*(rec: SegdRecord, blocks = true): VendorContext =
     of slRev3:
       result.general = rec.generalBlocks
 
-func usesRecordBlocks(reg: VendorRegistry): bool =
+func usesRecordBlocks*(reg: VendorRegistry): bool =
+  ## True when a loaded map reads the record-level blocks of the context.
   for m in reg.maps:
     if m.usesRecordBlocks: return true
 
@@ -40,8 +41,7 @@ func vendorContext*(f: SegyFile): VendorContext =
 proc addDecoded(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorContext,
     area: VendorArea, bytes: openArray[byte], log: var DiagLog, loc: Location) =
   # Decodes one area and keeps the block, if anything applies.
-  let b = reg.decode(ctx, area, bytes, log, loc)
-  if b.isSome: blocks.add b.get
+  blocks.add reg.decodeAll(ctx, area, bytes, log, loc)
 
 proc decodeArea(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorContext,
     kind: VendorTargetKind, bytes: openArray[byte], log: var DiagLog, loc: Location) =
@@ -109,13 +109,13 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
     result.decodeArea(reg, ctx, vtExtendedHeader, rec.extended, log, loc)
     result.decodeArea(reg, ctx, vtExternalHeader, rec.external, log, loc)
 
-proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
-    log: var DiagLog, file = ""): seq[VendorBlock] =
+proc decodeVendorAreas*(reg: VendorRegistry, ctx: VendorContext, rec: SegdRecord,
+    t: SegdTrace, log: var DiagLog, file = ""): seq[VendorBlock] =
   ## Decodes a SEG-D trace's header extensions #2 and later: Rev 1/2 by
   ## position (`traceExt`, `(extension k)`), Rev 3 by block type (`block`,
   ## `(type 0xB0) (where traceHeader)`). `file` names the file in the
-  ## diagnostics.
-  let ctx = vendorContext(rec, reg.usesRecordBlocks)
+  ## diagnostics. `ctx` is `vendorContext(rec, reg.usesRecordBlocks)`, built once
+  ## per record: a caller that decodes many traces of a record should pass it.
   let loc = Location(file: file, record: rec.index, trace: t.index)
   case t.layout
   of slRev2:
@@ -125,6 +125,14 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
         log, loc)
   of slRev3:
     result.decodeTypedBlocks(reg, ctx, t.extensions, "traceHeader", log, loc)
+
+proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
+    log: var DiagLog, file = ""): seq[VendorBlock] =
+  ## `decodeVendorAreas` for one trace, building the context itself. For many
+  ## traces of one record, build `vendorContext(rec, reg.usesRecordBlocks)` once
+  ## and call the overload that takes it (this one copies the record's header
+  ## blocks for every trace when a map reads them).
+  reg.decodeVendorAreas(vendorContext(rec, reg.usesRecordBlocks), rec, t, log, file)
 
 proc decodeVendorAreas*(reg: VendorRegistry, f: SegyFile, log: var DiagLog,
     file = ""): seq[VendorBlock] =
