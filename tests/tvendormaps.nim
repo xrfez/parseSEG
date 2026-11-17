@@ -159,7 +159,7 @@ proc main*() =
         ("(vendormap \"a\" (target (kind block) (field x (enc u8))))", "no (at)"),
         ("(vendormap \"a\" (target (kind block) (field x (at 1) (len 3) (enc u16))))", "disagrees"),
         ("(vendormap \"a\" (target (kind nowhere)))", "unknown target kind"),
-        ("(vendormap \"a\" (target (kind block) (field x (at 1) (enc u8) (when (y 1)))))", "not supported"),
+        ("(vendormap \"a\" (target (kind block) (field x (at 1) (enc u8) (when (y 1)))))", "unknown (when)"),
         ("(vendormap \"a\" (target (kind block) (field x (at 1) (enc u8))", "unbalanced"),
         ("(vendormap \"a\" (match (format segx)) (target (kind block)))", "segd or segy"),
         ("(vendormap \"a\" (match (serial)) (target (kind block)))", "(serial) needs"),

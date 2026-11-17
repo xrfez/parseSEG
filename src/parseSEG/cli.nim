@@ -700,6 +700,7 @@ func `$`(v: VendorValue): string =
 proc printBlocks(indent: string, blocks: seq[VendorBlock]) =
   for b in blocks:
     stdout.write indent, "(block ", nifString(b.mapName), " ", b.name
+    if b.blockNumber >= 0: stdout.write " (number ", b.blockNumber, ")"
     for f in b.fields: stdout.write "\n", indent, "  (f ", f.name, " ", $f.value, ")"
     stdout.write ")\n"
 

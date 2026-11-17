@@ -9,12 +9,27 @@ import ../segy/reader as segyreader
 import ./maps
 export maps
 
-func vendorContext*(rec: SegdRecord): VendorContext =
-  ## Matching facts of a SEG-D record: revision, manufacturer code and serial.
-  VendorContext(format: skSegd,
+func vendorContext*(rec: SegdRecord, blocks = true): VendorContext =
+  ## Matching facts of a SEG-D record: revision, manufacturer code and serial,
+  ## and (`blocks`) copies of the extended header, external header and general
+  ## header blocks after GH#2 that `hasBlock` and `(when (record ...))` read.
+  ## `decodeVendorAreas` copies them only when a loaded map reads them.
+  result = VendorContext(format: skSegd,
     revision: VendorRevision(major: int(rec.revision.major), minor: int(rec.revision.minor)),
     manufacturer: rec.gh1.manufacturerCode, serial: rec.gh1.manufacturerSerial,
     byteOrder: boBig)
+  if blocks:
+    result.extended = rec.extended
+    result.external = rec.external
+    case rec.layout
+    of slRev2:
+      for g in rec.sourceHeaders: result.general.add g.raw
+    of slRev3:
+      result.general = rec.generalBlocks
+
+func usesRecordBlocks(reg: VendorRegistry): bool =
+  for m in reg.maps:
+    if m.usesRecordBlocks: return true
 
 func vendorContext*(f: SegyFile): VendorContext =
   ## Matching facts of a SEG-Y file: revision, textual header, byte order.
@@ -71,8 +86,12 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
   ## each 32-byte block), its other general header blocks (Rev 1/2: GH#3 and
   ## later as `generalHeader`, by number; Rev 3: `block`, by type, where
   ## `generalHeader`) and its general trailer, wherever a map or decoder
-  ## applies. `file` names the file in the diagnostics.
-  let ctx = vendorContext(rec)
+  ## applies. A target with `(match ...)` and no `blockIndex` is tried on every
+  ## 32-byte block of the extended and external header; each block it holds
+  ## for is its own `VendorBlock`, with its number in `blockNumber`. A
+  ## trailing part of the area shorter than 32 bytes is not offered as a
+  ## block. `file` names the file in the diagnostics.
+  let ctx = vendorContext(rec, reg.usesRecordBlocks)
   let loc = Location(file: file, record: rec.index)
   case rec.layout
   of slRev2:
@@ -96,7 +115,7 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
   ## position (`traceExt`, `(extension k)`), Rev 3 by block type (`block`,
   ## `(type 0xB0) (where traceHeader)`). `file` names the file in the
   ## diagnostics.
-  let ctx = vendorContext(rec)
+  let ctx = vendorContext(rec, reg.usesRecordBlocks)
   let loc = Location(file: file, record: rec.index, trace: t.index)
   case t.layout
   of slRev2:
