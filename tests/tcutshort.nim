@@ -16,7 +16,10 @@
 ## Built with `-d:parseSegNoMapGuard` (`nim testNoGuard`) there is no
 ## handler: each read past a cut that nothing found yet must end a child
 ## with `SIGBUS`, as in parseSEG 0.11, and the calls made once `cutShort`
-## found the cut must fail as documented without a fault.
+## found the cut must fail as documented without a fault. Seen failing
+## with the `{.importc.}` resource constants declared inside `main` (they
+## are locals, not the C constants): that build killed the child (exit
+## 137) instead of SIGBUS.
 
 # test-separate: re-executes itself (getAppFilename, paramStr); it must be the main module
 
@@ -32,6 +35,13 @@ when not defined(posix):
   discard
 else:
   import std/[memfiles, posix]
+
+# An `{.importc.}` var inside `main` is a local, not the C constant:
+# `setrlimit` then got resource 0 and the child was killed instead of faulting.
+var rlimitCore {.importc: "RLIMIT_CORE", header: "<sys/resource.h>".}: cint
+when defined(linux):
+  var sysTgSigqueueinfo {.importc: "SYS_rt_tgsigqueueinfo",
+    header: "<sys/syscall.h>".}: clong
 
 var tmp: typeof(scratchDir(if paramCount() == 1: "parseseg_tcutshort_child" else: "parseseg_tcutshort"))
 
@@ -105,7 +115,6 @@ proc main*() =
     # Run as a child by `a_fault_outside_parseSEG_still_ends_the_process`.
     if paramCount() == 1 and paramStr(1) == "foreign":
       # No core dump of the planned crash.
-      var rlimitCore {.importc: "RLIMIT_CORE", header: "<sys/resource.h>".}: cint
       var none = RLimit(rlim_cur: 0, rlim_max: 0)
       discard setrlimit(rlimitCore, none)
       when defined(linux):
@@ -125,7 +134,6 @@ proc main*() =
     if paramCount() == 1 and paramStr(1).startsWith("past:"):
       # Run by `without_the_guard_a_read_past_a_cut_ends_the_program`: one read
       # past a cut that nothing has found yet.
-      var rlimitCore {.importc: "RLIMIT_CORE", header: "<sys/resource.h>".}: cint
       var none = RLimit(rlim_cur: 0, rlim_max: 0)
       discard setrlimit(rlimitCore, none)
       let what = paramStr(1)["past:".len .. ^1]
@@ -174,12 +182,9 @@ proc main*() =
       if paramCount() == 1 and paramStr(1) == "queued":
         # Run by `a_sigbus_sent_by_a_program_is_no_cut`: a `SIGBUS` queued to
         # this thread whose `si_addr` lies in parseSEG's map is no fault there.
-        var rlimitCore {.importc: "RLIMIT_CORE", header: "<sys/resource.h>".}: cint
         var none = RLimit(rlim_cur: 0, rlim_max: 0)
         discard setrlimit(rlimitCore, none)
         var f = openSeismic(fresh("survey.sgy"))
-        var sysTgSigqueueinfo {.importc: "SYS_rt_tgsigqueueinfo",
-          header: "<sys/syscall.h>".}: clong
         proc syscall(n: clong): clong {.importc, header: "<unistd.h>", varargs.}
         proc gettid(): Pid {.importc, header: "<unistd.h>".}
         var info: SigInfo
