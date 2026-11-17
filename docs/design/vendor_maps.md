@@ -23,8 +23,90 @@ express, and both go through the same registry.
 ## Matching (when a map applies)
 A map applies to a file when every clause in its `match` holds. Possible clauses: `format`
 (segd/segy), `rev` range, `manufacturer` code (SEG-D GH1 byte 17), `serial` range,
-`textContains` (a SEG-Y textual header substring, e.g. "INOVA"), and `blockType`. If several
-maps match, the most specific one wins. Ties raise a diagnostic.
+`textContains` (a SEG-Y textual header substring, e.g. "INOVA"), `hasBlock` (below) and
+`blockType`. If several maps match, the most specific one wins. Ties raise a diagnostic.
+
+The specificity is the number of clauses that hold: one for `format`, `rev`, `manufacturer`
+and `serial`, one for each `textContains` and one for each `hasBlock`. A map that also
+requires a block by its bytes therefore beats one with the same other clauses without it.
+
+**`(hasBlock <area> (match ...) ...)`** requires that some 32-byte block of a record-level
+area (`extendedHeader`, `externalHeader` or `generalHeader`: the GH blocks after GH#2) holds
+all the given byte runs (the `(match)` of a target, below). It tells two maps of one
+manufacturer apart by what the file contains:
+```
+(match (format segd) (manufacturer 9)
+  (hasBlock extendedHeader (match (at 1) (bytes 0x09 0 0 1 1))))
+```
+It reads only what `vendorContext(record)` holds (`extended`, `external`, `general` of
+`VendorContext`); a SEG-Y file has none, so a map with `hasBlock` does not apply to it.
+Without the block, the map does not apply and nothing is logged.
+
+## Blocks found by their bytes
+Some manufacturers fill the extended header with 32-byte modules that identify themselves
+in their first bytes and come in no fixed order. A target then says what the block holds,
+not where it is:
+```
+(target (kind extendedHeader) (name acmeSource)
+  (match (at 1) (bytes 0x09 0 0 2))          ; bytes 1-4 of the block
+  (field shot (at 6) (enc u32)))
+```
+- **Spelling.** `(match (at N) (bytes b...))`: one clause names the whole identifying run
+  as the spec tables write it (`09 00 00 02`), and `(at)` is 1-based like every offset. A
+  per-byte form (`(byteIs 1 9)`) would need one clause per byte and say less. Several
+  `(match)` clauses in a target (at most 16) must all hold, which covers runs that are not
+  adjacent. A run holds at most 64 bytes, each 0..255.
+- **Meaning.** With `match` and no position, the target applies to **every** block of the
+  area whose bytes equal the run, wherever it sits. Two such blocks are two decoded
+  `VendorBlock`s, each with its block number in `blockNumber`. A file with no such block
+  decodes nothing for the target and logs nothing. `(blockIndex k)` with `match` means: block
+  `k`, only if it matches. A target with `match` is never tried on the whole area
+  (`blockIndex` -1) of the extended or external header.
+- **Block size.** Content is matched on the bytes handed to the decoder: 32-byte blocks for
+  the SEG-D extended and external headers (a final part of fewer than 32 bytes is not a block),
+  the 32-byte GH blocks, and each trace header extension (`traceExt`, with or without
+  `(extension k)`). A run that reaches past the block's end does not match; `vendormap check`
+  notes it. The other kinds (`block`, `trailer`, SEG-Y) get the area as it is offered.
+- Existing maps are unaffected: a target without `match` behaves as before.
+
+## Conditions: `(when)` and `(group)`
+A field is decoded only when its conditions hold. A field whose condition does not hold is
+absent, like one holding its sentinel, and nothing is logged. Several `(when)` on a field
+all have to hold.
+```
+(field orientation (at 26) (enc u8) (when (field layout) (is 2)))
+(group (when (byte 30) (in 1 2))              ; one condition for several fields
+  (field a (at 2) (enc u8))
+  (field b (at 3) (enc u16)))
+```
+- **Source:** `(field name)` is the raw value of an integer or `bcd` field defined **earlier
+  in the same target** (read again from the block, even where that field is absent by its
+  sentinel; a name that is not defined earlier is a map error with its line). `(byte N)`,
+  `(highNibble N)`, `(lowNibble N)` read a raw byte of the block (1-based); one past the end
+  of the block makes the condition false.
+- **Test:** `(is v)`, `(in v...)` (at most 256 values) or `(range lo hi)` (both included).
+- **From another target of the same record:** `(record <area> (match ...) (byte N))`
+  (also `highNibble`/`lowNibble`) reads that byte in the **first** block of the record's
+  extended header, external header or general header blocks that holds the `(match)` runs.
+  The module is looked up in `VendorContext`, so a trace extension layout can depend on a
+  version byte of an extended-header module. With no such block the condition is false.
+  `decodeVendorAreas` fills the context blocks only when a loaded map uses them
+  (`VendorMap.usesRecordBlocks`).
+- `(when)` is not supported inside `(repeat)`.
+
+## Narrow fields
+`(enc unibble)` and `(enc inibble)` read an unsigned or signed binary number of `(len N n)`
+nibbles (1..16), starting at the high or the `(nibble low)` nibble of the byte at `(at)`:
+```
+(field flags  (at 12) (nibble high) (len 1n) (enc unibble))   ; high 4 bits
+(field mode   (at 12) (nibble low)  (len 1n) (enc unibble))   ; low 4 bits
+(field digit  (at 13) (nibble low)  (len 1n) (enc bcd))       ; one BCD digit
+(field wide   (at 14) (len 3n) (enc unibble))                 ; 12 bits: nibbles 1-3 of bytes 14-15
+(field wide2  (at 14) (nibble low) (len 3n) (enc unibble))    ; 12 bits: nibbles 2-4
+```
+Nibbles are read most significant first; the byte order does not apply. `sentinel`,
+`scale`, `enum` and `bits` work as for other integers. A field that does not fit the block
+is reported as for any field.
 
 ## File format sketch (NIF, `.nif27` header)
 ```

@@ -808,6 +808,24 @@ doAssert lines.len == 40 and lines[0].len == 80
 f.close()
 ```
 
+## Vendor fields
+
+`decodeVendorAreas(reg, record, log)` (and the overload with a trace, or a SEG-Y file) gives
+a `seq[VendorBlock]` beside the raw bytes: each block has `mapName`, `name`, `blockNumber`
+and `fields`. What a viewer should expect from maps that find blocks by content:
+
+- A block's `blockNumber` is its 1-based number in its area (extended or external header,
+  general header number), or the trace header extension number; -1 for a whole area.
+  When a file holds the same module twice, the same `name` comes twice, with different block
+  numbers: show the number beside the name.
+- A module that is not in the file gives no block and no diagnostic; do not list it.
+- A field can be absent from `fields` without any message: its sentinel value, or a `(when)`
+  condition of the map that does not hold (e.g. a layout that another byte excludes). Look
+  fields up with `name in blk` before `blk["name"]`, which raises `KeyError`.
+- `VendorContext.extended`, `external` and `general` are copied only when a loaded map needs
+  them (`hasBlock`, `(when (record ...))`); `vendorContext(rec)` always fills them, so
+  `map.applies(ctx)` is exact.
+
 ## Geometry, time and annotation
 
 With `keys = true`, `traceKeys(i)` gives what an annotation bar or a base map needs.
