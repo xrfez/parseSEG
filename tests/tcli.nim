@@ -277,18 +277,21 @@ proc main*() =
     writeFile(tmp / "broken_map.nif", "(vendormap \"x\" (version 1) (target")
     doAssert "not loaded" in fails(1, "vendormap", "check", tmp / "broken_map.nif")
     doAssert "[does not match]" in ok("vendormap", "list", s63, "--map=" & example)
-    # Scaffold the INOVA vendor blocks, check the skeleton, apply it, rescan.
+    # The shipped map already decodes manufacturer 50's trace block 0xB0; scaffold what it leaves
+    # unmapped (the external header), check the skeleton, apply it, rescan.
     let o = ok("vendormap", "scaffold", inova, "-o", tmp / "inova.nif")
     doAssert "unmapped vendor areas" in o
     let m = readFile(tmp / "inova.nif")
-    doAssert "(kind block) (type 0xB0) (where traceHeader)" in m and "(manufacturer 50)" in m
+    doAssert "(kind externalHeader) (blockIndex 1)" in m and "(manufacturer 50)" in m
+    doAssert "(type 0xB0)" notin m # covered by vendormaps/mfr50-rev3.nif
     doAssert ", ok" in ok("vendormap", "check", tmp / "inova.nif")
     doAssert "[matches]" in ok("vendormap", "list", inova, "--map=" & tmp / "inova.nif")
     let a = ok("vendormap", "apply", inova, "--map=" & tmp / "inova.nif", "--traces=3")
-    doAssert "(trace 3" in a and "blockB0Trace" in a and "(f blockB0Trace_1 " in a
+    doAssert "deviceHeaderB0" in a and "(f external1_1 " in a
     let again = ok("vendormap", "scaffold", inova, "--map=" & tmp / "inova.nif")
     doAssert "(target" notin again # everything is mapped now
-    doAssert "(kind extendedHeader) (blockIndex 1)" in ok("vendormap", "scaffold", s63)
+    # 63.sgd is manufacturer 9: the shipped vendormaps/mfr09-rev2.nif leaves nothing unmapped.
+    doAssert "no unmapped vendor areas" in ok("vendormap", "scaffold", s63)
     doAssert "expected vendormap" in fails(2, "vendormap", "frob")
 
   # ------------------------------------------- Phase 7 review regressions --
@@ -423,7 +426,9 @@ proc main*() =
     doAssert "is a directory" in fails(2, "info", tmp / "adir")
     writeFile(tmp / "empty.nif", "")
     doAssert "the document is empty" in fails(1, "headers", "import", inglewood, tmp / "empty.nif")
-    doAssert "no vendor maps found in" in ok("vendormap", "list", "--map=" & tmp / "adir")
+    # An empty extra folder adds nothing; the shipped maps are still listed.
+    let shipped = ok("vendormap", "list", "--map=" & tmp / "adir")
+    doAssert "mfr09-rev2" in shipped and "mfr50-rev3" in shipped
     doAssert "no unmapped vendor areas" in ok("vendormap", "scaffold", inglewood, "-o",
       tmp / "none.nif")
     doAssert not fileExists(tmp / "none.nif")

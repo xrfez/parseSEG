@@ -1,0 +1,262 @@
+(.nif27)
+; Vendor map for Geospace (manufacturer code 9) SEG-D Rev 2.0 files written by the GeoRes System (GeoRes Imagine
+; and XTC) that carry the Acquisition Detail extended header module. It decodes the extended header modules (found by
+; their own leading bytes, not by position) and trace header extensions #2 and #3 (Extended Trace Header Version
+; 3 layout).
+; SOURCE: Geospace Engineering Resources, Intl., "SEG-D Tape/Disk File Format", manual 593-00120-01, Rev. D
+; (released 8/9/21), the vendor's own format document. Byte numbers are the manual's (1-based, big-endian).
+; Enum labels are the manual's words; the comment above a field gives the manual's field name.
+; APPLIES TO a file whose extended header holds an Acquisition Detail module (bytes 1-4 = 09 00 00 01, the module
+; the manual says the GeoRes System always generates). Manufacturer code 9 is the SEG code of the whole Geo Space
+; company, so a code-9 file of another product matches the manufacturer clause, but it has no such module and the
+; map does not apply to it. A GeoRes file without the module (none is documented) would not be decoded.
+; MODULES: every module is found by bytes 1-5 = manufacturer code 9, sponsorship code, content type, content
+; version. The first six bytes of every module block (the "module header") are shown by one target for any block
+; that begins with byte 9; the other targets show the contents of the Acquisition Detail (content version 1, and
+; the superseded version 0 of the manual's Appendix A, told apart by byte 5), Source Location, Fire Control Detail,
+; External Header Catalog (first block only) and the third-party tape label (first block only) modules. A module
+; of a content version this map does not know shows only its module header.
+; TRACE EXTENSIONS depend on the Extended Trace Header Version, byte 30 of the Acquisition Detail module (the
+; same byte in both of its content versions): extension #2 bytes 1-24 for versions 0-3, its orientation nibble
+; (byte 25) for versions 1-3 (version 0 differs from there), extension #3 for version 3, and for version 2 when
+; Acquisition Detail byte 32 is 3 or more (First Sample Time for version 3 only). Both times have sentinel 0 (the
+; GPS epoch is not a real time). Every trace group also requires the Acquisition Detail module's byte 6
+; (compatibility version) to be 0 or 1; compatibility versions are not used otherwise (a module version or an
+; Extended Trace Header Version this map does not list decodes nothing, however its compatibility version reads).
+; LEFT OUT: the external header; the general header and channel set descriptors (a map cannot reach them); the
+; second and later blocks of a module (the catalog's entries 4 and up, the tape label module's second block): a
+; target can only find a block by its own bytes or by its position, and those blocks begin with no identifying
+; bytes; byte 10 low nibble of Fire Control Detail (the manual does not describe it); the module header version
+; fields are u8 at bytes 5 and 6 (the manual types them UINT-16 in four modules, which would overlap);
+; extension #2 bytes 24-25 high part (Analog Gain Applied, 12-bit) and bytes 26-32 (layout depends on the
+; orientation code); extension #3 bytes 4-5 (Applied Sensor Calibration, 12-bit), bytes 6-8 (documented reserved,
+; non-zero in samples) and bytes 25-28 (Total Drift For Trace: the samples hold float bit patterns and stale
+; values on some traces).
+(vendormap "mfr09-rev2" (version 1)
+  (match (format segd) (rev 2.0 2.0) (manufacturer 9)
+    (hasBlock extendedHeader (match (at 1) (bytes 9 0 0 1))))
+  (doc "Geospace (manufacturer code 9) SEG-D Rev 2.0 files of the GeoRes System (GeoRes Imagine/XTC, manual 593-00120-01 Rev. D): extended header modules found by their leading bytes, and trace header extensions 2 and 3 by the Extended Trace Header Version; applies to files with an Acquisition Detail module")
+  (target (kind extendedHeader) (name extModuleHeader)
+    ; The module header (manual p7), at the start of every module's first block. Applies to every block whose
+    ; byte 1 is 9, so a later block that happens to begin with 9 (the tape label module's second block starts with
+    ; free ASCII text, the manual says nothing of its first byte) would show a bogus header; no byte test can
+    ; tell a first block from a later one. Content type labels are those of sponsorship code 0 (the manual: the
+    ; content type is interpreted per manufacturer and sponsorship code); other sponsorship codes show the number.
+    (match (at 1) (bytes 9))
+    (field moduleSegMfrCode (at 1) (enc u8))
+    (field moduleSponsorshipCode (at 2) (enc u16))
+    (field moduleSponsoredContentType (at 4) (enc u8) (when (field moduleSponsorshipCode) (range 1 65535)))
+    (field moduleContentType (at 4) (enc u8) (when (field moduleSponsorshipCode) (is 0))
+      (enum (1 "Acquisition Detail") (2 "Source Location") (3 "Fire Control Detail") (6 "External Header Catalog")))
+    ; the manual types these two UINT-8 in the Acquisition Detail module and UINT-16 in the others (they would
+    ; overlap): read as u8 each
+    (field moduleContentVersion (at 5) (enc u8))
+    (field moduleCompatibilityVersion (at 6) (enc u8))
+    (field moduleBlockCount (at 7) (enc u16)))
+  (target (kind extendedHeader) (name acqDetail)
+    ; Acquisition Detail, sponsorship code 0, content type 1, content version 1 (manual p8-9, "always generated").
+    (match (at 1) (bytes 9 0 0 1 1))
+    ; UTC Fractional Second of Acquisition Time: ns past the second of general header block 1 byte 16 of the
+    ; acquisition trigger time, extrapolated by the Record Time Offset
+    (field utcFractionalSecond (at 9) (enc u32) (unit "ns"))
+    ; Shot Serial Number ID
+    (field shotSerialNumberId (at 13) (enc u32))
+    ; Record Index (Energy Point): 0 = the result of a stack or other composite operation
+    (field recordIndex (at 17) (enc u8))
+    ; Record Serial Number ID: 12 bits, byte 18 and the high nibble of byte 19, most significant first (the
+    ; manual's rule for multi-byte values; it does not spell the bit order of this field out)
+    (field recordSerialNumberId (at 18) (len 3n) (enc unibble))
+    ; Trigger Method (unshown values are reserved)
+    (field triggerMethod (at 19) (nibble low) (len 1n) (enc unibble)
+      (enum (0 "Unspecified") (1 "Fire Control") (2 "Event Detection") (3 "Continued Scan")
+            (4 "Hi-resolution Time")))
+    ; Sample Clock Synchronization (unshown values are reserved)
+    (field sampleClockSynchronization (at 20) (len 1n) (enc unibble)
+      (enum (0 "Unspecified") (1 "None (Internal)") (2 "GPS 1-PPS Signal") (3 "External 1-PPS Signal")))
+    ; Sample Clock Synchronization Status
+    (field sampleClockSynchronizationStatus (at 20) (nibble low) (len 1n) (enc unibble)
+      (enum (0 "Unspecified") (1 "Invalid") (2 "Transient") (3 "Stable/Locked")))
+    ; Sample Clock Synchronization Phase Error (microseconds). The manual types it UINT-24 yet gives the range
+    ; -999,999 to 999,999: read as signed (any stated value is far inside the 24-bit range). Not checked on a
+    ; non-zero value: both samples hold 0.
+    (field sampleClockPhaseError (at 21) (enc i24) (unit "us"))
+    ; No. of Auxiliary Channels Recorded
+    (field auxChannelCount (at 24) (enc u8))
+    ; No. of Receiver Channels Recorded
+    (field receiverChannelCount (at 25) (enc u16))
+    ; Record Time Offset (milliseconds): relative adjustment to the trigger event (or timebreak) to the first
+    ; recorded sample; positive or negative
+    (field recordTimeOffset (at 27) (enc i16) (unit "ms"))
+    ; Source Type (unshown values are reserved)
+    (field sourceType (at 29) (enc u8)
+      (enum (0 "None") (1 "Other") (2 "Other Impulse") (3 "Other Sweep") (4 "Dynamite") (5 "Airgun")
+            (6 "Shotgun") (7 "Hammer") (8 "Weight Drop") (9 "P Wave Vibrator") (10 "Shear Wave Vibrator")
+            (11 "Marine Vibrator") (12 "Orbital Vibrator CW (Clock Wise)") (13 "Orbital Vibrator CCW")))
+    ; Extended Trace Header Version (this map's trace extensions follow it), its Compatibility Version, and the
+    ; Number of Extended Trace Header Blocks Per Trace (includes trace header extension #1)
+    (field acqDetailTraceExtVersion (at 30) (enc u8))
+    (field acqDetailTraceExtCompatVersion (at 31) (enc u8))
+    (field acqDetailTraceExtBlocksPerTrace (at 32) (enc u8)))
+  (target (kind extendedHeader) (name acqDetailV0)
+    ; Acquisition Detail, content version 0 (manual appendix A-1.1, superseded). Same content type as acqDetail;
+    ; the layout differs from byte 13 on, which is why the content version byte is part of the match.
+    (match (at 1) (bytes 9 0 0 1 0))
+    (field utcFractionalSecond (at 9) (enc u32) (unit "ns"))
+    ; Record Time Offset (milliseconds)
+    (field recordTimeOffset (at 13) (enc i16) (unit "ms"))
+    ; No. of Aux Channels Recorded, No. of Receiver Channels Recorded (bytes 19-20 reserved)
+    (field auxChannelCount (at 15) (enc u16))
+    (field receiverChannelCount (at 17) (enc u16))
+    (field shotSerialNumberId (at 21) (enc u32))
+    ; Record Serial Number ID (a whole u16 here, 12 bits in version 1)
+    (field recordSerialNumberId (at 25) (enc u16))
+    (field recordIndex (at 27) (enc u8))
+    ; Trigger Method (4 and up are for future disclosure)
+    (field triggerMethod (at 28) (enc u8)
+      (enum (0 "Unspecified") (1 "Fire Control") (2 "Event Detection") (3 "Continued Scan")))
+    ; Source Type (11 and up are for future disclosure)
+    (field sourceType (at 29) (enc u8)
+      (enum (0 "None") (1 "Other") (2 "Other Impulse") (3 "Other Sweep") (4 "Dynamite") (5 "Airgun")
+            (6 "Shotgun") (7 "Hammer") (8 "Weight Drop") (9 "P Wave Vibrator") (10 "Shear Wave Vibrator")))
+    (field acqDetailTraceExtVersion (at 30) (enc u8))
+    (field acqDetailTraceExtCompatVersion (at 31) (enc u8))
+    (field acqDetailTraceExtBlocksPerTrace (at 32) (enc u8)))
+  (target (kind extendedHeader) (name sourceLocation)
+    ; Source Location, sponsorship code 0, content type 2, content version 0 (manual p10). Only generated for
+    ; known fixed source points or external navigation. The manual's "Source Point Easting (X)" etc. are the
+    ; "Receiver Point" values when the gather type is Continuous Time Receiver Gather or Triggered Time Receiver
+    ; Gather; the gather type is in the general header, which a map cannot read. Unit not stated.
+    (match (at 1) (bytes 9 0 0 2 0))
+    (field pointEasting (at 9) (enc f64))
+    (field pointNorthing (at 17) (enc f64))
+    (field pointElevation (at 25) (enc f32)))
+  (target (kind extendedHeader) (name fireControlDetail)
+    ; Fire Control Detail, sponsorship code 0, content type 3, content version 0 (manual p11-12). The manual says
+    ; "only be generated ... when triggered by Fire Control", yet a sample has it with Trigger Method 4: read the
+    ; Trigger Method, not the presence of this module. Byte 10 low nibble is not described and is left out.
+    (match (at 1) (bytes 9 0 0 3 0))
+    ; Fire Request Method / Sequence Start Method (3 and up are for future disclosure)
+    (field fireRequestMethod (at 9) (len 1n) (enc unibble)
+      (enum (0 "Internal") (1 "Remote Input") (2 "Time Match")))
+    (field sequenceStartMethod (at 9) (nibble low) (len 1n) (enc unibble)
+      (enum (0 "Internal") (1 "Remote Input") (2 "Time Match")))
+    ; Timebreak Method (3 and up are for future disclosure)
+    (field timebreakMethod (at 10) (len 1n) (enc unibble)
+      (enum (0 "Internal Synchronous") (1 "External Async.") (2 "Time Match")))
+    ; Arm Delay, Fire Delay, Timebreak Window Open Delay, Timebreak Window Duration: 1/8 millisecond units
+    ; (the manual: multiply by 125 for microseconds); the last two are 0 unless Timebreak Method is External Async
+    (field armDelay (at 11) (enc u16) (scale 0.125) (unit "ms"))
+    (field fireDelay (at 13) (enc u16) (scale 0.125) (unit "ms"))
+    (field timebreakWindowOpenDelay (at 15) (enc u16) (scale 0.125) (unit "ms"))
+    (field timebreakWindowDuration (at 17) (enc u16) (scale 0.125) (unit "ms"))
+    ; Start To Timebreak Integer, plus Start To Timebreak Fraction for the total time
+    (field startToTimebreakInteger (at 24) (enc u8) (unit "s"))
+    (field startToTimebreakFraction (at 25) (enc u32) (unit "ns"))
+    ; Timebreak to Sample Clock: within plus or minus half the sample interval
+    (field timebreakToSampleClock (at 29) (enc i32) (unit "ns")))
+  (target (kind extendedHeader) (name externalHeaderCatalog)
+    ; External Header Catalog, sponsorship code 0, content type 6, content version 0 (manual p13-14), FIRST BLOCK
+    ; only: entries 1-3. Entries 4 and up are in the following blocks of the module, which begin with no
+    ; identifying bytes (bytes 1-2 reserved) and which a map cannot address relative to this block. Entry 2 and 3
+    ; are optional: shown only when the Total No. of External Headers Recorded reaches them.
+    (match (at 1) (bytes 9 0 0 6 0))
+    ; Total No. of External Headers Recorded; No. of External Headers Per Record Index
+    (field catalogTotalHeaders (at 9) (enc u16))
+    (field catalogHeadersPerRecordIndex (at 11) (enc u8))
+    ; Entry 1: Device (unshown values are reserved)
+    (field entry1Device (at 15) (enc u8)
+      (enum (0 "Unspecified") (1 "Other") (2 "Navigation System") (3 "Receiver Depth Meter")
+            (4 "Source Depth Meter") (5 "Barometer") (6 "Upward Sonar")))
+    ; Entry 1: Format
+    (field entry1Format (at 16) (enc u8)
+      (enum (0 "Unspecified") (1 "STX/ETX") (2 "User-7") (3 "ASCII") (4 "NCS") (5 "NMEA") (6 "Syntrak")
+            (7 "Oyo Type S") (8 "GDX")))
+    ; Entry 1: Record Index (Energy Point)
+    (field entry1RecordIndex (at 17) (enc u8))
+    ; Entry 1: Transport (high nibble; the manual's range 0-255 for it is a misprint), Status (low nibble)
+    (field entry1Transport (at 18) (len 1n) (enc unibble)
+      (enum (0 "Unspecified") (1 "Serial") (2 "UDP") (3 "TCP/IP") (4 "File")))
+    (field entry1Status (at 18) (nibble low) (len 1n) (enc unibble)
+      (enum (0 "Unspecified") (1 "Normal") (2 "Missed") (3 "Discarded") (4 "Undersized, As Is")
+            (5 "Undersized, Padded") (6 "Oversized, As Is") (7 "Oversized, Truncated")))
+    ; Entry 1: No. of 32-Byte Blocks of its data in the external header (0 if missed or discarded)
+    (field entry1BlockCount (at 19) (enc u16))
+    (group (when (field catalogTotalHeaders) (range 2 65535))
+      (field entry2Device (at 21) (enc u8)
+        (enum (0 "Unspecified") (1 "Other") (2 "Navigation System") (3 "Receiver Depth Meter")
+              (4 "Source Depth Meter") (5 "Barometer") (6 "Upward Sonar")))
+      (field entry2Format (at 22) (enc u8)
+        (enum (0 "Unspecified") (1 "STX/ETX") (2 "User-7") (3 "ASCII") (4 "NCS") (5 "NMEA") (6 "Syntrak")
+              (7 "Oyo Type S") (8 "GDX")))
+      (field entry2RecordIndex (at 23) (enc u8))
+      (field entry2Transport (at 24) (len 1n) (enc unibble)
+        (enum (0 "Unspecified") (1 "Serial") (2 "UDP") (3 "TCP/IP") (4 "File")))
+      (field entry2Status (at 24) (nibble low) (len 1n) (enc unibble)
+        (enum (0 "Unspecified") (1 "Normal") (2 "Missed") (3 "Discarded") (4 "Undersized, As Is")
+              (5 "Undersized, Padded") (6 "Oversized, As Is") (7 "Oversized, Truncated")))
+      (field entry2BlockCount (at 25) (enc u16)))
+    (group (when (field catalogTotalHeaders) (range 3 65535))
+      (field entry3Device (at 27) (enc u8)
+        (enum (0 "Unspecified") (1 "Other") (2 "Navigation System") (3 "Receiver Depth Meter")
+              (4 "Source Depth Meter") (5 "Barometer") (6 "Upward Sonar")))
+      (field entry3Format (at 28) (enc u8)
+        (enum (0 "Unspecified") (1 "STX/ETX") (2 "User-7") (3 "ASCII") (4 "NCS") (5 "NMEA") (6 "Syntrak")
+              (7 "Oyo Type S") (8 "GDX")))
+      (field entry3RecordIndex (at 29) (enc u8))
+      (field entry3Transport (at 30) (len 1n) (enc unibble)
+        (enum (0 "Unspecified") (1 "Serial") (2 "UDP") (3 "TCP/IP") (4 "File")))
+      (field entry3Status (at 30) (nibble low) (len 1n) (enc unibble)
+        (enum (0 "Unspecified") (1 "Normal") (2 "Missed") (3 "Discarded") (4 "Undersized, As Is")
+              (5 "Undersized, Padded") (6 "Oversized, As Is") (7 "Oversized, Truncated")))
+      (field entry3BlockCount (at 31) (enc u16))))
+  (target (kind extendedHeader) (name thirdPartyTapeLabel)
+    ; Tape label module of a third party (sponsorship code 256, content type 0, content version 0; manual p24),
+    ; FIRST BLOCK only; its second block holds a 12-character software version and begins with no identifying
+    ; bytes. The manual's table banner says content type 2 while its section title and header row say 0 (the
+    ; match follows the two): a module with content type 2 and sponsorship 256 is not decoded. No sample file
+    ; holds this module.
+    (match (at 1) (bytes 9 1 0 0 0))
+    ; Tape Label (ASCII text, 16 characters)
+    (field tapeLabel (at 9) (len 16) (enc ascii) (trim right))
+    ; Tape Number
+    (field tapeNumber (at 25) (enc u32)))
+  (target (kind traceExt) (extension 2) (name geoResTraceExt2)
+    ; Receiver position, or the source position in a triggered receiver gather (the manual's "Receiver Easting
+    ; (X)" etc.). The gather type is in the general header, which a map cannot read. Unit not stated.
+    ; Bytes 1-24 are the same in Extended Trace Header Versions 0 to 3 (Acquisition Detail module byte 30); the
+    ; orientation code below is not in version 0 (its bytes 25 on differ).
+    (group (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 30)) (range 0 3))
+      (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 6)) (range 0 1))
+      (field positionEasting (at 1) (enc f64))
+      (field positionNorthing (at 9) (enc f64))
+      (field positionElevation (at 17) (enc f32))
+      ; 0 = stack / composite record, else the energy point index
+      (field recordIndex (at 21) (enc u8))
+      ; the manual defines only 255; the samples hold 1 (shown without a label)
+      (field traceDataProcessDescriptor (at 22) (enc u8) (enum (255 "None applied (raw data)")))
+      (field secondaryLowCutFilter (at 23) (enc u8)
+        (enum (0 "None") (1 "8 Hz, 12dB/Octave") (2 "32 Hz, 12dB/Octave") (3 "3.2 Hz, 6dB/Octave")))
+      (group (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 30)) (range 1 3))
+        (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 6)) (range 0 1))
+        ; Sensor Orientation Description, low nibble of byte 25 (the manual defines 0-4, "Unshown values are reserved")
+        (field sensorOrientationDescription (at 25) (nibble low) (len 1n) (enc unibble)
+          (enum (0 "No description given") (1 "Azimuth/Inclination Degrees re. Module Head End")
+                (2 "Sine of the Inclination from horizontal")
+                (3 "3-D Rotation Vector re. the as laid Module head end")
+                (4 "3-D Rotation Vector re. magnetic North"))))))
+  (target (kind traceExt) (extension 3) (name geoResTraceExt3)
+    ; Extended Trace Header Version 3, or version 2 when the Number of Extended Trace Header Blocks Per Trace
+    ; (Acquisition Detail byte 32) is 3 or more (manual p23: version 3 is a superset of version 2, differing by the
+    ; addition of First Sample Time, which is therefore shown for version 3 only).
+    (group (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 30)) (in 2 3))
+      (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 6)) (range 0 1))
+      (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 32)) (range 3 255))
+      ; digitizer module serial number, 0 = unknown
+      (field moduleSerialNumber (at 1) (enc u24) (sentinel 0))
+      ; microseconds since 1980-01-06 00:00:00 GPS time (no leap seconds): 18 s ahead of UTC in 2024
+      (group (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 30)) (is 3))
+        (field firstSampleTime (at 9) (enc i64) (sentinel 0) (unit "us GPS")))
+      ; Trigger (Event) Time: the manual states neither epoch nor unit; epoch and microseconds INFERRED
+      ; (equal to First Sample Time on every trace of both samples), so no unit is given
+      (field triggerTime (at 17) (enc i64) (sentinel 0))
+      (field totalDriftOfOBX (at 29) (enc f32) (unit "us")))))

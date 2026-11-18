@@ -1,0 +1,22 @@
+(.nif27)
+; Vendor map for INOVA SEG-D Rev 3.0 files (manufacturer code 50), trace header extension block 0xB0.
+; SOURCE: a third-party compliance report (2016, covering recording software 6.003), NOT the vendor's own
+; format document. The two fields below are inferred from ONE hex dump in that report plus its decoder
+; output, and from agreement with sample files written by software 9.005 (the version gap is untested
+; beyond those samples). The samples held no auxiliary traces.
+; RECOGNITION: the match is manufacturer code 50 and revision 3.0 only. It cannot tell one product of that
+; manufacturer from another, so any such Rev 3.0 file with a type-0xB0 trace block is decoded with these
+; names. Rev 3.1 files are not decoded (skipped). Blocks 0xB1-0xB8 and the external header are undocumented
+; and not mapped. "Distance from SP to receiver" in B0 is left out (position unknown).
+; A raw value 0 means "no value": an all-zero B0 (seen on traces without data) shows no fields.
+(vendormap "mfr50-rev3" (version 1)
+  (match (format segd) (rev 3.0 3.0) (manufacturer 50))
+  (doc "INOVA (manufacturer code 50) SEG-D Rev 3.0 trace header block 0xB0: device code and device serial number, inferred from one hex dump in a third-party compliance report")
+  (target (kind block) (type 0xB0) (where traceHeader) (name deviceHeaderB0)
+    ; inferred from one hex dump in a compliance report: device code = byte 1 (u8). 0x31 is that report's
+    ; decoder label; 0x32 is what the samples hold and has no documented meaning.
+    (field deviceCode (at 1) (enc u8) (sentinel 0)
+      (enum (0x31 "G3i FTU (per third-party compliance report)")
+            (0x32 "type 0x32 (not in the source document)")))
+    ; inferred from the same dump: device serial number = bytes 3-5, unsigned 24-bit big-endian.
+    (field deviceSerialNumber (at 3) (enc u24) (byteOrder big) (sentinel 0))))
