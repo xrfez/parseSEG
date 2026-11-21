@@ -323,6 +323,39 @@ proc main*() =
         if o.traces[k].ext1.isSome:
           doAssert t.ext1.get.encoded == o.traces[k].ext1.get.encoded
 
+  block rev3_lengths_are_n_times_dt:
+    # A Rev 2.1 source whose header is one sample short (end 2 x (N - 1) ms,
+    # record length the same) converts to a Rev 3 file with TE = TF + NS x SR
+    # and the record length to match; and N survives Rev 3 -> 2.1 -> 3.
+    # Seen to fail first: toRev3 copying the source's end (TE 102 ms, not 104).
+    var d: SegdData
+    var o = makeRev2(300, sd8058)
+    # Only the seismic set, which has THE#1 to say its count (an aux set's count
+    # comes from its window, so a short window would be read as 51 samples).
+    o.record.scanTypes[0].descriptors[1].endTime = 51
+    o.record.gh2.get.extRecordLength = 102
+    d.records.add o
+    toDisk(d, tmp / "short_r2.sgd")
+    var log = convertSegdRevision(tmp / "short_r2.sgd", tmp / "short_r3.sgd", rev(3, 0))
+    doAssert log.clean, $log
+    var r3 = readSegd(tmp / "short_r3.sgd")
+    doAssert r3.log.clean, $r3.log
+    var r = r3.records[0].record
+    for c in r.scanTypes[0].descriptorsRev3:
+      doAssert c.numSamples == 52 and c.samplingInterval == 2000
+      doAssert c.endTime == c.startTime + int32(c.numSamples * c.samplingInterval)
+    doAssert r.gh2Rev3.extRecordLength == 104_000
+    log = convertSegdRevision(tmp / "short_r3.sgd", tmp / "short_21.sgd", rev(2, 1))
+    doAssert log.clean, $log
+    log = convertSegdRevision(tmp / "short_21.sgd", tmp / "short_again.sgd", rev(3, 0))
+    doAssert log.clean, $log
+    r3 = readSegd(tmp / "short_again.sgd")
+    r = r3.records[0].record
+    for c in r.scanTypes[0].descriptorsRev3:
+      doAssert c.numSamples == 52 and c.endTime == 104_000
+    doAssert r.gh2Rev3.extRecordLength == 104_000
+    for t in r3.records[0].traces: doAssert t.numSamples == 52
+
   block rev2_on_tape_without_a_header_scan:
     # The stream API has no header scan: sample counts come from the descriptors.
     var d: SegdData

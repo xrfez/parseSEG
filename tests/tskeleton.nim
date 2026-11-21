@@ -7,7 +7,7 @@
 ## - mixed_orientation: the refusal removed (close wrote the file; expected
 ##   ValueError containing "give every trace of a channel set an orientation, or none")
 ## - uniform_option_sets: a filler block written on a uniform shot gather
-##   (checksum of the bare file was not 1797920802)
+##   (checksum of the bare file was not 2804808630)
 
 import std/[assertions, math, os, strutils]
 
@@ -192,19 +192,19 @@ proc main*() =
   block uniform_option_sets:
     # Shot gathers that were already uniform, checksummed before the skeleton.
     const want = [
-      ("bare", 972'i64, 1797920802'u32),
-      ("norcv", 584'i64, 2504485534'u32),
-      ("nosrc", 680'i64, 1976239584'u32),
-      ("feet", 580'i64, 1458858163'u32),
-      ("crs", 580'i64, 1497106906'u32),
-      ("tworec", 1160'i64, 714115694'u32),
-      ("dead", 580'i64, 1427291309'u32),
-      ("natime", 580'i64, 2461025836'u32),
-      ("fmt", 580'i64, 3097374429'u32),
-      ("aux", 584'i64, 1424156037'u32),
-      ("frac", 580'i64, 3562719808'u32),
-      ("units", 324'i64, 3743733315'u32),
-      ("three", 972'i64, 303919689'u32)]
+      ("bare", 972'i64, 2804808630'u32),
+      ("norcv", 584'i64, 699064518'u32),
+      ("nosrc", 680'i64, 101546848'u32),
+      ("feet", 580'i64, 2791501907'u32),
+      ("crs", 580'i64, 2280562458'u32),
+      ("tworec", 1160'i64, 1181900870'u32),
+      ("dead", 580'i64, 4010361477'u32),
+      ("natime", 580'i64, 2701964292'u32),
+      ("fmt", 580'i64, 4054038917'u32),
+      ("aux", 584'i64, 754805421'u32),
+      ("frac", 580'i64, 2481940808'u32),
+      ("units", 324'i64, 1016372755'u32),
+      ("three", 972'i64, 4237364105'u32)]
     writeOpt("bare"):
       proc (w: var SeismicWriter) =
         w.writeTrace(shot(2, 1, true), @[1'f32, 2, 3, 4])

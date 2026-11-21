@@ -13,6 +13,9 @@
 ##   tsDead on a seismic channel, not tsLive)
 ## - record_time: recording time not written (reads back NaN, and a record
 ##   with neither keys.time nor SegdOutputOptions.time was accepted)
+## - lengths_are_n_times_dt: the window was (N - 1) x dt again (12 samples at
+##   1 ms wrote 11 ms in the record length and the channel set end; the
+##   2000 ms file came back as 1998 ms)
 
 import std/[assertions, math, os, strutils]
 
@@ -349,7 +352,7 @@ proc main*() =
       v.writeTrace(late, samples(3, 1))
     expect("no traces"):
       discard v.close()
-    late.t0Ms = 2_147_482 # ends at 2 147 483 000 µs
+    late.t0Ms = 2_147_481 # two samples of 1 ms end at 2 147 483 000 µs
     var u = openOut(tmp / "end.sgd", opts(2))
     u.writeTrace(late, samples(2, 1))
     discard u.close()
@@ -398,6 +401,42 @@ proc main*() =
     for d in descs:
       for ch in d.description: doAssert ch == ' ', "description holds " & $ord(ch)
     f.close()
+
+  block lengths_are_n_times_dt:
+    # Rev 3 5.3.2: TE = TF + NS x SR, so 12 samples at 1 ms are 12 ms, in the
+    # extended record length and in the channel set's end time.
+    var w = openOut(tmp / "len12.sgd", opts(12))
+    w.writeTrace(shot(1, 1, true), samples(12, 1))
+    discard w.close()
+    var f = openSeismic(tmp / "len12.sgd", keys = true)
+    doAssert f.index.segdRecords[0].gh2Rev3.extRecordLength == 12_000
+    doAssert f.channelSets[0].endTimeMs == 12.0 and f.summary.recordLengthMs == 12.0
+    f.close()
+    # 1000 samples at 2 ms (a 2000 ms header) through SEG-D, SEG-Y and SEG-D.
+    let k2 = block:
+      var k = shot(1, 1, true)
+      k.intervalUs = 2000
+      k
+    var a = openOut(tmp / "len2000.sgd", opts(1000, dt = 2000))
+    a.writeTrace(k2, samples(1000, 1))
+    discard a.close()
+    var d1 = openSeismic(tmp / "len2000.sgd", keys = true)
+    doAssert d1.summary.recordLengthMs == 2000.0 and d1.summary.samplesPerTrace == 1000
+    var y = openSeismicWriter(tmp / "len2000.sgy", SegyOutputOptions())
+    y.writeTrace(d1.traceKeys(0), samples(1000, 1))
+    discard y.close()
+    d1.close()
+    var ys = openSeismic(tmp / "len2000.sgy", keys = true)
+    doAssert ys.summary.samplesPerTrace == 1000
+    var b = openOut(tmp / "len2000b.sgd", opts(ys.summary.samplesPerTrace,
+      dt = ys.summary.sampleIntervalUs))
+    b.writeTrace(k2, samples(1000, 1)) # the SEG-Y keys carry no source line
+    discard b.close()
+    ys.close()
+    var d2 = openSeismic(tmp / "len2000b.sgd", keys = true)
+    doAssert d2.index.segdRecords[0].gh2Rev3.extRecordLength == 2_000_000
+    doAssert d2.channelSets[0].endTimeMs == 2000.0
+    d2.close()
 
   block base_scan_interval_short_field:
     # General Header #1's base scan interval is a short field only for 1, 2, 4

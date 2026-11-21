@@ -89,6 +89,8 @@ log = convertSegdRevision("record.sgd", "record_rev3.sgd",
 doAssert not log.isFatal
 var r3 = openSeismic("record_rev3.sgd")
 doAssert r3.summary.revision.major == 3
+# A Rev 3 file's channel set end is start + samples x interval (TE = TF + NS x SR),
+# and its record length follows: a Rev 2 header one sample short is corrected.
 
 # Any standard to SEG-2, and SEG-2 back to SEG-D.
 log = convertFile("shot.sgd", "shot.sg2",

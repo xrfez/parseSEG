@@ -5,8 +5,9 @@
 ## - round_trip: the writer skipped the Orientation block (close raised
 ##   SegFormatError: the header announced 6 extensions, the trace carried 5)
 ## - round_trip: `traceOrientation` returned none without scanning (`o0.isSome`)
-## - byte_identical: the sum is the 0.14.0 writer's file (972 bytes); a trace
-##   given none that gained a block would miss it
+## - byte_identical: the sum is the 0.14.0 writer's file (972 bytes) but for
+##   the record and window lengths (3 ms became 4 ms); a trace given none that
+##   gained a block would miss it
 ## - general_header_orientation_is_separate: `recordOrientation` returned none
 ##   (`o.isSome`)
 ## - second_orientation_is_not_reported: a second block added a warning
@@ -185,11 +186,12 @@ proc main*() =
   let tmp = scratchDir("parseseg_torient")
 
   block byte_identical:
-    # The 0.14.0 writer, before orientation existed, produced this file.
+    # The 0.14.0 writer, before orientation existed, produced this file, but for
+    # two length fields: the record length and the channel set end (N x dt).
     let path = tmp / "bare.sgd"
     writeBare(path)
     doAssert getFileSize(path) == 972
-    doAssert fileSum(path) == 1797920802'u32
+    doAssert fileSum(path) == 2804808630'u32
     let again = tmp / "bare_none.sgd"
     var w = openSeismicWriter(again, SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 4,
       time: ShotTime))

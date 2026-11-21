@@ -100,12 +100,13 @@ proc main*() =
   let tmp = scratchDir("parseseg_treceivergather")
 
   block shot_stays:
-    # A shot gather written today is the 0.14.0 file, and the one-source rule
+    # A shot gather written today is the 0.14.0 file (but for its two length
+    # fields, now N x dt), and the one-source rule
     # still refuses a second source. Explicit receiverGather = false matches.
     let path = tmp / "bare.sgd"
     writeBare(path)
     doAssert getFileSize(path) == 972
-    doAssert fileSum(path) == 1797920802'u32
+    doAssert fileSum(path) == 2804808630'u32
     let again = tmp / "bare_false.sgd"
     writeBare(again, receiverGather = false)
     doAssert readFile(path) == readFile(again)

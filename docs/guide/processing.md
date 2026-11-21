@@ -435,13 +435,15 @@ with `status` `tsUnknown` is written as a live trace and reads back `tsLive` on 
 channel; on an auxiliary channel type it reads back `tsAuxiliary`. A channel number that is given
 twice in one channel set is refused; NaN assigns the lowest number the set has not used. A window
 whose end does not fit the channel set's end time is refused, and so is a window longer than
-2^32 - 1 µs (refused when the writer opens). An infinite coordinate or elevation is refused, and so
+2^32 - 1 µs (refused when the writer opens). The record length and each channel set's end time
+are N x dt (Rev 3: TE = TF + NS x SR): 12 samples at 1 ms are 12 ms, where 0.14.0 to 0.17.0
+wrote (N - 1) x dt. An infinite coordinate or elevation is refused, and so
 are coordinates with units unknown and no `crsText`. A recording time outside 1950-2049 is refused.
 Pass `orientation = some(att)` to give a trace a SEG-D Orientation header (0x60): the three
 rotations and the reference orientation
 in radians, the orientation type and the flags (`initTraceOrientation`). Its timestamp is
 `att.time` when that is set, otherwise the trace's recording time. A trace given none gets
-no block, so files written as in 0.14.0 stay byte-identical. Every trace of a channel set
+no block, so files are written as in 0.14.0 (but for the length fields below). Every trace of a channel set
 must be given an orientation, or none of them: a mix is refused, and the message names the
 channel set and the first trace without one (a filler block would be a fake attitude).
 NaN or an infinite rotation is
@@ -450,7 +452,7 @@ with `traceOrientation` ([the viewer guide](viewer.md#geometry-time-and-annotati
 
 Set `receiverGather = true` to write a receiver gather: one record is one receiver, and the
 traces are the shots that receiver recorded. The option is explicit (the default is false, a
-shot gather, byte-identical to 0.14.0, and a second source in a shot record is still refused).
+shot gather, as in 0.14.0, and a second source in a shot record is still refused).
 The receiver's line, point, index and coordinates must agree within the record; a trace that
 differs is refused, and the message names that trace's channel. Each trace's source line,
 point and index go in a Source Description block (0x1F) in that trace's header extensions,

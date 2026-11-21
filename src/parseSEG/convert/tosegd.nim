@@ -22,10 +22,10 @@
 ## | Rev 3 | From Rev 1/2 |
 ## |---|---|
 ## | GH#1 | the same bytes; byte 12H = blocks after #1 (F with GH#2 bytes 23-24 when > 14); format code |
-## | GH#2 (0x02) | ext file number, ext channel sets, ext extended/external counts (widened), record length (FFF: ms to µs), record set number = 2.1 line sequence number, revision 3.0 |
+## | GH#2 (0x02) | ext file number, ext channel sets, ext extended/external counts (widened), record length (FFF: ms to µs, raised to the longest channel set end, N x dt; GH#1's own length stays), record set number = 2.1 line sequence number, revision 3.0 |
 ## | GH#3 (0x03) | time zero from GH#1's date and time (whole seconds, UTC to GPS); sizes computed |
 ## | Source Description | each GH#N: line, point, index, set number; Vibrator (0x15, with phase control, vibrator type and phase angle) when any of those is set, else Other (0x1F) |
-## | CSD (96 bytes) | scan type, channel set (resolved), channel type (nibble n to n·0x10; 0xC to 0xA0), start/end time (µs), samples = (end − start) / interval, DSM = 2^MP, channels, interval (µs), array forming, J, EFH, stack, streamer, filters (Hz; notches from tenths) |
+## | CSD (96 bytes) | scan type, channel set (resolved), channel type (nibble n to n·0x10; 0xC to 0xA0), start time (µs), end time = start + samples × interval (Rev 3: TE = TF + NS × SR, so a source one sample short is corrected), samples = the traces' (else (end − start) / interval), DSM = 2^MP, channels, interval (µs), array forming, J, EFH, stack, streamer, filters (Hz; notches from tenths) |
 ## | Demux header | the same, with one extension (THE#1) |
 ## | THE#1 (0x40) | receiver line, point, index, extended line/point, sensor type; samples |
 ## | Extended, external, skew | the same bytes |
@@ -285,7 +285,9 @@ proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
   result = SegdChannelSetDescriptorRev3(scanTypeNumber: bcd(d.scanTypeNumber),
     channelSetNumber: uint16(max(0, headers.channelSetNumber(d))), # resolves FF + extended
     channelType: rev3ChannelType(d.channelType),
-    startTime: int32(round(d.startTimeMs * 1000)), endTime: int32(round(d.endTimeMs * 1000)),
+    startTime: int32(round(d.startTimeMs * 1000)),
+    endTime: int32(clamp(int64(round(d.startTimeMs * 1000)) + int64(samples) * int64(round(siUs)),
+      0, int64(high(int32)))), # TE = TF + NS x SR (Rev 3 5.3.2)
     numSamples: uint32(samples), descaleMultiplier: float32(pow(2.0, d.mpFactor)),
     channelsInSet: uint32(bcd(d.channelCount)), samplingInterval: uint32(round(siUs)),
     arrayForming: d.arrayForming, traceHeaderExtensions: 1,
@@ -366,6 +368,14 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
       s3.descriptorsRev3.add c.csdToRev3(d, rec.gh1, ns)
     result.scanTypes.add s3
   result.gh1 = g1
+  # A Rev 3 record is at least as long as its channel sets (N x dt): a source
+  # length one sample short is raised to the longest end; a longer one stays
+  # (a Rev 2 GH#1 length in 102.4 ms units stays as it is).
+  if rec.gh1.recordLength == BcdAllF:
+    var recordUs = 0'i64
+    for st in result.scanTypes:
+      for d in st.descriptorsRev3: recordUs = max(recordUs, int64(d.endTime))
+    g2.extRecordLength = max(g2.extRecordLength, uint32(clamp(recordUs, 0, int64(high(uint32)))))
   result.gh2Rev3 = g2
   result.extended = rec.extended
   result.external = rec.external
@@ -1100,7 +1110,7 @@ proc writeSeg2AsSegd(c: var Seg2Conv, f: SeismicFile, sink: RecordSink, opts: Se
   for k, s in sets:
     var d = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: uint16(k + 1),
       channelType: s.channelType, startTime: s.startUs,
-      endTime: int32(clamp(int64(s.startUs) + int64(max(s.ns - 1, 0)) * s.dtUs, 0,
+      endTime: int32(clamp(int64(s.startUs) + int64(s.ns) * s.dtUs, 0,
         int64(high(int32)))),
       numSamples: uint32(s.ns), descaleMultiplier: s.descale, channelsInSet: uint32(counts[k]),
       samplingInterval: uint32(s.dtUs), traceHeaderExtensions: uint8(ext), verticalStack: s.stack,

@@ -529,7 +529,7 @@ proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
   ## `close`, then written whole. Raises `ValueError` for a revision other
   ## than 3.0 or 3.1, a format that revision lacks, a sample interval that
   ## is not a whole number of microseconds from 1 to 2^32-1, a sample count
-  ## below 1, a window (count less one, times the interval) longer than
+  ## below 1, a window (count times the interval) longer than
   ## 2^32-1 µs, format 8015 with a count that is not a multiple of 4,
   ## coordinate units other than metres, feet or unknown, or a `time` that
   ## is set but not a finite UTC time in 1950-2049; `IOError` when the
@@ -545,7 +545,7 @@ proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
       "from 1 to " & $high(uint32) & ", not " & $opts.sampleIntervalUs)
   if opts.numSamples <= 0 or opts.numSamples > int(high(uint32)):
     refuse("SegdOutputOptions.numSamples must be at least 1, not " & $opts.numSamples)
-  let window = dt * float64(opts.numSamples - 1)
+  let window = dt * float64(opts.numSamples)
   if window > float64(high(uint32)):
     refuse("a window of " & $opts.numSamples & " samples at " & $dt & " µs is " & $window &
       " µs, longer than a SEG-D Rev 3 channel set can hold (" & $high(uint32) & " µs)")
@@ -1291,7 +1291,7 @@ proc flushSegdKeys(s: var WriterState) =
   let nCS = setType.len
   if nCS <= 99: gh1.channelSetsPerScanType = nCS
   else: gh1.channelSetsPerScanType = BcdAllF
-  let span = opts.sampleIntervalUs * float64(max(opts.numSamples - 1, 0))
+  let span = opts.sampleIntervalUs * float64(opts.numSamples)
   # The short field holds only these intervals (1/16 ms units); any other
   # is 0xFF, with the µs value in General Header #2.
   const ShortScanIntervals = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
@@ -1371,7 +1371,7 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   let num = s.chNumber(channelType, ch)
   let t0 = t0Of(k)
   let dt = s.segdOpts.sampleIntervalUs
-  if float64(t0) + dt * float64(n - 1) > float64(high(int32)):
+  if float64(t0) + dt * float64(n) > float64(high(int32)):
     refuse("a window of " & $n & " samples at " & $dt & " µs from " & $(float64(t0) / 1000) &
       " ms does not fit a SEG-D Rev 3 channel set end time")
   let hasRcv = checkStation(k.rcvLine, k.rcvPoint, "receiver")
