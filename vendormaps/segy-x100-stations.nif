@@ -9,7 +9,7 @@
 ; RECOGNITION: a SEG-Y file whose textual header holds the words below, so a file without the sentence is
 ; read as before. The map reads no other field and has no target to decode.
 (vendormap "segy-x100-stations" (version 1)
-  (match (format segy) (textContains "ARE X 100 IN TRACE HEADERS"))
+  (match (format segy) (textContains "LINE AND POINT NUMBERS ARE X 100 IN TRACE HEADERS"))
   (doc "SEG-Y trace headers that hold source and receiver line and point times 100 (bytes 181-196)")
   (layout
     (entry rec_line (at 181) (type int4) (divisor 100))

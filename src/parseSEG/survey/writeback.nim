@@ -122,6 +122,8 @@ type
       ## SEG-Y: where each of `headers` starts in the current trace's header
       ## bytes, -1 when the trace has none (`locate`).
     byName: array[Name, seq[Slot]]       ## SEG-Y: each name's entries, in layout order.
+    scaledBy: array[Name, int]
+      ## SEG-Y: the divisor of a name's entry that has one (read only: no slot), else 0.
     byKind: array[LayoutType, seq[Slot]] ## SEG-Y: every entry of each scaled kind.
     kindNames: array[LayoutType, set[Name]] ## SEG-Y: the names with an entry of each scaled kind.
     ups: seq[Update]      ## The current trace's updates (kept between traces: no allocation).
@@ -249,7 +251,10 @@ proc resolveLayout(p: var Planner) =
   for e in p.lay.entries:
     # A value stored times a divisor (`LayoutEntry.divisor`) has no slot: what is
     # written would have to be multiplied, and a whole number is not what is stored.
-    if e.divisor > 1: continue
+    if e.divisor > 1:
+      for n in Name:
+        if e.name == $n: p.scaledBy[n] = e.divisor
+      continue
     var name = -1
     for n in Name:
       if e.name == $n: name = ord(n)
@@ -536,8 +541,15 @@ proc planSegy(p: var Planner, trace: int, k: TraceKeys, buf: var seq[byte]): set
   for v in lossy: p.noteRounded(v, trace)
   for v in missing:
     p.unwritable(v, trace, case v
-      of vSrcStation, vRcvStation: "the file's layout has no field for the line, point or " &
-        "index (a Layout stanza can add sht_line, rec_line, ...)"
+      of vSrcStation, vRcvStation:
+        var by = 0
+        for n in [nShtLine, nShtPoint, nShtIndex, nRecLine, nRecPoint, nRecIndex]:
+          by = max(by, p.scaledBy[n])
+        if by > 0:
+          "the file stores its line and point numbers times " & $by & " (a vendor map or " &
+            "Layout stanza divisor) and they are read only"
+        else: "the file's layout has no field for the line, point or " &
+          "index (a Layout stanza can add sht_line, rec_line, ...)"
       of vCmp: "the file's layout has no CDP X/Y (SEG-Y Rev 0)"
       else: "the file's layout has no field for it")
 

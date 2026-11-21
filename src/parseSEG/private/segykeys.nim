@@ -510,8 +510,12 @@ func sourcePoint(espnum, sp: float64): float64 {.inline.} =
   elif not unset(sp) and round(sp) == espnum: sp
   else: espnum
 
+func scaled(rs: seq[Resolved]): bool =
+  for r in rs:
+    if r.entry.divisor != 1.0: return true
+
 proc stationsIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, cache: var ScalarCache,
-    k: var TraceKeys) {.noinline.} =
+    k: var TraceKeys, auxiliary: bool) {.noinline.} =
   # The stations a layout names (`sht_line` ... `rec_index`): a converted
   # SEG-D file keeps its source and receiver stations there. A line and a
   # point that are both 0 or missing are no station; otherwise each replaces
@@ -525,7 +529,10 @@ proc stationsIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, cache: var 
     let i = int16Of(keyValue(p, indexF, h, o, cache), 0)
     if i != 0: index = int16(i)
   station(kfShtLine, kfShtPoint, kfShtIndex, k.srcLine, k.srcPoint, k.srcIndex)
-  station(kfRecLine, kfRecPoint, kfRecIndex, k.rcvLine, k.rcvPoint, k.rcvIndex)
+  # An auxiliary trace (time break, sweep ...) keeps other data in the bytes a vendor
+  # map reads the receiver numbers from (they hold a divisor): no receiver station.
+  if not (auxiliary and (p.keyPlans[kfRecLine].scaled or p.keyPlans[kfRecPoint].scaled)):
+    station(kfRecLine, kfRecPoint, kfRecIndex, k.rcvLine, k.rcvPoint, k.rcvIndex)
 
 proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, timeBasis: int16,
     fixedUs: float64): TraceKeys =
@@ -539,7 +546,10 @@ proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, timeBasis: int1
   # source point 0 does not identify anything.
   let sp = sourcePoint(g[gfEspnum], g[gfSp])
   if sp != 0: result.srcPoint = sp
-  if p.stations: stationsIn(p, h, o, cache, result)
+  let code = if p.stdCode: loadNum[int16](h.std, 28, o)
+             else: int16(int16Of(keyValue(p, kfTrctype, h, o, cache), 0))
+  let auxiliary = segyStatus(code, p.major) == tsAuxiliary
+  if p.stations: stationsIn(p, h, o, cache, result, auxiliary)
   if not (unset(g[gfShtX]) and unset(g[gfShtY])):
     result.srcX = g[gfShtX]
     result.srcY = g[gfShtY]
@@ -557,9 +567,7 @@ proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, timeBasis: int1
   # number), and then the trace has no channel number.
   let channel = g[gfChan]
   if channel > 0: result.channel = channel
-  # The trace identification code (standard: bytes 29-30).
-  let code = if p.stdCode: loadNum[int16](h.std, 28, o)
-             else: int16(int16Of(keyValue(p, kfTrctype, h, o, cache), 0))
+  # The trace identification code, read above.
   let base = if code >= 0: int(code) and 0x3FFF else: int(code)
   if isComponentCode(base): result.component = uint8(base)
   result.traceCode = code

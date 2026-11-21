@@ -92,6 +92,9 @@ type
   TraceIndex* = object
     ## Every trace's location plus the file-level headers.
     kind*: SeismicKind
+    vendorLayout*: bool
+      ## A vendor map's layout went over the file's (`OpenOptions.vendors`): its keys
+      ## were read through it, so `saveIndex` refuses it.
     entries*: seq[TraceEntry]
     codecs*: seq[TraceCodec]
       ## One per SEG-D record; one for SEG-Y; one per sample format for SEG-2.

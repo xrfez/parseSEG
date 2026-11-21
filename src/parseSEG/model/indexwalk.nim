@@ -159,11 +159,13 @@ proc sampledKeys(ix: var TraceIndex, src: MemFileSource, tk: var ProgressTicker)
 proc indexSegy(src: RecordSource, keys: bool, verify: VerifyMode,
     tk: var ProgressTicker, vendors: VendorRegistry): TraceIndex =
   var r = openSegyWalk(src)
+  var overlaid = false
   if vendors.maps.len > 0:
     # A vendor map's layout over the file's (a Layout stanza's way): for a file
     # that says in its text header that its line and point numbers are times 100.
-    r.overlayLayout(vendors.vendorLayout(vendorContext(r.file)))
-  result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
+    overlaid = r.overlayLayout(vendors.vendorLayout(vendorContext(r.file)))
+  result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries,
+    vendorLayout: overlaid)
   result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
     order: r.file.byteOrder)
   if verify == vfSampled and result.indexFixed(r, src):

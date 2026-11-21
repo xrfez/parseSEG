@@ -128,7 +128,7 @@ The keys (`TraceKeys`) and `fieldValue` then read them; a map with a `(layout)` 
 target.
 ```
 (vendormap "x100-stations" (version 1)
-  (match (format segy) (textContains "ARE X 100 IN TRACE HEADERS"))
+  (match (format segy) (textContains "LINE AND POINT NUMBERS ARE X 100 IN TRACE HEADERS"))
   (layout
     (entry rec_line  (at 181) (type int4) (divisor 100))
     (entry rec_point (at 185) (type int4) (divisor 100))
@@ -145,12 +145,19 @@ target.
   `divisor="100"` attribute is accepted on a Layout stanza's `<entry>`.
 - Entries replace what the file's layout has for their names, and drop the entries whose
   bytes they use for something else (bytes 189-196 are `iline` and `xline` in Rev 1).
+- Order: the standard layout of the file's revision, then the file's own `((SEG:Layout))`
+  stanza, then the map's layout, except that an entry whose **name** the stanza defines is
+  left out: the file's own word wins over a map matched by a phrase.
 - The most specific map with a layout that applies is used (`vendorLayout`); a file no
   map's `match` holds for is read as before. Give such a map a `match` that names what the
   file says (`textContains`): without one it applies to every file.
 - It applies where the file is opened: `OpenOptions.vendors` (`openSeismic`) and
   `buildIndex(..., vendors)`. An index cache made without the map is not used for a file the
-  map applies to (the keys it holds were read without it).
+  map applies to (the keys it holds were read without it), and `saveIndex` refuses an index
+  whose keys were read through a map's layout (`TraceIndex.vendorLayout`).
+- An auxiliary trace (time break, sweep, ...: `tsAuxiliary`) keeps other data in the bytes of
+  the receiver entries that carry a divisor, so it gets no receiver line or point from them
+  (the source entries stay).
 - A value stored times a divisor is read only: `applySurvey` and `writeGeometry` give such a
   name no slot (reported in the log) rather than write a whole number where a multiple belongs.
 

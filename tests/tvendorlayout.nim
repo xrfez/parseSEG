@@ -12,6 +12,8 @@ import std/[assertions, math, os, strutils]
 
 import parseSEG
 
+from parseSEG/model/traceindex import mindex
+
 import ./utils/testutils
 
 const
@@ -25,7 +27,8 @@ proc put16(b: var seq[byte], at: int, v: int) =
   b[at] = byte((v shr 8) and 0xFF)
   b[at + 1] = byte(v and 0xFF)
 
-proc writeStored(path: string, rev: int, text: string, stored: openArray[array[4, int]]) =
+proc writeStored(path: string, rev: int, text: string, stored: openArray[array[4, int]],
+    codes: openArray[int] = []) =
   ## Big-endian, IEEE float, one sample per trace; per trace the four stored
   ## numbers (receiver line and point, source line and point) at bytes 181-196.
   var b = newSeq[byte](3600 + stored.len * 244)
@@ -40,6 +43,7 @@ proc writeStored(path: string, rev: int, text: string, stored: openArray[array[4
     b.put32(at, t + 1)
     b.put16(at + 114, 1)
     b.put16(at + 116, 2000)
+    if t < codes.len: b.put16(at + 28, codes[t])
     for k in 0..3: b.put32(at + 180 + 4 * k, s[k])
   writeBytes(path, b)
 
@@ -100,6 +104,70 @@ proc main*() =
     var f = openSeismic(p, keys = true, opts = OpenOptions(vendors: reg, cache: c))
     doAssert not f.fromCache
     f.checkKeys()
+    f.close()
+
+  block rev1_cdp_phrase_reads_as_before:
+    # "... ARE X 100 IN TRACE HEADERS" about something else (CDP coordinates): no map
+    let p = tmp / "cdp.sgy"
+    writeStored(p, 1, "C 5 CDP COORDINATES ARE X 100 IN TRACE HEADERS", stored)
+    var f = openSeismic(p, keys = true, opts = OpenOptions(vendors: reg))
+    doAssert f.traceKeys(0).srcLine.isNaN and f.traceKeys(0).rcvLine.isNaN
+    doAssert f.traceKeys(0).inline == 51900.0 and f.traceKeys(0).crossline == 13600.0
+    doAssert not f.index.vendorLayout
+    f.close()
+
+  block auxiliary_traces_have_no_receiver:
+    let p = tmp / "aux.sgy"
+    writeStored(p, 0, Sentence, [stored[0], stored[0], stored[0]], [1, 4, 6])
+    var f = openSeismic(p, keys = true, opts = OpenOptions(vendors: reg))
+    let ks = f.traceKeys(0 ..< f.len)
+    doAssert ks[0].rcvLine == 100.0 and ks[0].rcvPoint == 316.0
+    for i in 1 .. 2: # time break and sweep: the source stays, the receiver is blank
+      doAssert ks[i].srcLine == 519.0 and ks[i].srcPoint == 136.0
+      doAssert ks[i].rcvLine.isNaN and ks[i].rcvPoint.isNaN, $ks[i].rcvLine
+    f.close()
+
+  block cache_saved_with_the_map_is_refused:
+    let p = tmp / "refuse.sgy"
+    writeStored(p, 0, Sentence, stored)
+    var f = openSeismic(p, keys = true, opts = OpenOptions(vendors: reg))
+    doAssert f.index.vendorLayout
+    try:
+      f.saveIndex(tmp / "refuse.idx")
+      doAssert false, "saved"
+    except ValueError as e:
+      doAssert "vendor map" in e.msg, e.msg
+    f.close()
+
+  block write_back_says_read_only:
+    let p = tmp / "wb.sgy"
+    writeStored(p, 0, Sentence, stored)
+    var f = openSeismic(p, keys = true, opts = OpenOptions(vendors: reg))
+    f.mindex.keys[0].srcLine = 600.0
+    var ed = openEditor(move f)
+    discard ed.writeGeometry()
+    doAssert ed.log.has("times 100", sevWarning), $ed.log
+    ed.close()
+
+  block files_own_stanza_wins:
+    # the file's Layout stanza names sht_point at byte 21: the map's does not replace it
+    let p = tmp / "stanza.sgy"
+    writeStored(p, 2, Sentence, stored)
+    var raw = readBytes(p)
+    # a tiny extended text header holding the stanza, announced in the binary header
+    let xml = "((SEG:Layout:text/xml))\n<segy-layout name=\"own\"><entry name=\"sht_point\" " &
+      "byte=\"21\" type=\"int4\"/></segy-layout>\n((SEG:EndText))\n"
+    var rec = newSeq[byte](3200)
+    for i in 0 ..< 3200: rec[i] = 0x20
+    for i, c in xml: rec[i] = byte(c)
+    raw.put16(3504, 1)
+    var all = raw[0 ..< 3600] & rec & raw[3600 .. ^1]
+    for t in 0 ..< stored.len: all.put32(3600 + 3200 + t * 244 + 20, 777 + t)
+    writeBytes(p, all)
+    var f = openSeismic(p, keys = true, opts = OpenOptions(vendors: reg))
+    let k = f.traceKeys(0 ..< f.len)
+    doAssert k[0].srcPoint == 777.0, "the stanza's sht_point stays: " & $k[0].srcPoint
+    doAssert k[0].srcLine == 519.0, "the map's other entries apply"
     f.close()
 
   block layout_stanza_divisor:

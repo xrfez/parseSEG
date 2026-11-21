@@ -13,7 +13,7 @@ proc main*() =
     let m = loadVendorMap(readFile(path), path)
     doAssert m.doc.len > 0, path & " has no description"
     doAssert m.name.len > 0, path & " has no name"
-    doAssert m.targets.len > 0, path & " has no target"
+    doAssert m.targets.len > 0 or m.layout.len > 0, path & " has no target or layout"
     inc count
   doAssert count >= 2, "the shipped maps were not found in " & mapDir
 

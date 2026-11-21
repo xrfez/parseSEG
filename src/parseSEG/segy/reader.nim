@@ -67,6 +67,9 @@ type
     byteOrderDeclared*: bool        ## The Rev 2 marker declared `byteOrder`.
     format*: Option[SampleFormat]   ## None when the format code is undefined.
     firstTraceOffset*: int64        ## Medium offset of the first trace.
+    stanzaNames*: seq[string]
+      ## The entry names of the file's own Layout stanza: a vendor map's layout does
+      ## not replace them (`overlayLayout`).
     layout*: TraceLayout
       ## Effective trace header layout: the revision's standard layout with
       ## the file's Layout stanza merged over it. Empty for files built in
@@ -122,13 +125,19 @@ func file*(r: SegyReader): lent SegyFile {.inline.} =
   ## The file-level headers, filled by `openSegy`.
   r.file
 
-proc overlayLayout*(r: var SegyReader, entries: openArray[LayoutEntry]) =
+proc overlayLayout*(r: var SegyReader, entries: openArray[LayoutEntry]): bool =
   ## Puts `entries` over the file's layout as a Layout stanza's would be (`merge`):
   ## they win for their names, and standard entries on their bytes are dropped.
-  ## For a vendor map's layout (`vendorLayout`), before any trace is read.
-  if entries.len > 0:
+  ## An entry whose name the file's own Layout stanza defines is left out: the
+  ## file says better than a map. For a vendor map's layout (`vendorLayout`),
+  ## before any trace is read. Returns whether any entry went in.
+  var own: seq[LayoutEntry]
+  for e in entries:
+    if e.name notin r.file.stanzaNames: own.add e
+  result = own.len > 0
+  if result:
     r.file.layout = merge(r.file.layout, TraceLayout(name: r.file.layout.name,
-      desc: r.file.layout.desc, entries: @entries))
+      desc: r.file.layout.desc, entries: own))
 
 func log*(r: SegyReader): lent DiagLog {.inline.} =
   ## Every diagnostic of the read so far.
@@ -315,7 +324,10 @@ proc readFileHeaders(r: var SegyReader) =
       if st.dataEnd - st.dataStart > MaxLayoutBytes:
         raise newException(ValueError, "Layout stanza of " & $(st.dataEnd - st.dataStart) &
           " bytes exceeds " & $MaxLayoutBytes)
-      f.layout = merge(f.layout, parseLayout(f.extended.stanzaText(st)))
+      let own = parseLayout(f.extended.stanzaText(st))
+      f.layout = merge(f.layout, own)
+      for e in own.entries:
+        if e.name notin f.stanzaNames: f.stanzaNames.add e.name
     except ValueError as e:
       r.log.report(sevWarning, dcBadValue, e.msg & "; using the standard layout",
         extStart + st.headerStart, r.loc(field = "extended.layout"))

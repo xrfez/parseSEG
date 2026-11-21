@@ -1648,7 +1648,8 @@ proc saveIndex*(f: SeismicFile, path: string) =
   ## complete, so a crash leaves the previous cache or a whole new one.
   ##
   ## Raises `ValueError` for a closed or unrecognized file, a demultiplexed
-  ## copy (`demuxPath`), keys changed by `applyGeometry`/`applySurvey` (the
+  ## copy (`demuxPath`), a file whose keys were read through a vendor map's
+  ## layout (`OpenOptions.vendors`: a cache is read without the map), keys changed by `applyGeometry`/`applySurvey` (the
   ## cache holds the file's own index), a file that changed since it was
   ## opened, or `path` naming the file itself; `IOError`/`OSError` if the
   ## cache cannot be written.
@@ -1658,6 +1659,9 @@ proc saveIndex*(f: SeismicFile, path: string) =
   if f.demuxPath.len > 0:
     raise newException(ValueError, f.path & " was indexed through a demultiplexed copy, " &
       "which is not cached")
+  if f.idx.vendorLayout:
+    raise newException(ValueError, "the keys were read through a vendor map's layout " &
+      "(OpenOptions.vendors), which a cache read without the map would not know")
   if f.idx.joined:
     raise newException(ValueError, "the trace keys were changed by applyGeometry or " &
       "applySurvey; save the index before joining geometry")
