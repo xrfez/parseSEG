@@ -148,6 +148,8 @@ type
     rnCountsFromTimes     ## Rev 3 target without a scan: sample counts from the CSD times.
     rnUndefinedChannelType ## Rev 3 target: undefined Rev 2 channel types.
     rnRecordLengthClamped ## Rev 3 target: record lengths over 4294 s.
+    rnEndTimeClamped      ## Rev 3 target: a channel set end past 2^31 - 1 µs, clamped.
+    rnLengthsCorrected    ## Rev 3 target: channel set ends / record length set to N x dt.
     rnRev0StackArray      ## Rev 0 source: vertical stack and array forming set to 1.
 
   Conv = object
@@ -286,8 +288,7 @@ proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
     channelSetNumber: uint16(max(0, headers.channelSetNumber(d))), # resolves FF + extended
     channelType: rev3ChannelType(d.channelType),
     startTime: int32(round(d.startTimeMs * 1000)),
-    endTime: int32(clamp(int64(round(d.startTimeMs * 1000)) + int64(samples) * int64(round(siUs)),
-      0, int64(high(int32)))), # TE = TF + NS x SR (Rev 3 5.3.2)
+    endTime: int32(round(d.endTimeMs * 1000)),
     numSamples: uint32(samples), descaleMultiplier: float32(pow(2.0, d.mpFactor)),
     channelsInSet: uint32(bcd(d.channelCount)), samplingInterval: uint32(round(siUs)),
     arrayForming: d.arrayForming, traceHeaderExtensions: 1,
@@ -302,9 +303,24 @@ proc csdToRev3(c: var Conv, d: SegdChannelSetDescriptor, g1: SegdGeneralHeader1,
     notch3Freq: float32(bcd(d.notch3Freq)) / 10, blockType2: BlockTypeChannelSet2,
     blockType3: BlockTypeChannelSet3)
   for i in 0..<result.description.len: result.description[i] = ' '
+  # TE = TF + NS x SR (Rev 3 5.3.2); TF = TE = 0 (start times in the trace
+  # timestamps) stays.
+  if not (d.startTime == 0 and d.endTime == 0):
+    let wanted = int64(result.startTime) + int64(samples) * int64(round(siUs))
+    if wanted > int64(high(int32)):
+      c.note(rnEndTimeClamped, "a channel set end past 2147 s does not fit Rev 3's µs field " &
+        "and is clamped")
+    result.endTime = int32(clamp(wanted, 0, int64(high(int32))))
   if d.channelType notin {0'u8..9'u8, 0xC'u8}:
     c.note(rnUndefinedChannelType, "undefined Rev 2 channel types (0xA, 0xB, 0xD-0xF) are " &
       "written as 0x70 (other)")
+
+func longestEnd(sets: openArray[SegdScanType]): uint32 =
+  ## The longest channel set end (µs) of Rev 3 scan types.
+  var us = 0'i64
+  for st in sets:
+    for d in st.descriptorsRev3: us = max(us, int64(d.endTime))
+  uint32(clamp(us, 0, int64(high(uint32))))
 
 proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
     scan: SegdRecordScan): SegdRecord =
@@ -353,6 +369,7 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
   else:
     g3.timeZero = unixToTimestamp(utc)
     c.note(rnTimeZeroFromGh1, "GH#3 time zero comes from General Header #1 (whole seconds, UTC)")
+  var corrected = false
   for i, st in rec.scanTypes:
     var s3 = SegdScanType(layout: slRev3, skew: st.skew)
     for k, d in st.descriptors:
@@ -365,17 +382,22 @@ proc toRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat,
         c.note(rnCountsFromTimes, "without a header scan, channel set sample counts come " &
           "from the descriptors' times ((end - start) / interval); traces that differ are " &
           "adjusted")
-      s3.descriptorsRev3.add c.csdToRev3(d, rec.gh1, ns)
+      let d3 = c.csdToRev3(d, rec.gh1, ns)
+      if d3.endTime != int32(clamp(round(d.endTimeMs * 1000), 0.0, float64(high(int32)))):
+        corrected = true
+      s3.descriptorsRev3.add d3
     result.scanTypes.add s3
   result.gh1 = g1
   # A Rev 3 record is at least as long as its channel sets (N x dt): a source
   # length one sample short is raised to the longest end; a longer one stays
   # (a Rev 2 GH#1 length in 102.4 ms units stays as it is).
   if rec.gh1.recordLength == BcdAllF:
-    var recordUs = 0'i64
-    for st in result.scanTypes:
-      for d in st.descriptorsRev3: recordUs = max(recordUs, int64(d.endTime))
-    g2.extRecordLength = max(g2.extRecordLength, uint32(clamp(recordUs, 0, int64(high(uint32)))))
+    let was = g2.extRecordLength
+    g2.extRecordLength = max(g2.extRecordLength, longestEnd(result.scanTypes))
+    if g2.extRecordLength != was: corrected = true
+  if corrected:
+    c.note(rnLengthsCorrected, "channel set ends and the record length are set to N x dt " &
+      "(TE = TF + NS x SR)")
   result.gh2Rev3 = g2
   result.extended = rec.extended
   result.external = rec.external
@@ -646,6 +668,27 @@ proc withinRev3(c: var Conv, rec: SegdRecord, fOut: SegdSampleFormat): SegdRecor
                                     else: SegdBlockSize * int(gt))
   result.gh1.formatCode = ord(fOut)
   result.format = some(fOut)
+  # TE = TF + NS x SR, and the record at least that long; TF = TE = 0 stays.
+  var corrected = false
+  for st in result.scanTypes.mitems:
+    for d in st.descriptorsRev3.mitems:
+      if d.startTime == 0 and d.endTime == 0: continue
+      let wanted = int64(d.startTime) + int64(d.numSamples) * int64(d.samplingInterval)
+      if wanted > int64(high(int32)):
+        c.note(rnEndTimeClamped, "a channel set end past 2147 s does not fit Rev 3's µs " &
+          "field and is clamped")
+      let end3 = int32(clamp(wanted, 0, int64(high(int32))))
+      if end3 != d.endTime:
+        d.endTime = end3
+        corrected = true
+  if rec.gh1.recordLength == BcdAllF:
+    let longest = longestEnd(result.scanTypes)
+    if longest > result.gh2Rev3.extRecordLength:
+      result.gh2Rev3.extRecordLength = longest
+      corrected = true
+  if corrected:
+    c.note(rnLengthsCorrected, "channel set ends and the record length are set to N x dt " &
+      "(TE = TF + NS x SR)")
   if rec.revision.minor > target.minor:
     c.note(rnCrsNotConverted, "Rev 3." & $rec.revision.minor & " records are written as 3." &
       $target.minor & " unchanged; their CRS text (P1/11 in 3.1) is not converted")

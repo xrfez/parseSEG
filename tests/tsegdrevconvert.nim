@@ -345,6 +345,7 @@ proc main*() =
       doAssert c.numSamples == 52 and c.samplingInterval == 2000
       doAssert c.endTime == c.startTime + int32(c.numSamples * c.samplingInterval)
     doAssert r.gh2Rev3.extRecordLength == 104_000
+    doAssert log.has("set to N x dt", sevInfo), $log
     log = convertSegdRevision(tmp / "short_r3.sgd", tmp / "short_21.sgd", rev(2, 1))
     doAssert log.clean, $log
     log = convertSegdRevision(tmp / "short_21.sgd", tmp / "short_again.sgd", rev(3, 0))
@@ -355,6 +356,37 @@ proc main*() =
       doAssert c.numSamples == 52 and c.endTime == 104_000
     doAssert r.gh2Rev3.extRecordLength == 104_000
     for t in r3.records[0].traces: doAssert t.numSamples == 52
+
+  block rev3_within_corrects_lengths:
+    # 3.0 -> 3.1: a file one sample short gets TE = TF + NS x SR, the record
+    # length at least that, and one info note; a file whose sets have TF = TE = 0
+    # (start times in the trace timestamps) keeps them; a file already right
+    # says nothing; an end past 2^31 - 1 us is clamped with a note.
+    # Seen to fail first: withinRev3 copying TE (3000 us, not 4000).
+    toDisk(makeRev3(sd8058, [1.0, 2.0, 3.0, 4.0]), tmp / "w30.sgd")
+    var log = convertSegdRevision(tmp / "w30.sgd", tmp / "w31.sgd", rev(3, 1))
+    doAssert log.clean, $log
+    doAssert log.has("set to N x dt", sevInfo), $log
+    var x = readSegd(tmp / "w31.sgd")
+    var c = x.records[0].record.scanTypes[0].descriptorsRev3[0]
+    doAssert c.endTime == 4000 and x.records[0].record.gh2Rev3.extRecordLength == 4000
+    log = convertSegdRevision(tmp / "w31.sgd", tmp / "w30b.sgd", rev(3, 0))
+    doAssert not log.has("set to N x dt", sevInfo), $log
+    var z = makeRev3(sd8058, [1.0, 2.0, 3.0, 4.0])
+    z.records[0].record.scanTypes[0].descriptorsRev3[0].endTime = 0
+    toDisk(z, tmp / "z30.sgd")
+    log = convertSegdRevision(tmp / "z30.sgd", tmp / "z31.sgd", rev(3, 1))
+    doAssert not log.has("set to N x dt", sevInfo) or
+      readSegd(tmp / "z31.sgd").records[0].record.gh2Rev3.extRecordLength == 4000, $log
+    x = readSegd(tmp / "z31.sgd")
+    doAssert x.records[0].record.scanTypes[0].descriptorsRev3[0].endTime == 0
+    var big = makeRev3(sd8058, newSeq[float64](200))
+    big.records[0].record.scanTypes[0].descriptorsRev3[0].samplingInterval = 16_000_000'u32 # 200 x 16 s
+    toDisk(big, tmp / "big30.sgd")
+    log = convertSegdRevision(tmp / "big30.sgd", tmp / "big31.sgd", rev(3, 1))
+    doAssert log.has("does not fit Rev 3's", sevInfo), $log
+    x = readSegd(tmp / "big31.sgd")
+    doAssert x.records[0].record.scanTypes[0].descriptorsRev3[0].endTime == high(int32)
 
   block rev2_on_tape_without_a_header_scan:
     # The stream API has no header scan: sample counts come from the descriptors.
@@ -425,7 +457,21 @@ proc main*() =
         decodeF64(sd8058, orig.records[0].traces[i].samples, n)
     log = convertSegdRevision(tmp / "inova31.sgd", tmp / "inova30.sgd", rev(3, 0))
     doAssert not log.isFatal and log.count(sevError) == 0, $log
-    doAssert readFile(tmp / "inova30.sgd") == readFile(src), "3.0 -> 3.1/9058 -> 3.0 is exact"
+    # Exact but for the length fields (TE = TF + NS x SR, the record length),
+    # which the conversion corrects: only header bytes differ, at most the two
+    # bytes of the record length and of each set's end time.
+    let back = readFile(tmp / "inova30.sgd")
+    let was = readFile(src)
+    doAssert back.len == was.len
+    var differing = 0
+    for i in 0 ..< was.len:
+      if back[i] != was[i]:
+        inc differing
+        doAssert i < r.headerBytes + 128, "a byte past the headers differs: " & $i
+    doAssert differing <= 4 * (1 + r.scanTypes[0].descriptorsRev3.len), $differing
+    log = convertSegdRevision(tmp / "inova30.sgd", tmp / "inova31b.sgd", o)
+    log = convertSegdRevision(tmp / "inova31b.sgd", tmp / "inova30b.sgd", rev(3, 0))
+    doAssert readFile(tmp / "inova30b.sgd") == back, "corrected once, then exact"
     block indexed:
       var f = openSeismic(tmp / "inova31.sgd")
       var g = openSeismic(src)

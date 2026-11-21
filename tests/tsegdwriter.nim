@@ -438,6 +438,19 @@ proc main*() =
     doAssert d2.channelSets[0].endTimeMs == 2000.0
     d2.close()
 
+  block record_length_covers_a_late_start:
+    # A set starting at 100 ms with 12 samples at 1 ms ends at 112 ms, and the
+    # record length is at least that (it was 12 ms).
+    var late = shot(1, 1, true)
+    late.t0Ms = 100
+    var w = openOut(tmp / "late100.sgd", opts(12))
+    w.writeTrace(late, samples(12, 1))
+    discard w.close()
+    var f = openSeismic(tmp / "late100.sgd", keys = true)
+    doAssert f.index.segdRecords[0].gh2Rev3.extRecordLength == 112_000
+    doAssert f.channelSets[0].endTimeMs == 112.0
+    f.close()
+
   block base_scan_interval_short_field:
     # General Header #1's base scan interval is a short field only for 1, 2, 4
     # ... 128 sixteenths of a millisecond (125 µs to 8 ms in steps that double,

@@ -1308,7 +1308,10 @@ proc flushSegdKeys(s: var WriterState) =
   if nCS > 99: gh2.extChannelSetsPerScanType = uint16(nCS)
   if gh1.baseScanInterval16 == 0xFF:
     gh2.dominantSamplingInterval = uint32(opts.sampleIntervalUs)
-  gh2.extRecordLength = uint32(span) # in range: openSeismicWriter refuses a longer window
+  var longest = span
+  for t0 in setT0: longest = max(longest, float64(t0) + span)
+  # in range: writeSegdKeys refuses a window whose end does not fit an int32
+  gh2.extRecordLength = uint32(longest)
   rec.gh2Rev3 = gh2
   rec.gh3 = SegdGeneralHeader3(timeZero: unixToTimestamp(recTime),
     blockType: BlockTypeGeneralHeader3)
