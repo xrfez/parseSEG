@@ -18,7 +18,7 @@
 ## format code         binary 3225-3226                GH#1 bytes 3-4
 ## field records       trace bytes 9-12, first/last    file number, first/last record
 ## sample interval     each trace's effective one      each trace's channel set
-## record length       (samples - 1) × interval        GH#1 / GH#2 record length
+## record length       samples × interval              GH#1 / GH#2 record length
 ## coordinate units    trace 89-90, binary 3255-3256   CRS text (Rev 3), else unknown
 ## CRS text            P1/11 or Location Data stanza   0x55 blocks of the general header
 ## ==================  ==============================  ==================================
@@ -75,7 +75,8 @@ type
       ## m/ft); NaN when they differ (SEG-D: see `channelSets`).
     samplesPerTrace*: int ## Samples every trace has; -1 when they differ.
     recordLengthMs*: float64
-      ## SEG-Y: (samples - 1) × interval when both are uniform. SEG-D: the
+      ## SEG-Y: samples × interval when both are uniform (a length is N × dt: 4000
+      ## samples at 1 ms are 4000 ms, the last sample at 3999 ms). SEG-D: the
       ## general header's record length when every record has the same (NaN
       ## for 0, "indeterminate", and for a field that is not valid BCD).
     coordinateUnits*: CoordinateUnits
@@ -250,7 +251,7 @@ proc summary*(f: SeismicFile): FileSummary =
       result.lastFieldRecord = f.intField(f.len - 1, "trace.fieldRecord")
       result.sampleIntervalUs = ix.segyIntervalUs
       if result.samplesPerTrace >= 0 and not result.sampleIntervalUs.isNaN:
-        result.recordLengthMs = float64(max(result.samplesPerTrace - 1, 0)) *
+        result.recordLengthMs = float64(max(result.samplesPerTrace, 0)) *
           result.sampleIntervalUs / 1000
     result.crsFormat = segyCrs(s, text)
     result.coordinateUnits = segyUnits(f, crsUnits(text, result.crsFormat))
@@ -310,7 +311,7 @@ proc summary*(f: SeismicFile): FileSummary =
           result.sampleIntervalUs = NaN
           break
       if result.samplesPerTrace >= 0 and not result.sampleIntervalUs.isNaN:
-        result.recordLengthMs = float64(max(result.samplesPerTrace - 1, 0)) *
+        result.recordLengthMs = float64(max(result.samplesPerTrace, 0)) *
           result.sampleIntervalUs / 1000
 
 proc channelSets*(f: SeismicFile): seq[ChannelSetSummary] =

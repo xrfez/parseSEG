@@ -36,8 +36,42 @@ proc edited(src, name: string, edits: openArray[(HeaderScope, int, string, Field
   ed.close()
   removeFile(result & ".edits.nif")
 
+
+proc lengthFile(path: string, ns, dtUs: int) =
+  ## A one-trace big-endian IEEE-float SEG-Y of `ns` samples at `dtUs` µs.
+  var b = newSeq[byte](3600 + 240 + ns * 4)
+  b[0] = 0x43
+  for i in 1 ..< 3200: b[i] = 0x20
+  proc put16(b: var seq[byte], at, v: int) =
+    b[at] = byte((v shr 8) and 0xFF)
+    b[at + 1] = byte(v and 0xFF)
+  b.put16(3216, dtUs)
+  b.put16(3220, ns)
+  b.put16(3224, 5)
+  b[3500] = 0
+  b.put16(3600 + 114, ns)
+  b.put16(3600 + 116, dtUs)
+  var s = newString(b.len)
+  for i, c in b: s[i] = char(c)
+  writeFile(path, s)
+
+proc lengthsAreNTimesDt() =
+  # A record of 12000 ms at 1 ms is 12000 samples (the last at 11999 ms); the
+  # summary's length is N x dt, not (N - 1) x dt. Broke it by restoring the
+  # `- 1` in `summary`: 11999 ms.
+  for (ns, dtUs, ms) in [(12000, 1000, 12000.0), (6000, 2000, 12000.0), (24000, 500, 12000.0),
+      (3, 4000, 12.0)]:
+    let p = tmp / ("len" & $ns & ".sgy")
+    lengthFile(p, ns, dtUs)
+    var f = openSeismic(p)
+    let s = f.summary
+    doAssert s.samplesPerTrace == ns and s.sampleIntervalUs == float64(dtUs), $ns
+    doAssert s.recordLengthMs == ms, $ns & ": " & $s.recordLengthMs
+    f.close()
+
 proc main*() =
   tmp = scratchDir("parseseg_tsummary")
+  lengthsAreNTimesDt()
 
   sampleBlock segd_rev2_sample:
     # Values as tools/walks/segd2_walk.py prints them for 63.sgd: file 63,
@@ -90,7 +124,7 @@ proc main*() =
     let s = f.summary
     doAssert s.standard == skSegy and $s.revision == "2.1" and s.byteOrder == boBig
     doAssert s.formatCode == 1 and s.decodable and s.traceCount == 200 and s.recordCount == 1
-    doAssert s.sampleIntervalUs == 2000 and s.samplesPerTrace == 2001 and s.recordLengthMs == 4000
+    doAssert s.sampleIntervalUs == 2000 and s.samplesPerTrace == 2001 and s.recordLengthMs == 4002
     doAssert s.firstFieldRecord == 0 and s.lastFieldRecord == 0
     doAssert s.coordinateUnits == cuMeters and s.crsFormat == ctP1_11
     doAssert f.crsText.startsWith("IOGP,IOGP P1") and "HC,1,6,1" in f.crsText
@@ -101,7 +135,7 @@ proc main*() =
     let s = f.summary
     doAssert $s.revision == "0.0" and s.byteOrder == boLittle and s.formatCode == 5
     doAssert s.sampleIntervalUs == 1000 and s.samplesPerTrace == 12001
-    doAssert s.recordLengthMs == 12000 and s.firstFieldRecord == 1
+    doAssert s.recordLengthMs == 12001 and s.firstFieldRecord == 1 # N x dt
     doAssert s.coordinateUnits == cuFeet # binary 3255 = 2
     doAssert s.crsFormat == ctNone and f.crsText == ""
 
