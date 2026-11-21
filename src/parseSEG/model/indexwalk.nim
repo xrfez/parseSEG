@@ -14,6 +14,7 @@
 import ../common/[errors, diagnostics, bcd, seismickind, progress, endians]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
+import ../vendor/[maps, apply]
 import ../segd/[reader as segdreader, mux]
 import ../seg2/[reader as seg2reader]
 import ./[keys, indextypes]
@@ -156,8 +157,12 @@ proc sampledKeys(ix: var TraceIndex, src: MemFileSource, tk: var ProgressTicker)
     if not tk.tick(e.offset): raiseCancelled()
 
 proc indexSegy(src: RecordSource, keys: bool, verify: VerifyMode,
-    tk: var ProgressTicker): TraceIndex =
+    tk: var ProgressTicker, vendors: VendorRegistry): TraceIndex =
   var r = openSegyWalk(src)
+  if vendors.maps.len > 0:
+    # A vendor map's layout over the file's (a Layout stanza's way): for a file
+    # that says in its text header that its line and point numbers are times 100.
+    r.overlayLayout(vendors.vendorLayout(vendorContext(r.file)))
   result = TraceIndex(kind: skSegy, contiguous: not src.hasRecordBoundaries)
   result.codecs.add TraceCodec(kind: skSegy, segyFormat: r.file.format,
     order: r.file.byteOrder)
@@ -286,7 +291,8 @@ proc indexSeg2(src: MemFileSource, twosComplement8015, keys: bool,
   result.log = log
 
 proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = false,
-    keys = false, progress: Progress = nil, verify = vfFull): TraceIndex =
+    keys = false, progress: Progress = nil, verify = vfFull,
+    vendors = VendorRegistry()): TraceIndex =
   ## Walks the stream at the current position of `src` with headers only and
   ## indexes every trace; with `keys`, also collects each trace's geometry
   ## (for `gathers` and `componentGroups`). Problems go to `log`, as with the
@@ -310,12 +316,15 @@ proc buildIndex*(src: RecordSource, kind: SeismicKind, twosComplement8015 = fals
   ## there), and with `keys` reads the keys from every mapped trace header;
   ## the default walks every trace.
   ##
+  ## `vendors`: maps whose `(layout)` applies to a SEG-Y file go over its
+  ## layout (`OpenOptions.vendors`).
+  ##
   ## A `MemFileSource` that another program cuts short during the walk gives
   ## the index of what the walk saw (zeros past the cut): ask `src.cutShort`
   ## afterwards, as `openSeismic` does (it raises `IOError` then).
   var tk = initProgressTicker(progress, if src of MemFileSource: MemFileSource(src).size else: -1)
   result = case kind
-    of skSegy: indexSegy(src, keys, verify, tk)
+    of skSegy: indexSegy(src, keys, verify, tk, vendors)
     of skSegd: indexSegd(src, twosComplement8015, keys, tk)
     of skSeg2:
       if not (src of MemFileSource):

@@ -122,6 +122,14 @@ func file*(r: SegyReader): lent SegyFile {.inline.} =
   ## The file-level headers, filled by `openSegy`.
   r.file
 
+proc overlayLayout*(r: var SegyReader, entries: openArray[LayoutEntry]) =
+  ## Puts `entries` over the file's layout as a Layout stanza's would be (`merge`):
+  ## they win for their names, and standard entries on their bytes are dropped.
+  ## For a vendor map's layout (`vendorLayout`), before any trace is read.
+  if entries.len > 0:
+    r.file.layout = merge(r.file.layout, TraceLayout(name: r.file.layout.name,
+      desc: r.file.layout.desc, entries: @entries))
+
 func log*(r: SegyReader): lent DiagLog {.inline.} =
   ## Every diagnostic of the read so far.
   r.log

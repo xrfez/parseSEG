@@ -830,6 +830,11 @@ and `fields`. What a viewer should expect from maps that find blocks by content:
 - `VendorContext.extended`, `external` and `general` are copied only when a loaded map needs
   them (`hasBlock`, `(when (record ...))`); `vendorContext(rec)` always fills them, so
   `map.applies(ctx)` is exact.
+- A map's `(layout)` (SEG-Y trace header entries, with an optional `divisor`: a number stored
+  times 100) reaches the keys when the file is opened with the registry:
+  `openSeismic(path, keys = true, opts = OpenOptions(vendors: reg))`. Pass it on every open
+  of a file (also the one that reads the index cache: it is not used for a file such a map
+  applies to), so the keys, the map and the joins all see the true numbers.
 
 ## Geometry, time and annotation
 

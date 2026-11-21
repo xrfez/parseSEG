@@ -247,6 +247,9 @@ proc resolveLayout(p: var Planner) =
   # in layout order (for a repeated name the last applicable entry wins).
   p.headers = @["", "SEG00001"]
   for e in p.lay.entries:
+    # A value stored times a divisor (`LayoutEntry.divisor`) has no slot: what is
+    # written would have to be multiplied, and a whole number is not what is stored.
+    if e.divisor > 1: continue
     var name = -1
     for n in Name:
       if e.name == $n: name = ord(n)

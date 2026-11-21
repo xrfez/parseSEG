@@ -34,6 +34,7 @@ import std/[algorithm, math, os, times, locks]
 import ../common/[errors, diagnostics, endians, seismickind, progress, tensors]
 import ../io/[records, memsource]
 import ../segy/[reader as segyreader, fields]
+import ../vendor/[maps, apply]
 import ../segd/[reader as segdreader, demux]
 import ../seg2/[reader as seg2reader]
 import ./[keys, indextypes, indexwalk]
@@ -396,7 +397,7 @@ proc requireWholeOpen(f: SeismicFile) =
 
 proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
-    forced = skUnknown, access = DefaultAccess): SeismicFile =
+    forced = skUnknown, access = DefaultAccess, vendors = VendorRegistry()): SeismicFile =
   # `openSeismic` / `openSeismicRw`. Built in a local, so a raise (a
   # cancelled walk) unmaps the file. The source is opened before the map
   # ref is made: a `MapRef` under construction is not freed when an
@@ -407,6 +408,11 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
   var why = ""
   if cache.len > 0:
     why = f.loadIndex(cache, keys, verify)
+    if why.len == 0 and vendors.maps.len > 0 and f.idx.kind == skSegy and
+        vendors.vendorLayout(vendorContext(f.idx.segy)).len > 0:
+      # A map's layout applies: the cached keys were read without it.
+      why = "a vendor map has a layout for this file, which the cached keys were read without"
+      f.idx = TraceIndex()
     if why.len == 0 and forced != skUnknown and f.idx.kind != forced:
       # The cache was saved from another reading of the file than the one
       # the caller names (`OpenOptions.kind`).
@@ -427,7 +433,7 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     f.holdBytes(h, 0, n)
     kind = detectKind(f.map.src.memory.toOpenArray(0, n - 1))
   if kind != skUnknown:
-    f.idx = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify)
+    f.idx = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify, vendors)
     f.map.src.endWalk()
     if kind == skSegd and f.idx.multiplexed:
       if writable:
@@ -496,7 +502,7 @@ proc openSeismic*(path: string, keys = false, progress: Progress = nil,
   ## `twosComplement8015` also reads SEG-2 format-3 mantissas as two's
   ## complement.
   openMapped(path, opts.twosComplement8015, keys, false, opts.demuxDir, progress, opts.cache,
-    opts.verify, opts.kind, opts.access)
+    opts.verify, opts.kind, opts.access, opts.vendors)
 
 proc openSeismicRw*(path: string, access = DefaultAccess): SeismicFile =
   ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`

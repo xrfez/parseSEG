@@ -49,6 +49,7 @@ type
     sel: HeaderSel
     name: string ## The proprietary header's name (`hsProprietary`).
     ifNonZero: bool
+    divisor: float64 ## The stored number over the value (1.0: none).
     inRange: bool
       ## `pos + size <= 240`: Layout XML guarantees it; a layout built by hand
       ## may not, and then the load is checked (raising as it did).
@@ -114,6 +115,7 @@ func rawEntry(e: LayoutEntry): RawEntry =
             else: hsProprietary
   let pos = e.bytePos - 1
   RawEntry(kind: e.kind, pos: pos, sel: sel, ifNonZero: e.ifNonZero,
+    divisor: if e.divisor > 1: float64(e.divisor) else: 1.0,
     name: if sel == hsProprietary: e.extension else: "",
     inRange: pos >= 0 and pos + e.kind.size <= TraceHeaderSize)
 
@@ -133,7 +135,7 @@ func fixedIntervalUs*(f: SegyFile): float64 =
   else: NaN
 
 func isAt(e: RawEntry, pos: int, kind: LayoutType, sel = hsStd): bool =
-  e.sel == sel and e.pos == pos and e.kind == kind and not e.ifNonZero
+  e.sel == sel and e.pos == pos and e.kind == kind and not e.ifNonZero and e.divisor == 1.0
 
 func isAt(rs: openArray[Resolved], pos: int, kind: LayoutType, sel = hsStd): bool =
   # The name has one entry, the plain one at 0-based `pos`.
@@ -241,8 +243,8 @@ func initFieldPlan*(lay: TraceLayout, name: string): FieldPlan =
 
 {.push boundChecks: off, overflowChecks: off, rangeChecks: off.}
 
-proc read(b: ByteBuf, e: RawEntry, o: static ByteOrder): float64 {.inline.} =
-  # An entry's unscaled value from its 240-byte header at `b`.
+proc readStored(b: ByteBuf, e: RawEntry, o: static ByteOrder): float64 {.inline.} =
+  # An entry's stored number from its 240-byte header at `b`.
   template num(T: typedesc, at: int): untyped =
     (if e.inRange: loadNum[T](b, at, o)
      else: getNum[T](b.toOpenArray(0, TraceHeaderSize - 1), at, o))
@@ -258,6 +260,12 @@ proc read(b: ByteBuf, e: RawEntry, o: static ByteOrder): float64 {.inline.} =
   of ltIeee32: float64(num(float32, p))
   of ltIeee64: num(float64, p)
   of ltScale6: float64(num(int32, p)) * pow(10.0, float64(num(int16, p + 4)))
+
+proc read(b: ByteBuf, e: RawEntry, o: static ByteOrder): float64 {.inline.} =
+  # An entry's unscaled value: the stored number over the entry's divisor
+  # (one division, correctly rounded: a whole result is exact).
+  result = readStored(b, e, o)
+  if e.divisor != 1.0: result = result / e.divisor
 
 proc rawProprietary(h: RawHeaders, e: RawEntry, o: static ByteOrder,
     value: var float64): bool {.noinline.} =

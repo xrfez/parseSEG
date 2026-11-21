@@ -5,6 +5,7 @@
 
 import ../common/[endians, diagnostics, seismickind]
 import ../io/memsource
+import ../vendor/maps
 import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ../seg2/[reader as seg2reader]
@@ -32,6 +33,11 @@ type
       ## The standard to read the file as, without detecting it: for a file
       ## `detectKind` does not recognize, or takes for another standard.
       ## `skUnknown`, the default, detects.
+    vendors*: VendorRegistry
+      ## Vendor maps whose `(layout)` entries go over a SEG-Y file's own layout
+      ## when the map applies to it (`vendorLayout`): the keys and `fieldValue` then
+      ## read the bytes and divisors the map names. An index cache is not used when a
+      ## map has a layout (the keys it holds were read without it).
     access*: FileAccess = DefaultAccess
       ## How the file's bytes are reached: `faAuto` (the default) reads a
       ## file on a network file system unmapped and maps any other;

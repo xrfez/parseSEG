@@ -36,6 +36,9 @@ type
     bytePos*: int      ## 1-based byte within its 240-byte header.
     kind*: LayoutType
     ifNonZero*: bool   ## Overrides earlier entries of the same name only when non-zero.
+    divisor*: int      ## The stored number is this many times the value (0 and 1: it is the
+                       ## value): `divisor="100"` for a point number stored as 100.5 x 100 =
+                       ## 10050. The readers divide the stored number, so a whole result is exact.
 
   TraceLayout* = object
     ## An ordered set of entries; for a repeated name the last applicable one wins.
@@ -213,8 +216,15 @@ proc addEntry(r: var TraceLayout, n: XmlNode, ext: string) =
     raise newException(ValueError, "Layout XML: entry '" & name & "' at byte " & $pos &
       " does not fit a 240-byte header")
   let inz = n.attr("if-non-zero").strip.toLowerAscii in ["1", "true", "yes"]
+  var divisor = 1
+  let dv = n.attr("divisor").strip
+  if dv.len > 0:
+    if not dv.allCharsInSet(Digits) or dv.len > 7 or parseInt(dv) < 1:
+      raise newException(ValueError, "Layout XML: entry '" & name & "' has divisor '" & dv &
+        "' (a whole number from 1 to 9999999)")
+    divisor = parseInt(dv)
   r.entries.add LayoutEntry(name: name, extension: ext, bytePos: pos, kind: kind,
-    ifNonZero: inz)
+    ifNonZero: inz, divisor: divisor)
 
 proc checkCharRefs(xml: string) =
   # The XML parser raises a defect on out-of-range numeric character

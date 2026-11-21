@@ -43,6 +43,10 @@
 ##   `(record <area> (match ...) (byte N))`. Test: `(is v)`, `(in v...)`,
 ##   `(range lo hi)`. A field whose own conditions failed is absent for the
 ##   conditions that name it.
+## - `(layout (entry name (at N) (type int4) (divisor D)) ...)`: SEG-Y trace
+##   header entries that go over the file's layout when the map applies
+##   (`vendorLayout`, `OpenOptions.vendors`); `divisor`: the stored number is D
+##   times the value. A map with a layout needs no target.
 ## - In the map's `(match ...)`: `(hasBlock <area> (match ...))` requires such a
 ##   block in `extendedHeader`, `externalHeader` or `generalHeader`; each counts
 ##   one in the specificity.
@@ -54,6 +58,7 @@
 
 import std/[strutils, os, math, options]
 import ../common/[endians, ibmfloat, ebcdic, bcd, diagnostics, seismickind]
+import ../segy/layout
 export diagnostics, endians, options, seismickind
 
 type
@@ -194,6 +199,9 @@ type
     source*: string      ## File the map was loaded from.
     match*: VendorMatch
     targets*: seq[VendorTarget]
+    layout*: seq[LayoutEntry]
+      ## The map's `(layout ...)`: SEG-Y trace header entries that go over the file's own
+      ## layout (`vendorLayout`), so the keys and `fieldValue` read them.
 
   VendorContext* = object
     ## Facts about a file that maps are matched against.
@@ -700,6 +708,32 @@ proc addField(t: var VendorTarget, f: sink VendorFieldPlan, inherited: seq[Vendo
           ")) needs an integer or bcd field", c.line)
   t.fields.add f
 
+proc compileLayoutEntry(n: NNode): LayoutEntry =
+  # (entry name (at 189) (type int4) (divisor 100)): one SEG-Y trace header
+  # entry, as a Layout stanza's <entry>. Rev 0 and 1 files have no stanza.
+  result = LayoutEntry(name: normalizeEntryName(n.textAtom), divisor: 1)
+  var atSeen, typeSeen = false
+  for k in n.trees:
+    case k.tag
+    of "at":
+      result.bytePos = k.boundedAtom(1)
+      atSeen = true
+    of "type":
+      try: result.kind = parseEnum[LayoutType](k.textAtom.toLowerAscii)
+      except ValueError: mapError("unknown layout type " & k.textAtom, k.line)
+      typeSeen = true
+    of "divisor":
+      let v = k.intAtom
+      if v < 1 or v > 9_999_999: mapError("(divisor) must be 1..9999999", k.line)
+      result.divisor = int(v)
+    of "extension": result.extension = k.textAtom.toUpperAscii
+    of "ifNonZero": result.ifNonZero = true
+    else: mapError("unknown layout entry attribute (" & k.tag & ")", k.line)
+  if not (atSeen and typeSeen):
+    mapError("layout entry " & result.name & " needs (at) and (type)", n.line)
+  if result.bytePos + result.kind.size - 1 > 240:
+    mapError("layout entry " & result.name & " does not fit a 240-byte header", n.line)
+
 proc compileGroup(t: var VendorTarget, n: NNode, inherited: seq[VendorCondition],
     total: var int) =
   # `(group (when ...)... (field ...)... (group ...))`: the conditions apply to every field.
@@ -806,8 +840,13 @@ proc loadVendorMap*(nif: string, source = ""): VendorMap =
           result.match.blocks.add bm
         else: mapError("unknown match clause (" & c.tag & ")", c.line)
     of "target": result.targets.add compileTarget(k, condTotal)
+    of "layout":
+      for e in k.trees:
+        if e.tag != "entry": mapError("unknown (layout) attribute (" & e.tag & ")", e.line)
+        result.layout.add compileLayoutEntry(e)
     else: mapError("unknown vendormap attribute (" & k.tag & ")", k.line)
-  if result.targets.len == 0: mapError("vendor map " & result.name & " has no target")
+  if result.targets.len == 0 and result.layout.len == 0:
+    mapError("vendor map " & result.name & " has no target or layout")
 
 func contradicts(a, b: seq[VendorBytesMatch]): bool =
   # True when some byte is required to have two values.
@@ -1188,6 +1227,19 @@ proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
       for f in r.fields:
         let v = decodeField(f, b, r.byteOff + i * r.stride, order)
         if v.isSome: blk.fields.add VendorField(name: f.name & "[" & $i & "]", value: v.get)
+
+func vendorLayout*(reg: VendorRegistry, ctx: VendorContext): seq[LayoutEntry] =
+  ## The `(layout)` entries of the most specific map with a layout that
+  ## applies to `ctx` (the one loaded first when equally specific); empty
+  ## when none does. `openSeismic` merges them over a SEG-Y file's layout
+  ## (`OpenOptions.vendors`).
+  var best = -1
+  for m in reg.maps:
+    if m.layout.len > 0:
+      let sp = specificity(m.match, ctx)
+      if sp > best:
+        best = sp
+        result = m.layout
 
 func applies*(m: VendorMap, ctx: VendorContext): bool =
   ## True when every clause of the map's `match` holds for `ctx`.

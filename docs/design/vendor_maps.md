@@ -121,6 +121,39 @@ Nibbles are read most significant first; the byte order does not apply. `sentine
 `scale`, `enum` and `bits` work as for other integers. A field that does not fit the block
 is reported as for any field.
 
+## Layouts: stations and numbers a SEG-Y file stores in its own way
+A map may carry a `(layout)`: SEG-Y trace header entries that go over the file's layout when
+the map applies, as a `((SEG:Layout))` stanza's would (a Rev 0 or Rev 1 file has no stanza).
+The keys (`TraceKeys`) and `fieldValue` then read them; a map with a `(layout)` needs no
+target.
+```
+(vendormap "x100-stations" (version 1)
+  (match (format segy) (textContains "ARE X 100 IN TRACE HEADERS"))
+  (layout
+    (entry rec_line  (at 181) (type int4) (divisor 100))
+    (entry rec_point (at 185) (type int4) (divisor 100))
+    (entry sht_line  (at 189) (type int4) (divisor 100))
+    (entry sht_point (at 193) (type int4) (divisor 100))))
+```
+- `(entry name (at N) (type T) [(divisor D)] [(extension NAME)] [(ifNonZero)])`: `name` is a
+  layout name (`sht_line`, `sht_point`, `rec_line`, `rec_point`, `iline`, `cdp_x`, ...), `at`
+  is 1-based in the 240-byte header, `type` one of the layout types (`int2`, `int4`,
+  `uint4`, `ieee32`, ...: D-8 Table 13).
+- `(divisor D)` (1..9999999): the stored number is D times the value; the reader divides it.
+  One division of two exact numbers is correctly rounded, so a whole result is exact (51900
+  with divisor 100 is 519) and a fraction keeps its digits (10050 is 100.5). The same
+  `divisor="100"` attribute is accepted on a Layout stanza's `<entry>`.
+- Entries replace what the file's layout has for their names, and drop the entries whose
+  bytes they use for something else (bytes 189-196 are `iline` and `xline` in Rev 1).
+- The most specific map with a layout that applies is used (`vendorLayout`); a file no
+  map's `match` holds for is read as before. Give such a map a `match` that names what the
+  file says (`textContains`): without one it applies to every file.
+- It applies where the file is opened: `OpenOptions.vendors` (`openSeismic`) and
+  `buildIndex(..., vendors)`. An index cache made without the map is not used for a file the
+  map applies to (the keys it holds were read without it).
+- A value stored times a divisor is read only: `applySurvey` and `writeGeometry` give such a
+  name no slot (reported in the log) rather than write a whole number where a multiple belongs.
+
 ## File format sketch (NIF, `.nif27` header)
 ```
 (.nif27)

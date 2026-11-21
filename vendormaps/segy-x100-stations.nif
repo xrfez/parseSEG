@@ -1,0 +1,18 @@
+(.nif27)
+; Vendor map for SEG-Y files whose textual header says that the source and receiver line and point
+; numbers are times 100 in the trace headers ("SOURCE AND RECEIVER LINE AND POINT NUMBERS ARE X 100 IN
+; TRACE HEADERS"). SOURCE: the textual header and trace headers of two such files: the four numbers are
+; 32-bit integers in bytes 181-196, which Rev 0 leaves unassigned. The order (receiver line, receiver point,
+; source line, source point) was checked against the files' survey (SPS) stations; the divisor is the
+; text's "X 100". A point number with a fraction (100.5) is stored as 10050; the keys hold the quotient,
+; exact for a whole number.
+; RECOGNITION: a SEG-Y file whose textual header holds the words below, so a file without the sentence is
+; read as before. The map reads no other field and has no target to decode.
+(vendormap "segy-x100-stations" (version 1)
+  (match (format segy) (textContains "ARE X 100 IN TRACE HEADERS"))
+  (doc "SEG-Y trace headers that hold source and receiver line and point times 100 (bytes 181-196)")
+  (layout
+    (entry rec_line (at 181) (type int4) (divisor 100))
+    (entry rec_point (at 185) (type int4) (divisor 100))
+    (entry sht_line (at 189) (type int4) (divisor 100))
+    (entry sht_point (at 193) (type int4) (divisor 100))))
