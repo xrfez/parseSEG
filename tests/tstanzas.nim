@@ -292,6 +292,12 @@ proc main*() =
     expect("only to SEG-D"): wl.writeTrace(keys(0), row(0), externalHeader = h)
     sd.close()
 
+  block memory_internals_stay_internal:
+    # The sink and the source behind the bytes calls are not part of the public API.
+    doAssert not compiles(openMemSink("x"))
+    doAssert not compiles(openMemorySource(@[byte 1], "x"))
+    doAssert compiles(openSeismicBytes(@[byte 1], "x"))
+
   block unchanged_without_the_calls:
     # No stanza and no external header: the file is the one written before these
     # arguments existed (an empty one is the same as none).

@@ -80,10 +80,12 @@ import parseSEG/survey/[textrec, sps, p1, join, writeback]
 export textrec, sps, p1, join
 export writeback except KeysPlan, planKeys, finishKeys # internal: model/writefile
 
-import parseSEG/io/[records, diskio, memsink, memsource, tapeimage, tapedevice]
-export records, diskio, memsink, tapeimage, tapedevice
-export memsource except mapGuard, readCache, endWalk, resolveAccess, walkError
-  # internal: the readers' guard against a cut file, an unmapped file's cache
+import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
+export records, diskio, tapeimage, tapedevice
+export memsource except mapGuard, readCache, endWalk, resolveAccess, walkError,
+  openMemorySource, isMemory
+  # internal: the readers' guard against a cut file, an unmapped file's cache, and the
+  # source behind `openSeismicBytes` (`io/memsink` is not exported either)
 when defined(linux):
   import parseSEG/io/tape_linux
   export tape_linux
