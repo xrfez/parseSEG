@@ -16,6 +16,13 @@ type
                 ## gun signature, vibrator and velocity/depth pair codes; SEG-D channel types
                 ## other than seismic (and EM); SEG-2 `TEST_DATA` and `UPHOLE`.
 
+  TraceCodeRev* = enum
+    ## The SEG-Y revision a `TraceKeys.traceCode` is numbered in.
+    tcrCaller ## The caller's code, in the numbering of the file it is written to.
+    tcrRev0   ## Read from a Rev 0 file (codes 1-8 defined).
+    tcrRev1   ## Read from a Rev 1 file (codes 1-22 defined).
+    tcrRev2   ## Read from a Rev 2 file (codes 1-41 defined).
+
   TraceKeys* = object
     ## Geometry of one trace (NaN / 0 where unknown).
     record*: float64     ## SEG-Y field record number; SEG-D file number.
@@ -44,6 +51,12 @@ type
       ## unless a Layout stanza moves it) as stored; 0 when unknown and for
       ## SEG-D and SEG-2.
     status*: TraceStatus ## Live, dead or auxiliary (see `TraceStatus`).
+    traceCodeRev*: TraceCodeRev
+      ## The revision `traceCode` is numbered in: the SEG-Y reader sets it to
+      ## the file's, so the writer can tell a code the source revision left
+      ## undefined (status unknown) from one the output revision defines
+      ## differently, and does not carry it over. `tcrCaller` (the default,
+      ## also for SEG-D and SEG-2) is a code the caller chose for the output.
     channel*: float64
       ## Channel (trace) number in the field record: SEG-Y the layout's `chan`
       ## (bytes 13-16; NaN when 0, and when a Layout stanza keeps something

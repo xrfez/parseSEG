@@ -87,6 +87,40 @@ func toInterval(us: float64): uint16 =
   # `us` rounded and clamped to the 16-bit interval field (0 for NaN).
   if us >= 65535: high(uint16) elif us >= 0: uint16(round(us)) else: 0
 
+func traceIdCodeOf*(k: TraceKeys, major: int): int16 =
+  ## The trace identification code written for `k` in a revision `major`
+  ## file. `component` is not used: for SEG-D, SEG-2 and survey keys it is a
+  ## group index or sensor type, not a SEG-Y code (a SEG-Y input's code is
+  ## in `traceCode`).
+  let code = k.traceCode
+  if code != 0:
+    let here = segyStatus(code, major)
+    # The stored code when it says what the status says (a status changed in
+    # the keys, e.g. a trace killed, wins over the input's code).
+    if here == k.status: return code
+    case k.status
+    of tsUnknown:
+      # Says nothing, so it cannot override a code the caller gave (also one
+      # this revision does not define). A code read from a file is carried
+      # over unless the file's revision left it undefined and this one gives
+      # that number a meaning: a vendor's code 12 in Rev 0 is not Rev 1's
+      # vertical geophone.
+      let src = case k.traceCodeRev
+        of tcrCaller: -1
+        of tcrRev0: 0
+        of tcrRev1: 1
+        of tcrRev2: 2
+      if src < 0 or here == tsUnknown or segyStatus(code, src) != tsUnknown:
+        return code
+    of tsAuxiliary:
+      # An optional-use code of this revision is not contradicted by it.
+      if here == tsUnknown: return code
+    of tsLive, tsDead: discard
+  case k.status
+  of tsLive: 1
+  of tsDead: 2
+  of tsUnknown, tsAuxiliary: 0
+
 proc keysToHeaders*(t: var SegyTrace, k: TraceKeys, n, seqNo: int, rev: SegyRevision,
     ext1: bool, timeScalar = 0'i16, datum = NaN) =
   ## Sets the headers of `t` to hold `k` in the standard layout of `rev`,
@@ -107,22 +141,7 @@ proc keysToHeaders*(t: var SegyTrace, k: TraceKeys, n, seqNo: int, rev: SegyRevi
   if not k.record.isNaN: h.fieldRecord = clampI32(k.record)
   if not k.channel.isNaN: h.traceNumberInField = clampI32(k.channel)
   if not k.ensemble.isNaN: h.ensembleNumber = clampI32(k.ensemble)
-  h.traceIdCode =
-    # The stored code when it says what the status says (a status changed
-    # in the keys, e.g. a trace killed, wins over the input's code), or when
-    # the status is unknown: that says nothing, so it cannot override a
-    # code the caller gave (also one this revision does not define).
-    # `component` is not used: for SEG-D, SEG-2 and survey keys it is a
-    # group index or sensor type, not a SEG-Y code (a SEG-Y input's code is
-    # in `traceCode`).
-    if k.traceCode != 0 and
-        (k.status == tsUnknown or segyStatus(k.traceCode, int(rev.major)) == k.status):
-      k.traceCode
-    else:
-      case k.status
-      of tsLive: 1
-      of tsDead: 2
-      of tsUnknown, tsAuxiliary: 0
+  h.traceIdCode = traceIdCodeOf(k, int(rev.major))
   if not k.srcPoint.isNaN:
     # Readers take the energy source point when non-zero, else the scaled
     # shotpoint (Rev 1): a fractional point goes in the second alone.

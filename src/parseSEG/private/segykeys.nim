@@ -572,6 +572,10 @@ proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, timeBasis: int1
   if isComponentCode(base): result.component = uint8(base)
   result.traceCode = code
   result.status = segyStatus(code, p.major)
+  result.traceCodeRev = case p.major
+    of 0: tcrRev0
+    of 1: tcrRev1
+    else: tcrRev2
   result.time = segyTime(p, h, o, cache, timeBasis)
   result.t0Ms = startTimeIn(p, h, o, cache)
   # The sample interval is not a layout value: with the sample count it is

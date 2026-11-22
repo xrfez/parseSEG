@@ -1738,13 +1738,19 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   fractional source point is rounded, and the midpoint, `inline` and
   ##   `crossline` are not written (bytes 181-240 are unassigned there; the
   ##   midpoint reads back as halfway between source and receiver);
-  ## - the trace identification code is `traceCode` when non-zero and `status`
-  ##   is `tsUnknown` (which says nothing, so the code is written as given,
-  ##   also one the revision does not define) or is the status the code has
-  ##   in the output's revision (so a known status changed in the keys wins),
-  ##   else 1 (live), 2 (dead) or 0 (unknown; also
-  ##   auxiliary, which SEG-Y has no general code for). `component` is not
-  ##   written as a code: outside SEG-Y it is a group index or sensor type;
+  ## - the trace identification code is `traceCode` when non-zero and
+  ##   `status` is the status the code has in the output's revision (so a
+  ##   known status changed in the keys wins), or is `tsUnknown`, which says
+  ##   nothing: the code is written as given, also one the revision does not
+  ##   define (the file then reads back that code's status in its revision:
+  ##   code 1 with `tsUnknown` reads back `tsLive`), or is `tsAuxiliary` with
+  ##   a code the revision leaves to optional use. Keys read from a SEG-Y file
+  ##   (`traceCodeRev`) do not carry an unknown code over into a revision that
+  ##   gives that number a meaning (Rev 0 code 12 is not Rev 1's vertical
+  ##   geophone): it is written as 0. Otherwise the code is 1 (live), 2
+  ##   (dead) or 0 (unknown; also auxiliary, which SEG-Y has no general code
+  ##   for). `component` is not written as a code: outside SEG-Y it is a
+  ##   group index or sensor type;
   ## - `time` is written in UTC (time basis 4);
   ## - an `intervalUs` within 1e-9 of a whole number is that number (1001 µs
   ##   kept as 1.001 ms and multiplied back is 1000.9999999999999).
