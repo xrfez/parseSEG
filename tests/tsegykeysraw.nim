@@ -170,6 +170,7 @@ proc refKeys(f: SegyFile, t: SegyTrace): TraceKeys =
   # Phase 16: timing, trace code and status.
   result.traceCode = int16(code)
   let rev = int(f.revision.major)
+  result.traceCodeRev = [tcrRev0, tcrRev1, tcrRev2][min(rev, 2)]
   let sb = if rev >= 2: base else: code
   let defined = if rev == 0: 1..8 elif rev == 1: 1..22 else: 1..41
   result.status =
