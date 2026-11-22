@@ -61,10 +61,12 @@ when defined(windows):
 
   const RetryErrors = [5'i32, 32, 33]
 
-  proc moveFileShared*(source, dest: string) {.raises: [OSError, IOError].} =
-    ## `os.moveFile`, tried again (10 times, 20 ms apart) when Windows says
-    ## access denied, sharing violation or lock violation: another program
-    ## has `dest` open for a moment.
+  proc moveFileShared*(source, dest: string, attempts = 10, pauseMs = 20) {.
+      raises: [OSError, IOError].} =
+    ## `os.moveFile`, tried again (`attempts` times in all, `pauseMs` apart:
+    ## about a fifth of a second) when Windows says access denied, sharing
+    ## violation or lock violation: another program has `dest` open for a
+    ## moment.
     var attempt = 0
     while true:
       try:
@@ -72,8 +74,8 @@ when defined(windows):
         return
       except OSError as e:
         inc attempt
-        if attempt >= 10 or e.errorCode notin RetryErrors: raise
-        sleep 20
+        if attempt >= attempts or e.errorCode notin RetryErrors: raise
+        sleep pauseMs
 
 else:
   proc openShared*(f: var File, path: string, mode: FileMode = fmRead,
@@ -81,8 +83,9 @@ else:
     ## `open`: nothing to share on this platform (see the module's text).
     open(f, path, mode, bufSize)
 
-  proc moveFileShared*(source, dest: string) {.raises: [OSError, IOError].} =
-    ## `os.moveFile`.
+  proc moveFileShared*(source, dest: string, attempts = 10, pauseMs = 20) {.
+      raises: [OSError, IOError].} =
+    ## `os.moveFile` (nothing to retry on this platform).
     os.moveFile(source, dest)
 
 proc readFileShared*(path: string): string {.raises: [IOError].} =
@@ -118,3 +121,35 @@ proc fileSizeShared*(path: string): int64 {.raises: [OSError].} =
     result = getFileInfo(path, followSymlink = true).size
   else:
     result = getFileSize(path)
+
+proc copyFileShared*(source, dest: string) {.raises: [OSError, IOError].} =
+  ## `os.copyFile`. On Windows `CopyFileW` does not say how it shares the
+  ## source, so the copy is made here, in chunks, from a file opened by
+  ## `openShared` (other programs may write to, rename and delete it
+  ## meanwhile), and the copy gets the source's modification time, as
+  ## `CopyFileW` gives it. A partial copy is removed when the copy fails.
+  when defined(windows):
+    var i, o: File
+    if not openShared(i, source, fmRead):
+      raise newException(IOError, "cannot open for reading: " & source)
+    try:
+      if not open(o, dest, fmWrite):
+        raise newException(IOError, "cannot write " & dest)
+      var done = false
+      try:
+        var buf = newSeq[byte](1 shl 20)
+        while true:
+          let n = readBuffer(i, addr buf[0], buf.len)
+          if n > 0 and writeBuffer(o, addr buf[0], n) != n:
+            raise newException(IOError, "write failed: " & dest)
+          if n < buf.len: break
+        flushFile(o)
+        done = true
+      finally:
+        close(o)
+        if not done: discard tryRemoveFile(dest)
+    finally:
+      close(i)
+    setLastModificationTime(dest, getLastModificationTime(source))
+  else:
+    os.copyFile(source, dest)

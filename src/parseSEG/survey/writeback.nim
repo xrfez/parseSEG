@@ -993,10 +993,10 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
     f.close()
 
 proc copyReporting(src, dst: string, progress: Progress) =
-  # `copyFile`, in chunks through `progress` when there is one; raises
+  # `copyFileShared`, in chunks through `progress` when there is one; raises
   # `SegCancelledError` when it cancels.
   if progress == nil:
-    copyFile(src, dst)
+    copyFileShared(src, dst)
     return
   const chunk = 8 shl 20
   var i, o: File

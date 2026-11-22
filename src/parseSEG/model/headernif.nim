@@ -405,7 +405,7 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
       f = openSeismic(path)
     else:
       if opts.outPath.len > 0:
-        copyFile(path, opts.outPath)
+        copyFileShared(path, opts.outPath)
         if fileExists(journal):
           removeFile(journal)
           result.log.report(sevInfo, dcValidation, "an earlier journal " & journal &
