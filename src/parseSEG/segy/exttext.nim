@@ -490,6 +490,22 @@ proc addEndText*(h: var ExtendedTextHeader, encoding = teAscii) =
   ## Appends the `((SEG:EndText))` record.
   h.addStanza("SEG", "EndText", [], "", false, encoding)
 
+proc withStanza*(h: ExtendedTextHeader, company, name: string, data: openArray[byte],
+    contentType = "", binary = false, encoding = teAscii): ExtendedTextHeader =
+  ## A copy of `h` with the stanza added before a final `((SEG:EndText))`
+  ## record, which stays last, as the standard requires. `h` must hold all its
+  ## records (`isComplete`), else `ValueError`. The records are indexed again,
+  ## so the result's `stanzas` list the new one.
+  if not h.isComplete:
+    raise newException(ValueError, "the extended textual header was only indexed, not held " &
+      "in memory; a stanza cannot be added to it")
+  let keep = if h.endText: h.records - 1 else: h.records
+  result = initExtendedTextHeader(h.rev1Lines, h.maxRetained)
+  for i in 0 ..< keep:
+    result.add h.data.toOpenArray(i * TextHeaderSize, (i + 1) * TextHeaderSize - 1)
+  result.addStanza(company, name, data, contentType, binary, encoding)
+  if h.endText: result.addEndText()
+
 func toDescXml*(b: UserDataBlock): string =
   ## The description block for `b` (single-level XML, ASCII, lower-case tags).
   template tag(name, value: string) =

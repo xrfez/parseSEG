@@ -280,6 +280,7 @@ type
     segdRecNo: int64
     segdRecTime: float64 ## UTC POSIX seconds of the buffered record; NaN if none.
     segdPending: seq[SegdKeyTrace]
+    segdExternal: seq[byte] ## The buffered record's external header (set by its first trace).
     segdSource: SegdSourceFix
     segdReceiver: SegdReceiverFix
     segdSetT0: seq[SegdSetT0]
@@ -1342,6 +1343,11 @@ proc flushSegdKeys(s: var WriterState) =
     year: civil.year mod 100, julianDay: civil.yearday + 1, hour: civil.hour,
     minute: civil.minute, second: civil.second,
     scanTypesPerRecord: 1, skewBlocks: 0, extendedHeaderBlocks: 0, externalHeaderBlocks: 0)
+  var extSmall = 0
+  var extBig = 0'u32
+  setBcdOrExt(extSmall, extBig, int64(s.segdExternal.len div SegdBlockSize), 2)
+  gh1.externalHeaderBlocks = extSmall
+  rec.external = move s.segdExternal
   var fileSmall = 0
   var fileExt = 0'u32
   setBcdOrExt(fileSmall, fileExt, fileNo, 4)
@@ -1366,6 +1372,7 @@ proc flushSegdKeys(s: var WriterState) =
     blockType: BlockTypeGeneralHeader2)
   if additional > 14: gh2.extAdditionalGhBlocks = uint16(additional)
   if nCS > 99: gh2.extChannelSetsPerScanType = uint16(nCS)
+  gh2.extExternalHeaderBlocks = extBig
   if gh1.baseScanInterval16 == 0xFF:
     gh2.dominantSamplingInterval = uint32(opts.sampleIntervalUs)
   var longest = span
@@ -1407,9 +1414,28 @@ proc flushSegdKeys(s: var WriterState) =
   s.segdSetT0.setLen 0
   s.segdChannels.setLen 0
 
+const MaxExternalHeader = 1 shl 30
+  ## Bytes of a SEG-D external header the writer accepts: GH#3's header size is 32 bits
+  ## and counts the whole header, so a header this long is far inside it.
+
+proc checkExternal(s: WriterState, h: openArray[byte]) =
+  # An external header of the keys form: its length, and agreement with the
+  # one the record's first trace set. Nothing is changed.
+  if h.len == 0: return
+  if h.len mod SegdBlockSize != 0:
+    refuse("an external header is whole 32-byte blocks; this one has " & $h.len & " bytes")
+  if h.len > MaxExternalHeader:
+    refuse("an external header of " & $h.len & " bytes is longer than " & $MaxExternalHeader &
+      " (General Header #2's block count and GH#3's header size could not hold it)")
+  if s.segdHaveRec and (h.len != s.segdExternal.len or
+      not equalMem(unsafeAddr h[0], unsafeAddr s.segdExternal[0], h.len)):
+    refuse("the external header differs from the one the first trace of SEG-D record " &
+      $s.segdRecNo & " set (a record has one external header: pass it with the first trace, " &
+      "and nothing or the same bytes with the others)")
+
 proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: openArray[T],
     overrides: openArray[HeaderOverride], channelType: SegdChannelType,
-    orientation: Option[TraceOrientation]) =
+    orientation: Option[TraceOrientation], externalHeader: openArray[byte]) =
   let n = s.segdOpts.numSamples
   if samples.len != n:
     refuse("a SEG-D channel set has one sample count, " & $n &
@@ -1420,6 +1446,7 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
       $s.segdRecNo)
   if s.segdHaveRec and recNo > s.segdRecNo: s.flushSegdKeys()
   if not s.open: return
+  checkExternal(s, externalHeader)
   if not k.intervalUs.isNaN and wholeInterval(k.intervalUs) != s.segdOpts.sampleIntervalUs:
     refuse("the keys' sample interval is " & $wholeInterval(k.intervalUs) &
       " µs, the output's is " & $s.segdOpts.sampleIntervalUs)
@@ -1464,6 +1491,7 @@ proc writeSegdKeys[T: SampleType](s: var WriterState, k: TraceKeys, samples: ope
   if (not k.rcvZ.isNaN and not k.hasReceiverXY) or (not k.srcZ.isNaN and not k.hasSourceXY):
     inc s.segdNoZ
   s.noteChannel(channelType, num)
+  if not s.segdHaveRec: s.segdExternal = @externalHeader # the record's first trace sets it
   s.segdPending.add SegdKeyTrace(keys: k, channelType: channelType, samples: raw,
     overrides: ov, orientation: orientation, t0Us: t0, channel: num, recorded: recorded)
   s.segdHaveRec = true
@@ -1646,7 +1674,8 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: openArray[T],
     overrides: openArray[HeaderOverride] = [], channelType: SegdChannelType = sctSeismic,
-    orientation: Option[TraceOrientation] = none(TraceOrientation)) =
+    orientation: Option[TraceOrientation] = none(TraceOrientation),
+    externalHeader: openArray[byte] = []) =
   ## Writes a trace whose headers are built from `keys` (no template
   ## trace), with `samples`, then `overrides` applied: a stacked or derived
   ## trace of any input standard. The output is SEG-Y (from
@@ -1778,9 +1807,12 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## the format cannot hold; `IOError` on a write failure, which discards
   ## the output and closes the writer.
   if not w.s.open: refuse("the writer is closed")
+  if externalHeader.len > 0 and not w.s.segdFresh:
+    refuse("an external header is written only to SEG-D Rev 3 (openSeismicWriter with " &
+      "SegdOutputOptions)")
   if w.s.segdFresh:
     try:
-      w.s.writeSegdKeys(keys, samples, overrides, channelType, orientation)
+      w.s.writeSegdKeys(keys, samples, overrides, channelType, orientation, externalHeader)
     except IOError:
       w.s.discardOutput()
       raise
@@ -1798,6 +1830,83 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
     w.s.discardOutput() # as above: the file may be torn
     raise
   inc w.s.written
+
+# ------------------------------------------------------------ SEG-Y stanzas --
+
+proc checkStanzaName(what, v: string) =
+  if v.len == 0: refuse("the stanza's " & what & " is empty")
+  for c in v:
+    if c notin {' ' .. '~'} or c in {':', '(', ')'}:
+      refuse("the stanza's " & what & " \"" & v & "\" holds a character that a stanza header " &
+        "cannot carry (only printable ASCII without ':', '(' and ')')")
+
+proc addSegyStanza(w: var SeismicWriter, company, name: string, data: openArray[byte],
+    contentType: string, binary: bool) =
+  if not w.s.open: refuse("the writer is closed")
+  if w.s.kind != skSegy:
+    refuse("stanzas are written to SEG-Y extended textual headers; the output is " & $w.s.kind)
+  if w.s.segyStarted or w.s.written > 0:
+    refuse("a stanza is added before the first trace (the headers are already written)")
+  template f: untyped = w.s.segyFile
+  if f.revision.major == 0:
+    refuse("SEG-Y Rev 0 has no extended textual header, so no stanzas (Rev 1 or later)")
+  checkStanzaName("company", company)
+  checkStanzaName("name", name)
+  if contentType.len > 0: checkStanzaName("content type", contentType.replace("/", "-"))
+  if binary and data.len > 999_999_999_999_999: refuse("the stanza is too long")
+  var ext: ExtendedTextHeader
+  try: ext = f.extended.withStanza(company, name, data, contentType, binary)
+  except ValueError as e: refuse(e.msg)
+  let records = ext.recordCount
+  if records > int(high(int16)):
+    refuse("the extended textual header would hold " & $records & " records; the binary " &
+      "header's count holds up to " & $high(int16))
+  # What the reader finds must be the stanza as given.
+  let want = normalizeStanzaName(company & ":" & name)
+  var found = false
+  for st in ext.stanzas:
+    if st.key == want and st.isBinary == binary and (not binary or st.byteCount == data.len):
+      found = true
+  if not found:
+    refuse("the stanza " & company & ":" & name & " would not read back as written " &
+      "(its data may hold a stanza header at a line start)")
+  let added = records - f.extended.recordCount
+  var nf = f
+  nf.extended = ext
+  if nf.binary.numExtTextHeaders >= 0: nf.binary.numExtTextHeaders = int16(records)
+  if nf.binary.firstTraceOffset != 0:
+    nf.binary.firstTraceOffset += uint64(added * TextHeaderSize)
+  # Validated now, while the writer can still refuse: the file headers must be writable
+  # with the stanza in.
+  try: discard openSegyWriter(NullSink(name: w.s.path), nf, initSegyWriteOptions(nf))
+  except CatchableError as e: refuse("the stanza cannot be added: " & e.msg)
+  f = nf
+
+proc addStanza*(w: var SeismicWriter, company, name: string, data: openArray[byte],
+    contentType = "application/octet-stream") =
+  ## Adds a binary stanza `((company:name:contentType:length))` and `data` to the
+  ## SEG-Y file's extended textual header, as `ExtendedTextHeader.addStanza` writes it
+  ## and `openSeismic` reads it (`index.segy.extended.stanzas`, and a vendor map's
+  ## `stanza` target). It starts a record of its own and is padded with NULs to whole
+  ## 3200-byte records; the binary header's extended-record count (and, when it was
+  ## set, the first trace offset) are updated. Call it any number of times before the
+  ## first trace; the stanzas come in call order, ahead of the `((SEG:EndText))`
+  ## record that Rev 2 files end with. Names are matched without case or spaces, as
+  ## the standard says. Works for a writer of a file and of bytes, from
+  ## `SegyOutputOptions` or `like` a SEG-Y file (whose own extended header comes first).
+  ## Raises `ValueError` after the first trace, for a writer of another standard (SEG-D,
+  ## SEG-2), for SEG-Y Rev 0 (no extended textual header), for an empty `company` or
+  ## `name` or one with a character a stanza header cannot carry (`:`, `(`, `)`,
+  ## non-printable), for a `like` file whose extended header was only indexed, for more
+  ## than 32767 records, and when the stanza would not read back as written.
+  w.addSegyStanza(company, name, data, contentType, true)
+
+proc addTextStanza*(w: var SeismicWriter, company, name, text: string,
+    contentType = "text/plain") =
+  ## `addStanza` for a text stanza `((company:name:contentType))` followed by `text`
+  ## (ASCII; padded with blanks to whole records). The reader gives it no byte count
+  ## (`isBinary` false). The same rules and refusals.
+  w.addSegyStanza(company, name, encodeText(text, teAscii), contentType, false)
 
 proc finishWork(w: var SeismicWriter, log: var DiagLog) =
   # What `close` and `finishBytes` share: everything up to the last byte

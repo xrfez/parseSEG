@@ -737,6 +737,49 @@ What to know:
 - Bytes that are no seismic file, or a truncated or damaged one, give the same
   diagnostics and errors as a file on disk, never a crash.
 
+### Vendor data written with the file
+
+A decoder that hands parseSEG vendor bytes of its own (a shot's controller record, say) can
+keep them in the file, where a vendor map decodes them by name. SEG-Y: `addStanza` before the
+first trace puts them in a binary stanza of the extended textual header. SEG-D Rev 3: the
+first trace of a record passes them as `externalHeader`. Both work for a file and for bytes.
+
+```nim
+import parseSEG
+
+var w = openSeismicWriterBytes(SegyOutputOptions(text: @["ACME SHOTS"]))
+w.addStanza("acme", "Shot v1", [byte 0x41, 0x43, 0x4D, 0x45, 0, 7])
+var k = initTraceKeys()
+k.intervalUs = 2000
+w.writeTrace(k, [1'f32, 2, 3])
+var f = openSeismicBytes(w.finishBytes(), "shot.sgy")
+let ext = f.index.segy.extended
+doAssert ext.stanzas[0].key == "ACME:SHOTV1" and ext.stanzas[0].byteCount == 6
+doAssert ext.data[ext.stanzas[0].dataStart ..< ext.stanzas[0].dataStart + 6][5] == 7
+f.close()
+
+var d = openSeismicWriterBytes(SegdOutputOptions(sampleIntervalUs: 2000, numSamples: 3,
+  time: 1_709_273_228.0))
+var dk = initTraceKeys()
+dk.record = 1
+dk.channel = 1
+dk.intervalUs = 2000
+dk.srcLine = 1
+dk.srcPoint = 1
+dk.rcvLine = 1
+dk.rcvPoint = 1
+let header = newSeq[byte](64) # whole 32-byte blocks; the record's first trace sets it
+d.writeTrace(dk, [1'f32, 2, 3], externalHeader = header)
+var g = openSeismicBytes(d.finishBytes(), "shot.sgd")
+doAssert g.index.segdRecords[0].external == header
+g.close()
+```
+
+Stanzas come in call order (a `like` file's own extended records first; Rev 2's
+`((SEG:EndText))` stays last); the binary header's count follows. Later traces of a SEG-D
+record pass nothing or the same bytes; different ones are a `ValueError`. Stanzas need Rev 1
+or later, an external header SEG-D from keys (Rev 3).
+
 ## Survey files in the background
 
 A viewer that lists a folder tells SPS from SEG P1 files with `looksLikeSps` on the first
