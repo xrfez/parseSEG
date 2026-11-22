@@ -166,6 +166,9 @@ proc cutJournal(f: File, size: int64): bool =
   else:
     false
 
+when defined(windows):
+  proc commitFd(fd: cint): cint {.importc: "_commit", header: "<io.h>".}
+
 proc syncJournal(ed: var HeaderEditor): bool =
   # Writes the unsynced journal lines and syncs them: they must be on disk
   # before the map is written, as mapped pages can reach the disk any time
@@ -186,6 +189,10 @@ proc syncJournal(ed: var HeaderEditor): bool =
       ok = false
   when defined(posix):
     if ok: ok = fsync(getFileHandle(f)) == 0
+  elif defined(windows):
+    # The journal is unbuffered, so the bytes are with the OS: `_commit`
+    # (`FlushFileBuffers`) puts them on the device, as `fsync` does.
+    if ok: ok = commitFd(cint(getFileHandle(f))) == 0
   ed.unsynced.setLen 0
   if not ok and mark >= 0 and not cutJournal(f, mark):
     ed.journalDead = true
