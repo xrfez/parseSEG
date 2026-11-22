@@ -47,9 +47,11 @@ proc keysOf(path: string): seq[TraceKeys] =
   f.close()
 
 proc differences(a, b: TraceKeys): string =
-  ## The fields in which `a` and `b` differ (NaN equals NaN).
+  ## The fields in which `a` and `b` differ (NaN equals NaN), apart from the
+  ## revision the trace code is numbered in (it is the file's).
   for name, x, y in fieldPairs(a, b):
-    when x is float64:
+    when name == "traceCodeRev": discard
+    elif x is float64:
       if not ((x.isNaN and y.isNaN) or x == y): result.add name & " " & $x & " -> " & $y & "; "
     else:
       if x != y: result.add name & " " & $x & " -> " & $y & "; "
