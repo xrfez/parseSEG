@@ -11,12 +11,13 @@
 ## - `append_rename_while_open`: another handle appends to the file and
 ##   it is renamed while parseSEG has it open; reads of the bytes of the
 ##   size at open go on, the size stays, and a read past it is refused.
-## - `delete_while_open`: Windows maps are special: the OS refuses to
-##   delete a file with a mapped view whatever its sharing, so for a mapped
-##   open only "no crash, reads go on or the delete says why" is checked;
-##   unmapped (and everywhere else) the delete works and the name is gone.
-## - `replace_while_open`: a rename over the open file; on Windows a mapped one
-##   may be refused (the output says which happened).
+## - `delete_while_open`: the delete works, mapped or not (seen on Windows
+##   10 and later, NTFS); the output says whether the name was gone at once
+##   or stayed until the last handle closed. For a mapped open the test would
+##   accept a refusal, as the OS may give one elsewhere.
+## - `replace_while_open`: a rename over the open file works on Linux; on
+##   Windows it was seen refused, mapped or not, and only the reads going on
+##   is checked (the output says which happened).
 ## - `open_while_written`: a recorder holds the file open for appending
 ##   while parseSEG opens it, and goes on writing.
 ## - `symbolic_link_has_the_size_of_its_target`: a link reads as the file
@@ -89,7 +90,10 @@ proc main*() =
         doAssert deleted or access == faMapped, "delete of an unmapped open file"
       else:
         doAssert deleted
-      echo "  delete while open, ", access, ": ", (if deleted: "done" else: "refused by the OS")
+      echo "  delete while open, ", access, ": ",
+        (if deleted: "done" else: "refused by the OS"),
+        (if deleted: (if fileExists(a): ", the name stays until the last handle closes"
+                      else: ", the name is gone at once") else: "")
       doAssert f.readTraces(0 ..< f.len) == before
       f.close()
       if deleted:
@@ -111,10 +115,11 @@ proc main*() =
         moveFileShared(other, a, attempts = 3)
       except OSError:
         replaced = false
-      when defined(windows):
-        doAssert replaced or access == faMapped, "replace of an unmapped open file"
-      else:
+      when not defined(windows):
         doAssert replaced
+      # Windows: `MoveFileExW(REPLACE_EXISTING)` was seen refusing a target that
+      # another handle has open, shared for delete or not, mapped or not
+      # (access denied), while a plain delete of the same open file works.
       echo "  replace while open, ", access, ": ", (if replaced: "done" else: "refused by the OS")
       doAssert f.readTraces(0 ..< f.len) == before
       f.close()

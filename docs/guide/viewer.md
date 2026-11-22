@@ -435,16 +435,20 @@ and delete all shared, and a link is followed to its target. What that means in 
   open: what is appended is not read, and a read past that size
   is refused, never a fault. Open the file again to see the new end.
 - A file can be renamed while it is open; the open file goes on reading the same bytes.
-- Deleting a file while it is open: the name goes at once (Windows 10 1809 and later on
-  NTFS), or when the last handle closes (older Windows, FAT, network shares). Not
-  while it is mapped: Windows, as far as is known here, refuses to delete (or to
-  replace by a rename) a file with a mapped view, whatever its sharing; the other
-  program's call fails with access denied until the map is closed. A viewer that must let
-  a recorder replace or delete files freely opens unmapped
-  (`OpenOptions(access: faUnmapped)`), which holds no view.
+- Deleting a file while it is open works, mapped or unmapped (tried on Windows with
+  NTFS): the open file goes on reading its bytes, and its name goes at once (Windows 10
+  1809 and later on NTFS) or when the last handle closes (older Windows, FAT, network
+  shares).
+- Replacing a file by renaming another over it (the way the writers below finish) does
+  not work while it is open: Windows refuses the rename (access denied) whether the file
+  is mapped or not, although parseSEG shares it for delete, while a plain delete of the same file
+  works. The writer's retry gives up after about a fifth of a second and reports the
+  error; the open file is untouched. A viewer that wants to be replaced must close the
+  file first.
 - Cutting the file below the mapped size (opening it again with truncation,
-  `SetEndOfFile`) is refused by Windows too, with "the requested operation cannot be
-  performed on a file with a user-mapped section open" (error 1224), so on a local disk
+  `SetEndOfFile`) is refused by Windows (as its documentation says; not tried here), with
+  "the requested operation cannot be performed on a file with a user-mapped section open"
+  (error 1224), so on a local disk
   a mapped read never meets a cut. A network share that goes away, or a removable disk
   pulled out, can still make a mapped read fault, and nothing guards a map on Windows:
   that read ends the program (this is why `faAuto` reads such files unmapped). Unmapped,
