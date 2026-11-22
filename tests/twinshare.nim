@@ -15,6 +15,8 @@
 ##   delete a file with a mapped view whatever its sharing, so for a mapped
 ##   open only "no crash, reads go on or the delete says why" is checked;
 ##   unmapped (and everywhere else) the delete works and the name is gone.
+## - `replace_while_open`: a rename over the open file; on Windows a mapped one
+##   may be refused (the output says which happened).
 ## - `open_while_written`: a recorder holds the file open for appending
 ##   while parseSEG opens it, and goes on writing.
 ## - `symbolic_link_has_the_size_of_its_target`: a link reads as the file
@@ -87,10 +89,35 @@ proc main*() =
         doAssert deleted or access == faMapped, "delete of an unmapped open file"
       else:
         doAssert deleted
+      echo "  delete while open, ", access, ": ", (if deleted: "done" else: "refused by the OS")
       doAssert f.readTraces(0 ..< f.len) == before
       f.close()
       if deleted:
         doAssert not fileExists(a), "the name is gone when the last handle closes"
+
+  block replace_while_open:
+    # Another program replaces the file by a rename over it (what a writer
+    # that renames a temporary file does). Mapped on Windows the OS may refuse
+    # (the writer's retry gives up); the readers go on either way.
+    for access in [faMapped, faUnmapped]:
+      let a = tmp / ("p_" & $access & ".sgy")
+      let other = tmp / ("q_" & $access & ".sgy")
+      copyFile(src, a)
+      copyFile(src, other)
+      var f = openSeismic(a, opts = OpenOptions(access: access))
+      let before = f.readTraces(0 ..< f.len)
+      var replaced = true
+      try:
+        moveFileShared(other, a, attempts = 3)
+      except OSError:
+        replaced = false
+      when defined(windows):
+        doAssert replaced or access == faMapped, "replace of an unmapped open file"
+      else:
+        doAssert replaced
+      echo "  replace while open, ", access, ": ", (if replaced: "done" else: "refused by the OS")
+      doAssert f.readTraces(0 ..< f.len) == before
+      f.close()
 
   block open_while_written:
     for access in [faMapped, faUnmapped]:
@@ -151,10 +178,10 @@ proc main*() =
       doAssert open(held, b, fmRead) # fopen: shares no delete: the replace is refused
       var t: Thread[ptr File]
       proc letGo(p: ptr File) {.thread.} =
-        sleep(80)
+        sleep(50)
         p[].close()
       createThread(t, letGo, addr held)
-      moveFileShared(a, b)
+      moveFileShared(a, b, attempts = 100) # a loaded runner may be late to let go
       joinThread(t)
       doAssert fileExists(b) and not fileExists(a)
 
