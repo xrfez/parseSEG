@@ -719,9 +719,11 @@ What to know:
   The bytes are never copied by the open, and no file system call is made for the name,
   which can be anything (the same name for two files is allowed; give them different ones
   so that messages tell them apart).
-- The open takes `bytes` over: the caller's `seq[byte]` is empty afterwards. To keep
-  one, copy it first (`let kept = bytes` before the open). A view of memory the caller owns is not offered: a prefetcher
-  can outlive `close`, so the caller could not know when the memory may go.
+- The open takes `bytes` over. It is moved in, with no copy, when the call is the last use
+  of the `seq` or it is passed with `move` (the `seq` is then empty); a `seq` that is used
+  again afterwards is copied, as Nim does for any `sink` parameter. A view of memory the
+  caller owns is not offered: a prefetcher can outlive `close`, so the caller could not
+  know when the memory may go.
 - What needs a disk file is refused, in plain words, with `ValueError`: `saveIndex`
   (a cache is keyed on a path and its time stamps; `OpenOptions.cache` is ignored with an
   info diagnostic and the file is indexed), `openEditor(f)` (edits are journaled to a file

@@ -534,8 +534,10 @@ proc openSeismic*(path: string, keys = false, progress: Progress = nil,
 proc openSeismicBytes*(bytes: sink seq[byte], name: string, keys = false,
     progress: Progress = nil, opts = OpenOptions()): SeismicFile =
   ## Opens a SEG-Y, SEG-D or SEG-2 file that lives in memory: `bytes`, the
-  ## whole file, which the result takes over (moved in, never copied; the
-  ## caller's `seq` is empty afterwards). Everything after the open is as for
+  ## whole file, which the result takes over: moved in, with no copy, when this
+  ## call is the argument's last use or it is passed with `move` (the caller's
+  ## `seq` is then empty); a `seq` used again later is copied, as Nim does for any
+  ## `sink` parameter. Everything after the open is as for
   ## `openSeismic`, from `bytes`: detection, the index, headers, keys, sample
   ## reads, gathers, summaries, and reads from any number of threads. `name`
   ## is a display name, or a virtual path, for messages and diagnostics and

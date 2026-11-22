@@ -306,6 +306,7 @@ proc main*() =
   block refusals:
     var b = bytesOf(demoDir() / "survey.sgy")
     var f = openSeismicBytes(b, "mem.sgy")
+    doAssert b.len > 0 # used again below: the open got a copy, not the caller's buffer
     expect("lives in memory"): f.saveIndex(tmp / "x.idx")
     expect("lives in memory"): discard openEditor(f)
     doAssert not fileExists(tmp / "x.idx")

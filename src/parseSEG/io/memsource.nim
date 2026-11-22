@@ -143,8 +143,9 @@ proc openMemFileSource*(path: string; writable = false; chunk = DefaultMapChunk;
 
 proc openMemorySource*(bytes: sink seq[byte]; name: string;
     chunk = DefaultMapChunk): MemFileSource =
-  ## A source over `bytes`, which it takes over (moved, never copied; the
-  ## caller's `seq` is empty afterwards). `name` is a display name for
+  ## A source over `bytes`, which it takes over: moved in when this call is the
+  ## argument's last use (or it is passed with `move`; the caller's `seq` is then
+  ## empty), copied otherwise, as Nim does for any `sink` parameter. `name` is a display name for
   ## messages; no file system access happens for it. Empty `bytes` read as
   ## end of data. The bytes are never changed, and may be read from any
   ## number of threads until `close`.
