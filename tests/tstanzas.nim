@@ -12,7 +12,7 @@
 ##   refused the record: "the external header has 32 bytes, 0 announced")
 ## - segd_external_headers: the extended count (GH#2) left 0 for 100 blocks
 
-import std/[assertions, os, strutils]
+import std/[assertions, os, strutils, times]
 
 import parseSEG
 
@@ -291,6 +291,24 @@ proc main*() =
     var wl = openSeismicWriterBytes(sd)
     expect("only to SEG-D"): wl.writeTrace(keys(0), row(0), externalHeader = h)
     sd.close()
+
+  block many_stanzas_take_linear_time:
+    # One stanza per shot over thousands of shots: each call costs its own size, not the
+    # header's (the calls were quadratic: 56 s for 4000). The limit is generous, for a
+    # slow CI runner; linear takes about a second.
+    let t0 = epochTime()
+    var w = openSeismicWriterBytes(segyOpts(2, 1))
+    let data = shotBytes(2048 - 10, 1, 1.0)
+    for i in 0 ..< 4000: w.addStanza("acme", "Shot v" & $i, data)
+    w.writeTrace(keys(0), row(0))
+    let bytes = w.finishBytes()
+    let took = epochTime() - t0
+    doAssert took < 30, "4000 stanzas took " & $took & " s"
+    var f = openSeismicBytes(bytes, "many.sgy")
+    doAssert f.index.segy.extended.recordCount == 4001 # 4000 stanzas and EndText
+    doAssert int(f.index.segy.binary.numExtTextHeaders) == 4001
+    doAssert stanzaData(f, 3999) == data and f.len == 1
+    f.close()
 
   block memory_internals_stay_internal:
     # The sink and the source behind the bytes calls are not part of the public API.

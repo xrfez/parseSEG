@@ -253,6 +253,11 @@ type
     nsLine = "a source line other than the receiver line (SEG-2 has one LINE_ID)"
     nsZ = "an elevation without its location's X/Y"
 
+  PendingStanza = object
+    company, name, contentType: string
+    data: seq[byte]
+    binary: bool
+
   WriterState = object
     kind: SeismicKind
     path, tmp: string     ## The output, and its temporary file ("" once gone, or in memory).
@@ -265,6 +270,8 @@ type
     segyFile: SegyFile    ## The file headers to write.
     segy: SegyWriter
     segyStarted: bool     ## `segy` is open on `sink` (from the first trace).
+    segyStanzas: seq[PendingStanza] ## Added by `addStanza`, put into the header at the first trace.
+    segyStanzaRecords: int ## The records they will take.
     segyFixed: bool       ## Fixed-length traces (Rev 1+, binary 3503 = 1).
     segyCount: int        ## The sample count of every trace so far; -1 none, -2 mixed.
     segyMax: int          ## The largest sample count so far.
@@ -687,7 +694,37 @@ proc noteCount(s: var WriterState, n: int) =
   s.segyCount = if s.segyCount == -1 or s.segyCount == n: n else: -2
   s.segyMax = max(s.segyMax, n)
 
+proc applyStanzas(s: var WriterState) =
+  # The stanzas `addStanza` collected go into the extended header, once: before
+  # a final EndText record, which is put back after them, with the binary
+  # header's record count (and a set first trace offset) following.
+  if s.segyStanzas.len == 0: return
+  template f: untyped = s.segyFile
+  let had = f.extended.recordCount
+  let hadEnd = f.extended.hasEndText
+  var ext = f.extended.withoutEndText()
+  for st in s.segyStanzas:
+    let before = ext.stanzas.len
+    ext.addStanza(st.company, st.name, st.data, st.contentType, st.binary)
+    # What the reader finds must be the stanza as given.
+    let want = normalizeStanzaName(st.company & ":" & st.name)
+    var found = false
+    for k in before ..< ext.stanzas.len:
+      let sn = ext.stanzas[k]
+      if sn.key == want and sn.isBinary == st.binary and
+          (not st.binary or sn.byteCount == st.data.len): found = true
+    if not found:
+      refuse("the stanza " & st.company & ":" & st.name & " does not read back as written")
+  if hadEnd: ext.addEndText()
+  let added = ext.recordCount - had
+  f.extended = ext
+  if f.binary.numExtTextHeaders >= 0: f.binary.numExtTextHeaders = int16(ext.recordCount)
+  if f.binary.firstTraceOffset != 0:
+    f.binary.firstTraceOffset += uint64(added * TextHeaderSize)
+  s.segyStanzas = @[]
+
 proc startSegy(s: var WriterState) =
+  s.applyStanzas()
   s.segy = openSegyWriter(s.sink, s.segyFile, initSegyWriteOptions(s.segyFile))
   s.segyStarted = true
 
@@ -1859,33 +1896,33 @@ proc addSegyStanza(w: var SeismicWriter, company, name: string, data: openArray[
       "writer itself; it cannot be added as a stanza")
   if contentType.len > 0: checkStanzaName("content type", contentType.replace("/", "-"))
   if binary and data.len > 999_999_999_999_999: refuse("the stanza is too long")
-  var ext: ExtendedTextHeader
-  try: ext = f.extended.withStanza(company, name, data, contentType, binary)
-  except ValueError as e: refuse(e.msg)
-  let records = ext.recordCount
+  let base = f.extended
+  if not base.isComplete:
+    refuse("the extended textual header was only indexed, not held in memory; a stanza " &
+      "cannot be added to it")
+  if w.s.segyStanzas.len == 0 and (base.inBinaryStanza or base.inUserDataChain):
+    refuse("the extended textual header ends inside an unfinished stanza; a stanza cannot " &
+      "follow it")
+  let records = base.recordCount + w.s.segyStanzaRecords +
+    stanzaRecordCount(company, name, data.len, contentType, binary)
   if records > int(high(int16)):
     refuse("the extended textual header would hold " & $records & " records; the binary " &
       "header's count holds up to " & $high(int16))
-  # What the reader finds must be the stanza as given.
+  # The stanza read on its own is the stanza as given (its data may hold a stanza
+  # header at a line start that would end it early).
+  var scratch = initExtendedTextHeader()
+  scratch.addStanza(company, name, data, contentType, binary)
   let want = normalizeStanzaName(company & ":" & name)
   var found = false
-  for st in ext.stanzas:
+  for st in scratch.stanzas:
     if st.key == want and st.isBinary == binary and (not binary or st.byteCount == data.len):
       found = true
   if not found:
     refuse("the stanza " & company & ":" & name & " would not read back as written " &
       "(its data may hold a stanza header at a line start)")
-  let added = records - f.extended.recordCount
-  var nf = f
-  nf.extended = ext
-  if nf.binary.numExtTextHeaders >= 0: nf.binary.numExtTextHeaders = int16(records)
-  if nf.binary.firstTraceOffset != 0:
-    nf.binary.firstTraceOffset += uint64(added * TextHeaderSize)
-  # Validated now, while the writer can still refuse: the file headers must be writable
-  # with the stanza in.
-  try: discard openSegyWriter(NullSink(name: w.s.path), nf, initSegyWriteOptions(nf))
-  except CatchableError as e: refuse("the stanza cannot be added: " & e.msg)
-  f = nf
+  w.s.segyStanzaRecords += stanzaRecordCount(company, name, data.len, contentType, binary)
+  w.s.segyStanzas.add PendingStanza(company: company, name: name, contentType: contentType,
+    data: @data, binary: binary)
 
 proc addStanza*(w: var SeismicWriter, company, name: string, data: openArray[byte],
     contentType = "application/octet-stream") =
@@ -1905,6 +1942,8 @@ proc addStanza*(w: var SeismicWriter, company, name: string, data: openArray[byt
   ## non-printable), for the `((SEG:EndText))` stanza under any spelling the reader matches
   ## (it ends the header and the writer writes it), for a `like` file whose extended header was only indexed, for more
   ## than 32767 records, and when the stanza would not read back as written.
+  ## Each call costs its own size: the stanzas are kept and put into the header once, at the
+  ## first trace (or `finishBytes`/`close`), so thousands of them are cheap.
   w.addSegyStanza(company, name, data, contentType, true)
 
 proc addTextStanza*(w: var SeismicWriter, company, name, text: string,

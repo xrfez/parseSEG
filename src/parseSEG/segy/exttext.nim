@@ -126,6 +126,10 @@ func inBinaryStanza*(h: ExtendedTextHeader): bool {.inline.} =
   ## into the next record.
   h.skipUntil > h.streamLen
 
+func inUserDataChain*(h: ExtendedTextHeader): bool {.inline.} =
+  ## True while a User Data chain is open at the end of the records added.
+  h.udActive
+
 func normalizeStanzaName*(s: string): string =
   ## Upper case with spaces removed: the spec's matching rule.
   for c in s:
@@ -490,12 +494,11 @@ proc addEndText*(h: var ExtendedTextHeader, encoding = teAscii) =
   ## Appends the `((SEG:EndText))` record.
   h.addStanza("SEG", "EndText", [], "", false, encoding)
 
-proc withStanza*(h: ExtendedTextHeader, company, name: string, data: openArray[byte],
-    contentType = "", binary = false, encoding = teAscii): ExtendedTextHeader =
-  ## A copy of `h` with the stanza added before a final `((SEG:EndText))`
-  ## record, which stays last, as the standard requires. `h` must hold all its
-  ## records (`isComplete`), else `ValueError`. The records are indexed again,
-  ## so the result's `stanzas` list the new one.
+proc withoutEndText*(h: ExtendedTextHeader): ExtendedTextHeader =
+  ## A copy of `h` without a final `((SEG:EndText))` record (as is when it has
+  ## none), for stanzas to be appended in place before the record is put back
+  ## with `addEndText`. `h` must hold all its records (`isComplete`), else
+  ## `ValueError`. The records are indexed again.
   if not h.isComplete:
     raise newException(ValueError, "the extended textual header was only indexed, not held " &
       "in memory; a stanza cannot be added to it")
@@ -503,8 +506,16 @@ proc withStanza*(h: ExtendedTextHeader, company, name: string, data: openArray[b
   result = initExtendedTextHeader(h.rev1Lines, h.maxRetained)
   for i in 0 ..< keep:
     result.add h.data.toOpenArray(i * TextHeaderSize, (i + 1) * TextHeaderSize - 1)
-  result.addStanza(company, name, data, contentType, binary, encoding)
-  if h.endText: result.addEndText()
+
+func stanzaRecordCount*(company, name: string, dataLen: int, contentType = "",
+    binary = false): int =
+  ## The records `addStanza` appends for a stanza of `dataLen` data bytes (ASCII
+  ## header, as `addStanza` writes by default): the header and data, padded to
+  ## whole records.
+  var n = 2 + company.len + 1 + name.len + 2 + dataLen
+  if contentType.len > 0 or binary: n += 1 + contentType.len
+  if binary: n += 1 + len($dataLen)
+  (n + TextHeaderSize - 1) div TextHeaderSize
 
 func toDescXml*(b: UserDataBlock): string =
   ## The description block for `b` (single-level XML, ASCII, lower-case tags).
