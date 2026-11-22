@@ -813,6 +813,7 @@ type
     p: Planner
     ready: bool
     path: string
+    memId: int
     fields: GeometryFields
 
 proc planKeys*(kp: var KeysPlan, src: SeismicFile, trace: int, k: TraceKeys,
@@ -821,11 +822,11 @@ proc planKeys*(kp: var KeysPlan, src: SeismicFile, trace: int, k: TraceKeys,
   ## trace `trace` of `src` (SEG-Y or SEG-D), as write-back writes it;
   ## values without a slot or too large for theirs are counted for
   ## `finishKeys`.
-  if not kp.ready or kp.path != src.path or kp.fields != fields:
+  if not kp.ready or kp.path != src.path or kp.memId != src.memoryId or kp.fields != fields:
     if kp.ready: kp.p.summarize()
     let log = move kp.p.log
     kp = KeysPlan(p: initPlanner(src.index, src.path, fields), ready: true, path: src.path,
-      fields: fields)
+      memId: src.memoryId, fields: fields)
     kp.p.log = log
   kp.p.count(kp.p.planTrace(src.index, trace, k, buf))
 

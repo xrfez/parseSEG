@@ -61,7 +61,8 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,
   traceindex.copyBytes, traceindex.readTracesInto, traceindex.readTraces,
   traceindex.applyGeometry, traceindex.saveIndex, traceindex.index, traceindex.cutShort,
-  traceindex.readFailed, traceindex.access
+  traceindex.readFailed, traceindex.access, traceindex.openSeismicBytes,
+  traceindex.inMemory
 export headerfields.fieldNames, headerfields.fieldByName, headerfields.traceField,
   headerfields.recordField, headerfields.fileField, headerfields.findTraceField,
   headerfields.findRecordField, headerfields.findFileField, headerfields.blockKind,
@@ -79,8 +80,8 @@ import parseSEG/survey/[textrec, sps, p1, join, writeback]
 export textrec, sps, p1, join
 export writeback except KeysPlan, planKeys, finishKeys # internal: model/writefile
 
-import parseSEG/io/[records, diskio, memsource, tapeimage, tapedevice]
-export records, diskio, tapeimage, tapedevice
+import parseSEG/io/[records, diskio, memsink, memsource, tapeimage, tapedevice]
+export records, diskio, memsink, tapeimage, tapedevice
 export memsource except mapGuard, readCache, endWalk, resolveAccess, walkError
   # internal: the readers' guard against a cut file, an unmapped file's cache
 when defined(linux):

@@ -69,7 +69,7 @@
 
 import std/[math, options, os, sets, times]
 import ../common/[diagnostics, endians, outputfile, seismickind]
-import ../io/[records, diskio]
+import ../io/[records, diskio, memsink]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
   samples as segysamples, textheader, exttext]
 import ../segd/[reader as segdreader, writer as segdwriter]
@@ -255,7 +255,9 @@ type
 
   WriterState = object
     kind: SeismicKind
-    path, tmp: string     ## The output, and its temporary file ("" once gone).
+    path, tmp: string     ## The output, and its temporary file ("" once gone, or in memory).
+    memory: bool          ## The output is collected in `mem`, not written to `tmp`.
+    mem: MemSink          ## `sink` when `memory`; keeps the bytes after the sink is closed.
     open: bool            ## Set by `openSeismicWriter`; false once closed (and when zeroed).
     written: int
     sink: RecordSink      ## SEG-Y and SEG-D output (nil once closed).
@@ -285,6 +287,7 @@ type
     segdNoZ: int          ## Traces whose elevation has no X/Y, so is not written.
     inRecord: bool
     recPath: string       ## The record in progress: its file, index and traces.
+    recMem: int           ## `recPath`'s `memoryId` (0 for a disk file).
     recIndex, recFirst, recLast, nextTrace: int
     recFormat: SegdSampleFormat
     # SEG-2
@@ -341,6 +344,14 @@ method writeRecordImpl(s: NullSink; data: openArray[byte]) {.raises: [].} =
 
 method writeTapeMarkImpl(s: NullSink) {.raises: [].} = discard
 
+proc makeSink(s: var WriterState) =
+  # The output's sink: the temporary file's, or the memory buffer.
+  if s.memory:
+    s.mem = openMemSink(s.path)
+    s.sink = s.mem
+  else:
+    s.sink = openDiskSink(s.tmp)
+
 proc discardOutput(s: var WriterState) {.raises: [].} =
   # Closes what is still open and removes the temporary file; once.
   if s.sink != nil:
@@ -368,7 +379,8 @@ func len*(w: SeismicWriter): int {.inline.} =
   w.s.written
 
 func path*(w: SeismicWriter): lent string {.inline.} =
-  ## The output path (written by `close`).
+  ## The output path (written by `close`); for a writer of bytes
+  ## (`openSeismicWriterBytes`) its display name.
   w.s.path
 
 # ------------------------------------------------------------------ open --
@@ -404,7 +416,7 @@ proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat) =
   # Validate now; the real writer opens at the first trace.
   discard openSegyWriter(NullSink(name: s.path), f, initSegyWriteOptions(f))
   s.segyFile = f
-  s.sink = openDiskSink(s.tmp)
+  s.makeSink()
 
 proc checkGroups(src: SeismicFile, first, last: int) =
   # 8015 packs 4 samples into 10 bytes, and a SEG-D trace keeps its count:
@@ -423,8 +435,40 @@ proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
           " (record " & $rec.index & ")")
     if fmt == sd8015: checkGroups(like, 0, like.len - 1)
     s.segdFormat = some(fmt)
-  s.sink = openDiskSink(s.tmp)
+  s.makeSink()
   s.segd = openSegdWriter(s.sink, SegdWriteOptions(), like.index.segdLabel)
+
+proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTargetFormat,
+    segdFormat: SegdTargetFormat, seg2Format: Seg2TargetFormat): SeismicWriter =
+  # `openSeismicWriter(path, like)` and `openSeismicWriterBytes(like)`; see there.
+  let kind = like.kind
+  if kind == skUnknown: refuse("the file " & like.path & " is not SEG-Y, SEG-D or SEG-2")
+  if like.demuxPath.len > 0:
+    refuse(like.path & " holds multiplexed SEG-D; convert it to a demultiplexed file " &
+      "first (`convertSegdRevision`)")
+  if (segyFormat != stKeep and kind != skSegy) or (segdFormat != tfKeep and kind != skSegd) or
+      (seg2Format != s2tKeep and kind != skSeg2):
+    refuse("a sample format was chosen for another standard than the input's (" & $kind & ")")
+  if memory and kind == skSeg2:
+    refuse("SEG-2 cannot be written to memory (its writer needs a file); write it to a path")
+  var same = false
+  if not memory and not like.inMemory:
+    try: same = fileExists(path) and sameFile(like.path, path)
+    except OSError: discard
+  if same: refuse("the output " & path & " is the input file")
+  result = SeismicWriter(s: WriterState(kind: kind, path: path, open: true, memory: memory,
+    tmp: if memory: "" else: createTempFor(path)))
+  try:
+    case kind
+    of skSegy: result.s.openSegy(like, segyFormat)
+    of skSegd: result.s.openSegd(like, segdFormat)
+    of skSeg2:
+      if seg2Format != s2tKeep: result.s.seg2Format = toSeg2Format(ord(seg2Format))
+      result.s.seg2 = openSeg2Writer(result.s.tmp, like.index.seg2)
+    of skUnknown: discard
+  except CatchableError:
+    result.s.discardOutput()
+    raise
 
 proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
     segdFormat = tfKeep, seg2Format = s2tKeep): SeismicWriter =
@@ -438,31 +482,17 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## multiple of 4, or `path` being `like`'s file; `SegFormatError` for
   ## file headers the writer refuses; `IOError` when the output cannot be
   ## created.
-  let kind = like.kind
-  if kind == skUnknown: refuse("the file " & like.path & " is not SEG-Y, SEG-D or SEG-2")
-  if like.demuxPath.len > 0:
-    refuse(like.path & " holds multiplexed SEG-D; convert it to a demultiplexed file " &
-      "first (`convertSegdRevision`)")
-  if (segyFormat != stKeep and kind != skSegy) or (segdFormat != tfKeep and kind != skSegd) or
-      (seg2Format != s2tKeep and kind != skSeg2):
-    refuse("a sample format was chosen for another standard than the input's (" & $kind & ")")
-  var same = false
-  try: same = fileExists(path) and sameFile(like.path, path)
-  except OSError: discard
-  if same: refuse("the output " & path & " is the input file")
-  result = SeismicWriter(s: WriterState(kind: kind, path: path, tmp: createTempFor(path),
-    open: true))
-  try:
-    case kind
-    of skSegy: result.s.openSegy(like, segyFormat)
-    of skSegd: result.s.openSegd(like, segdFormat)
-    of skSeg2:
-      if seg2Format != s2tKeep: result.s.seg2Format = toSeg2Format(ord(seg2Format))
-      result.s.seg2 = openSeg2Writer(result.s.tmp, like.index.seg2)
-    of skUnknown: discard
-  except CatchableError:
-    result.s.discardOutput()
-    raise
+  openLike(path, false, like, segyFormat, segdFormat, seg2Format)
+
+proc openSeismicWriterBytes*(like: SeismicFile, name = "memory", segyFormat = stKeep,
+    segdFormat = tfKeep): SeismicWriter =
+  ## `openSeismicWriter(path, like)` that collects the file in memory:
+  ## `finishBytes` returns its bytes, and nothing touches the disk. `name`
+  ## is the display name in diagnostics and `path`. SEG-Y and SEG-D only
+  ## (`ValueError` for SEG-2 `like`: its writer needs a file); otherwise the
+  ## same checks and refusals as the file writer, except those about the
+  ## output file. `like` may itself be a file in memory.
+  openLike(name, true, like, segyFormat, segdFormat, s2tKeep)
 
 func textCard(s: string): string =
   # A line as card text: printable ASCII only, cut to the card after its prefix.
@@ -470,17 +500,8 @@ func textCard(s: string): string =
   for ch in result.mitems:
     if ch notin {' '..'~'}: ch = ' '
 
-proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
-  ## A writer of a new SEG-Y file at `path`, with file headers from `opts`
-  ## rather than an input file, for traces built from `TraceKeys`
-  ## (`writeTrace(w, keys, samples)`): e.g. a stack of SEG-D or SEG-2 data.
-  ## The binary header's sample interval is the first trace's and its count
-  ## the largest of the traces written (set by `close`); traces are
-  ## variable-length. Rev 2 traces carry Trace
-  ## Header Extension 1. Raises `ValueError` for a format the revision lacks
-  ## (8-byte and 3-byte formats need Rev 2), a 3-byte format pair-swapped,
-  ## a byte order other than big-endian before Rev 2, or a revision other
-  ## than 0, 1, 2.0 or 2.1; `IOError` when the output cannot be created.
+proc openNewSegy(path: string, memory: bool, opts: SegyOutputOptions): SeismicWriter =
+  # `openSeismicWriter(path, opts)` and `openSeismicWriterBytes(opts)`; see there.
   let rev = opts.revision
   if not (rev.major in 0'u8..1'u8 and rev.minor == 0 or rev.major == 2 and rev.minor <= 1):
     refuse("SEG-Y Rev " & $rev & " cannot be written (0, 1, 2.0 or 2.1)")
@@ -508,32 +529,43 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
     f.binary.maxAddlTraceHeaders = 1
     f.extended.addEndText()
     f.binary.numExtTextHeaders = int16(f.extended.recordCount)
-  result = SeismicWriter(s: WriterState(kind: skSegy, path: path, tmp: createTempFor(path),
-    open: true, segyFresh: true, segyCount: -1))
+  result = SeismicWriter(s: WriterState(kind: skSegy, path: path,
+    tmp: if memory: "" else: createTempFor(path),
+    open: true, memory: memory, segyFresh: true, segyCount: -1))
   try:
     # Validate now (with a placeholder interval); the real writer opens at the first trace.
     discard openSegyWriter(NullSink(name: path), f, initSegyWriteOptions(f))
     result.s.segyFile = f
-    result.s.sink = openDiskSink(result.s.tmp)
+    result.s.makeSink()
   except CatchableError:
     result.s.discardOutput()
     raise
 
+proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
+  ## A writer of a new SEG-Y file at `path`, with file headers from `opts`
+  ## rather than an input file, for traces built from `TraceKeys`
+  ## (`writeTrace(w, keys, samples)`): e.g. a stack of SEG-D or SEG-2 data.
+  ## The binary header's sample interval is the first trace's and its count
+  ## the largest of the traces written (set by `close`); traces are
+  ## variable-length. Rev 2 traces carry Trace
+  ## Header Extension 1. Raises `ValueError` for a format the revision lacks
+  ## (8-byte and 3-byte formats need Rev 2), a 3-byte format pair-swapped,
+  ## a byte order other than big-endian before Rev 2, or a revision other
+  ## than 0, 1, 2.0 or 2.1; `IOError` when the output cannot be created.
+  openNewSegy(path, false, opts)
+
+proc openSeismicWriterBytes*(opts: SegyOutputOptions, name = "memory"): SeismicWriter =
+  ## `openSeismicWriter(path, opts)` that collects the new SEG-Y file in memory
+  ## instead of a file: `finishBytes` returns its bytes, byte for byte what the file
+  ## writer writes, and nothing touches the disk. `name` is the display name in
+  ## diagnostics and `path`. The same checks and refusals as the file writer (`ValueError`,
+  ## `SegFormatError`), except those about the output file.
+  openNewSegy(name, true, opts)
+
 proc checkRecordingTime(t: float64, what: string)
 
-proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
-  ## A writer of a new SEG-D Rev 3 file at `path`, for traces built from
-  ## `TraceKeys` (`writeTrace(w, keys, samples)`), grouped into records by
-  ## `keys.record`. The sample interval, sample count and sample format come
-  ## from `opts`; a record is buffered until the next record number or
-  ## `close`, then written whole. Raises `ValueError` for a revision other
-  ## than 3.0 or 3.1, a format that revision lacks, a sample interval that
-  ## is not a whole number of microseconds from 1 to 2^32-1, a sample count
-  ## below 1, a window (count times the interval) longer than
-  ## 2^32-1 µs, format 8015 with a count that is not a multiple of 4,
-  ## coordinate units other than metres, feet or unknown, or a `time` that
-  ## is set but not a finite UTC time in 1950-2049; `IOError` when the
-  ## output cannot be created.
+proc openNewSegd(path: string, memory: bool, opts: SegdOutputOptions): SeismicWriter =
+  # `openSeismicWriter(path, opts)` and `openSeismicWriterBytes(opts)`; see there.
   let rev = opts.revision
   if rev.major != 3 or rev.minor > 1:
     refuse("SEG-D Rev " & $rev & " cannot be written from keys (3.0 or 3.1)")
@@ -556,14 +588,38 @@ proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
   if not opts.time.isNaN: checkRecordingTime(opts.time, "SegdOutputOptions.time")
   var fixed = opts
   fixed.sampleIntervalUs = dt
-  result = SeismicWriter(s: WriterState(kind: skSegd, path: path, tmp: createTempFor(path),
-    open: true, segdFresh: true, segdOpts: fixed, segdRecTime: NaN))
+  result = SeismicWriter(s: WriterState(kind: skSegd, path: path,
+    tmp: if memory: "" else: createTempFor(path),
+    open: true, memory: memory, segdFresh: true, segdOpts: fixed, segdRecTime: NaN))
   try:
-    result.s.sink = openDiskSink(result.s.tmp)
+    result.s.makeSink()
     result.s.segd = openSegdWriter(result.s.sink, SegdWriteOptions())
   except CatchableError:
     result.s.discardOutput()
     raise
+
+proc openSeismicWriter*(path: string, opts: SegdOutputOptions): SeismicWriter =
+  ## A writer of a new SEG-D Rev 3 file at `path`, for traces built from
+  ## `TraceKeys` (`writeTrace(w, keys, samples)`), grouped into records by
+  ## `keys.record`. The sample interval, sample count and sample format come
+  ## from `opts`; a record is buffered until the next record number or
+  ## `close`, then written whole. Raises `ValueError` for a revision other
+  ## than 3.0 or 3.1, a format that revision lacks, a sample interval that
+  ## is not a whole number of microseconds from 1 to 2^32-1, a sample count
+  ## below 1, a window (count times the interval) longer than
+  ## 2^32-1 µs, format 8015 with a count that is not a multiple of 4,
+  ## coordinate units other than metres, feet or unknown, or a `time` that
+  ## is set but not a finite UTC time in 1950-2049; `IOError` when the
+  ## output cannot be created.
+  openNewSegd(path, false, opts)
+
+proc openSeismicWriterBytes*(opts: SegdOutputOptions, name = "memory"): SeismicWriter =
+  ## `openSeismicWriter(path, opts)` that collects the new SEG-D Rev 3 file in memory
+  ## instead of a file: `finishBytes` returns its bytes, byte for byte what the file
+  ## writer writes, and nothing touches the disk. `name` is the display name in
+  ## diagnostics and `path`. The same checks and refusals as the file writer (`ValueError`,
+  ## `SegFormatError`), except those about the output file.
+  openNewSegd(name, true, opts)
 
 # ----------------------------------------------------------------- SEG-Y --
 
@@ -689,6 +745,9 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
   if b != s.segyFile.binary:
     var bytes = newSeq[byte](BinaryHeaderSize)
     b.encode(bytes, s.segyFile.byteOrder)
+    if s.memory:
+      s.mem.patch(s.segyFile.tapeLabel.len + TextHeaderSize, bytes)
+      return
     var f: File
     if not open(f, s.tmp, fmReadWriteExisting): raise newException(IOError, "cannot reopen " & s.tmp)
     try:
@@ -812,6 +871,7 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace: int) =
   s.segd.writeRecordHeaders(rec)
   s.inRecord = true
   s.recPath = src.path
+  s.recMem = src.memoryId
   s.recIndex = r
   s.recFirst = trace
   s.recLast = last
@@ -857,7 +917,7 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   withTemplateHeaders(s, src, trace, SegdTraceHeaderSize, keys, fields, h):
     t = loadSegdTrace(src, trace, src.index.segdRecords[r], h)
   t.overrideSegd(overrides)
-  if s.inRecord and s.recPath == src.path and s.recIndex == r:
+  if s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and s.recIndex == r:
     if trace != s.nextTrace:
       refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
         " (a record's traces are written in input order)")
@@ -1739,6 +1799,29 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
     raise
   inc w.s.written
 
+proc finishWork(w: var SeismicWriter, log: var DiagLog) =
+  # What `close` and `finishBytes` share: everything up to the last byte
+  # going to the sink; a raise discards the output.
+  try:
+    case w.s.kind
+    of skSegy: w.s.closeSegy(log)
+    of skSegd: w.s.closeSegd(log)
+    of skSeg2:
+      w.s.seg2.close()
+      log.add w.s.seg2.log
+    of skUnknown: discard
+    # Traces written with keys: the values that had no slot or did not fit.
+    log.add w.s.keysPlan.finishKeys()
+    for why in Seg2NoSlot:
+      if w.s.seg2NoSlot[why] > 0:
+        log.report(sevWarning, dcValidation, "not written: " & $why & ", in " &
+          $w.s.seg2NoSlot[why] & " traces (the first is trace " & $w.s.seg2NoSlotFirst[why] &
+          ")", loc = Location(file: w.s.path))
+  except CatchableError:
+    w.s.discardOutput()
+    raise
+  w.s.open = false
+
 proc close*(w: var SeismicWriter): DiagLog =
   ## Finishes the output: ends the SEG-D record in progress, writes the
   ## SEG-Y trailer and final counts or the SEG-2 trace pointers, and renames
@@ -1749,29 +1832,37 @@ proc close*(w: var SeismicWriter): DiagLog =
   ## `SegFormatError` for output the writer refuses, e.g. a SEG-2 file
   ## without traces, `IOError` when the last bytes cannot be written or the
   ## file cannot be moved into place). Raises `ValueError` when already
-  ## closed.
+  ## closed, or for a writer of bytes (`finishBytes` finishes that one).
   if not w.s.open: refuse("the writer is closed")
-  try:
-    case w.s.kind
-    of skSegy: w.s.closeSegy(result)
-    of skSegd: w.s.closeSegd(result)
-    of skSeg2:
-      w.s.seg2.close()
-      result.add w.s.seg2.log
-    of skUnknown: discard
-    # Traces written with keys: the values that had no slot or did not fit.
-    result.add w.s.keysPlan.finishKeys()
-    for why in Seg2NoSlot:
-      if w.s.seg2NoSlot[why] > 0:
-        result.report(sevWarning, dcValidation, "not written: " & $why & ", in " &
-          $w.s.seg2NoSlot[why] & " traces (the first is trace " & $w.s.seg2NoSlotFirst[why] &
-          ")", loc = Location(file: w.s.path))
-  except CatchableError:
-    w.s.discardOutput()
-    raise
-  w.s.open = false
+  if w.s.memory:
+    refuse("a writer of bytes is finished with finishBytes, not close")
+  w.finishWork(result)
   var moved: DiagLog
   finishOutput(w.s.tmp, w.s.path, keep = true, moved) # removes what it cannot move
   w.s.tmp = ""
   for d in moved:
     if d.severity == sevFatal: raise newException(IOError, d.msg & ": " & w.s.path)
+
+proc finishBytes*(w: var SeismicWriter, log: var DiagLog): seq[byte] =
+  ## Finishes a writer made by `openSeismicWriterBytes` and returns the bytes
+  ## of the file, moved out of the writer (no copy). Does what `close` does
+  ## except the move into place: ends the SEG-D record in progress, writes
+  ## the SEG-Y trailer, and patches the counts known at the end into the
+  ## buffer as a file is patched, so the bytes equal what the file writer
+  ## writes for the same traces. The writer's diagnostics (warnings only,
+  ## see `close`) are added to `log`. Raises as `close` does (`ValueError`
+  ## for an incomplete SEG-D record or a SEG-D file with no traces,
+  ## `SegFormatError`), and `ValueError` for a writer opened on a path or
+  ## already finished; a raise discards the output.
+  if not w.s.open: refuse("the writer is closed")
+  if not w.s.memory:
+    refuse("a writer of a file is finished with close, not finishBytes")
+  w.finishWork(log)
+  result = w.s.mem.takeBytes()
+  w.s.mem = nil
+
+proc finishBytes*(w: var SeismicWriter): seq[byte] =
+  ## `finishBytes(w, log)` without the diagnostics: they are warnings only
+  ## (values that had no slot in the headers), which this drops.
+  var log: DiagLog
+  w.finishBytes(log)
