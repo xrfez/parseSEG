@@ -91,7 +91,7 @@ proc main*() =
         "mappedSize", "flush", "segyIntervalOf", "refreshKeys", "refreshSegyInterval", "mindex",
         "requireUncut", "requireUncutFirst", "cutSeen", "unsafeGuard", "unsafeCache", "holdBytes",
         "coverBytes", "coverSeg2Block", "coverHeaders", "seg2FileBlockEnd", "writeFileBytes",
-        "withHeld"]),
+        "withHeld", "memoryId"]),
       ("headerfields", "model/headerfields.nim", newSeq[string]()),
       ("edit", "model/edit.nim", @["logVar", "writeBytes", "batching", "flushPending"]),
       ("tosegy", "convert/tosegy.nim", @["GeometryJoin", "convertSegdToSegyJoined"]),

@@ -10,6 +10,7 @@ It reads from disk and from tape. It also joins geometry from SPS and SEG P1 sur
 - **Any file size.** Files are memory-mapped and indexed with one pass over the headers, using about 24 bytes per trace; the data is never loaded whole. A fixed-length SEG-Y file opens in milliseconds whatever its size: 12 GB and 10 M traces open in about 20 ms.
 - **Samples go straight into tensors.** You get Arraymancer `Tensor[float32]` or `Tensor[float64]` arrays shaped `[traces, samples]`. A request can be a range, a list of traces (a gather or a sort order) or a sample window. Several threads can read from one open file, and a multi-threaded prefetcher can read ahead. Decoding runs at up to 20-27 GB/s per thread.
 - **Headers by name.** You can read any header field by name, a column of one field across many traces, per-trace geometry keys, gathers, header listings with byte offsets, and the SEG-Y textual header.
+- **Files in memory.** A file can be written into a buffer (`openSeismicWriterBytes`, `finishBytes`) and opened from bytes (`openSeismicBytes`), with no temporary file: for data a decoder produces, not read from disk.
 - **Safe writes.** Header edits happen in place, and each one is journaled and can be undone. Writers produce files like the input, and conversions report every loss.
 - **Diagnostics, not crashes.** Bad file content never raises an exception. It is reported as a diagnostic with a severity, a code, a byte offset and a location.
 

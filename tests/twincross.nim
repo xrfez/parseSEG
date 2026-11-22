@@ -48,7 +48,10 @@ proc main*() =
 
   # Reads traces, so that the sample decoders, which use `cpu.h`, are compiled.
   writeFile(main, "import std/os\nimport parseSEG\n" &
-    "var f = openSeismic(paramStr(1))\necho f.readTraces(0 .. 0).shape\n")
+    "var f = openSeismic(paramStr(1))\necho f.readTraces(0 .. 0).shape\n" &
+    # Files in memory: opened from bytes, written to bytes.
+    "var w = openSeismicWriterBytes(SegyOutputOptions())\n" &
+    "var m = openSeismicBytes(w.finishBytes(), \"memory\")\necho m.inMemory\n")
 
   let cache = tmp / "nimcache"
 

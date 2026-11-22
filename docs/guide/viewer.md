@@ -18,6 +18,7 @@ records, channel sets, keys, gathers).
 | [Other programs and an open file](#other-programs-and-a-file-that-is-open) | Windows sharing, `faUnmapped`, appends, renames, deletes |
 | [A file cut short](#a-file-cut-short-while-it-is-open) | `cutShort`, `dcTruncated`, `SegTruncatedError` |
 | [Files on a network drive](#files-on-a-network-drive) | `OpenOptions.access`, `faAuto`, `faUnmapped`, `dcIo` |
+| [Files that live in memory](#files-that-live-in-memory) | `openSeismicBytes`, `openSeismicWriterBytes`, `finishBytes`, `inMemory` |
 | [Survey files](#survey-files-in-the-background) | `looksLikeSps`, `readSps(progress)`, `readP1(progress)`, `SpsOptions` |
 | [The header tab](#the-header-tab-and-the-textual-header) | `traceHeaders`, `copyBytes`, `textHeader` |
 | [Geometry](#geometry-time-and-annotation) | `traceKeys`, inline and crossline |
@@ -682,6 +683,59 @@ What it must still do itself:
   2 s, and past that leaves the map mapped).
 - Watch a network file for changes (size, modification time) and open it again: an
   unmapped file does not see another program's change to bytes it holds in its cache.
+
+## Files that live in memory
+
+Some data never was a file: a vibrator controller's signature files, say, which a small
+decoder turns into trace headers and samples. Write such a shot as SEG-Y or SEG-D into
+memory and open it from memory, and the viewer needs no temporary file, no cache folder
+and no clean-up. Everything after the open works as on a disk file: the index, headers,
+keys, sample reads, gathers, summaries, prefetchers, and reads from several threads.
+
+```nim
+import parseSEG
+
+# Write: a growable buffer instead of a path. Same options, same checks, same bytes as
+# the file writer.
+var w = openSeismicWriterBytes(SegyOutputOptions(text: @["VIBRATOR SIGNATURE"]), "sig.sgy")
+var k = initTraceKeys()
+k.intervalUs = 2000
+k.record = 1
+w.writeTrace(k, [0.5'f32, 1.5, -0.25, 0.0])
+let bytes = w.finishBytes() # the whole file; nothing was written to disk
+
+# Open: the bytes are moved in (no copy); the name is only for messages.
+var f = openSeismicBytes(bytes, "sig.sgy", keys = true)
+doAssert f.inMemory and f.path == "sig.sgy"
+doAssert f.len == 1 and f.kind == skSegy
+let x = f.readTraces(0 ..< 1)
+doAssert x[0, 1] == 1.5'f32
+f.close() # frees the bytes (a running prefetcher keeps them until it closes)
+```
+
+What to know:
+
+- The file is as read-only as a mapped one, and reading it from many threads is as safe.
+  The bytes are never copied by the open, and no file system call is made for the name,
+  which can be anything (the same name for two files is allowed; give them different ones
+  so that messages tell them apart).
+- The open takes `bytes` over: the caller's `seq[byte]` is empty afterwards. To keep
+  one, copy it first (`let kept = bytes` before the open). A view of memory the caller owns is not offered: a prefetcher
+  can outlive `close`, so the caller could not know when the memory may go.
+- What needs a disk file is refused, in plain words, with `ValueError`: `saveIndex`
+  (a cache is keyed on a path and its time stamps; `OpenOptions.cache` is ignored with an
+  info diagnostic and the file is indexed), `openEditor(f)` (edits are journaled to a file
+  next to the one edited), and a multiplexed SEG-D file (it is demultiplexed through a
+  temporary file; convert it to a demultiplexed file first). `cutShort` and `readFailed`
+  are always false; `f.access` is `faMapped` (the bytes are reached in place), and
+  `f.inMemory` tells such a file from a mapped one.
+- `openSeismicWriterBytes` takes the three writers' arguments (`SegyOutputOptions`,
+  `SegdOutputOptions` or a `like` file) and `finishBytes` replaces `close`: it returns the
+  bytes, with the counts known at the end patched in, byte for byte what the file writer
+  writes for the same traces. SEG-2 is not written to memory. Use
+  `finishBytes(w, log)` to receive the writer's warnings.
+- Bytes that are no seismic file, or a truncated or damaged one, give the same
+  diagnostics and errors as a file on disk, never a crash.
 
 ## Survey files in the background
 
