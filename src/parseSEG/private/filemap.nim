@@ -35,9 +35,17 @@ when defined(windows):
       mem*: pointer
       size*: int
       handle*: Handle ## the file, open with full sharing until `close`
+      writable: bool
 
   type LargeInteger {.importc: "LARGE_INTEGER", header: "<windows.h>".} = object
     QuadPart: int64
+
+  type MemoryBasicInformation {.importc: "MEMORY_BASIC_INFORMATION",
+      header: "<windows.h>".} = object
+    RegionSize: csize_t
+
+  proc virtualQuery(address: pointer, info: ptr MemoryBasicInformation,
+      length: csize_t): csize_t {.stdcall, dynlib: "kernel32", importc: "VirtualQuery".}
 
   proc getFileSizeEx(h: Handle, size: ptr LargeInteger): int32 {.stdcall,
     dynlib: "kernel32", importc: "GetFileSizeEx".}
@@ -94,14 +102,24 @@ when defined(windows):
     if writable:
       var now: LargeInteger
       if getFileSizeEx(file, addr now) != 0: bytes = min(bytes, uint64(now.QuadPart))
-    result = FileMap(mem: view, size: int(bytes), handle: file)
+      # And no more than the view holds, whatever the file's size says.
+      var info: MemoryBasicInformation
+      if virtualQuery(view, addr info, csize_t(sizeof(info))) != 0:
+        bytes = min(bytes, uint64(info.RegionSize))
+    result = FileMap(mem: view, size: int(bytes), handle: file, writable: writable)
 
   proc flush*(m: var FileMap) {.raises: [OSError].} =
-    ## Writes modified pages of a writable map back to the file.
-    if m.mem != nil:
+    ## Writes modified pages of a writable map back to the file and the
+    ## file's buffers to the device.
+    if m.mem != nil and m.writable:
       var last: OSErrorCode
       for _ in 1 .. 3:
-        if flushViewOfFile(m.mem, 0) != 0: return
+        if flushViewOfFile(m.mem, 0) != 0:
+          # `FlushViewOfFile` hands the pages to the file system; the file's
+          # own buffers are written out by `FlushFileBuffers`.
+          if flushFileBuffers(m.handle) == 0:
+            raiseOSError(osLastError(), "error flushing the file of a mapping")
+          return
         last = osLastError()
         if last != OSErrorCode(ERROR_LOCK_VIOLATION): break
       raiseOSError(last, "error flushing mapping")
