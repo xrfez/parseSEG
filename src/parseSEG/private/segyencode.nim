@@ -109,11 +109,15 @@ proc keysToHeaders*(t: var SegyTrace, k: TraceKeys, n, seqNo: int, rev: SegyRevi
   if not k.ensemble.isNaN: h.ensembleNumber = clampI32(k.ensemble)
   h.traceIdCode =
     # The stored code when it says what the status says (a status changed
-    # in the keys, e.g. a trace killed, wins over the input's code).
+    # in the keys, e.g. a trace killed, wins over the input's code), or when
+    # the status is unknown: that says nothing, so it cannot override a
+    # code the caller gave (also one this revision does not define).
     # `component` is not used: for SEG-D, SEG-2 and survey keys it is a
     # group index or sensor type, not a SEG-Y code (a SEG-Y input's code is
     # in `traceCode`).
-    if k.traceCode != 0 and segyStatus(k.traceCode, int(rev.major)) == k.status: k.traceCode
+    if k.traceCode != 0 and
+        (k.status == tsUnknown or segyStatus(k.traceCode, int(rev.major)) == k.status):
+      k.traceCode
     else:
       case k.status
       of tsLive: 1

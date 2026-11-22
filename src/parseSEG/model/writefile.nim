@@ -1738,9 +1738,11 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ##   fractional source point is rounded, and the midpoint, `inline` and
   ##   `crossline` are not written (bytes 181-240 are unassigned there; the
   ##   midpoint reads back as halfway between source and receiver);
-  ## - the trace identification code is `traceCode` when non-zero and its
-  ##   status in the output's revision is `status` (so a status changed in
-  ##   the keys wins), else 1 (live), 2 (dead) or 0 (unknown; also
+  ## - the trace identification code is `traceCode` when non-zero and `status`
+  ##   is `tsUnknown` (which says nothing, so the code is written as given,
+  ##   also one the revision does not define) or is the status the code has
+  ##   in the output's revision (so a known status changed in the keys wins),
+  ##   else 1 (live), 2 (dead) or 0 (unknown; also
   ##   auxiliary, which SEG-Y has no general code for). `component` is not
   ##   written as a code: outside SEG-Y it is a group index or sensor type;
   ## - `time` is written in UTC (time basis 4);
