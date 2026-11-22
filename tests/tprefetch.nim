@@ -3,6 +3,8 @@
 # test-separate: needs -d:nimAllocStats from tprefetch.nims
 
 import std/[assertions, os, random, strutils]
+when defined(windows):
+  import std/[winlean, widestrs]
 
 import parseSEG/model/[traceindex, prefetch, tracerows]
 
@@ -19,10 +21,25 @@ proc src(n: string): string =
 proc rows(t: Tensor[float32], first, count: int): Tensor[float32] =
   t[first ..< first + count, _]
 
+when defined(windows):
+  proc heldByAnyone(path: string): bool =
+    ## A handle of the file is open somewhere: an open that shares nothing is refused.
+    let h = createFileW(newWideCString(path), GENERIC_READ, 0, nil, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, 0)
+    if h == INVALID_HANDLE_VALUE: return true
+    discard closeHandle(h)
+    false
+
 proc mapped(path: string): bool =
-  ## The file is held by this process (Linux; true elsewhere): mapped, or
-  ## open unmapped (a descriptor of it).
-  when defined(linux):
+  ## The file is held by this process (Linux; Windows: by anyone, which a
+  ## virus scanner may be for a moment, so a release is waited for for a
+  ## second; true elsewhere): mapped, or open unmapped (a descriptor of it).
+  when defined(windows):
+    for _ in 1 .. 20:
+      if not heldByAnyone(path): return false
+      sleep 50
+    true
+  elif defined(linux):
     let full = expandFilename(path)
     if full in readFile("/proc/self/maps"): return true
     for kind, fd in walkDir("/proc/self/fd"):
