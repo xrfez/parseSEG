@@ -93,6 +93,28 @@ jobs:
           name: parseseg-linux-x64
           path: bin/parseSEG*
 
+  # The test suite on Windows, built natively with the runner's MinGW gcc at
+  # the baseline CPU (`nim test` passes no -march; only `nim cli` targets
+  # x86-64-v3, and MinGW's gcc crashed other projects' tests built that way).
+  # `tests/twinshare.nim` checks there that an open file can be appended to,
+  # renamed and written by a recorder meanwhile.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.4.0' # the build uses its bundled atlas and nimony NIF library
+
+      - name: Fetch dependencies (Atlas)
+        run: atlas rep atlas.lock
+
+      - name: Run test suite
+        run: nim test
+
   # The command line tool on the other hosts.
   native:
     strategy:
