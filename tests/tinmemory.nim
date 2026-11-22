@@ -15,6 +15,7 @@ import parseSEG
 
 import ./utils/testutils
 
+import parseSEG/io/memsink
 from parseSEG/model/traceindex import unsafeMemory, mappedSize
 
 proc bytesOf(path: string): seq[byte] = readFile(path).toBytes
@@ -357,6 +358,18 @@ proc main*() =
     for c in p.chunks: n += c.count
     doAssert n == ss.len
     discard p.close()
+
+  block memsink_patch_bounds:
+    # A patch outside the bytes written is an IndexDefect, also for an offset
+    # that would wrap `at + data.len`.
+    let sink = openMemSink("p")
+    sink.writeRecord([byte 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    sink.patch(8, [byte 0, 0])
+    doAssertRaises(IndexDefect): sink.patch(9, [byte 0, 0])
+    doAssertRaises(IndexDefect): sink.patch(high(int), [byte 0])
+    doAssertRaises(IndexDefect): sink.patch(high(int) - 1, [byte 0, 0, 0])
+    doAssertRaises(IndexDefect): sink.patch(-1, [byte 0])
+    doAssert sink.takeBytes() == @[byte 1, 2, 3, 4, 5, 6, 7, 8, 0, 0]
 
   block hostile:
     # Truncated, damaged and random bytes: the library's errors and

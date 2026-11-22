@@ -23,11 +23,7 @@ func len*(s: MemSink): int {.inline.} =
   s.buf.len
 
 method writeRecordImpl*(s: MemSink; data: openArray[byte]) {.raises: [CatchableError].} =
-  if data.len > 0:
-    try:
-      s.buf.add data
-    except OutOfMemDefect:
-      raise newException(IOError, "out of memory writing " & s.name)
+  if data.len > 0: s.buf.add data
   s.offset += data.len
 
 method writeTapeMarkImpl*(s: MemSink) {.raises: [CatchableError].} = discard
@@ -36,7 +32,7 @@ proc patch*(s: MemSink, at: int, data: openArray[byte]) =
   ## Overwrites the bytes at `at` with `data`, which must lie inside what was
   ## written (the back-patching of counts that are known at the end, as a
   ## file is patched). Raises `IndexDefect` otherwise.
-  if at < 0 or at + data.len > s.buf.len:
+  if at < 0 or data.len > s.buf.len - at: # not `at + data.len`: that can wrap
     raise newException(IndexDefect, "patch outside the bytes written")
   if data.len > 0: copyMem(addr s.buf[at], addr data[0], data.len)
 
