@@ -388,6 +388,42 @@ proc main*() =
     x = readSegd(tmp / "big31.sgd")
     doAssert x.records[0].record.scanTypes[0].descriptorsRev3[0].endTime == high(int32)
 
+  block rev3_end_clamped_from_rev2:
+    # Rev 2.1 -> 3.0: a seismic set of 140_000 samples at 15.9375 ms ends at
+    # 2231 s, past the int32 microsecond field: the end is clamped to
+    # high(int32) with one note, the record length (GH#2, from the longest
+    # end) follows it, and "set to N x dt" is noted. The Rev 3 -> 2.1 trip
+    # back is not asserted: Rev 2 ends are 16 bits of ms.
+    # Seen to fail first: the rnEndTimeClamped note removed from csdToRev3.
+    const ns = 140_000
+    var o = makeRev2(400, sd8058, ns)
+    o.record.gh1.baseScanInterval16 = 255
+    o.record.gh1.channelSetsPerScanType = 1
+    o.record.scanTypes[0].descriptors.delete(0) # the aux set (its end is 16 bits of ms)
+    o.record.scanTypes[0].descriptors[0].endTime = 65_535
+    o.record.gh2.get.extRecordLength = 65_535
+    o.record.traceCount = 3
+    o.traces = o.traces[2 .. ^1]
+    var d: SegdData
+    d.records.add o
+    toDisk(d, tmp / "clamp_r2.sgd")
+    var log = convertSegdRevision(tmp / "clamp_r2.sgd", tmp / "clamp_r3.sgd", rev(3, 0))
+    doAssert log.clean, $log
+    var notes = 0
+    for e in log:
+      if "does not fit Rev 3's" in e.msg: inc notes
+    doAssert notes == 1, $log
+    doAssert log.has("set to N x dt", sevInfo), $log
+    let r3 = readSegd(tmp / "clamp_r3.sgd")
+    doAssert r3.log.clean, $r3.log
+    let r = r3.records[0].record
+    let c = r.scanTypes[0].descriptorsRev3[0]
+    doAssert c.numSamples == uint32(ns) and c.samplingInterval == 15_938
+    doAssert c.endTime == high(int32)
+    # The record length is raised to the (clamped) longest end, as documented.
+    doAssert r.gh2Rev3.extRecordLength == uint32(high(int32))
+    for t in r3.records[0].traces: doAssert t.numSamples == ns
+
   block rev2_on_tape_without_a_header_scan:
     # The stream API has no header scan: sample counts come from the descriptors.
     var d: SegdData
