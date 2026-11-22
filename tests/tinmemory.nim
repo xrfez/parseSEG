@@ -309,6 +309,11 @@ proc main*() =
     doAssert b.len > 0 # used again below: the open got a copy, not the caller's buffer
     expect("lives in memory"): f.saveIndex(tmp / "x.idx")
     expect("lives in memory"): discard openEditor(f)
+    # Before any disk access: a journal path that is a real file is not looked at.
+    writeFile(tmp / "real.sgy", "x")
+    var f2 = openSeismicBytes(b, tmp / "real.sgy")
+    expect("lives in memory"): discard openEditor(f2, journalPath = tmp / "real.sgy")
+    doAssert not fileExists(tmp / "real.sgy.edits.nif")
     doAssert not fileExists(tmp / "x.idx")
     # An index cache is not read: the walk is made, and says why.
     var g = openSeismic(demoDir() / "survey.sgy")

@@ -607,6 +607,15 @@ proc parkAndDrop(f: var SeismicFile, next: sink MapRef) =
     old = nil
     unlockMaps()
 
+proc requireEditable*(f: SeismicFile) =
+  ## **Internal** (`openEditor(f)`; not exported by `parseSEG`). Raises
+  ## `ValueError` for a closed file or a file in memory, before anything touches
+  ## the disk.
+  f.requireOpen()
+  if f.inMemory:
+    raise newException(ValueError, f.path & " lives in memory, which cannot be edited " &
+      "in place (edits go to a disk file with a journal); write it to a file and edit that")
+
 proc remapWritable*(f: var SeismicFile) =
   ## **Internal** (`openEditor(f)`; not exported by `parseSEG`). Maps `f.path`
   ## read-write in place of the file's read-only map and keeps its index.
@@ -616,10 +625,7 @@ proc remapWritable*(f: var SeismicFile) =
   ## pin, and the index tables it reads (entries, codecs and keys) stay
   ## parked there: the file gets copies of them, so that prefetcher's chunks
   ## show the keys as they were at this call.
-  f.requireOpen()
-  if f.inMemory:
-    raise newException(ValueError, f.path & " lives in memory, which cannot be edited " &
-      "in place (edits go to a disk file with a journal); write it to a file and edit that")
+  f.requireEditable()
   if f.demuxPath.len > 0:
     raise newException(ValueError, f.path & " holds multiplexed SEG-D, which cannot be " &
       "edited in place; convert it to a demultiplexed file first (`parseseg convert " &

@@ -673,8 +673,10 @@ proc openEditor*(f: sink SeismicFile, journalPath = ""): HeaderEditor =
   ## `ValueError` for a closed file, a demultiplexed copy of multiplexed
   ## SEG-D, a file whose size changed since it was opened, or a journal that
   ## is the file itself; `IOError`/`OSError` if the file or the journal
-  ## cannot be opened. On a raise, `f` is closed with it.
+  ## cannot be opened. A file in memory (`openSeismicBytes`) is refused with
+  ## `ValueError` before the disk is touched. On a raise, `f` is closed with it.
   var file = f
+  file.requireEditable() # before any disk access: the journal's name is not looked at
   let jp = journalFor(file.path, journalPath)
   file.remapWritable()
   result = HeaderEditor(file: file, journalPath: jp)
