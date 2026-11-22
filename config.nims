@@ -113,7 +113,8 @@ task asan, "Run the threaded tests under ASan/LSan (any leak or memory error fai
   ## with libasan. Each test gets its own nimcache under nimcache/asan.
   for t in ["tprefetch", "tsharedreads", "tcolumns", "tviewerreads", "tdiagnostics",
       "ttracerows", "tprefetchrows", "tcutshort", "tcrossthread", "tunmapped", "tboundedclose",
-      "tgcsafe", "treadwait", "tcommitfail"]:
+      "tgcsafe", "treadwait", "tcommitfail", "tinmemory", "tstanzas",
+      "tvendormatch"]:
     selfExec "c -r --hints:off -d:useMalloc -d:noSignalHandler --debugger:native " &
       "--passC:-fsanitize=address " &
       "--passL:-fsanitize=address --nimcache:nimcache/asan/" & t & " -o:bin/asan/" & t &

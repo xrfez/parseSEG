@@ -985,10 +985,13 @@ func findBlock(area: openArray[byte], ms: openArray[VendorBytesMatch]): int =
   -1
 
 func contextArea(ctx: VendorContext, k: VendorTargetKind): lent seq[byte] =
+  # Each branch assigns `result`: a `case` expression returned through `lent` is
+  # compiled (Nim 2.4.2) as a temporary copy that is destroyed before the caller
+  # reads it.
   case k
-  of vtExtendedHeader: ctx.extended
-  of vtExternalHeader: ctx.external
-  else: ctx.general
+  of vtExtendedHeader: result = ctx.extended
+  of vtExternalHeader: result = ctx.external
+  else: result = ctx.general
 
 func specificity(m: VendorMatch, ctx: VendorContext): int =
   # -1 if the map does not apply, else the number of clauses that hold.
