@@ -1854,6 +1854,9 @@ proc addSegyStanza(w: var SeismicWriter, company, name: string, data: openArray[
     refuse("SEG-Y Rev 0 has no extended textual header, so no stanzas (Rev 1 or later)")
   checkStanzaName("company", company)
   checkStanzaName("name", name)
+  if normalizeStanzaName(company & ":" & name) == "SEG:ENDTEXT":
+    refuse("((SEG:EndText)) ends the extended textual header and is written by the " &
+      "writer itself; it cannot be added as a stanza")
   if contentType.len > 0: checkStanzaName("content type", contentType.replace("/", "-"))
   if binary and data.len > 999_999_999_999_999: refuse("the stanza is too long")
   var ext: ExtendedTextHeader
@@ -1899,7 +1902,8 @@ proc addStanza*(w: var SeismicWriter, company, name: string, data: openArray[byt
   ## Raises `ValueError` after the first trace, for a writer of another standard (SEG-D,
   ## SEG-2), for SEG-Y Rev 0 (no extended textual header), for an empty `company` or
   ## `name` or one with a character a stanza header cannot carry (`:`, `(`, `)`,
-  ## non-printable), for a `like` file whose extended header was only indexed, for more
+  ## non-printable), for the `((SEG:EndText))` stanza under any spelling the reader matches
+  ## (it ends the header and the writer writes it), for a `like` file whose extended header was only indexed, for more
   ## than 32767 records, and when the stanza would not read back as written.
   w.addSegyStanza(company, name, data, contentType, true)
 

@@ -182,6 +182,17 @@ proc main*() =
     expect("before the first trace"): w.addTextStanza("acme", "late", "t")
     discard w.close()
     expect("closed"): w.addStanza("acme", "x", [byte 1])
+    # The terminator is the writer's, in every revision.
+    for (major, minor) in [(1, 0), (2, 0), (2, 1)]:
+      var we = openSeismicWriterBytes(segyOpts(major, minor))
+      for (c, n) in [("SEG", "EndText"), ("seg", "End Text"), (" SEG ", "endtext")]:
+        expect("EndText"): we.addStanza(c, n, [byte 1])
+        expect("EndText"): we.addTextStanza(c, n, "t")
+      we.addStanza("acme", "ok", [byte 1]) # the writer is intact
+      we.writeTrace(keys(0), row(0))
+      var fe = openSeismicBytes(we.finishBytes(), "e.sgy")
+      doAssert not fe.log.isFatal and fe.log.count(sevError) == 0, $fe.log
+      fe.close()
     var r0 = openSeismicWriter(tmp / "r0.sgy", segyOpts(0, 0))
     expect("Rev 0"): r0.addStanza("acme", "x", [byte 1])
     var rd = openSeismicWriter(tmp / "rd.sgd", SegdOutputOptions(sampleIntervalUs: 2000,
