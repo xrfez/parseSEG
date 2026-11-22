@@ -9,8 +9,16 @@
 ## joined by `/` again (the include held `\cpu.h`; zig: file not found).
 ## Zig also compiles the Windows system calls of `faAuto` (`private/netfs`:
 ## `GetVolumePathNameW`, `GetDriveTypeW`, `QueryDosDeviceW`,
-## `GetFileAttributesW`) and of unmapped reads (`private/readcache`)
+## `GetFileAttributesW`), of unmapped reads (`private/readcache`) and of the
+## shared open and map (`private/sharedfile`, `private/filemap`:
+## `CreateFileW`, `CreateFileMappingW`, `MapViewOfFile`, `_open_osfhandle`)
 ## against the real `windows.h`.
+##
+## The same cross build must give `PackageVersion` (it read the nimble file
+## by a path the `\` of the target broke: "unknown"); checked by compiling
+## a program with `static: doAssert PackageVersion != "unknown"` for
+## `--os:windows`, which needs no C compiler (`--compileOnly`), only this
+## Nim. Seen failing with `parentDir` and `/` in `version.nim` again.
 
 import std/[assertions, os, osproc, strutils]
 
@@ -66,13 +74,22 @@ proc main*() =
 
   doAssert checked >= 2, "the generated C that includes cpu.h: " & $checked & " files"
 
-  for name in ["netfs.nim.c", "readcache.nim.c"]:
+  for name in ["netfs.nim.c", "readcache.nim.c", "filemap.nim.c", "sharedfile.nim.c"]:
     var found = false
     for path in walkFiles(cache / "*.c"):
       if path.endsWith(name):
         cFiles.add path
         found = true
     doAssert found, name & " is not in the generated C"
+
+  # The package version, found in a cross build.
+  let vmain = tmp / "winversion.nim"
+  writeFile(vmain, "import parseSEG/version\n" &
+    "static: doAssert PackageVersion != \"unknown\", \"PackageVersion is unknown\"\n")
+  let (vo, vcode) = execCmdEx(getCurrentCompilerExe().quoteShell & " c --os:windows --cpu:amd64" &
+    " --compileOnly --hints:off --warnings:off --skipParentCfg --skipUserCfg" & nimPaths() &
+    " --nimcache:" & quoteShell(tmp / "nimcachev") & " " & quoteShell(vmain))
+  doAssert vcode == 0, "PackageVersion in a cross build for Windows: " & vo
 
   let zig = findExe("zig")
 

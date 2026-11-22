@@ -3,12 +3,22 @@
 ## Nimble builds pass it as `-d:NimblePkgVersion`. Other builds read it from
 ## the nimble file at compile time.
 
-import std/[os, strutils]
+import std/strutils
+from std/os import fileExists
 
 const NimblePkgVersion {.strdefine.} = ""
 
 proc nimbleVersion(): string {.compileTime.} =
-  let path = currentSourcePath().parentDir.parentDir.parentDir / "parseSEG.nimble"
+  # The path is cut and joined by hand with "/": in a cross-build for
+  # Windows this runs on the build host, where `std/os` (`parentDir`, `/`)
+  # would write the target's backslashes and find no file. Every host's
+  # compiler-side file calls take "/" (Windows hosts accept it too).
+  let here = currentSourcePath().replace('\\', '/')
+  var root = here
+  for _ in 1 .. 3: # version.nim, parseSEG/, src/
+    let cut = root.rfind('/')
+    root = if cut >= 0: root[0 ..< cut] else: "."
+  let path = root & "/parseSEG.nimble"
   if fileExists(path):
     for line in staticRead(path).splitLines:
       let parts = line.split('=', maxsplit = 1)
