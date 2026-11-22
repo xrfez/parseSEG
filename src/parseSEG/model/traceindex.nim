@@ -133,7 +133,8 @@ proc `=dup`(src: MapPin): MapPin {.error.}
 
 type
   SeismicFile* = object
-    ## A memory-mapped disk file with its trace index.
+    ## An open file with its trace index: a disk file (mapped or unmapped) or
+    ## bytes in memory (`openSeismicBytes`).
     idx: TraceIndex ## See `index`.
     gr: GeometryReader
       ## SEG-Y: the file's layout resolved for the keys, once, when the index
@@ -145,6 +146,7 @@ type
     demuxPath: string ## See `demuxPath`.
     map: MapRef       ## nil once closed.
     stamp: FileStamp  ## The file as opened, for `saveIndex`.
+    memId: int        ## See `inMemory`: 0 for a disk file, else unique to the open.
     walkLog: int      ## Entries of `index.log` the walk (or the cache) made.
     twos: bool        ## Opened with `twosComplement8015`.
     cached: bool      ## See `fromCache`.
@@ -236,8 +238,10 @@ proc unsafeCache*(f: SeismicFile): ptr ReadCache {.inline.} =
 
 proc access*(f: SeismicFile): FileAccess {.inline.} =
   ## How the file's bytes are reached: `faMapped` or `faUnmapped`
-  ## (`OpenOptions.access`, with `faAuto` resolved when it was opened).
-  ## `faAuto` for a closed file.
+  ## (`OpenOptions.access`, with `faAuto` resolved when it was opened);
+  ## `faMapped` also for a file opened from bytes (`openSeismicBytes`: its
+  ## bytes are reached in place; `inMemory` tells them apart). `faAuto` for
+  ## a closed file.
   if f.mapped: f.map.src.access else: faAuto
 
 proc raiseReadFailed(f: SeismicFile, a: int64) {.noinline, noreturn.} =
@@ -395,18 +399,29 @@ proc requireWholeOpen(f: SeismicFile) =
       $f.map.src.size & " bytes mapped, " & $f.map.src.readable & " left); open it again " &
       "once it stops changing")
 
-proc openMapped(path: string, twosComplement8015, keys, writable: bool,
-    demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
-    forced = skUnknown, access = DefaultAccess, vendors = VendorRegistry()): SeismicFile =
-  # `openSeismic` / `openSeismicRw`. Built in a local, so a raise (a
-  # cancelled walk) unmaps the file. The source is opened before the map
-  # ref is made: a `MapRef` under construction is not freed when an
-  # argument of its constructor raises (96 bytes per failed open).
-  let src = openMemFileSource(path, writable, access = access)
+var memoryOpens: int # opens of files in memory, for `SeismicFile.memId`; under `mapLock`
+
+proc openSource(src: MemFileSource, path: string, twosComplement8015, keys, writable: bool,
+    demuxDir: string, progress: Progress, cache: string, verify: VerifyMode,
+    forced: SeismicKind, access: FileAccess, vendors: VendorRegistry): SeismicFile =
+  # What `openSeismic`, `openSeismicRw` and `openSeismicBytes` share, once
+  # `src` is open. Built in a local, so a raise (a cancelled walk) unmaps
+  # the file. The source is opened before the map ref is made: a `MapRef`
+  # under construction is not freed when an argument of its constructor
+  # raises (96 bytes per failed open).
+  let memory = src.isMemory
   var f = SeismicFile(path: path, map: MapRef(src: src), twos: twosComplement8015)
-  f.stamp = stampOf(path)
+  if memory:
+    acquire(mapLock)
+    inc memoryOpens
+    f.memId = memoryOpens
+    release(mapLock)
+  else:
+    f.stamp = stampOf(path)
   var why = ""
-  if cache.len > 0:
+  if memory and cache.len > 0:
+    why = "a file in memory has no index cache"
+  elif cache.len > 0:
     why = f.loadIndex(cache, keys, verify)
     if why.len == 0 and vendors.maps.len > 0 and f.idx.kind == skSegy and
         vendors.vendorLayout(vendorContext(f.idx.segy)).len > 0:
@@ -436,6 +451,10 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
     f.idx = buildIndex(f.map.src, kind, twosComplement8015, keys, progress, verify, vendors)
     f.map.src.endWalk()
     if kind == skSegd and f.idx.multiplexed:
+      if memory:
+        raise newException(ValueError, path & " holds multiplexed SEG-D, which a file in " &
+          "memory cannot demultiplex (that needs a temporary file); convert it to a " &
+          "demultiplexed file first (`parseseg convert --to=segd`, `convertSegdRevision`)")
       if writable:
         raise newException(ValueError, path & " holds multiplexed SEG-D, which cannot be " &
           "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
@@ -452,6 +471,14 @@ proc openMapped(path: string, twosComplement8015, keys, writable: bool,
       why & "); the file was indexed", 0, Location(file: path))
   f.requireWholeOpen()
   f
+
+proc openMapped(path: string, twosComplement8015, keys, writable: bool,
+    demuxDir: string, progress: Progress = nil, cache = "", verify = vfSampled,
+    forced = skUnknown, access = DefaultAccess, vendors = VendorRegistry()): SeismicFile =
+  # `openSeismic` / `openSeismicRw`.
+  let src = openMemFileSource(path, writable, access = access)
+  openSource(src, path, twosComplement8015, keys, writable, demuxDir, progress, cache, verify,
+    forced, access, vendors)
 
 proc openSeismic*(path: string, keys = false, progress: Progress = nil,
     opts = OpenOptions()): SeismicFile =
@@ -504,6 +531,48 @@ proc openSeismic*(path: string, keys = false, progress: Progress = nil,
   openMapped(path, opts.twosComplement8015, keys, false, opts.demuxDir, progress, opts.cache,
     opts.verify, opts.kind, opts.access, opts.vendors)
 
+proc openSeismicBytes*(bytes: sink seq[byte], name: string, keys = false,
+    progress: Progress = nil, opts = OpenOptions()): SeismicFile =
+  ## Opens a SEG-Y, SEG-D or SEG-2 file that lives in memory: `bytes`, the
+  ## whole file, which the result takes over (moved in, never copied; the
+  ## caller's `seq` is empty afterwards). Everything after the open is as for
+  ## `openSeismic`, from `bytes`: detection, the index, headers, keys, sample
+  ## reads, gathers, summaries, and reads from any number of threads. `name`
+  ## is a display name, or a virtual path, for messages and diagnostics and
+  ## for `path`: it need not exist and is never looked at on disk. Give
+  ## files that are written side by side different names, for the messages'
+  ## sake.
+  ##
+  ## `opts` is as for `openSeismic`, except that `access` has no effect (the
+  ## file is reached in place, `faMapped`) and `cache` is not used: the index is always walked,
+  ## with an info diagnostic (`dcIndexCache`) saying so, and nothing is read
+  ## from disk. What needs a disk file is refused in plain words, with
+  ## `ValueError`: `saveIndex`, `openEditor(f)` (edits go to a disk file) and
+  ## a multiplexed SEG-D file, which `openSeismic` demultiplexes through a
+  ## temporary file (convert it to a demultiplexed file first). Bytes that
+  ## are no seismic file, or a truncated one, give the library's usual
+  ## diagnostics and errors, never a crash. Empty `bytes` give an
+  ## unrecognized file with a fatal diagnostic.
+  ##
+  ## The bytes live until `close` (a running prefetcher keeps them until its
+  ## own `close`); no other copy of them is made. A borrowed view of the
+  ## caller's memory is not offered: a prefetcher outlives `close`, so the
+  ## caller could not know when the memory may go.
+  let src = openMemorySource(bytes, name)
+  openSource(src, name, opts.twosComplement8015, keys, false, "", progress, opts.cache,
+    opts.verify, opts.kind, faMapped, opts.vendors)
+
+func inMemory*(f: SeismicFile): bool {.inline.} =
+  ## The file was opened from bytes (`openSeismicBytes`), not from a disk
+  ## file: `path` is only a display name.
+  f.memId != 0
+
+func memoryId*(f: SeismicFile): int {.inline.} =
+  ## **Internal.** 0 for a disk file, else a number unique to each open of a
+  ## file in memory, so that two such files with one name are told apart. Not
+  ## exported by `parseSEG`.
+  f.memId
+
 proc openSeismicRw*(path: string, access = DefaultAccess): SeismicFile =
   ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`
   ## read-write (mapped or unmapped, as `access` says). Raises `ValueError`
@@ -546,6 +615,9 @@ proc remapWritable*(f: var SeismicFile) =
   ## parked there: the file gets copies of them, so that prefetcher's chunks
   ## show the keys as they were at this call.
   f.requireOpen()
+  if f.inMemory:
+    raise newException(ValueError, f.path & " lives in memory, which cannot be edited " &
+      "in place (edits go to a disk file with a journal); write it to a file and edit that")
   if f.demuxPath.len > 0:
     raise newException(ValueError, f.path & " holds multiplexed SEG-D, which cannot be " &
       "edited in place; convert it to a demultiplexed file first (`parseseg convert " &
@@ -738,6 +810,7 @@ proc writeFileBytes*(f: var SeismicFile, at: int64, src: pointer, n: int): strin
   ## to the cache, so later reads see them. "" when done, else why not (an
   ## I/O error: a network share that failed).
   if n <= 0 or not f.mapped: return ""
+  if f.inMemory: return "a file in memory is read-only"
   let c = f.unsafeCache
   if c == nil:
     copyMem(addr f.map.src.memory[at], src, n)
@@ -1651,9 +1724,12 @@ proc saveIndex*(f: SeismicFile, path: string) =
   ## copy (`demuxPath`), a file whose keys were read through a vendor map's
   ## layout (`OpenOptions.vendors`: a cache is read without the map), keys changed by `applyGeometry`/`applySurvey` (the
   ## cache holds the file's own index), a file that changed since it was
-  ## opened, or `path` naming the file itself; `IOError`/`OSError` if the
-  ## cache cannot be written.
+  ## opened, a file in memory (`openSeismicBytes`), or `path` naming the file
+  ## itself; `IOError`/`OSError` if the cache cannot be written.
   f.requireOpen()
+  if f.inMemory:
+    raise newException(ValueError, f.path & " lives in memory, which has no index cache " &
+      "(the cache belongs to a disk file's path and time stamps)")
   if not f.idx.detected:
     raise newException(ValueError, f.path & " is not a SEG-Y, SEG-D or SEG-2 file")
   if f.demuxPath.len > 0:

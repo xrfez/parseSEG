@@ -45,6 +45,7 @@ type
       ## parseSEG's own cache, where a failed read fails its call and the
       ## next call tries again (see `FileAccess`). `SeismicFile.access` says
       ## which one the open used.
+      ## `openSeismicBytes` takes no access: its file reports `faMapped`.
 
   TraceEntry* = object
     ## Where one trace lives (24 bytes).

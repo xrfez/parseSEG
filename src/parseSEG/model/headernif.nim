@@ -171,7 +171,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
   ## nothing is written.
   if f.len > 0: f.requireOpen()
   f.requireUncut()
-  if path == f.path or (fileExists(path) and sameFile(path, f.path)):
+  if not f.inMemory and (path == f.path or (fileExists(path) and sameFile(path, f.path))):
     raise newException(ValueError, "the output " & path & " is the seismic file itself")
   let tmp = createTempFor(path)
   var o = NifOut()

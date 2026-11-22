@@ -1,5 +1,7 @@
-## Disk files whose bytes are reached in memory: mapped (`private/filemap`), or
-## unmapped, read into parseSEG's own cache (`private/readcache`).
+## Files whose bytes are reached in memory: a disk file mapped
+## (`private/filemap`), or unmapped, read into parseSEG's own cache
+## (`private/readcache`); or no file at all, bytes the caller handed over
+## (`openMemorySource`).
 ##
 ## A `MemFileSource` is a byte-stream `RecordSource` over such a file: it
 ## skips forward in O(1), so a header-only walk touches only the pages that
@@ -25,6 +27,11 @@
 ## renamed or appended to while it is open. A map's reads cover the size at
 ## open (`size`); what is appended later is not read. See the viewer guide
 ## for what the OS still refuses another program while a map exists.
+##
+## A source made from bytes (`openMemorySource`) owns them and reads them in place:
+## nothing is copied, mapped or registered with the cut guard (the bytes
+## cannot be cut), and no file system access happens. It reads like a
+## mapped file, from any number of threads.
 
 import std/os
 import records
@@ -67,7 +74,8 @@ type
     ## lead back to it, and says so (`acyclic`): ORC never lists it as a
     ## possible cycle root, so one opened on one thread may be released on
     ## another.
-    mf: FileMap
+    mf: FileMap       # in memory: `mem` and `size` of `owned`, nothing else
+    owned: seq[byte]  # in memory: the bytes (`mf.mem` points into it; never resized)
     mapped: bool      # bytes can be read (mapped or unmapped); false once closed or empty
     size: int64
     chunk: int
@@ -75,7 +83,8 @@ type
     cache: ptr ReadCache # unmapped: the descriptor, the region, the blocks; nil when mapped
     walk: Cursor      # unmapped: what the record reads hold
     walkError: string # unmapped: why a record read failed ("" if none did)
-    access: FileAccess
+    access: FileAccess # in memory: `faMapped` (the bytes are reached in place)
+    inMemory: bool    # the bytes are `owned`, not a file
 
 const DefaultAccess* = when defined(parseSegUnmapped): faUnmapped else: faAuto
   ## The access of an open that names none: `faAuto`, or `faUnmapped` in a
@@ -132,9 +141,30 @@ proc openMemFileSource*(path: string; writable = false; chunk = DefaultMapChunk;
           result.mapped = false
           raise
 
+proc openMemorySource*(bytes: sink seq[byte]; name: string;
+    chunk = DefaultMapChunk): MemFileSource =
+  ## A source over `bytes`, which it takes over (moved, never copied; the
+  ## caller's `seq` is empty afterwards). `name` is a display name for
+  ## messages; no file system access happens for it. Empty `bytes` read as
+  ## end of data. The bytes are never changed, and may be read from any
+  ## number of threads until `close`.
+  result = MemFileSource(name: name, chunk: max(1, chunk), access: faMapped,
+    inMemory: true, owned: move bytes)
+  if result.owned.len > 0:
+    result.mf.mem = addr result.owned[0]
+    result.mf.size = result.owned.len
+    when not defined(windows): result.mf.handle = -1
+    result.mapped = true
+    result.size = int64(result.owned.len)
+
+func isMemory*(s: MemFileSource): bool {.inline.} =
+  ## The bytes were handed over (`openMemorySource`), not read from a file.
+  s.inMemory
+
 proc access*(s: MemFileSource): FileAccess {.inline.} =
   ## How the file's bytes are reached: `faMapped` or `faUnmapped` (an open
-  ## with `faAuto` resolved it).
+  ## with `faAuto` resolved it); `faMapped` for bytes in memory (`isMemory`),
+  ## which are reached in place.
   s.access
 
 proc size*(s: MemFileSource): int64 {.inline.} =
@@ -189,6 +219,7 @@ proc flush*(s: MemFileSource) =
   ## Writes modified pages of a writable mapping back to the file (unmapped:
   ## the written bytes to the device, `fsync`; raises `IOError` when it
   ## fails).
+  if s.inMemory: return
   if s.cache != nil:
     if not s.cache.sync():
       raise newException(IOError, "cannot write " & s.name & " to its device: " &
@@ -241,6 +272,10 @@ method close*(s: MemFileSource) {.raises: [CatchableError].} =
     s.cache = nil
     freeTrackSlot(s.guard)
     s.guard = nil
+    s.mapped = false
+  elif s.inMemory:
+    s.mf = FileMap()
+    s.owned = @[]
     s.mapped = false
   elif s.mapped:
     # Before the unmap: a fault in it now is no longer ours. A handler that
