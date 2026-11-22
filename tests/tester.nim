@@ -13,10 +13,19 @@
 ## process. A `# test-separate: <reason>` line marks a file the runner
 ## compiles alone: its own defines, a libc interposition, or it must be
 ## the main module. `alltests --list` prints the aggregate's names.
+##
+## On Windows a file whose header holds a `## Not on Windows: <why>` line is
+## left out (it uses POSIX calls the platform does not have), and a failing
+## file does not stop the run: every file runs, every failure is listed at the
+## end and the exit code is 1, so one run shows them all
+## (`PARSESEG_TEST_KEEP_GOING=1` does that on any platform).
 
 import std/[algorithm, os, osproc, strutils]
 
-const SeparateMarker = "# test-separate:"
+const
+  SeparateMarker = "# test-separate:"
+  NotWindowsMarker = "## Not on Windows:"
+  keepGoing = defined(windows)
 
 proc fatal(msg: string) = quit "FAILURE " & msg
 
@@ -27,12 +36,23 @@ proc markedSeparate(path: string): bool =
     if line.strip.startsWith(SeparateMarker): return true
   false
 
+proc markedNotWindows(path: string): bool =
+  ## True when `path` has a `## Not on Windows:` line (with a reason).
+  for line in lines(path):
+    if line.strip.startsWith(NotWindowsMarker): return true
+  false
+
 proc exec(cmd: string) =
   echo "Running: ", cmd
   if execShellCmd(cmd) != 0:
     if "alltests.nim" in cmd:
       echo "PARSESEG_TEST_SEPARATE=1 compiles every file alone"
     fatal cmd
+
+proc tryExec(cmd: string): bool =
+  ## Runs `cmd`; false when it failed (the caller lists it and goes on).
+  echo "Running: ", cmd
+  execShellCmd(cmd) == 0
 
 # Forward the build mode, so `nim c -d:danger -r tests/tester.nim` tests danger
 # builds, `-d:cpuV3` (tests/config.nims: x86-64-v3) so `nim testV3` tests
@@ -55,7 +75,7 @@ proc nimString(s: string): string =
 
 proc testFiles(testDir: string): seq[string] =
   for f in walkFiles(testDir / "t*.nim"):
-    if f.extractFilename != "tester.nim":
+    if f.extractFilename != "tester.nim" and not (defined(windows) and markedNotWindows(f)):
       result.add f
   result.sort()
 
@@ -106,7 +126,12 @@ proc checkMarkers(testDir: string) =
   doAssert markedSeparate(tmp), "a marked file was not separate"
   writeFile(tmp, "## note\nproc main*() = discard\n")
   doAssert not markedSeparate(tmp), "an unmarked file was separate"
+  writeFile(tmp, "## Not on Windows: a reason\nproc main*() = discard\n")
+  doAssert markedNotWindows(tmp), "a Not on Windows file was not marked"
+  writeFile(tmp, "## note\nproc main*() = discard\n")
+  doAssert not markedNotWindows(tmp), "an unmarked file was marked"
   removeFile(tmp)
+  doAssert markedNotWindows(testDir / "tcutshort.nim"), "tcutshort lost its Not on Windows line"
   for name in ["tcommitfail.nim", "tguardslot.nim", "tkeyfields.nim", "tprefetch.nim",
       "tblockedclose.nim", "tboundedclose.nim", "treadwait.nim", "tunmapped.nim",
       "tcutshort.nim"]:
@@ -129,6 +154,7 @@ when isMainModule:
       fatal "unknown option " & a
     else:
       wanted.add a
+  let keepOn = keepGoing or getEnv("PARSESEG_TEST_KEEP_GOING") == "1"
   var files = testFiles(testDir)
   if wanted.len > 0:
     var picked: seq[string] = @[]
@@ -164,11 +190,19 @@ when isMainModule:
     if code != 0: fatal "alltests --list"
     for n in names:
       if n notin listed.splitLines: fatal "alltests --list omitted " & n
+  var failed: seq[string] = @[]
   for f in files:
-    if f in alone:
-      exec compiler & " c -r --hints:off" & mode & " --outdir:" & quoteShell(cache) &
-        " " & quoteShell(f)
-    else:
-      exec quoteShell(bin) & " " & stem(f)
+    let ok =
+      if f in alone:
+        tryExec compiler & " c -r --hints:off" & mode & " --outdir:" & quoteShell(cache) &
+          " " & quoteShell(f)
+      else:
+        tryExec quoteShell(bin) & " " & stem(f)
+    if not ok:
+      failed.add f.extractFilename
+      if not keepOn: fatal f.extractFilename
+  if failed.len > 0:
+    echo "FAILED test files (", failed.len, " of ", files.len, "): ", failed.join(" ")
+    quit 1
 
   echo "All test files completed."

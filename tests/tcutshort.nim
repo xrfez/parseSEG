@@ -1,3 +1,6 @@
+## Not on Windows: it cuts a mapped file with truncate(2) and reads the map past the cut
+## (SIGBUS); Windows refuses to cut a file that has a mapped view.
+##
 ## A mapped file cut short by another program (a recorder, a copy over the
 ## file) while it is open must not end the program: on POSIX a read of a
 ## page past the new end raised SIGBUS. Each block cuts a fresh copy of a
