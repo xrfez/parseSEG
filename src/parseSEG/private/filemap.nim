@@ -20,8 +20,8 @@
 ## best of this module's knowledge, deleting or replacing the file (access
 ## denied). `docs/guide/viewer.md` says so for users of the library.
 ##
-## Paths longer than `MAX_PATH` are not handled specially (no `\\?\` prefix:
-## the library does not add one anywhere): they open on Windows 10 and later
+## Paths longer than `MAX_PATH` are not handled specially (the library adds no
+## long-path prefix anywhere): they open on Windows 10 and later
 ## when the program's manifest says it is long-path aware.
 
 import std/memfiles

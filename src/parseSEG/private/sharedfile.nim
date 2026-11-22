@@ -8,8 +8,8 @@
 ## while a file is open here no other program can rename or delete it.
 ## `openShared` opens it with `CreateFileW` and all three, then wraps the
 ## handle in a `File`. A link is followed. And `os.moveFile` fails with
-## access denied, a sharing violation or a lock violation (errors 5, 32,
-## 33) while another program (a reader of the file, a virus scanner, the
+## access denied, a sharing violation or a lock violation (the errors 5, 32
+## and 33) while another program (a reader of the file, a virus scanner, the
 ## search indexer) has the target open: `moveFileShared` tries again for
 ## about a fifth of a second before it gives up.
 
