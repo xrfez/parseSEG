@@ -59,6 +59,7 @@
 import std/[strutils, os, math, options]
 import ../common/[endians, ibmfloat, ebcdic, bcd, diagnostics, seismickind]
 import ../segy/layout
+import ../private/sharedfile
 export diagnostics, endians, options, seismickind
 
 type
@@ -952,7 +953,7 @@ proc loadVendorMaps*(reg: var VendorRegistry, paths: openArray[string], log: var
       files.add p
     for f in files:
       try:
-        let m = loadVendorMap(readFile(f), f)
+        let m = loadVendorMap(readFileShared(f), f)
         for problem in m.checkVendorMap:
           log.report(sevInfo, dcVendorMap, m.name & ": " & problem, loc = Location(file: f))
         reg.addMap m

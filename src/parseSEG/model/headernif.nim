@@ -45,6 +45,7 @@ import ../segd/reader as segdreader
 from ../seg2/reader import Seg2String, fileBlockSize
 import ./[traceindex, headerfields, edit]
 import ../private/[fieldaccess, progressticker, readcache]
+import ../private/sharedfile
 
 type
   HeaderChange* = object
@@ -229,7 +230,7 @@ proc exportHeaders*(f: SeismicFile, path: string, raw = true, progress: Progress
     o.f.close()
     removeFile(tmp)
     raise
-  moveFile(tmp, path)
+  moveFileShared(tmp, path)
 
 # --------------------------------------------------------------- document --
 # Read with the strict tokenizer of `common/niftext`, streamed from the file.
@@ -376,7 +377,7 @@ proc importHeaders*(path, nifPath: string, opts = ImportOptions()): ImportResult
     result.log.report(sevFatal, dcValidation, msg, loc = Location(file: at))
     return
   if not fileExists(nifPath): fatal("no such document")
-  let size = try: getFileSize(nifPath) except OSError: -1
+  let size = try: fileSizeShared(nifPath) except OSError: -1
   if size < 0: fatal("cannot read the document")
   if size == 0: fatal("the document is empty")
   let target = if opts.outPath.len > 0 and not opts.dryRun: opts.outPath else: path
@@ -534,4 +535,4 @@ proc writeHeaderPatch*(changes: openArray[HeaderChange], path: string) =
   except IOError:
     if fileExists(tmp): removeFile(tmp)
     raise
-  moveFile(tmp, path)
+  moveFileShared(tmp, path)

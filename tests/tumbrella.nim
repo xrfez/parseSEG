@@ -28,8 +28,9 @@ proc main*() =
     # modules import them, no module re-exports them, so `import parseSEG`
     # cannot reach them whatever the re-export graph does.
     const privateMods = ["bytestore", "checks", "coordscalar", "decodeentry", "fieldaccess",
-      "indexcache", "mapguard", "netfs", "pagehints", "progressticker", "readcache", "sampleconv",
-      "seg2conv", "segyencode", "segyfixed", "segykeys", "segywalk", "tensorrows"]
+      "filemap", "indexcache", "mapguard", "netfs", "pagehints", "progressticker", "readcache",
+      "sampleconv", "seg2conv", "segyencode", "segyfixed", "segykeys", "segywalk",
+      "sharedfile", "tensorrows"]
     doAssert sorted(privateModules()) == @privateMods,
       "update privateMods (and the hidden-name check below) for " & $privateModules()
     for path in sourceFiles():

@@ -11,6 +11,7 @@
 
 import std/os
 import ./[diagcodes, diagnostics]
+import ../private/sharedfile
 
 when defined(posix):
   import std/[posix, random, times]
@@ -113,7 +114,7 @@ proc finishOutput*(tmp, path: string, keep: bool, log: var DiagLog) {.raises: []
     if not fileExists(tmp):
       discard
     elif keep:
-      moveFile(tmp, path)
+      moveFileShared(tmp, path)
     else:
       removeFile(tmp)
   except OSError, IOError:

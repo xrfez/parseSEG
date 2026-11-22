@@ -25,6 +25,7 @@
 import std/[options, os, streams, strutils, math]
 import ../common/[diagnostics, errors, outputfile, years, progress]
 import ../private/progressticker
+import ../private/sharedfile
 import ./[textrec, cards]
 
 export textrec, diagnostics
@@ -391,13 +392,13 @@ proc readP1*(path: string, opts = P1Options(), progress: Progress = nil): P1File
   ## Reads the P1-P4 file at `path` (streamed). `progress` is called about
   ## every MiB with the bytes read and the file's size, and once at the end;
   ## returning false stops the read, as for a stream.
-  let s = newFileStream(path, fmRead)
+  let s = newFileStreamShared(path, fmRead)
   if s == nil:
     result = P1File(name: path)
     result.log.report(sevFatal, dcIo, "cannot open " & path, loc = Location(file: path))
   else:
     try:
-      let size = try: getFileSize(path) except OSError: -1'i64
+      let size = try: fileSizeShared(path) except OSError: -1'i64
       result = readP1Records(s, path, opts, progress, total = if size > 0: size else: -1)
     finally: s.close()
 

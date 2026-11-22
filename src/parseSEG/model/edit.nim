@@ -78,6 +78,7 @@ import ../segy/[reader as segyreader]
 import ../segd/[reader as segdreader]
 import ./[traceindex, headerfields]
 import ../private/[fieldaccess, readcache]
+import ../private/sharedfile
 
 
 type
@@ -383,7 +384,7 @@ proc endBatch*(ed: var HeaderEditor): bool =
   ed.batch = false
 
 proc openJournal(ed: var HeaderEditor) =
-  if not open(ed.journal.f, ed.journalPath, fmAppend, bufSize = 0):
+  if not openShared(ed.journal.f, ed.journalPath, fmAppend, bufSize = 0):
     raise newException(IOError, "cannot open the edit journal: " & ed.journalPath)
   ed.journalLine "(session (file " & nifString(ed.file.path) & ") (size " &
     $ed.file.mappedSize & "))"
@@ -471,7 +472,7 @@ proc readJournal*(journalPath: string, log: var DiagLog): seq[JournalEdit] =
   ## `(session ...)` lines are skipped. Raises `IOError` if the journal cannot
   ## be read.
   var f: File
-  if not open(f, journalPath, fmRead):
+  if not openShared(f, journalPath, fmRead):
     raise newException(IOError, "cannot open the edit journal: " & journalPath)
   defer: f.close()
   var bad = 0
@@ -605,7 +606,7 @@ proc replayOn(path, journalPath: string, size: int64, undo: bool, readAt: ReadSp
 proc replay(path, journalPath: string, undo: bool): DiagLog =
   # `replayOn` the file at `path`, read and written through a `File`.
   var f: File
-  if not open(f, path, fmReadWriteExisting):
+  if not openShared(f, path, fmReadWriteExisting):
     result.report(sevFatal, dcIo, "cannot open for writing", loc = Location(file: path))
     return
   defer: f.close()

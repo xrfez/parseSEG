@@ -23,6 +23,7 @@ import std/[os, times, strutils]
 import ../common/[diagnostics, diagcodes, binstore, niftext, outputfile]
 import ../io/memsource
 import ./readcache
+import ./sharedfile
 import ../model/[keys, indextypes]
 import ../version
 
@@ -206,7 +207,7 @@ proc writeIndexCache*(path: string, k: CacheKey, ix: TraceIndex, walkLog: int, k
         if fsync(getFileHandle(o)) != 0: raise newException(IOError, "cannot sync " & tmp)
     finally:
       o.close()
-    moveFile(tmp, path)
+    moveFileShared(tmp, path)
   except CatchableError:
     discard tryRemoveFile(tmp)
     raise

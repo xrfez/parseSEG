@@ -10,6 +10,7 @@
 
 import std/strutils
 import ./errors
+import ../private/sharedfile
 
 const
   MaxNifDepth* = 64         ## Deepest nesting `skipTree` follows.
@@ -66,7 +67,7 @@ proc openNifIn*(path: string): NifIn =
   ## A reader of the document in the file `path`, which error messages
   ## name. Raises `IOError` if it cannot be opened. `close` it when done.
   result = NifIn(line: 1, name: path)
-  if not open(result.f, path, fmRead):
+  if not openShared(result.f, path, fmRead):
     raise newException(IOError, "cannot open for reading: " & path)
 
 proc close*(n: var NifIn) =

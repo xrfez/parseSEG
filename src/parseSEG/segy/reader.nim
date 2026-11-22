@@ -36,6 +36,7 @@ import std/[hashes, os]
 import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio, pushback]
 import ../common/tensors
+import ../private/sharedfile
 import ./[textheader, binheader, traceheader, samples, exttext, layout]
 export textheader, binheader, traceheader, exttext, layout
 export samples except decodeSamplesRaw
@@ -387,7 +388,7 @@ proc openSegy*(src: RecordSource, maxRetained = DefaultMaxRetained,
   if headersOnly: result.input.cursor.preferSmallReads()
   if result.byteStream:
     try:
-      result.mediumSize = getFileSize(src.name)
+      result.mediumSize = fileSizeShared(src.name)
     except CatchableError:
       discard # not a plain file (e.g. a pipe): no size limit
   # A failure here, and in `readTrace`, ends the read: always a fatal entry.
@@ -660,7 +661,7 @@ proc extractUserData*(path: string, b: UserDataBlock, dest: string) =
     raise newException(ValueError, "User Data block '" & b.dataLabel & "' declares " &
       $b.blockSize & " bytes, but only " & $b.available & " are inside the records")
   var src, dst: File
-  if not open(src, path, fmRead):
+  if not openShared(src, path, fmRead):
     raise newException(IOError, "cannot open for reading: " & path)
   try:
     if not open(dst, dest, fmWrite):

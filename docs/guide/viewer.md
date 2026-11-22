@@ -15,6 +15,7 @@ records, channel sets, keys, gathers).
 | [Sorted views](#sorted-views) | `sortTraces`, `sortOrder` |
 | [Header columns and keys on demand](#header-columns-and-keys-on-demand) | `traceFieldColumn`, `traceKeys(traces)` |
 | [Read ahead](#read-ahead-without-blocking-the-ui) | `newPrefetcher`, `tryNext`, `seek`, `nextInto`, `recycle` |
+| [Other programs and an open file](#other-programs-and-a-file-that-is-open) | Windows sharing, `faUnmapped`, appends, renames, deletes |
 | [A file cut short](#a-file-cut-short-while-it-is-open) | `cutShort`, `dcTruncated`, `SegTruncatedError` |
 | [Files on a network drive](#files-on-a-network-drive) | `OpenOptions.access`, `faAuto`, `faUnmapped`, `dcIo` |
 | [Survey files](#survey-files-in-the-background) | `looksLikeSps`, `readSps(progress)`, `readP1(progress)`, `SpsOptions` |
@@ -417,6 +418,41 @@ doAssert shown == f.len + 64
 p.close()
 f.close()
 ```
+
+## Other programs and a file that is open
+
+A viewer keeps a file open (mapped or unmapped) for as long as it is on screen, and a
+recorder or a copy job may be working on the same file. On Linux and macOS the OS lets
+every program do that. On Windows a file is open for sharing only as far as the program
+that opened it says, so parseSEG opens every file it reads (the map, the unmapped reads,
+the index cache, the survey and header documents, the editor's journal) with read, write
+and delete all shared, and a link is followed to its target. What that means in practice:
+
+- A recorder that already has the file open for writing does not stop parseSEG from
+  opening it (it must itself let readers in, as most recorders do); parseSEG does not stop
+  the recorder from going on writing.
+- A file can be appended to while it is open. A map covers the bytes the file had at
+  open: what is appended is not read, and a read past that size
+  is refused, never a fault. Open the file again to see the new end.
+- A file can be renamed while it is open; the open file goes on reading the same bytes.
+- Deleting a file while it is open: the name goes when the last handle closes. Not
+  while it is mapped: Windows, as far as is known here, refuses to delete (or to
+  replace by a rename) a file with a mapped view, whatever its sharing; the other program's call fails with access
+  denied until the map is closed. A viewer that must let a recorder replace or delete
+  files freely opens unmapped (`OpenOptions(access: faUnmapped)`), which holds no view.
+- Cutting the file below the mapped size (opening it again with truncation, `SetEndOfFile`)
+  is refused by Windows too, with "the requested operation cannot be performed on a file
+  with a user-mapped section open" (error 1224), so a mapped read never meets a cut
+  there. Unmapped, a cut is allowed and found by the next read that must fetch past it
+  (`cutShort`, `dcTruncated`), as in the next section.
+- The writers that make a file by writing a temporary one next to it and renaming it
+  (conversions, saved edits, the index cache, header documents) try the rename again for
+  about a fifth of a second when Windows says the target is in use (access denied,
+  sharing or lock violation: a reader, a virus scanner, the search indexer), and report
+  the error if it still is.
+- Paths are passed to Windows as given: parseSEG adds no `\\?\` prefix, so a path longer
+  than 259 characters opens only in a program that is long-path aware (its manifest says
+  so, and the system's `LongPathsEnabled` is on).
 
 ## A file cut short while it is open
 

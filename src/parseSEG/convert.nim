@@ -14,6 +14,7 @@ import ./segd/samples
 import ./model/[traceindex, indexwalk]
 import ./convert/[tosegy, tosegd, toseg2]
 import ./private/[progressticker, seg2conv]
+import ./private/sharedfile
 
 export tosegy, tosegd, toseg2
 
@@ -42,7 +43,7 @@ proc convertJoined*(srcPath, dstPath: string, opts: ConvertOptions,
   ## `convertFile` with survey geometry joined to SEG-D keys (SEG-Y target).
   var head = newSeq[byte](8192)
   try:
-    let f = open(srcPath, fmRead)
+    let f = openFileShared(srcPath, fmRead)
     try: head.setLen f.readBytes(head, 0, head.len)
     finally: f.close()
   except IOError as e:

@@ -1,4 +1,4 @@
-## Disk files whose bytes are reached in memory: mapped (`std/memfiles`), or
+## Disk files whose bytes are reached in memory: mapped (`private/filemap`), or
 ## unmapped, read into parseSEG's own cache (`private/readcache`).
 ##
 ## A `MemFileSource` is a byte-stream `RecordSource` over such a file: it
@@ -19,10 +19,16 @@
 ## region laid out like the file, in few, large requests, and a read that
 ## fails (a network share gone) or meets a cut is a failed read like any
 ## other, with no signal involved; a later read tries again.
+##
+## On Windows both ways open the file shared with every other program (read,
+## write and delete): a recorder may keep writing to it, and it may be
+## renamed or appended to while it is open. A map's reads cover the size at
+## open (`size`); what is appended later is not read. See the viewer guide
+## for what the OS still refuses another program while a map exists.
 
-import std/[memfiles, os]
+import std/os
 import records
-import ../private/[mapguard, netfs, readcache]
+import ../private/[filemap, mapguard, netfs, readcache]
 
 const DefaultMapChunk* = 64 shl 10
   ## Largest chunk a read returns. Small chunks keep a header walk from
@@ -61,7 +67,7 @@ type
     ## lead back to it, and says so (`acyclic`): ORC never lists it as a
     ## possible cycle root, so one opened on one thread may be released on
     ## another.
-    mf: MemFile
+    mf: FileMap
     mapped: bool      # bytes can be read (mapped or unmapped); false once closed or empty
     size: int64
     chunk: int
@@ -105,20 +111,26 @@ proc openMemFileSource*(path: string; writable = false; chunk = DefaultMapChunk;
     result.guard = g
     result.size = result.cache.openedSize
     result.mapped = true
-  elif getFileSize(path) > 0:
+  else:
+    # An empty file maps nothing. Not Windows: `getFileSize(path)` follows a
+    # link. Windows: sized from the opened handle, which follows it too
+    # (`getFileSize(path)` there is the link's own size, 0).
+    when not defined(windows):
+      if getFileSize(path) <= 0: return
     # `allowRemap` keeps the descriptor open: the guard asks it for the
     # file's size when a read meets a cut.
-    result.mf = memfiles.open(path, mode = if writable: fmReadWrite else: fmRead,
-      allowRemap = mapsTracked)
-    result.mapped = true
-    result.size = int64(result.mf.size) # the mapped size, not an earlier stat
-    when mapsTracked:
-      try:
-        result.guard = guardMap(result.mf.mem, result.mf.size, result.mf.handle, writable)
-      except OSError:
-        result.mf.close()
-        result.mapped = false
-        raise
+    result.mf = when defined(windows): openFileMap(path, writable)
+      else: openFileMap(path, writable, allowRemap = mapsTracked)
+    if result.mf.size > 0:
+      result.mapped = true
+      result.size = int64(result.mf.size) # the mapped size, not an earlier stat
+      when mapsTracked:
+        try:
+          result.guard = guardMap(result.mf.mem, result.mf.size, result.mf.handle, writable)
+        except OSError:
+          result.mf.close()
+          result.mapped = false
+          raise
 
 proc access*(s: MemFileSource): FileAccess {.inline.} =
   ## How the file's bytes are reached: `faMapped` or `faUnmapped` (an open

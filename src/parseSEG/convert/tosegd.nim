@@ -89,6 +89,7 @@ import ../segd/[headers, samples, reader, writer, rev3, blocks]
 import ../seg2/[reader as seg2reader]
 import ../model/[traceindex, keys, headerfields]
 import ../private/[progressticker, seg2conv]
+import ../private/sharedfile
 
 type
   SegdTargetFormat* = enum
@@ -925,7 +926,7 @@ proc convertSegdRevision*(srcPath, dstPath: string, opts = SegdConvertOptions(),
     src = nil
     src = openDiskSource(srcPath)
     sink = openDiskSink(tmp)
-    result = convertStream(src, sink, opts, scan, getFileSize(srcPath),
+    result = convertStream(src, sink, opts, scan, fileSizeShared(srcPath),
       progressPhase(progress, 1, 2))
   except SegCancelledError:
     result.reportCancelled(dstPath)

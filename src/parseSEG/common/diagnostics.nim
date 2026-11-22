@@ -24,6 +24,7 @@
 
 import std/strutils
 import errors, diagcodes, niftext
+import ../private/sharedfile
 
 export diagcodes
 
@@ -262,4 +263,4 @@ proc parseDiagnostics*(nif: string): DiagLog =
 proc readDiagnostics*(filename: string): DiagLog =
   ## Reads a NIF diagnostics file. Raises `IOError` if it cannot be read and
   ## `SegFormatError` if it is malformed.
-  parseDiagnostics(readFile(filename))
+  parseDiagnostics(readFileShared(filename))

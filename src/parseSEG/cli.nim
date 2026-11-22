@@ -8,6 +8,7 @@
 import std/[os, strutils, sequtils, tables, math, streams, times]
 import ../parseSEG
 import ./common/niftext
+import ./private/sharedfile
 
 const
   Usage = """
@@ -201,7 +202,7 @@ proc checkInput(path: string) =
   if dirExists(path): usage(path & " is a directory")
   if not fileExists(path): usage("no such file: " & path)
   try:
-    var fh = open(path, fmRead)
+    var fh = openFileShared(path, fmRead)
     fh.close()
   except IOError:
     cannot("cannot read " & path & " (" & osErrorMsg(osLastError()) & ")")
@@ -287,7 +288,7 @@ proc info(a: Args): int =
   defer: f.close()
   let surveyLog = if a.wantsSurvey: joinSurvey(a, f) else: DiagLog()
   template ix: untyped = f.index
-  echo "file:        ", a.pos[0], " (", getFileSize(a.pos[0]), " bytes)"
+  echo "file:        ", a.pos[0], " (", fileSizeShared(a.pos[0]), " bytes)"
   if f.kind == skSegy:
     template s: untyped = ix.segy
     echo "standard:    SEG-Y rev ", s.revision, ", ", s.byteOrder, "-endian",
@@ -462,7 +463,7 @@ proc isSeg2Name(p: string): bool =
 proc sourceKind(path: string): SeismicKind =
   ## What the file is, from its content.
   var head = newString(8192)
-  var fh = open(path, fmRead)
+  var fh = openFileShared(path, fmRead)
   head.setLen fh.readBuffer(addr head[0], head.len)
   fh.close()
   result = detectKind(head.toOpenArrayByte(0, head.len - 1))
@@ -713,7 +714,7 @@ proc vendormap(a: Args): int =
     result = 0
     for p in a.pos[1..^1]:
       try:
-        let m = loadVendorMap(readFile(p), p)
+        let m = loadVendorMap(readFileShared(p), p)
         let problems = m.checkVendorMap
         echo p, ": ", m.name, " version ", m.version, ", ", m.targets.len, " targets",
           (if problems.len == 0: ", ok" else: "")
@@ -844,7 +845,7 @@ proc keysCmd(a: Args): int =
 
 proc isSps(path: string): bool =
   ## SPS or SEG P1, from the shape of the data records (`looksLikeSps`).
-  let s = newFileStream(path, fmRead)
+  let s = newFileStreamShared(path, fmRead)
   if s == nil: cannot("cannot read " & path)
   try: looksLikeSps(s)
   finally: s.close()

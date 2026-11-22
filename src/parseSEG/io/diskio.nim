@@ -9,6 +9,7 @@ when defined(posix):
   import std/posix
 import records
 import ../common/outputfile
+import ../private/sharedfile
 
 type
   DiskSource* {.acyclic.} = ref object of RecordSource
@@ -36,7 +37,7 @@ const SinkBufferSize* = 1 shl 20
 proc openDiskSource*(path: string): DiskSource =
   ## Opens `path` for reading. Raises `IOError` if it cannot be opened.
   var f: File
-  if not open(f, path, fmRead):
+  if not openShared(f, path, fmRead):
     raise newException(IOError, "cannot open for reading: " & path)
   var size = -1'i64 # unknown (a pipe or device): skips read and discard
   try:

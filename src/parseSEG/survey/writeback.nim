@@ -53,6 +53,7 @@ import ../segd/[reader as segdreader]
 import ../model/[traceindex, keys, edit]
 import ../convert
 import ./join
+import ../private/sharedfile
 import ../private/[checks, coordscalar, progressticker, segykeys, readcache]
 
 export join
@@ -999,7 +1000,7 @@ proc copyReporting(src, dst: string, progress: Progress) =
     return
   const chunk = 8 shl 20
   var i, o: File
-  if not open(i, src, fmRead): raise newException(IOError, "cannot open for reading: " & src)
+  if not openShared(i, src, fmRead): raise newException(IOError, "cannot open for reading: " & src)
   try:
     if not open(o, dst, fmWrite): raise newException(IOError, "cannot write " & dst)
     try:
@@ -1072,7 +1073,7 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
   var kind = skUnknown
   try:
     var head = newSeq[byte](8192)
-    let fh = open(srcPath, fmRead)
+    let fh = openFileShared(srcPath, fmRead)
     try: head.setLen fh.readBytes(head, 0, head.len)
     finally: fh.close()
     kind = detectKind(head)
@@ -1095,7 +1096,7 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
     if not result.isFatal:
       try:
         let c = writeInPlace(tmp, g, fields, overwrite, result, progressPhase(progress, 1, 2,
-          getFileSize(srcPath)))
+          fileSizeShared(srcPath)))
         result.report(sevInfo, dcValidation, "geometry written: " & $c,
           loc = Location(file: dstPath))
       except SegCancelledError:

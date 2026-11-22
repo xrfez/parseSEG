@@ -27,6 +27,7 @@
 import std/[options, streams, strutils, math, os]
 import ../common/[coordref, diagnostics, errors, outputfile, progress]
 import ../private/progressticker
+import ../private/sharedfile
 import ./[textrec, cards, linespans]
 
 export textrec, diagnostics, coordref
@@ -900,7 +901,7 @@ proc readSps*(path: string, opts = SpsOptions(), progress: Progress = nil): SpsF
   ## `progress` is called about every MiB with the bytes read and the file's
   ## size, and once at the end; returning false stops the read, as for a
   ## stream (a viewer reads large files in the background this way).
-  let s = newFileStream(path, fmRead)
+  let s = newFileStreamShared(path, fmRead)
   if s == nil:
     result = SpsFile(name: path)
     result.log.report(sevFatal, dcIo, "cannot open " & path, loc = Location(file: path))
@@ -911,7 +912,7 @@ proc readSps*(path: string, opts = SpsOptions(), progress: Progress = nil): SpsF
       # like SPS reserved one record per 82 bytes of it (160 GB for 64 GiB:
       # out of memory), before the junk bound could stop the read.
       const ReserveRecords = 1'i64 shl 20
-      let size = try: getFileSize(path) except OSError: 0'i64
+      let size = try: fileSizeShared(path) except OSError: 0'i64
       let expected = int(min(size div 82, ReserveRecords))
       result = readRecords(s, path, opts, expected, progress,
         total = if size > 0: size else: -1)

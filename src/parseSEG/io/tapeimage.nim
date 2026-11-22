@@ -17,6 +17,7 @@
 from std/strutils import toHex
 import ../common/[errors, diagnostics]
 import records
+import ../private/sharedfile
 
 const
   TapMark = 0x0000_0000'u32
@@ -42,7 +43,7 @@ func le32(b: openArray[byte]): uint32 =
 proc openTapeImageSource*(path: string; padOdd = true): TapeImageSource =
   ## Opens a tape image for reading. Raises `IOError` if it cannot be opened.
   var f: File
-  if not open(f, path, fmRead):
+  if not openShared(f, path, fmRead):
     raise newException(IOError, "cannot open for reading: " & path)
   TapeImageSource(f: f, name: path, padOdd: padOdd)
 

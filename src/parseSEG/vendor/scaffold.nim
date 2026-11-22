@@ -23,6 +23,7 @@ import ../io/[records, diskio]
 import ../segd/reader as segdreader
 import ../segy/[reader as segyreader, binheader, traceheader]
 import ../model/traceindex
+import ../private/sharedfile
 import ./[maps, apply]
 
 type
@@ -176,7 +177,7 @@ proc scaffoldVendorMap*(path: string, reg: VendorRegistry): VendorScaffold =
   ## be read and `ValueError` if it is neither standard (SEG-2 has no vendor
   ## maps yet).
   var head = newString(8192)
-  let fh = open(path, fmRead)
+  let fh = openFileShared(path, fmRead)
   try: head.setLen fh.readBuffer(addr head[0], head.len)
   finally: fh.close()
   let kind = detectKind(head.toOpenArrayByte(0, head.len - 1))
