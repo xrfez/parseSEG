@@ -51,6 +51,9 @@ proc main*() =
     "var f = openSeismic(paramStr(1))\necho f.readTraces(0 .. 0).shape\n" &
     # Files in memory: opened from bytes, written to bytes.
     "var w = openSeismicWriterBytes(SegyOutputOptions())\n" &
+    "w.addStanza(\"acme\", \"x\", [byte 1])\n" &
+    "var dw = openSeismicWriterBytes(SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 1))\n" &
+    "dw.writeTrace(initTraceKeys(), [1'f32], externalHeader = newSeq[byte](32))\n" &
     "var m = openSeismicBytes(w.finishBytes(), \"memory\")\necho m.inMemory\n")
 
   let cache = tmp / "nimcache"
