@@ -24,7 +24,9 @@ var exe: typeof(tmp / "parseSEG")
 proc run(args: varargs[string]): (string, int) =
   var cmd = quoteShell(exe)
   for a in args: cmd.add " " & quoteShell(a)
-  execCmdEx(cmd & " 2>&1")
+  # stderr joins stdout (`execCmdEx`'s default); a `2>&1` in `cmd` would reach the
+  # program as an argument on Windows
+  execCmdEx(cmd)
 
 proc ok(args: varargs[string]): string =
   let (o, code) = run(args)
