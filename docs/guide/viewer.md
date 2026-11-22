@@ -780,7 +780,9 @@ g.close()
 Stanzas come in call order (a `like` file's own extended records first; Rev 2's
 `((SEG:EndText))` stays last); the binary header's count follows. Later traces of a SEG-D
 record pass nothing or the same bytes; different ones are a `ValueError`. Stanzas need Rev 1
-or later, an external header SEG-D from keys (Rev 3).
+or later, an external header SEG-D from keys (Rev 3), at most 0xFFFFFF blocks of 32 bytes;
+the reader holds 256 MiB of header areas by default, so a longer header reads back
+`incomplete`.
 
 ## Survey files in the background
 

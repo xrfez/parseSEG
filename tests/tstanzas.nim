@@ -258,6 +258,9 @@ proc main*() =
     let h = shotBytes(22, 1, 1.0) # 32 bytes
     expect("32-byte blocks"): w.writeTrace(keys(0), row(0), externalHeader = h[0 ..< 31])
     expect("32-byte blocks"): w.writeTrace(keys(0), row(0), externalHeader = h & @[byte 0])
+    # More blocks than GH#2's 24-bit count holds: a ValueError, not a failed flush.
+    let tooLong = newSeq[byte](0xFF_FFFF * 32 + 32)
+    expect("24-bit"): w.writeTrace(keys(0), row(0), externalHeader = tooLong)
     doAssert w.len == 0 # nothing was written by the refusals
     w.writeTrace(keys(0), row(0), externalHeader = h)
     var other = h

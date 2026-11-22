@@ -1414,9 +1414,11 @@ proc flushSegdKeys(s: var WriterState) =
   s.segdSetT0.setLen 0
   s.segdChannels.setLen 0
 
-const MaxExternalHeader = 1 shl 30
-  ## Bytes of a SEG-D external header the writer accepts: GH#3's header size is 32 bits
-  ## and counts the whole header, so a header this long is far inside it.
+const MaxExternalHeader = 0xFF_FFFF * SegdBlockSize
+  ## Bytes of a SEG-D external header the writer accepts: General Header #2's extended
+  ## external header block count is 24 bits (and GH#3's 32-bit header size holds a header
+  ## this long). The reader holds at most `DefaultMaxHeaderBytes` (256 MiB) of header
+  ## areas by default; a longer header reads back `incomplete`.
 
 proc checkExternal(s: WriterState, h: openArray[byte]) =
   # An external header of the keys form: its length, and agreement with the
@@ -1426,7 +1428,7 @@ proc checkExternal(s: WriterState, h: openArray[byte]) =
     refuse("an external header is whole 32-byte blocks; this one has " & $h.len & " bytes")
   if h.len > MaxExternalHeader:
     refuse("an external header of " & $h.len & " bytes is longer than " & $MaxExternalHeader &
-      " (General Header #2's block count and GH#3's header size could not hold it)")
+      " (General Header #2's 24-bit block count could not hold it)")
   if s.segdHaveRec and (h.len != s.segdExternal.len or
       not equalMem(unsafeAddr h[0], unsafeAddr s.segdExternal[0], h.len)):
     refuse("the external header differs from the one the first trace of SEG-D record " &
