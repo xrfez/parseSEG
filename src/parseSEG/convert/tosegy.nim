@@ -19,6 +19,8 @@
 ##     fields moves to the 16-bit ones; a trace whose count or interval
 ##     does not fit them is skipped with an error (a fixed-length file of
 ##     such traces is refused).
+##   Cards 39 and 40 name the target revision when it differs from the
+##   source. A trace identification code is kept as stored.
 ## - `convertSegdToSegy`: SEG-D (Rev 1, 2.x, 3.x) to SEG-Y. Every record's
 ##   traces go out in file order, one SEG-Y trace per SEG-D trace (auxiliary
 ##   traces included, with their trace identification code). The mapping is
@@ -97,7 +99,7 @@ import ../model/[traceindex, keys, headerfields]
 import ../survey/join
 import ./[tosegd, toseg2]
 import ../version
-import ../private/[decodeentry, progressticker, sampleconv, segyencode]
+import ../private/[decodeentry, progressticker, sampleconv, segyencode, segyrev]
 
 const
   ConverterName = "parseSEG " & PackageVersion
@@ -205,23 +207,13 @@ func targetFormat*(f: SampleFormat): SegyTargetFormat =
 {.pop.}
 
 func checkTarget(opts: ConvertOptions, err: var string): bool =
-  let r = opts.revision
-  if not (r.major == 0 and r.minor == 0 or r.major == 1 and r.minor == 0 or
-      r.major == 2 and r.minor in {0'u8, 1}):
-    err = "target revision " & $r & " is not 0, 1, 2.0 or 2.1"
-    return false
-  if opts.format != stKeep:
-    let f = opts.format.sampleFormat
-    if f.isRev2Format and r.major < 2:
-      err = "format " & $opts.format & " needs SEG-Y Rev 2"
-      return false
-    if sampleSize(f) == 3 and opts.byteOrder == boPairSwapped:
-      err = "3-byte format " & $opts.format & " cannot be pair-swapped"
-      return false
-  if opts.byteOrder != boBig and r.major < 2:
-    err = "little-endian and pair-swapped SEG-Y need Rev 2"
-    return false
-  true
+  # The same messages as `prepareRevision`'s callers (`segyrev`).
+  err = revisionFault(opts.revision)
+  if err.len == 0 and opts.format != stKeep:
+    err = chosenFormatFault(opts.revision, opts.format.sampleFormat, $opts.format,
+      opts.byteOrder)
+  if err.len == 0: err = endianFault(opts.revision, opts.byteOrder)
+  err.len == 0
 
 proc add(l: var Losses, trace: int) =
   if l.traces == 0: l.first = trace
@@ -270,82 +262,6 @@ func inputSize(src: RecordSource): int64 =
   elif src of DiskSource: DiskSource(src).size
   else: -1
 
-func dropUnassigned(b: var SegyBinaryHeader, fromRev: SegyRevision): bool =
-  # Zeroes the binary header fields that revision `fromRev` (0 or 1) leaves
-  # unassigned and a later revision defines, so that vendor data there is
-  # not read as a count or a flag: Rev 0 bytes 3261-3600, Rev 1 bytes
-  # 3261-3300 and 3507-3532. True if any of them was set.
-  let was = b
-  b.extDataTracesPerEnsemble = 0
-  b.extAuxTracesPerEnsemble = 0
-  b.extSamplesPerTrace = 0
-  b.extSampleInterval = 0
-  b.extSampleIntervalOrig = 0
-  b.extSamplesPerTraceOrig = 0
-  b.extEnsembleFold = 0
-  b.byteOrderMarker = 0
-  b.maxAddlTraceHeaders = 0
-  b.surveyType = 0
-  b.timeBasisCode = 0
-  b.numTraces = 0
-  b.firstTraceOffset = 0
-  b.numTrailerRecords = 0
-  if fromRev.major == 0:
-    b.unassigned1 = default(typeof(b.unassigned1))
-    b.fixedLengthTraces = 0
-    b.numExtTextHeaders = 0
-    b.unassigned2 = default(typeof(b.unassigned2))
-  was != b
-
-func dropRev1Fields(h: var SegyTraceHeader): bool =
-  # Zeroes trace bytes 181-240, which Rev 0 leaves unassigned and Rev 1
-  # fills (CDP position, inline and crossline, shotpoint, transduction,
-  # time scalar, source fields). True if any of them was set.
-  let was = h
-  h.cdpX = 0
-  h.cdpY = 0
-  h.inlineNumber = 0
-  h.crosslineNumber = 0
-  h.shotpointNumber = 0
-  h.shotpointScalar = 0
-  h.traceValueUnit = 0
-  h.transductionMantissa = 0
-  h.transductionExponent = 0
-  h.transductionUnits = 0
-  h.deviceTraceId = 0
-  h.timeScalar = 0
-  h.sourceTypeOrientation = 0
-  h.sourceEnergyDirVert = 0
-  h.sourceEnergyDirXline = 0
-  h.sourceEnergyDirInline = 0
-  h.sourceMeasurementMantissa = 0
-  h.sourceMeasurementExponent = 0
-  h.sourceMeasurementUnit = 0
-  h.headerName = default(typeof(h.headerName))
-  was != h
-
-func unscaleTimes(h: var SegyTraceHeader): tuple[rounded, clamped: bool] =
-  # Rev 0 has no time scalar: the times of bytes 95-114 become whole ms,
-  # with the scalar (bytes 215-216) applied. `rounded`: a value lost its
-  # fraction; `clamped`: one is beyond the int16 a Rev 0 field holds.
-  let scalar = h.timeScalar
-  if scalar != 0 and scalar != 1:
-    template whole(field: untyped) =
-      let ms = applyScalar(h.field, scalar)
-      if abs(ms) > 32767.5: result.clamped = true
-      elif ms != round(ms): result.rounded = true
-      h.field = clampI16(ms)
-    whole(upholeTimeSource)
-    whole(upholeTimeGroup)
-    whole(sourceStatic)
-    whole(groupStatic)
-    whole(totalStatic)
-    whole(lagTimeA)
-    whole(lagTimeB)
-    whole(delayRecordingTime)
-    whole(muteStart)
-    whole(muteEnd)
-
 proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     progress: Progress = nil): DiagLog =
   ## Rewrites the SEG-Y file at `src` with the target revision, byte order and
@@ -368,99 +284,21 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     return
   var f = r.file
   let loc = Location(file: sink.name)
-  var seen: set[LossNote]
-  let fromRev = f.revision
   let rev = opts.revision
   let inFmt = f.format.get # known: else the read is fatal
   let outFmt = if opts.format != stKeep: opts.format.sampleFormat else: inFmt
-  if outFmt.isRev2Format and rev.major < 2:
+  let fmtFault = keptFormatFault(rev, outFmt, opts.byteOrder)
+  if fmtFault.len > 0:
     result.add r.log
-    result.report(sevFatal, dcUnsupportedFormat, "the input format " & $ord(outFmt) &
-      " needs Rev 2; choose a Rev 1 format (e.g. 5)", loc = loc)
+    result.report(sevFatal, dcUnsupportedFormat, fmtFault, loc = loc)
     return
-  if sampleSize(outFmt) == 3 and opts.byteOrder == boPairSwapped:
+  var rw: RevRewrite
+  let fatal = prepareRevision(f, rev, result, loc, rw)
+  if fatal.len > 0:
     result.add r.log
-    result.report(sevFatal, dcUnsupportedFormat, "the 3-byte format " & $ord(outFmt) &
-      " cannot be pair-swapped; choose another target format", loc = loc)
+    result.report(sevFatal, dcUnsupportedFormat, fatal, loc = loc)
     return
-  # By the input's rules, before the revision bytes change.
-  let fileNs = f.binary.effectiveSamplesPerTrace
-  let fileDt = f.binary.effectiveSampleInterval
-  let fixedIn = fromRev.major >= 1 and f.binary.fixedLengthTraces == 1
-  if fromRev.major < 2 and fromRev.major < rev.major and f.binary.dropUnassigned(fromRev):
-    result.note(seen, lnUnassignedBinary, "the Rev " & $fromRev & " input holds values in " &
-      "binary header bytes its revision leaves unassigned (" &
-      (if fromRev.major == 0: "3261-3600" else: "3261-3300, 3507-3532") & ") and Rev " & $rev &
-      " defines: cleared", loc)
-  if rev.major < 2 and fixedIn and not (fileDt >= 0 and fileDt <= 65535):
-    result.add r.log
-    result.report(sevFatal, dcUnsupportedFormat, "the sample interval of " & $fileDt &
-      " needs Rev 2 (Rev " & $rev & " holds whole intervals up to 65535)", loc = loc)
-    return
-  if rev.major < 2 and fixedIn and fileNs > high(uint16):
-    result.add r.log
-    result.report(sevFatal, dcUnsupportedFormat, $fileNs & " samples per trace need Rev 2 " &
-      "(Rev " & $rev & " holds up to 65535)", loc = loc)
-    return
-  f.binary.revision = rev
-  f.revision = rev
   f.binary.formatCode = int16(ord(outFmt))
-  if rev == SegyRevision(major: 2, minor: 0):
-    if f.binary.surveyType != 0:
-      result.note(seen, lnSurveyType, "Rev 2.0 has no survey type (bytes 3509-3510 belong " &
-        "to the additional trace header count): survey type " & $f.binary.surveyType &
-        " dropped", loc)
-      f.binary.surveyType = 0
-    for s in f.extended.stanzas:
-      if s.company.toUpperAscii == "SEG" and s.name.toLowerAscii.startsWith("layout"):
-        result.note(seen, lnLayoutStanza, "the ((SEG:Layout)) stanza is defined from Rev 2.1; " &
-          "a Rev 2.0 reader ignores it (it is kept as text)", loc)
-  if rev.major == 0 and f.extended.recordCount > 0:
-    result.note(seen, lnExtendedText, "Rev 0 has no extended textual headers: " &
-      $f.extended.recordCount & " records dropped", loc)
-    if f.extended.find("SEG:Layout") >= 0:
-      # Not a note: every field the stanza places is now read elsewhere.
-      result.report(sevWarning, dcValidation, "the input's ((SEG:Layout)) stanza is dropped " &
-        "with the extended textual headers, but the trace headers keep its layout: readers " &
-        "of the output take the fields it moved from their standard bytes", loc = loc)
-  if rev.major == 0 or (rev.major < 2 and f.extended.recordCount > 0 and fromRev.major >= 2):
-    if rev.major == 0:
-      f.extended = initExtendedTextHeader()
-      f.binary.numExtTextHeaders = 0
-    else:
-      result.note(seen, lnStanzasAsText, "Rev 2 stanzas (Layout, User Data) are kept as " &
-        "plain Rev 1 extended text", loc)
-  if rev.major < 2:
-    if f.trailer.recordCount > 0:
-      result.note(seen, lnTrailers, "Rev 1 has no data trailers: " & $f.trailer.recordCount &
-        " records dropped", loc)
-    f.trailer = initExtendedTextHeader()
-    f.binary.byteOrderMarker = 0
-    f.binary.maxAddlTraceHeaders = 0
-    f.binary.numTraces = 0
-    f.binary.firstTraceOffset = 0
-    f.binary.numTrailerRecords = 0
-    # The count may be held in bytes 3269-3272 alone (Rev 2); over 65535 its
-    # traces are skipped below.
-    f.binary.samplesPerTrace = uint16(min(fileNs, uint32(high(uint16))))
-    f.binary.extSamplesPerTrace = 0
-    if fileDt != float64(f.binary.sampleInterval):
-      # Held in bytes 3273-3280 (Rev 2), which override 3217-3218.
-      if fileDt != round(fileDt):
-        result.note(seen, lnIntervalRounding, "Rev 1 holds sample intervals as whole units; " &
-          "extended intervals were rounded", loc)
-      f.binary.sampleInterval = if fileDt >= 0 and fileDt <= 65535: uint16(round(fileDt))
-                                elif fileDt > 65535: high(uint16) # its traces are skipped
-                                else: 0
-    f.binary.extSampleInterval = 0
-  else:
-    f.binary.byteOrderMarker = ByteOrderMarker
-    if fromRev.major < 2:
-      f.binary.firstTraceOffset = 0
-      f.binary.numTrailerRecords = 0
-      if f.extended.recordCount > 0 and not f.extended.hasEndText:
-        f.extended.addEndText()
-        f.binary.numExtTextHeaders = int16(f.extended.recordCount)
   f.format = some(outFmt)
   var w: SegyWriter
   try:
@@ -474,62 +312,15 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
   var vals, scratch: seq[float64]
   var losses: Losses
   var layoutReordered: seq[int] # traces whose proprietary headers the Layout fully described
-  var clampedTimes: Losses
   var tk = initProgressTicker(progress, inputSize(src))
+  let fixedOut = f.binary.fixedLengthTraces == 1
   while r.readTrace(t):
     if not tk.tick(t.offset):
       result.add r.log
       result.reportCancelled(sink.name)
       return
     let tl = Location(file: sink.name, trace: t.index)
-    var ok = true
-    if fromRev.major == 0 and rev.major >= 1 and t.header.dropRev1Fields():
-      result.note(seen, lnUnassignedTrace, "the Rev 0 input holds values in trace header " &
-        "bytes 181-240, which Rev 0 leaves unassigned and Rev " & $rev & " defines (CDP " &
-        "position, inline and crossline, shotpoint, time scalar, ...): cleared", loc)
-    if fromRev.major >= 1 and rev.major == 0:
-      let times = t.header.unscaleTimes()
-      if times.rounded:
-        result.note(seen, lnTimeRounding, "Rev 0 holds the trace times (bytes 95-114) as " &
-          "whole ms, without a time scalar: scaled times were rounded", loc)
-      if times.clamped: clampedTimes.add(t.index)
-      if t.header.dropRev1Fields():
-        result.note(seen, lnRev1TraceFields, "Rev 0 leaves trace header bytes 181-240 " &
-          "unassigned: the CDP position, inline and crossline numbers, shotpoint and the " &
-          "other Rev 1 fields there are dropped", loc)
-    if rev.major < 2:
-      if t.numSamples > int(high(uint16)):
-        result.report(sevError, dcValidation, "the trace has " & $t.numSamples &
-          " samples, which Rev 1 cannot hold; skipped", t.offset, tl)
-        ok = false
-      if t.hasExt1:
-        result.note(seen, lnTraceExtensions, "Rev 1 has no Trace Header Extension 1 or " &
-          "proprietary trace headers: dropped", loc)
-      t.hasExt1 = false
-      t.proprietary.setLen 0
-      t.header.numSamples = uint16(min(t.numSamples, int(high(uint16))))
-      let dt = t.sampleInterval
-      if not (dt >= 0 and dt <= 65535):
-        if ok:
-          result.report(sevError, dcValidation, "the trace has a sample interval of " & $dt &
-            ", which Rev " & $rev & " cannot hold (whole, up to 65535); skipped", t.offset, tl)
-        ok = false
-      elif dt != float64(t.header.sampleInterval):
-        if dt != round(dt):
-          result.note(seen, lnIntervalRounding, "Rev 1 holds sample intervals as whole units; " &
-            "extended intervals were rounded", loc)
-        t.header.sampleInterval = uint16(round(dt))
-    elif f.binary.fixedLengthTraces != 1:
-      # Each trace gives its own count and interval. A Rev 0 trace may leave
-      # them to the binary header (the reader says so): write them out.
-      if declaredSamples(t) != t.numSamples and not t.setSampleCount(t.numSamples):
-        result.report(sevError, dcValidation, "the trace has " & $t.numSamples &
-          " samples, which need a Trace Header Extension 1 it lacks; skipped", t.offset, tl)
-        ok = false
-      let dt = t.sampleInterval
-      if t.header.sampleInterval == 0 and dt >= 1 and dt <= 65535 and dt == round(dt) and
-          not (t.hasExt1 and t.ext1.extSampleInterval != 0):
-        t.header.sampleInterval = uint16(dt)
+    let ok = rewriteTrace(rw, t, fixedOut, result, loc, tl)
     if ok and t.proprietary.len > 0 and opts.byteOrder != f.byteOrder:
       if reorderProprietary(f.layoutOf, t.proprietary, f.byteOrder, opts.byteOrder):
         layoutReordered.add t.index
@@ -551,10 +342,7 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
         return
   result.add r.log
   result.report(losses, outFmt, loc)
-  if clampedTimes.traces > 0:
-    result.report(sevWarning, dcValidation, $clampedTimes.traces & " traces (the first is " &
-      "trace " & $clampedTimes.first & ") have times beyond ±32767 ms in bytes 95-114, " &
-      "which Rev 0 cannot hold without a time scalar: clamped", loc = loc)
+  finishRevision(rw, result, loc)
   if not tk.finish():
     result.reportCancelled(sink.name)
     return

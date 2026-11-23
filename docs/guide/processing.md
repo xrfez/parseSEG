@@ -207,7 +207,13 @@ with `f`'s file headers; `writeTrace(w, f, i, samples)` writes trace `i` of `f` 
 headers and your samples, encoded in the file's format. Only what the samples change is
 changed. `close` writes the final counts and renames the output into place: until then the
 output is a temporary file, and a writer dropped without `close` leaves nothing behind. The
-same code works for SEG-Y, SEG-D and SEG-2.
+same code works for SEG-Y, SEG-D and SEG-2. `segyRevision = some(SegyRevision(major: 1))`
+(import `std/options`) writes that SEG-Y file as another revision: the source headers,
+rewritten as `convertSegy` rewrites them, with the new samples. `none` (the default) or the
+source's own revision changes nothing. A revision, format or byte order the target cannot
+hold, or a fixed-length count or interval that does not fit, is a `ValueError` before any
+file exists; what is dropped is listed by `revisionNotes`. A non-SEG-Y file does not take
+`segyRevision`.
 
 Failures raise, and a failed output never appears under its name: `close` returns the
 writer's warnings and raises for everything else (a full disk shows at the latest there, as
