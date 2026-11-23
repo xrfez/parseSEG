@@ -115,6 +115,22 @@ when defined(linux):
         return
     doAssert false, "the journal is not open"
 
+  proc failFile(path: string) =
+    ## Points the open file's descriptor at /dev/full: every `pwrite` to it
+    ## fails with ENOSPC. Reads still return (zeros). The journal is another
+    ## file, so its sync still succeeds.
+    let want = expandFilename(path)
+    for kind, p in walkDir("/proc/self/fd"):
+      var target = ""
+      try: target = expandSymlink(p)
+      except OSError: discard
+      if target == want:
+        let full = posix.open("/dev/full", O_RDWR)
+        doAssert full >= 0 and dup2(full, cint(parseInt(p.extractFilename))) >= 0
+        discard posix.close(full)
+        return
+    doAssert false, "the file is not open"
+
   var RLIMIT_FSIZE {.importc, header: "<sys/resource.h>".}: cint
 
   proc limitFileSize(bytes: int) =
@@ -802,5 +818,28 @@ proc main*() =
     es.close()
     doAssert readBytes(seg2) == s0
     doAssert editLines(sj) == 0
+
+  when defined(linux):
+    block replace_text_header_batched_write_miss_returns_false:
+      # Seen fail first with the unwritten check skipped: replaceTextHeader
+      # returned true and installed the new text though pwrite failed and the
+      # file was unchanged.
+      let path = tmp / "text_unwritten.sgy"
+      writeTinySegy(path, teEbcdic)
+      let journal = path & ".edits.nif"
+      if fileExists(journal): removeFile(journal)
+      let original = readBytes(path)
+      var ed = openEditor(path, access = faUnmapped)
+      doAssert ed.file.access == faUnmapped
+      let oldText = ed.file.textHeader
+      ed.beginBatch()
+      doAssert ed.setTraceField(0, "trace.groupStatic", -3)
+      failFile(path)
+      doAssert not ed.replaceTextHeader(["C 1 should not stick"]), $ed.log
+      doAssert ed.file.textHeader == oldText
+      doAssert "should not stick" notin ed.file.textHeader
+      doAssert readBytes(path) == original
+      doAssert ed.log.has("did not reach the file", sevError), $ed.log
+      doAssertRaises(IOError): ed.close()
 
 when isMainModule: main()

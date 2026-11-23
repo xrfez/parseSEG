@@ -177,8 +177,10 @@ header of a SEG-Y file (after a tape label, when the file has one) with up to 40
 up to 80 characters, padded with spaces. `encoding` none keeps the file's present encoding;
 `some(teEbcdic)` or `some(teAscii)` forces one. Raises `ValueError` for more lines or a
 longer line, before any byte changes; another standard is refused (false, a diagnostic in
-`log`). Journaled, so `rollbackJournal` undoes it. Extended textual headers, the binary
-header and traces are left alone; cards 39 and 40 are whatever `lines` says.
+`log`). Flushes an open batch; false when a write of that flush did not reach the file (the
+index's copy of the header stays as it was). Journaled, so `rollbackJournal` undoes it.
+Extended textual headers, the binary header and traces are left alone; cards 39 and 40 are
+whatever `lines` says.
 `rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them;
 `readJournal(journal)` lists its edits (`JournalEdit`, oldest first).
 `rollbackJournal(ed)` / `applyJournal(ed)` do the same on the editor's open file and re-read

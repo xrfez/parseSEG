@@ -65,8 +65,9 @@ full text: cards 39 and 40 are not rewritten. By default the bytes are written i
 encoding the file already uses (EBCDIC or ASCII); `some(teEbcdic)` or `some(teAscii)` forces
 one (`import std/options`). More than 40 lines, or a line longer than 80 characters, raises
 `ValueError` before any byte changes. Another standard is refused (`false`, the reason in
-`ed.log`). The edit is journaled, so `rollbackJournal` undoes it. Extended textual headers,
-the binary header and traces are left alone.
+`ed.log`). An open batch is flushed first; a write that does not reach the file returns
+`false` and leaves the open view unchanged. The edit is journaled, so `rollbackJournal`
+undoes it. Extended textual headers, the binary header and traces are left alone.
 
 ```nim
 import std/os

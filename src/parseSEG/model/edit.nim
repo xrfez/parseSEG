@@ -1045,11 +1045,14 @@ proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
   ## the file has one) with up to 40 lines of up to 80 characters, each padded
   ## with spaces and missing lines left blank. `encoding` none keeps the
   ## file's present encoding; `some(teEbcdic)` or `some(teAscii)` forces one.
-  ## Cards 39 and 40 are whatever `lines` says. Journaled like a field edit,
+  ## Cards 39 and 40 are whatever `lines` says. Flushes an open batch, as
+  ## `beginBatch` documents for `setFileField`. Journaled like a field edit,
   ## so `rollbackJournal` undoes it. Extended textual headers, the binary
   ## header and traces are left alone. Raises `ValueError` for more lines or
   ## a longer line, before any byte changes. Another standard is refused
   ## (false, a diagnostic in `log`), as is a write the editor cannot make.
+  ## False also when the flush's writes did not reach the file: the index's
+  ## copy of the header is left as it was.
   checkTextLines(lines)
   if ed.file.kind != skSegy:
     return ed.refuseName("text", "not a SEG-Y file", Location(file: ed.file.path))
@@ -1057,8 +1060,10 @@ proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
   let bytes = textualHeaderBytes(lines, enc)
   let at = int64(ed.file.index.segy.tapeLabel.len)
   let before = ed.edits
+  let missed = ed.unwritten
   result = ed.writeBytes(at, bytes, "text", Location(file: ed.file.path, field: "text"))
   if result and ed.batch and not ed.flushBatch(): return false
+  if result and ed.unwritten > missed: return false
   if result and ed.edits != before: ed.storeTextHeader(bytes, enc)
 
 # ------------------------------------------------ journal on an open editor --
