@@ -1045,12 +1045,13 @@ func textEncodingName(enc: TextEncoding): string =
 proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
     encoding: Option[TextEncoding] = none(TextEncoding)): bool =
   ## Replaces the 3200-byte SEG-Y textual header (after a tape label, when
-  ## the file has one) with up to 40 lines of up to 80 characters, each padded
-  ## with spaces and missing lines left blank. `encoding` none keeps the
+  ## the file has one) with up to 40 lines of up to 80 characters. All 40
+  ## lines are replaced; a shorter line is padded with spaces and a missing
+  ## line becomes blank. Cards 39 and 40 are whatever `lines` says; a caller
+  ## who wants the standard's cards passes them. `encoding` none keeps the
   ## file's present encoding; `some(teEbcdic)` or `some(teAscii)` forces one.
   ## An encoding the reader would not detect, forced or the file's own, raises
-  ## `ValueError` before any write. Cards 39 and 40 are whatever `lines` says.
-  ## Flushes an open batch, as
+  ## `ValueError` before any write. Flushes an open batch, as
   ## `beginBatch` documents for `setFileField`. Journaled like a field edit,
   ## so `rollbackJournal` undoes it. Extended textual headers, the binary
   ## header and traces are left alone. Raises `ValueError` for more lines or

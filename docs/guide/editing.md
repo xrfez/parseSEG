@@ -60,8 +60,9 @@ What the editor refuses, and why:
 
 The SEG-Y textual header is not a named field. `replaceTextHeader(ed, lines)` replaces its
 3200 bytes in place, after a tape label when the file has one, with up to 40 lines of up to
-80 characters. Shorter lines and missing lines are padded with spaces. The caller gives the
-full text: cards 39 and 40 are not rewritten. By default the bytes are written in the
+80 characters. All 40 lines are replaced; a shorter line is padded with spaces and a missing
+line becomes blank. Cards 39 and 40 are whatever `lines` says; a caller who wants the
+standard's cards passes them. By default the bytes are written in the
 encoding the file already uses (EBCDIC or ASCII); `some(teEbcdic)` or `some(teAscii)` forces
 one (`import std/options`). An encoding the reader would not detect, forced or the file's
 own, raises `ValueError` before any write (start line 1 with `C`). More than 40 lines, or a
