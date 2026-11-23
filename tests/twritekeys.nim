@@ -52,6 +52,16 @@ proc sameHeader(path: string, lines: openArray[string], encoding: TextEncoding) 
   for i in 0 ..< 3200:
     doAssert byte(got[i]) == want[i], "byte " & $i & " of " & path
 
+proc reopenHeader(path: string, lines: openArray[string], encoding: TextEncoding) =
+  var g = openSeismic(path)
+  doAssert g.index.segy.text.encoding == encoding, path
+  let want = paddedHeader(lines)
+  for n in 1 .. 40:
+    let card = g.index.segy.text.card(n)
+    let start = (n - 1) * 80
+    doAssert card == want[start ..< start + 80], path & " card " & $n
+  g.close()
+
 proc writeOne(path: string, opts: SegyOutputOptions) =
   var w = openSeismicWriter(path, opts)
   var k = initTraceKeys()
@@ -433,6 +443,7 @@ proc main*() =
         writeOne(dst, SegyOutputOptions(revision: rev, textEncoding: encoding,
           text: @["SHOULD NOT APPEAR"], fullText: lines))
         sameHeader(dst, lines, encoding)
+        reopenHeader(dst, lines, encoding)
         let src = tmp / ("src_" & $rev.major & "_" & $encoding & ".sgy")
         writeOne(src, SegyOutputOptions(revision: rev, textEncoding: encoding,
           text: @["SOURCE HEADER"]))
@@ -443,6 +454,7 @@ proc main*() =
         discard w.close()
         f.close()
         sameHeader(likeDst, lines, encoding)
+        reopenHeader(likeDst, lines, encoding)
     let untouched = newSeq[string](40)
     var custom = untouched
     custom[0] = "HI"
@@ -452,6 +464,7 @@ proc main*() =
     writeOne(raw, SegyOutputOptions(fullText: custom, fixCards: false,
       text: @["SHOULD NOT APPEAR"]))
     sameHeader(raw, custom, teEbcdic)
+    reopenHeader(raw, custom, teEbcdic)
     let fixed = tmp / "fixedcards.sgy"
     writeOne(fixed, SegyOutputOptions(revision: SegyRevision(major: 1),
       fullText: custom, fixCards: true))
@@ -460,6 +473,10 @@ proc main*() =
     doAssert "SEG Y REV1" in g.index.segy.text.card(39)
     doAssert "END TEXTUAL HEADER" in g.index.segy.text.card(40)
     g.close()
+    var fixedLines = custom
+    fixedLines[38] = cardPrefix(39) & "SEG Y REV1"
+    fixedLines[39] = cardPrefix(40) & "END TEXTUAL HEADER"
+    reopenHeader(fixed, fixedLines, teEbcdic)
     let plain = tmp / "plain.sgy"
     writeOne(plain, SegyOutputOptions(text: @["A STACK", "LINE 7"]))
     var h = initTextHeader(teEbcdic)
@@ -469,6 +486,11 @@ proc main*() =
     h.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
     let got = readFile(plain)
     for i in 0 ..< 3200: doAssert byte(got[i]) == h.data[i]
+    var gp = openSeismic(plain)
+    doAssert gp.index.segy.text.encoding == teEbcdic
+    for n in 1 .. 40:
+      doAssert gp.index.segy.text.card(n) == h.card(n), "plain card " & $n
+    gp.close()
     var srcf = openSeismic(plain)
     let copied = tmp / "copied.sgy"
     var lw = openSeismicWriter(copied, like = srcf)
@@ -476,6 +498,11 @@ proc main*() =
     discard lw.close()
     srcf.close()
     doAssert readFile(plain)[0 ..< 3200] == readFile(copied)[0 ..< 3200]
+    var gc = openSeismic(copied)
+    doAssert gc.index.segy.text.encoding == teEbcdic
+    for n in 1 .. 40:
+      doAssert gc.index.segy.text.card(n) == h.card(n), "copied card " & $n
+    gc.close()
     let over = tmp / "overlong.sgy"
     let n = fileCount(tmp)
     var raised = false
@@ -506,5 +533,66 @@ proc main*() =
       doAssert "SEG-Y" in e.msg, e.msg
     doAssert segdRaised and not fileExists(tmp / "notsegy.sgy")
     sd.close()
+
+  # Seen to fail first: textFault ignored thfReadBack, so a misread header
+  # was opened instead of raising ValueError before any file existed.
+  block full_text_readback:
+    let label = @["1   SY rest of card one", repeat(' ', 48) & "C and more"]
+    let umlaut = @["\xE4 and more"]
+    proc noFile(path: string, msgPart: string, openIt: proc () {.closure.}) =
+      let n = fileCount(tmp)
+      var raised = false
+      try:
+        openIt()
+      except ValueError as e:
+        raised = true
+        doAssert msgPart in e.msg, e.msg
+      doAssert raised, path
+      doAssert not fileExists(path), path
+      doAssert fileCount(tmp) == n, path
+      for kind, p in walkDir(tmp):
+        doAssert not p.endsWith(".tmp"), p
+    let labelPath = tmp / "label_ascii.sgy"
+    noFile(labelPath, "tape label", proc () =
+      discard openSeismicWriter(labelPath, SegyOutputOptions(
+        textEncoding: teAscii, fullText: label, fixCards: false)))
+    let labelFix = tmp / "label_ascii_fix.sgy"
+    noFile(labelFix, "tape label", proc () =
+      discard openSeismicWriter(labelFix, SegyOutputOptions(
+        textEncoding: teAscii, fullText: label, fixCards: true)))
+    let umlautPath = tmp / "umlaut.sgy"
+    noFile(umlautPath, "ASCII", proc () =
+      discard openSeismicWriter(umlautPath, SegyOutputOptions(
+        textEncoding: teEbcdic, fullText: umlaut, fixCards: false)))
+    let umlautFix = tmp / "umlaut_fix.sgy"
+    noFile(umlautFix, "ASCII", proc () =
+      discard openSeismicWriter(umlautFix, SegyOutputOptions(
+        textEncoding: teEbcdic, fullText: umlaut, fixCards: true)))
+    let beforeMem = fileCount(tmp)
+    noFile(tmp / "mem_label_unused.sgy", "tape label", proc () =
+      discard openSeismicWriterBytes(SegyOutputOptions(
+        textEncoding: teAscii, fullText: label, fixCards: true)))
+    noFile(tmp / "mem_umlaut_unused.sgy", "ASCII", proc () =
+      discard openSeismicWriterBytes(SegyOutputOptions(
+        textEncoding: teEbcdic, fullText: umlaut, fixCards: false)))
+    doAssert fileCount(tmp) == beforeMem
+    let srcA = tmp / "src_ascii_rb.sgy"
+    writeOne(srcA, SegyOutputOptions(textEncoding: teAscii, text: @["SOURCE"]))
+    let srcE = tmp / "src_ebcdic_rb.sgy"
+    writeOne(srcE, SegyOutputOptions(textEncoding: teEbcdic, text: @["SOURCE"]))
+    var fa = openSeismic(srcA)
+    let likeLabel = tmp / "like_label.sgy"
+    noFile(likeLabel, "tape label", proc () =
+      discard openSeismicWriter(likeLabel, like = fa, fullText = label, fixCards = true))
+    noFile(tmp / "like_mem_label_unused.sgy", "tape label", proc () =
+      discard openSeismicWriterBytes(fa, fullText = label, fixCards = false))
+    fa.close()
+    var fe = openSeismic(srcE)
+    let likeUmlaut = tmp / "like_umlaut.sgy"
+    noFile(likeUmlaut, "ASCII", proc () =
+      discard openSeismicWriter(likeUmlaut, like = fe, fullText = umlaut, fixCards = false))
+    noFile(tmp / "like_mem_umlaut_unused.sgy", "ASCII", proc () =
+      discard openSeismicWriterBytes(fe, fullText = umlaut, fixCards = true))
+    fe.close()
 
 when isMainModule: main()

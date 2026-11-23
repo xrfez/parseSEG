@@ -271,8 +271,9 @@ Options and rules:
   replaces the copied SEG-Y textual header: up to 40 lines of 80 characters, written as
   given and padded with spaces. `fixCards` (true by default) sets cards 39 and 40 to the
   standard strings for the file's revision; false writes the lines untouched. More than 40
-  lines, a line over 80 characters, or a character the file's encoding cannot hold raises
-  `ValueError` before any file is created. A non-SEG-Y `like` is refused.
+  lines, a line over 80 characters, a character the file's encoding cannot hold, or a
+  header the reader would misread raises `ValueError` before any file is created. A
+  non-SEG-Y `like` is refused.
 - **Errors.** Caller mistakes raise `ValueError` and write nothing: a trace out of range,
   another standard, a closed file, a broken SEG-D rule. Spec-invalid output raises
   `SegFormatError`, as with the per-standard writers. An output path that is a directory
@@ -428,9 +429,11 @@ becomes a space); cards 39 and 40 are the revision and `END TEXTUAL HEADER`. `fu
 when set, is the whole header instead: up to 40 lines of up to 80 characters, written as
 given and padded with spaces, and it wins over `text`. `fixCards` (true by default) still
 sets cards 39 and 40 to those standard strings; false writes `fullText` untouched. More
-than 40 lines, a line over 80 characters, or a character the encoding cannot hold raises
-`ValueError` before any file is created. `checkTextHeader` reports those faults, and for
-Rev 1 and later a card 39 or 40 the standard would not accept, without raising.
+than 40 lines, a line over 80 characters, a character the encoding cannot hold, or a
+header the reader would misread raises `ValueError` before any file is created.
+`checkTextHeader` reports those faults, and for Rev 1 and later a card 39 or 40 not
+containing the standard's text, without raising. `thfReadBack` is that misread: the
+reader would take the header for a tape label, or detect a different encoding.
 
 The same keys write a SEG-D Rev 3 file. `openSeismicWriter(path, SegdOutputOptions)` takes the
 sample interval, sample count and sample format (IEEE float32, `sd8058`, by default; also the

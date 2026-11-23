@@ -414,11 +414,35 @@ func definedIn(f: SegdSampleFormat, r: SegdRevision): bool =
   elif f == sd8080: r.major >= 3
   else: true
 
-func textFault(lines: openArray[string], rev: SegyRevision, encoding: TextEncoding): string =
-  # The first length or character fault, or "" when `lines` may be written.
-  for p in checkTextHeader(lines, rev, encoding):
+func revisionCard(rev: SegyRevision): string =
+  cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
+    elif rev.major == 1: "SEG Y REV1" else: "")
+
+func endCard(): string = cardPrefix(40) & "END TEXTUAL HEADER"
+
+func linesAfterFix(lines: openArray[string], rev: SegyRevision): seq[string] =
+  # The lines `fillFullText` writes when `fixCards` is set: caller cards,
+  # then the standard cards 39 and 40.
+  result = newSeq[string](CardCount)
+  let n = min(lines.len, CardCount)
+  for i in 0 ..< n: result[i] = lines[i]
+  result[38] = revisionCard(rev)
+  result[39] = endCard()
+
+func textFault(lines: openArray[string], rev: SegyRevision, encoding: TextEncoding,
+    fixCards: bool): string =
+  # The first length, character or read-back fault, or "" when `lines` may
+  # be written. Read-back is judged on the bytes actually written.
+  let problems = checkTextHeader(lines, rev, encoding)
+  for p in problems:
     if p.kind in {thfTooManyLines, thfLineTooLong, thfBadCharacter}:
       return p.message
+  if not fixCards:
+    for p in problems:
+      if p.kind == thfReadBack: return p.message
+    return ""
+  for p in checkTextHeader(linesAfterFix(lines, rev), rev, encoding):
+    if p.kind == thfReadBack: return p.message
 
 proc fillFullText(h: var SegyTextHeader, lines: openArray[string], rev: SegyRevision,
     fixCards: bool) =
@@ -433,9 +457,8 @@ proc fillFullText(h: var SegyTextHeader, lines: openArray[string], rev: SegyRevi
     for j in 0 ..< take: body[start + j] = line[j]
   h.text = body
   if fixCards:
-    h.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
-      elif rev.major == 1: "SEG Y REV1" else: ""))
-    h.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+    h.setCard(39, revisionCard(rev))
+    h.setCard(40, endCard())
 
 proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat,
     fullText: seq[string], fixCards: bool) =
@@ -488,7 +511,8 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
   if fullText.len > 0:
     if kind != skSegy:
       refuse("a full textual header is only written for SEG-Y, not " & $kind)
-    let fault = textFault(fullText, like.index.segy.revision, like.index.segy.text.encoding)
+    let fault = textFault(fullText, like.index.segy.revision,
+      like.index.segy.text.encoding, fixCards)
     if fault.len > 0: refuse(fault)
   if kind == skUnknown: refuse("the file " & like.path & " is not SEG-Y, SEG-D or SEG-2")
   if like.demuxPath.len > 0:
@@ -533,8 +557,9 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## multiplexed SEG-D `like`, a format for another standard or one the
   ## revision lacks, SEG-D 8015 for traces whose sample count is not a
   ## multiple of 4, `path` being `like`'s file, `fullText` on a non-SEG-Y
-  ## `like`, or a `fullText` that `checkTextHeader` faults for length or
-  ## characters (before any file is created); `SegFormatError` for
+  ## `like`, or a `fullText` that `checkTextHeader` faults for length,
+  ## characters or a header the reader would misread (before any file is
+  ## created); `SegFormatError` for
   ## file headers the writer refuses; `IOError` when the output cannot be
   ## created.
   openLike(path, false, like, segyFormat, segdFormat, seg2Format, fullText, fixCards)
@@ -569,7 +594,7 @@ proc openNewSegy(path: string, memory: bool, opts: SegyOutputOptions): SeismicWr
   if rev.major < 2 and opts.byteOrder != boBig:
     refuse($opts.byteOrder & " output needs Rev 2 (only its byte-order marker declares it)")
   if opts.fullText.len > 0:
-    let fault = textFault(opts.fullText, rev, opts.textEncoding)
+    let fault = textFault(opts.fullText, rev, opts.textEncoding, opts.fixCards)
     if fault.len > 0: refuse(fault)
   elif opts.text.len > 38:
     refuse("the textual header holds 38 lines of text, not " & $opts.text.len)
@@ -581,9 +606,8 @@ proc openNewSegy(path: string, memory: bool, opts: SegyOutputOptions): SeismicWr
   else:
     let lines = if opts.text.len > 0: opts.text else: @["WRITTEN BY parseSEG " & PackageVersion]
     for i, line in lines: f.text.setCard(i + 1, cardPrefix(i + 1) & line.textCard)
-    f.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
-      elif rev.major == 1: "SEG Y REV1" else: ""))
-    f.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+    f.text.setCard(39, revisionCard(rev))
+    f.text.setCard(40, endCard())
   f.binary = SegyBinaryHeader(formatCode: int16(ord(fmt)), segyMajor: rev.major,
     segyMinor: rev.minor, traceSorting: opts.traceSorting,
     measurementSystem: opts.measurementSystem, sampleInterval: 1000, samplesPerTrace: 1)
@@ -615,8 +639,8 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
   ## (8-byte and 3-byte formats need Rev 2), a 3-byte format pair-swapped,
   ## a byte order other than big-endian before Rev 2, or a revision other
   ## than 0, 1, 2.0 or 2.1, or a `fullText` that `checkTextHeader` faults
-  ## for length or characters (before any file is created); `IOError` when
-  ## the output cannot be created.
+  ## for length, characters or a header the reader would misread (before any
+  ## file is created); `IOError` when the output cannot be created.
   openNewSegy(path, false, opts)
 
 proc openSeismicWriterBytes*(opts: SegyOutputOptions, name = "memory"): SeismicWriter =
