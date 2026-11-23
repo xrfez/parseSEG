@@ -179,7 +179,8 @@ missing line becomes blank. Cards 39 and 40 are whatever `lines` says; a caller 
 standard's cards passes them. `encoding` none keeps the file's present encoding;
 `some(teEbcdic)` or `some(teAscii)` forces one. An encoding the reader would not detect,
 forced or the file's own, raises `ValueError` before any write. Raises `ValueError` for more
-lines or a longer line, before any byte changes; another standard is refused (false, a
+lines, a longer line, or a control character (the message names the line), before any byte
+changes; another standard is refused (false, a
 diagnostic in `log`). Flushes an open batch; false when a write of that flush did not reach
 the file (the index's copy of the header stays as it was). Journaled, so `rollbackJournal`
 undoes it. Extended textual headers, the binary header and traces are left alone.

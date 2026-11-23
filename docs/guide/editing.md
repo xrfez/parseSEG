@@ -65,8 +65,9 @@ line becomes blank. Cards 39 and 40 are whatever `lines` says; a caller who want
 standard's cards passes them. By default the bytes are written in the
 encoding the file already uses (EBCDIC or ASCII); `some(teEbcdic)` or `some(teAscii)` forces
 one (`import std/options`). An encoding the reader would not detect, forced or the file's
-own, raises `ValueError` before any write (start line 1 with `C`). More than 40 lines, or a
-line longer than 80 characters, raises `ValueError` before any byte changes. Another standard
+own, raises `ValueError` before any write (start line 1 with `C`). More than 40 lines, a
+line longer than 80 characters, or a control character (the message names the line), raises
+`ValueError` before any byte changes. Another standard
 is refused (`false`, the reason in `ed.log`). An open batch is flushed first; a write that
 does not reach the file returns `false` and leaves the open view unchanged. The edit is
 journaled, so `rollbackJournal` undoes it. Extended textual headers, the binary header and

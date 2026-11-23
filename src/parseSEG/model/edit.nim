@@ -48,8 +48,8 @@
 ## The SEG-Y textual header is not one of those blocks. `replaceTextHeader`
 ## replaces its 3200 bytes in place, after a tape label when the file has
 ## one, journaled like a field edit. More than 40 lines, a line longer than
-## 80 characters, or an encoding the reader would not detect, raises
-## `ValueError` before any byte changes.
+## 80 characters, a control character, or an encoding the reader would not
+## detect, raises `ValueError` before any byte changes.
 ##
 ## The journal is NIF, one entry per line, so it can be read back even when
 ## the last line was cut short:
@@ -1019,10 +1019,14 @@ proc checkTextLines(lines: openArray[string]) =
   if lines.len > CardCount:
     raise newException(ValueError, "the textual header holds " & $CardCount &
       " lines, not " & $lines.len)
-  for line in lines:
+  for i, line in lines:
     if line.len > CardWidth:
       raise newException(ValueError, "a textual header line holds " & $CardWidth &
         " characters, not " & $line.len)
+    for c in line:
+      if c < ' ':
+        raise newException(ValueError, "textual header line " & $(i + 1) &
+          " holds a control character")
 
 func textualHeaderBytes(lines: openArray[string], encoding: TextEncoding): seq[byte] =
   # 40 cards of 80 columns: each given line padded with spaces, the rest blank.
@@ -1054,8 +1058,9 @@ proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
   ## `ValueError` before any write. Flushes an open batch, as
   ## `beginBatch` documents for `setFileField`. Journaled like a field edit,
   ## so `rollbackJournal` undoes it. Extended textual headers, the binary
-  ## header and traces are left alone. Raises `ValueError` for more lines or
-  ## a longer line, before any byte changes. Another standard is refused
+  ## header and traces are left alone. Raises `ValueError` for more lines, a
+  ## longer line, or a control character (the message names the line), before
+  ## any byte changes. Another standard is refused
   ## (false, a diagnostic in `log`), as is a write the editor cannot make.
   ## False also when the flush's writes did not reach the file: the index's
   ## copy of the header is left as it was.

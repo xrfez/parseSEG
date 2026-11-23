@@ -893,4 +893,23 @@ proc main*() =
     roundTrip(teEbcdic)
     roundTrip(teAscii)
 
+  block replace_text_header_rejects_control_characters:
+    let path = tmp / "text_control.sgy"
+    writeTinySegy(path, teEbcdic)
+    let journal = path & ".edits.nif"
+    if fileExists(journal): removeFile(journal)
+    let original = readBytes(path)
+    var ed = openEditor(path)
+    for bad in ["\n", "\r", "\t", "\0"]:
+      var raised = false
+      try:
+        discard ed.replaceTextHeader(["C 1 ok", "C 2 " & bad])
+      except ValueError as e:
+        raised = true
+        doAssert "line 2" in e.msg, e.msg
+      doAssert raised, "expected ValueError"
+      doAssert readBytes(path) == original
+      doAssert editLines(journal) == 0
+    ed.close()
+
 when isMainModule: main()
