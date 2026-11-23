@@ -37,12 +37,13 @@ import ../common/[endians, errors, diagnostics, ebcdic]
 import ../io/[records, diskio, pushback]
 import ../common/tensors
 import ../private/sharedfile
+import ../private/textlabel
 import ./[textheader, binheader, traceheader, samples, exttext, layout]
 export textheader, binheader, traceheader, exttext, layout
 export samples except decodeSamplesRaw
 
 const
-  TapeLabelSize* = 128 ## Bytes in a SEG-Y tape label.
+  TapeLabelSize* = LabelBytes ## Bytes in a SEG-Y tape label.
   MaxExtendedRecords = 1_000_000
     ## Bound on extended records implied by a Rev 2 first-trace offset (3.2 GB).
   MaxLayoutBytes* = 1 shl 20 ## Larger Layout stanzas are ignored (with a warning).
@@ -144,14 +145,6 @@ func log*(r: SegyReader): lent DiagLog {.inline.} =
   ## Every diagnostic of the read so far.
   r.log
 
-func looksLikeTapeLabel(b: openArray[byte]): bool =
-  # Storage unit sequence number (digits or blanks) and "SY" in bytes 5-6;
-  # a textual header starts with 'C' instead.
-  b[0] in {0x20'u8, 0x30'u8..0x39'u8} and b[4] == 0x53 and b[5] == 0x59
-
-func startsWithC(b: openArray[byte]): bool {.inline.} = b[0] == 0xC3 or b[0] == 0x43
-  # The first card of a textual header: `C` in EBCDIC or ASCII.
-
 func loc(r: SegyReader, trace = -1, field = ""): Location {.inline.} =
   Location(file: r.name, record: 0, trace: trace, field: field)
 
@@ -238,7 +231,7 @@ proc readFileHeaders(r: var SegyReader) =
   var textBytes: seq[byte]
   if looksLikeTapeLabel(head):
     textBytes = r.readBlock(TextHeaderSize)
-    if startsWithC(textBytes) or r.labelBeforePlainText(textBytes):
+    if wouldTakeTapeLabel(head, textBytes) or r.labelBeforePlainText(textBytes):
       f.tapeLabel = head
     else:
       # Not a label after all: the textual header started at byte 0.

@@ -267,6 +267,13 @@ Options and rules:
   whole, each record's traces in input order: a record ends when a trace of another record
   arrives, or at `close`, and must then be complete. Records may be skipped or reordered.
   Multiplexed SEG-D is refused: convert it to a demultiplexed file first.
+- **Textual header.** `fullText` on `openSeismicWriter(path, like, fullText = lines)`
+  replaces the copied SEG-Y textual header: up to 40 lines of 80 characters, written as
+  given and padded with spaces. `fixCards` (true by default) sets cards 39 and 40 to the
+  standard strings for the file's revision; false writes the lines untouched. More than 40
+  lines, a line over 80 characters, a character the file's encoding cannot hold, or a
+  header the reader would misread raises `ValueError` before any file is created. A
+  non-SEG-Y `like` is refused.
 - **Errors.** Caller mistakes raise `ValueError` and write nothing: a trace out of range,
   another standard, a closed file, a broken SEG-D rule. Spec-invalid output raises
   `SegFormatError`, as with the per-standard writers. An output path that is a directory
@@ -416,6 +423,17 @@ var g = openSeismic("shot_stack.sgy", keys = true)
 doAssert g.kind == skSegy and g.traceKeys(0).ensemble == 1201
 doAssert g.traceKeys(0).cmpX == k.cmpX and g.traceKeys(0).intervalUs == k.intervalUs
 ```
+
+`text` is up to 38 lines for cards 1-38 (cut to the card; a character outside ASCII 32-126
+becomes a space); cards 39 and 40 are the revision and `END TEXTUAL HEADER`. `fullText`,
+when set, is the whole header instead: up to 40 lines of up to 80 characters, written as
+given and padded with spaces, and it wins over `text`. `fixCards` (true by default) still
+sets cards 39 and 40 to those standard strings; false writes `fullText` untouched. More
+than 40 lines, a line over 80 characters, a character the encoding cannot hold, or a
+header the reader would misread raises `ValueError` before any file is created.
+`checkTextHeader` reports those faults, and for Rev 1 and later a card 39 or 40 not
+containing the standard's text, without raising. `thfReadBack` is that misread: the
+reader would take the header for a tape label, or detect a different encoding.
 
 The same keys write a SEG-D Rev 3 file. `openSeismicWriter(path, SegdOutputOptions)` takes the
 sample interval, sample count and sample format (IEEE float32, `sd8058`, by default; also the

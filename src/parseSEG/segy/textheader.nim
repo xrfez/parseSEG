@@ -3,9 +3,13 @@
 ##
 ## The raw bytes are kept as read, so a round trip is byte-identical whatever
 ## the content. Text is exposed as Latin-1 strings. Text blocks are never
-## byte-swapped.
+## byte-swapped. `checkTextHeader` reports faults in lines a caller means to
+## write as this header; it never raises and never changes the lines.
 
+import std/strutils
 import ../common/ebcdic
+import ../private/textlabel
+from ./binheader import SegyRevision
 
 const
   TextHeaderSize* = 3200 ## Bytes in a textual header or extended textual record.
@@ -132,3 +136,122 @@ proc setCard*(h: var SegyTextHeader, n: CardNumber, text: openArray[char]) =
   let bytes = encodeText(text.toOpenArray(0, min(text.len, CardWidth) - 1), h.encoding)
   for i in 0..<CardWidth:
     h.data[start + i] = if i < bytes.len: bytes[i] else: blank
+
+type
+  TextHeaderFault* = enum
+    ## One kind of fault `checkTextHeader` reports.
+    thfTooManyLines ## More than 40 lines.
+    thfLineTooLong ## A line longer than 80 characters.
+    thfBadCharacter ## A character the encoding cannot hold.
+    thfRevisionCard ## Card 39 does not name the revision (Rev 1 and later).
+    thfEndMarker ## Card 40 is not an end marker (Rev 1 and later).
+    thfReadBack ## As written, the reader would misread the header.
+
+  TextHeaderProblem* = object
+    ## One fault in a textual header, as `checkTextHeader` reports it.
+    line*: int ## 1-based line. `lines.len` when there are more than 40.
+    kind*: TextHeaderFault
+    message*: string
+
+func standardRevisionText(revision: SegyRevision): string =
+  # Card 39 as the standard writes it, without a C39 prefix.
+  if revision.major >= 2: "SEG-Y_REV" & $revision.major & "." & $revision.minor
+  elif revision.major == 1: "SEG Y REV1"
+  else: ""
+
+func badColumn(line: string, encoding: TextEncoding): int =
+  # 1-based column of the first character `encoding` cannot hold, or 0.
+  case encoding
+  of teAscii:
+    for i, c in line:
+      if c notin {' '..'~'}: return i + 1
+  of teEbcdic:
+    let back = decodeText(encodeText(line, teEbcdic), teEbcdic)
+    if back != line:
+      let n = min(back.len, line.len)
+      for i in 0 ..< n:
+        if back[i] != line[i]: return i + 1
+      return n + 1
+  0
+
+func paddedCards(lines: openArray[string]): string =
+  # Same padding as the writer's fillFullText: spaces, then each line's
+  # columns, cut at 80. Missing cards stay blank.
+  result = newString(TextHeaderSize)
+  for i in 0 ..< result.len: result[i] = ' '
+  let n = min(lines.len, CardCount)
+  for i in 0 ..< n:
+    let line = lines[i]
+    let start = i * CardWidth
+    let take = min(line.len, CardWidth)
+    for j in 0 ..< take: result[start + j] = line[j]
+
+func readBackName(encoding: TextEncoding): string =
+  case encoding
+  of teAscii: "ASCII"
+  of teEbcdic: "EBCDIC"
+
+func readBackFault(lines: openArray[string], encoding: TextEncoding): string =
+  # "" when the reader's own detection would keep this encoding and not
+  # assume a tape label. A label wins when both would apply.
+  let bytes = encodeText(paddedCards(lines), encoding)
+  if bytes.len > LabelBytes and wouldTakeTapeLabel(
+      bytes.toOpenArray(0, LabelBytes - 1),
+      bytes.toOpenArray(LabelBytes, bytes.high)):
+    return "line 1 should start with C: as written, this header would be " &
+      "taken for a tape label"
+  let detected = detectTextEncoding(bytes)
+  if detected != encoding:
+    return "line 1 should start with C: as written, this header would be " &
+      "read back as " & readBackName(detected)
+
+func checkTextHeader*(lines: openArray[string], revision: SegyRevision,
+    encoding = teEbcdic): seq[TextHeaderProblem] {.raises: [].} =
+  ## Reports every fault in `lines` as a textual file header of `revision`
+  ## in `encoding`. Never raises and never changes `lines`. A line may carry
+  ## a `C01` prefix or not; neither is added or required.
+  ##
+  ## Faults: more than 40 lines; a line over 80 characters; a character
+  ## `encoding` cannot hold (ASCII: a byte outside 32..126; EBCDIC: a byte
+  ## `encodeText` does not round-trip, which cp037 never does for Latin-1);
+  ## for Rev 1 and later, card 39 not containing the revision name the
+  ## standard writes (`SEG Y REV1`, or `SEG-Y_REV` plus `major.minor`) and
+  ## card 40 containing neither `END TEXTUAL HEADER` nor `END EBCDIC`.
+  ## When there is no length or character fault, the cards are padded and
+  ## encoded as a writer would (the given encoding, the cards as given) and
+  ## checked with the reader's own detection. A different detected encoding,
+  ## or a block the reader would take for a tape label, is `thfReadBack` on
+  ## line 1.
+  var blocked = false
+  if lines.len > CardCount:
+    result.add TextHeaderProblem(line: lines.len, kind: thfTooManyLines,
+      message: "the textual header has " & $lines.len & " lines, not at most 40")
+    blocked = true
+  for i, line in lines:
+    let n = i + 1
+    if line.len > CardWidth:
+      result.add TextHeaderProblem(line: n, kind: thfLineTooLong,
+        message: "textual header line " & $n & " has " & $line.len &
+          " characters, not at most 80")
+      blocked = true
+    let col = badColumn(line, encoding)
+    if col > 0:
+      result.add TextHeaderProblem(line: n, kind: thfBadCharacter,
+        message: "textual header line " & $n & " column " & $col &
+          " holds a byte " & $encoding & " cannot encode")
+      blocked = true
+  if not blocked:
+    let msg = readBackFault(lines, encoding)
+    if msg.len > 0:
+      result.add TextHeaderProblem(line: 1, kind: thfReadBack, message: msg)
+  if revision.major >= 1:
+    let name = standardRevisionText(revision)
+    let card39 = if lines.len >= 39: lines[38] else: ""
+    if card39.find(name) < 0:
+      result.add TextHeaderProblem(line: 39, kind: thfRevisionCard,
+        message: "textual header line 39 does not name the revision as " & name)
+    let card40 = if lines.len >= 40: lines[39] else: ""
+    if card40.find("END TEXTUAL HEADER") < 0 and card40.find("END EBCDIC") < 0:
+      result.add TextHeaderProblem(line: 40, kind: thfEndMarker,
+        message: "textual header line 40 is not an end marker " &
+          "(END TEXTUAL HEADER or END EBCDIC)")

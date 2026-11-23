@@ -36,6 +36,42 @@ proc checkKeys(a, k: TraceKeys, major: int) =
   if major >= 1:
     doAssert same(a.inline, k.inline) and same(a.crossline, k.crossline)
 
+proc paddedHeader(lines: openArray[string]): string =
+  result = newString(3200)
+  for i in 0 ..< result.len: result[i] = ' '
+  for i, line in lines:
+    if i >= 40: break
+    let start = i * 80
+    let n = min(line.len, 80)
+    for j in 0 ..< n: result[start + j] = line[j]
+
+proc sameHeader(path: string, lines: openArray[string], encoding: TextEncoding) =
+  let want = encodeText(paddedHeader(lines), encoding)
+  let got = readFile(path)
+  doAssert got.len >= 3200, path
+  for i in 0 ..< 3200:
+    doAssert byte(got[i]) == want[i], "byte " & $i & " of " & path
+
+proc reopenHeader(path: string, lines: openArray[string], encoding: TextEncoding) =
+  var g = openSeismic(path)
+  doAssert g.index.segy.text.encoding == encoding, path
+  let want = paddedHeader(lines)
+  for n in 1 .. 40:
+    let card = g.index.segy.text.card(n)
+    let start = (n - 1) * 80
+    doAssert card == want[start ..< start + 80], path & " card " & $n
+  g.close()
+
+proc writeOne(path: string, opts: SegyOutputOptions) =
+  var w = openSeismicWriter(path, opts)
+  var k = initTraceKeys()
+  k.intervalUs = 1000
+  w.writeTrace(k, [1'f32, 2, 3])
+  discard w.close()
+
+proc fileCount(dir: string): int =
+  for p in walkDir(dir): inc result
+
 proc roundTrip(src: string, opts: SegyOutputOptions, dst: string) =
   var f = openSeismic(src, keys = true)
   let x = f.readTraces(0 ..< f.len)
@@ -307,5 +343,256 @@ proc main*() =
     var g = openSeismic(tmp / "frac_r2.sgy", keys = true)
     doAssert g.traceKeys(0).intervalUs == 1000.999
     g.close()
+
+  # Seen to fail first: checkTextHeader returned no problems.
+  block check_text_header:
+    let rev0 = SegyRevision()
+    let rev1 = SegyRevision(major: 1)
+    let rev20 = SegyRevision(major: 2, minor: 0)
+    let rev21 = SegyRevision(major: 2, minor: 1)
+    var many = newSeq[string](41)
+    many[0] = "\x01" & 'y'.repeat(80)
+    let all = checkTextHeader(many, rev1, teAscii)
+    var kinds: set[TextHeaderFault]
+    for p in all: kinds.incl p.kind
+    doAssert thfTooManyLines in kinds and thfLineTooLong in kinds
+    doAssert thfBadCharacter in kinds and thfRevisionCard in kinds
+    doAssert thfEndMarker in kinds
+    doAssert all[0].kind == thfTooManyLines and all[0].line == 41
+    doAssert "41" in all[0].message
+    let long = checkTextHeader(@['x'.repeat(81)], rev0, teAscii)
+    doAssert long.len == 1 and long[0].kind == thfLineTooLong and long[0].line == 1
+    doAssert "81" in long[0].message
+    let bad = checkTextHeader(@["ok\x01"], rev0, teAscii)
+    doAssert bad.len == 1 and bad[0].kind == thfBadCharacter and bad[0].line == 1
+    doAssert bad[0].message.contains("column 3")
+    doAssert checkTextHeader(@["ok\x01"], rev0, teEbcdic).len == 0
+    let missing = checkTextHeader(@["hello"], rev1, teAscii)
+    doAssert missing.len == 2
+    doAssert missing[0].kind == thfRevisionCard and missing[0].line == 39
+    doAssert missing[1].kind == thfEndMarker and missing[1].line == 40
+    var ok = newSeq[string](40)
+    ok[38] = "SEG Y REV1"
+    ok[39] = "END EBCDIC"
+    doAssert checkTextHeader(ok, rev1, teEbcdic).len == 0
+    ok[39] = "C40 END TEXTUAL HEADER"
+    doAssert checkTextHeader(ok, rev1, teEbcdic).len == 0
+    ok[38] = "C39 SEG Y REV1"
+    doAssert checkTextHeader(ok, rev1, teAscii).len == 0
+    ok[38] = "SEG-Y_REV2.0"
+    doAssert checkTextHeader(ok, rev20, teEbcdic).len == 0
+    ok[38] = "SEG-Y_REV2.1"
+    doAssert checkTextHeader(ok, rev21, teEbcdic).len == 0
+    ok[38] = "SEG Y REV1"
+    let wrong = checkTextHeader(ok, rev21, teEbcdic)
+    doAssert wrong.len == 1 and wrong[0].kind == thfRevisionCard
+    doAssert checkTextHeader(newSeq[string](40), rev0, teEbcdic).len == 0
+    var srcLines = @["hello"]
+    discard checkTextHeader(srcLines, rev1, teAscii)
+    doAssert srcLines == @["hello"]
+    discard checkTextHeader(@["\x00".repeat(100)], rev21, teAscii)
+
+  # Seen to fail first: checkTextHeader reported no thfReadBack (the read-back
+  # check was absent, so both misread headers came back clean).
+  block check_text_readback:
+    let rev0 = SegyRevision()
+    let label = @[
+      "1   SY rest of card one",
+      repeat(' ', 48) & "C and more"]
+    let asLabel = checkTextHeader(label, rev0, teAscii)
+    doAssert asLabel.len == 1, $asLabel.len
+    doAssert asLabel[0].kind == thfReadBack and asLabel[0].line == 1
+    doAssert "tape label" in asLabel[0].message, asLabel[0].message
+    doAssert asLabel[0].message == "line 1 should start with C: as written, " &
+      "this header would be taken for a tape label"
+    let asAscii = checkTextHeader(@["\xE4 and more"], rev0, teEbcdic)
+    doAssert asAscii.len == 1, $asAscii.len
+    doAssert asAscii[0].kind == thfReadBack and asAscii[0].line == 1
+    doAssert asAscii[0].message == "line 1 should start with C: as written, " &
+      "this header would be read back as ASCII", asAscii[0].message
+    doAssert checkTextHeader(@["C 1 client"], rev0, teAscii).len == 0
+    doAssert checkTextHeader(@["C 1 client"], rev0, teEbcdic).len == 0
+    doAssert checkTextHeader(@["Hello free text"], rev0, teAscii).len == 0
+    doAssert checkTextHeader(@["Hello free text"], rev0, teEbcdic).len == 0
+    let longLabel = @[
+      "1   SY " & 'x'.repeat(80),
+      repeat(' ', 48) & "C and more"]
+    for p in checkTextHeader(longLabel, rev0, teAscii):
+      doAssert p.kind != thfReadBack
+    let rev1 = checkTextHeader(@["C 1 client"], SegyRevision(major: 1), teAscii)
+    doAssert rev1.len == 2
+    for p in rev1: doAssert p.kind != thfReadBack
+
+  # Seen to fail first: textFault returned "" so an over-long fullText did
+  # not raise, and fillFullText did not store the lines (byte 0 differed).
+  block full_textual_header:
+    proc linesOf(rev: SegyRevision): seq[string] =
+      result = newSeq[string](40)
+      for i in 0 ..< 38:
+        result[i] = align($(i + 1), 2, '0') & ":" &
+          repeat(char(ord('A') + (i mod 26)), 77)
+      let name = if rev.major >= 2: "SEG-Y_REV" & $rev
+        elif rev.major == 1: "SEG Y REV1" else: "REV0 CARD"
+      result[38] = cardPrefix(39) & name
+      result[39] = cardPrefix(40) & "END TEXTUAL HEADER"
+    for rev in [SegyRevision(major: 2, minor: 1), SegyRevision(major: 1),
+        SegyRevision(major: 2, minor: 0)]:
+      for encoding in [teEbcdic, teAscii]:
+        let dst = tmp / ("full_" & $rev.major & "_" & $encoding & ".sgy")
+        let lines = linesOf(rev)
+        writeOne(dst, SegyOutputOptions(revision: rev, textEncoding: encoding,
+          text: @["SHOULD NOT APPEAR"], fullText: lines))
+        sameHeader(dst, lines, encoding)
+        reopenHeader(dst, lines, encoding)
+        let src = tmp / ("src_" & $rev.major & "_" & $encoding & ".sgy")
+        writeOne(src, SegyOutputOptions(revision: rev, textEncoding: encoding,
+          text: @["SOURCE HEADER"]))
+        var f = openSeismic(src)
+        let likeDst = tmp / ("like_" & $rev.major & "_" & $encoding & ".sgy")
+        var w = openSeismicWriter(likeDst, like = f, fullText = lines)
+        w.writeTrace(f, 0, [1'f32, 2, 3])
+        discard w.close()
+        f.close()
+        sameHeader(likeDst, lines, encoding)
+        reopenHeader(likeDst, lines, encoding)
+    let untouched = newSeq[string](40)
+    var custom = untouched
+    custom[0] = "HI"
+    custom[38] = "NOT THE REVISION"
+    custom[39] = "NOT AN END"
+    let raw = tmp / "untouched.sgy"
+    writeOne(raw, SegyOutputOptions(fullText: custom, fixCards: false,
+      text: @["SHOULD NOT APPEAR"]))
+    sameHeader(raw, custom, teEbcdic)
+    reopenHeader(raw, custom, teEbcdic)
+    let fixed = tmp / "fixedcards.sgy"
+    writeOne(fixed, SegyOutputOptions(revision: SegyRevision(major: 1),
+      fullText: custom, fixCards: true))
+    var g = openSeismic(fixed)
+    doAssert g.index.segy.text.card(1).startsWith("HI")
+    doAssert "SEG Y REV1" in g.index.segy.text.card(39)
+    doAssert "END TEXTUAL HEADER" in g.index.segy.text.card(40)
+    g.close()
+    var fixedLines = custom
+    fixedLines[38] = cardPrefix(39) & "SEG Y REV1"
+    fixedLines[39] = cardPrefix(40) & "END TEXTUAL HEADER"
+    reopenHeader(fixed, fixedLines, teEbcdic)
+    let plain = tmp / "plain.sgy"
+    writeOne(plain, SegyOutputOptions(text: @["A STACK", "LINE 7"]))
+    var h = initTextHeader(teEbcdic)
+    h.setCard(1, cardPrefix(1) & "A STACK")
+    h.setCard(2, cardPrefix(2) & "LINE 7")
+    h.setCard(39, cardPrefix(39) & "SEG-Y_REV2.1")
+    h.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+    let got = readFile(plain)
+    for i in 0 ..< 3200: doAssert byte(got[i]) == h.data[i]
+    var gp = openSeismic(plain)
+    doAssert gp.index.segy.text.encoding == teEbcdic
+    for n in 1 .. 40:
+      doAssert gp.index.segy.text.card(n) == h.card(n), "plain card " & $n
+    gp.close()
+    var srcf = openSeismic(plain)
+    let copied = tmp / "copied.sgy"
+    var lw = openSeismicWriter(copied, like = srcf)
+    lw.writeTrace(srcf, 0, [1'f32, 2, 3])
+    discard lw.close()
+    srcf.close()
+    doAssert readFile(plain)[0 ..< 3200] == readFile(copied)[0 ..< 3200]
+    var gc = openSeismic(copied)
+    doAssert gc.index.segy.text.encoding == teEbcdic
+    for n in 1 .. 40:
+      doAssert gc.index.segy.text.card(n) == h.card(n), "copied card " & $n
+    gc.close()
+    let over = tmp / "overlong.sgy"
+    let n = fileCount(tmp)
+    var raised = false
+    try:
+      discard openSeismicWriter(over, SegyOutputOptions(fullText: @['x'.repeat(81)]))
+    except ValueError as e:
+      raised = true
+      doAssert "81" in e.msg, e.msg
+    doAssert raised
+    doAssert not fileExists(over)
+    doAssert fileCount(tmp) == n
+    for kind, p in walkDir(tmp):
+      doAssert not p.endsWith(".tmp"), p
+    var badRaised = false
+    try:
+      discard openSeismicWriter(tmp / "badchar.sgy", SegyOutputOptions(
+        textEncoding: teAscii, fullText: @["ok\x01"]))
+    except ValueError as e:
+      badRaised = true
+      doAssert "cannot encode" in e.msg, e.msg
+    doAssert badRaised and not fileExists(tmp / "badchar.sgy")
+    var sd = openSeismic(demoDir() / "record.sgd")
+    var segdRaised = false
+    try:
+      discard openSeismicWriter(tmp / "notsegy.sgy", like = sd, fullText = @["X"])
+    except ValueError as e:
+      segdRaised = true
+      doAssert "SEG-Y" in e.msg, e.msg
+    doAssert segdRaised and not fileExists(tmp / "notsegy.sgy")
+    sd.close()
+
+  # Seen to fail first: textFault ignored thfReadBack, so a misread header
+  # was opened instead of raising ValueError before any file existed.
+  block full_text_readback:
+    let label = @["1   SY rest of card one", repeat(' ', 48) & "C and more"]
+    let umlaut = @["\xE4 and more"]
+    proc noFile(path: string, msgPart: string, openIt: proc () {.closure.}) =
+      let n = fileCount(tmp)
+      var raised = false
+      try:
+        openIt()
+      except ValueError as e:
+        raised = true
+        doAssert msgPart in e.msg, e.msg
+      doAssert raised, path
+      doAssert not fileExists(path), path
+      doAssert fileCount(tmp) == n, path
+      for kind, p in walkDir(tmp):
+        doAssert not p.endsWith(".tmp"), p
+    let labelPath = tmp / "label_ascii.sgy"
+    noFile(labelPath, "tape label", proc () =
+      discard openSeismicWriter(labelPath, SegyOutputOptions(
+        textEncoding: teAscii, fullText: label, fixCards: false)))
+    let labelFix = tmp / "label_ascii_fix.sgy"
+    noFile(labelFix, "tape label", proc () =
+      discard openSeismicWriter(labelFix, SegyOutputOptions(
+        textEncoding: teAscii, fullText: label, fixCards: true)))
+    let umlautPath = tmp / "umlaut.sgy"
+    noFile(umlautPath, "ASCII", proc () =
+      discard openSeismicWriter(umlautPath, SegyOutputOptions(
+        textEncoding: teEbcdic, fullText: umlaut, fixCards: false)))
+    let umlautFix = tmp / "umlaut_fix.sgy"
+    noFile(umlautFix, "ASCII", proc () =
+      discard openSeismicWriter(umlautFix, SegyOutputOptions(
+        textEncoding: teEbcdic, fullText: umlaut, fixCards: true)))
+    let beforeMem = fileCount(tmp)
+    noFile(tmp / "mem_label_unused.sgy", "tape label", proc () =
+      discard openSeismicWriterBytes(SegyOutputOptions(
+        textEncoding: teAscii, fullText: label, fixCards: true)))
+    noFile(tmp / "mem_umlaut_unused.sgy", "ASCII", proc () =
+      discard openSeismicWriterBytes(SegyOutputOptions(
+        textEncoding: teEbcdic, fullText: umlaut, fixCards: false)))
+    doAssert fileCount(tmp) == beforeMem
+    let srcA = tmp / "src_ascii_rb.sgy"
+    writeOne(srcA, SegyOutputOptions(textEncoding: teAscii, text: @["SOURCE"]))
+    let srcE = tmp / "src_ebcdic_rb.sgy"
+    writeOne(srcE, SegyOutputOptions(textEncoding: teEbcdic, text: @["SOURCE"]))
+    var fa = openSeismic(srcA)
+    let likeLabel = tmp / "like_label.sgy"
+    noFile(likeLabel, "tape label", proc () =
+      discard openSeismicWriter(likeLabel, like = fa, fullText = label, fixCards = true))
+    noFile(tmp / "like_mem_label_unused.sgy", "tape label", proc () =
+      discard openSeismicWriterBytes(fa, fullText = label, fixCards = false))
+    fa.close()
+    var fe = openSeismic(srcE)
+    let likeUmlaut = tmp / "like_umlaut.sgy"
+    noFile(likeUmlaut, "ASCII", proc () =
+      discard openSeismicWriter(likeUmlaut, like = fe, fullText = umlaut, fixCards = false))
+    noFile(tmp / "like_mem_umlaut_unused.sgy", "ASCII", proc () =
+      discard openSeismicWriterBytes(fe, fullText = umlaut, fixCards = true))
+    fe.close()
 
 when isMainModule: main()
