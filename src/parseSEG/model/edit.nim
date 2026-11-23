@@ -47,8 +47,9 @@
 ##
 ## The SEG-Y textual header is not one of those blocks. `replaceTextHeader`
 ## replaces its 3200 bytes in place, after a tape label when the file has
-## one, journaled like a field edit. More than 40 lines, or a line longer
-## than 80 characters, raises `ValueError` before any byte changes.
+## one, journaled like a field edit. More than 40 lines, a line longer than
+## 80 characters, or an encoding the reader would not detect, raises
+## `ValueError` before any byte changes.
 ##
 ## The journal is NIF, one entry per line, so it can be read back even when
 ## the last line was cut short:
@@ -1032,12 +1033,14 @@ func textualHeaderBytes(lines: openArray[string], encoding: TextEncoding): seq[b
     at += CardWidth
   encodeText(text, encoding)
 
-proc storeTextHeader(ed: var HeaderEditor, bytes: openArray[byte], encoding: TextEncoding) =
+proc storeTextHeader(ed: var HeaderEditor, bytes: openArray[byte]) =
   # The index's copy, so `textHeader` shows the edit without a reopen.
-  # `encoding` is the one written: detection can disagree with a forced set.
-  var h = decodeTextHeader(bytes)
-  h.encoding = encoding
-  ed.file.mindex.segy.text = h
+  # The bytes were checked to detect as the encoding written, so this agrees
+  # with a reopen.
+  ed.file.mindex.segy.text = decodeTextHeader(bytes)
+
+func textEncodingName(enc: TextEncoding): string =
+  if enc == teEbcdic: "EBCDIC" else: "ASCII"
 
 proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
     encoding: Option[TextEncoding] = none(TextEncoding)): bool =
@@ -1045,7 +1048,9 @@ proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
   ## the file has one) with up to 40 lines of up to 80 characters, each padded
   ## with spaces and missing lines left blank. `encoding` none keeps the
   ## file's present encoding; `some(teEbcdic)` or `some(teAscii)` forces one.
-  ## Cards 39 and 40 are whatever `lines` says. Flushes an open batch, as
+  ## An encoding the reader would not detect, forced or the file's own, raises
+  ## `ValueError` before any write. Cards 39 and 40 are whatever `lines` says.
+  ## Flushes an open batch, as
   ## `beginBatch` documents for `setFileField`. Journaled like a field edit,
   ## so `rollbackJournal` undoes it. Extended textual headers, the binary
   ## header and traces are left alone. Raises `ValueError` for more lines or
@@ -1058,13 +1063,17 @@ proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
     return ed.refuseName("text", "not a SEG-Y file", Location(file: ed.file.path))
   let enc = if encoding.isSome: encoding.get else: ed.file.index.segy.text.encoding
   let bytes = textualHeaderBytes(lines, enc)
+  let detected = detectTextEncoding(bytes)
+  if detected != enc:
+    raise newException(ValueError, "text header: written as " & textEncodingName(enc) &
+      " it would be read back as " & textEncodingName(detected) & "; start line 1 with C")
   let at = int64(ed.file.index.segy.tapeLabel.len)
   let before = ed.edits
   let missed = ed.unwritten
   result = ed.writeBytes(at, bytes, "text", Location(file: ed.file.path, field: "text"))
   if result and ed.batch and not ed.flushBatch(): return false
   if result and ed.unwritten > missed: return false
-  if result and ed.edits != before: ed.storeTextHeader(bytes, enc)
+  if result and ed.edits != before: ed.storeTextHeader(bytes)
 
 # ------------------------------------------------ journal on an open editor --
 

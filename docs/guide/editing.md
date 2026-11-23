@@ -63,11 +63,13 @@ The SEG-Y textual header is not a named field. `replaceTextHeader(ed, lines)` re
 80 characters. Shorter lines and missing lines are padded with spaces. The caller gives the
 full text: cards 39 and 40 are not rewritten. By default the bytes are written in the
 encoding the file already uses (EBCDIC or ASCII); `some(teEbcdic)` or `some(teAscii)` forces
-one (`import std/options`). More than 40 lines, or a line longer than 80 characters, raises
-`ValueError` before any byte changes. Another standard is refused (`false`, the reason in
-`ed.log`). An open batch is flushed first; a write that does not reach the file returns
-`false` and leaves the open view unchanged. The edit is journaled, so `rollbackJournal`
-undoes it. Extended textual headers, the binary header and traces are left alone.
+one (`import std/options`). An encoding the reader would not detect, forced or the file's
+own, raises `ValueError` before any write (start line 1 with `C`). More than 40 lines, or a
+line longer than 80 characters, raises `ValueError` before any byte changes. Another standard
+is refused (`false`, the reason in `ed.log`). An open batch is flushed first; a write that
+does not reach the file returns `false` and leaves the open view unchanged. The edit is
+journaled, so `rollbackJournal` undoes it. Extended textual headers, the binary header and
+traces are left alone.
 
 ```nim
 import std/os

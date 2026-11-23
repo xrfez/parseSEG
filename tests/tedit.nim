@@ -842,4 +842,55 @@ proc main*() =
       doAssert ed.log.has("did not reach the file", sevError), $ed.log
       doAssertRaises(IOError): ed.close()
 
+  block replace_text_header_rejects_an_encoding_the_reader_would_not_detect:
+    # Seen fail first with the detection check skipped: the forced calls
+    # returned true and wrote the header (file and journal changed).
+    proc expectReject(path: string, line: string, enc: Option[TextEncoding],
+        written, readBack: string) =
+      let journal = path & ".edits.nif"
+      if fileExists(journal): removeFile(journal)
+      let original = readBytes(path)
+      var ed = openEditor(path)
+      var msg = ""
+      try:
+        discard ed.replaceTextHeader([line], enc)
+        doAssert false, "expected ValueError"
+      except ValueError as e:
+        msg = e.msg
+      doAssert ("written as " & written) in msg and ("read back as " & readBack) in msg, msg
+      ed.close()
+      doAssert readBytes(path) == original
+      doAssert editLines(journal) == 0
+
+    let ebcdic = tmp / "text_detect_ebcdic.sgy"
+    writeTinySegy(ebcdic, teEbcdic)
+    expectReject(ebcdic, $char(0xE4), some(teEbcdic), "EBCDIC", "ASCII")
+    expectReject(ebcdic, $char(0xE4), none(TextEncoding), "EBCDIC", "ASCII")
+
+    let ascii = tmp / "text_detect_ascii.sgy"
+    writeTinySegy(ascii, teAscii)
+    expectReject(ascii, $char(0xC3), some(teAscii), "ASCII", "EBCDIC")
+
+    proc roundTrip(encoding: TextEncoding) =
+      let path = tmp / ("text_round_" & $encoding & ".sgy")
+      writeTinySegy(path, encoding)
+      let journal = path & ".edits.nif"
+      if fileExists(journal): removeFile(journal)
+      let lines = ["C 1 replaced textual header"]
+      var ed = openEditor(path)
+      doAssert ed.replaceTextHeader(lines)
+      doAssert "replaced textual header" in ed.file.textHeader
+      doAssert ed.rollbackJournal().len == 0
+      doAssert "replaced textual header" notin ed.file.textHeader
+      doAssert ed.applyJournal().len == 0
+      doAssert "replaced textual header" in ed.file.textHeader
+      ed.close()
+      var f = openSeismic(path)
+      doAssert f.textHeader.split('\n')[0].startsWith(lines[0])
+      doAssert f.index.segy.text.encoding == encoding
+      f.close()
+
+    roundTrip(teEbcdic)
+    roundTrip(teAscii)
+
 when isMainModule: main()
