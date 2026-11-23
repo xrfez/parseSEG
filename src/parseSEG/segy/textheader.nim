@@ -8,6 +8,7 @@
 
 import std/strutils
 import ../common/ebcdic
+import ../private/textlabel
 from ./binheader import SegyRevision
 
 const
@@ -144,6 +145,7 @@ type
     thfBadCharacter ## A character the encoding cannot hold.
     thfRevisionCard ## Card 39 does not name the revision (Rev 1 and later).
     thfEndMarker ## Card 40 is not an end marker (Rev 1 and later).
+    thfReadBack ## As written, the reader would misread the header.
 
   TextHeaderProblem* = object
     ## One fault in a textual header, as `checkTextHeader` reports it.
@@ -172,6 +174,37 @@ func badColumn(line: string, encoding: TextEncoding): int =
       return n + 1
   0
 
+func paddedCards(lines: openArray[string]): string =
+  # Same padding as the writer's fillFullText: spaces, then each line's
+  # columns, cut at 80. Missing cards stay blank.
+  result = newString(TextHeaderSize)
+  for i in 0 ..< result.len: result[i] = ' '
+  let n = min(lines.len, CardCount)
+  for i in 0 ..< n:
+    let line = lines[i]
+    let start = i * CardWidth
+    let take = min(line.len, CardWidth)
+    for j in 0 ..< take: result[start + j] = line[j]
+
+func readBackName(encoding: TextEncoding): string =
+  case encoding
+  of teAscii: "ASCII"
+  of teEbcdic: "EBCDIC"
+
+func readBackFault(lines: openArray[string], encoding: TextEncoding): string =
+  # "" when the reader's own detection would keep this encoding and not
+  # assume a tape label. A label wins when both would apply.
+  let bytes = encodeText(paddedCards(lines), encoding)
+  if bytes.len > LabelBytes and wouldTakeTapeLabel(
+      bytes.toOpenArray(0, LabelBytes - 1),
+      bytes.toOpenArray(LabelBytes, bytes.high)):
+    return "line 1 should start with C: as written, this header would be " &
+      "taken for a tape label"
+  let detected = detectTextEncoding(bytes)
+  if detected != encoding:
+    return "line 1 should start with C: as written, this header would be " &
+      "read back as " & readBackName(detected)
+
 func checkTextHeader*(lines: openArray[string], revision: SegyRevision,
     encoding = teEbcdic): seq[TextHeaderProblem] {.raises: [].} =
   ## Reports every fault in `lines` as a textual file header of `revision`
@@ -184,20 +217,33 @@ func checkTextHeader*(lines: openArray[string], revision: SegyRevision,
   ## for Rev 1 and later, card 39 not containing the revision name the
   ## standard writes (`SEG Y REV1`, or `SEG-Y_REV` plus `major.minor`) and
   ## card 40 containing neither `END TEXTUAL HEADER` nor `END EBCDIC`.
+  ## When there is no length or character fault, the cards are padded and
+  ## encoded as a writer would (the given encoding, the cards as given) and
+  ## checked with the reader's own detection. A different detected encoding,
+  ## or a block the reader would take for a tape label, is `thfReadBack` on
+  ## line 1.
+  var blocked = false
   if lines.len > CardCount:
     result.add TextHeaderProblem(line: lines.len, kind: thfTooManyLines,
       message: "the textual header has " & $lines.len & " lines, not at most 40")
+    blocked = true
   for i, line in lines:
     let n = i + 1
     if line.len > CardWidth:
       result.add TextHeaderProblem(line: n, kind: thfLineTooLong,
         message: "textual header line " & $n & " has " & $line.len &
           " characters, not at most 80")
+      blocked = true
     let col = badColumn(line, encoding)
     if col > 0:
       result.add TextHeaderProblem(line: n, kind: thfBadCharacter,
         message: "textual header line " & $n & " column " & $col &
           " holds a byte " & $encoding & " cannot encode")
+      blocked = true
+  if not blocked:
+    let msg = readBackFault(lines, encoding)
+    if msg.len > 0:
+      result.add TextHeaderProblem(line: 1, kind: thfReadBack, message: msg)
   if revision.major >= 1:
     let name = standardRevisionText(revision)
     let card39 = if lines.len >= 39: lines[38] else: ""

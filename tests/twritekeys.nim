@@ -382,6 +382,37 @@ proc main*() =
     doAssert srcLines == @["hello"]
     discard checkTextHeader(@["\x00".repeat(100)], rev21, teAscii)
 
+  # Seen to fail first: checkTextHeader reported no thfReadBack (the read-back
+  # check was absent, so both misread headers came back clean).
+  block check_text_readback:
+    let rev0 = SegyRevision()
+    let label = @[
+      "1   SY rest of card one",
+      repeat(' ', 48) & "C and more"]
+    let asLabel = checkTextHeader(label, rev0, teAscii)
+    doAssert asLabel.len == 1, $asLabel.len
+    doAssert asLabel[0].kind == thfReadBack and asLabel[0].line == 1
+    doAssert "tape label" in asLabel[0].message, asLabel[0].message
+    doAssert asLabel[0].message == "line 1 should start with C: as written, " &
+      "this header would be taken for a tape label"
+    let asAscii = checkTextHeader(@["\xE4 and more"], rev0, teEbcdic)
+    doAssert asAscii.len == 1, $asAscii.len
+    doAssert asAscii[0].kind == thfReadBack and asAscii[0].line == 1
+    doAssert asAscii[0].message == "line 1 should start with C: as written, " &
+      "this header would be read back as ASCII", asAscii[0].message
+    doAssert checkTextHeader(@["C 1 client"], rev0, teAscii).len == 0
+    doAssert checkTextHeader(@["C 1 client"], rev0, teEbcdic).len == 0
+    doAssert checkTextHeader(@["Hello free text"], rev0, teAscii).len == 0
+    doAssert checkTextHeader(@["Hello free text"], rev0, teEbcdic).len == 0
+    let longLabel = @[
+      "1   SY " & 'x'.repeat(80),
+      repeat(' ', 48) & "C and more"]
+    for p in checkTextHeader(longLabel, rev0, teAscii):
+      doAssert p.kind != thfReadBack
+    let rev1 = checkTextHeader(@["C 1 client"], SegyRevision(major: 1), teAscii)
+    doAssert rev1.len == 2
+    for p in rev1: doAssert p.kind != thfReadBack
+
   # Seen to fail first: textFault returned "" so an over-long fullText did
   # not raise, and fillFullText did not store the lines (byte 0 differed).
   block full_textual_header:
