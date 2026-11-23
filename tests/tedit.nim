@@ -1,6 +1,6 @@
 ## In-place header edits with an undo journal (task 6.6).
 
-import std/[assertions, os, strutils]
+import std/[assertions, options, os, strutils]
 
 import parseSEG/common/[diagnostics, endians]
 
@@ -32,6 +32,51 @@ proc diffCount(a, b: seq[byte]): int =
 proc editLines(journal: string): int =
   for l in lines(journal):
     if l.startsWith("(edit "): inc result
+
+proc writeTinySegy(path: string, encoding: TextEncoding, label = false) =
+  ## One-trace Rev 1 SEG-Y: known job id, one extended stanza, optional tape label.
+  var ext = initExtendedTextHeader()
+  ext.addText("SEG", "Notes", "keep-me-stanza")
+  var f = SegyFile(text: initTextHeader(encoding), byteOrder: boBig, format: some(sfFloat32),
+    revision: SegyRevision(major: 1), extended: ext, trailer: initExtendedTextHeader())
+  if label:
+    var lab = newSeq[byte](TapeLabelSize)
+    let text = align("1", 4) & "SY" & repeat(' ', TapeLabelSize - 6)
+    doAssert text.len == TapeLabelSize
+    for i, c in text: lab[i] = byte(c)
+    f.tapeLabel = lab
+  f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 1, samplesPerTrace: 4,
+    sampleInterval: 1000, measurementSystem: 1, jobId: 77,
+    numExtTextHeaders: int16(ext.recordCount))
+  let sink = openDiskSink(path)
+  var w = openSegyWriter(sink, f, initSegyWriteOptions(f, lenient = true))
+  var t = SegyTrace(numSamples: 4, sampleInterval: 1000, samples: newSeq[byte](16))
+  t.samples[0] = 0xAB
+  t.header = SegyTraceHeader(fieldRecord: 9, traceNumberInField: 1, numSamples: 4,
+    sampleInterval: 1000)
+  w.writeTrace(t)
+  w.close()
+  sink.close()
+
+proc paddedCards(lines: openArray[string]): string =
+  result = repeat(' ', TextHeaderSize)
+  var at = 0
+  for line in lines:
+    for j, c in line: result[at + j] = c
+    at += CardWidth
+
+proc assertOutside(before, after: seq[byte], at, n: int) =
+  doAssert before.len == after.len
+  doAssert at >= 0 and at + n <= after.len
+  for i in 0 ..< before.len:
+    if i < at or i >= at + n:
+      doAssert before[i] == after[i], "byte " & $i & " outside the textual header changed"
+  doAssert after[at ..< at + n] != before[at ..< at + n]
+
+proc textOffset(path: string): int =
+  var f = openSeismic(path)
+  result = f.index.segy.tapeLabel.len
+  f.close()
 
 proc segyWithExt1(path: string) =
   ## A Rev 2.1 SEG-Y file whose traces carry Trace Header Extension 1.
@@ -625,5 +670,137 @@ proc main*() =
     ed.close()
     doAssert ed.log.len == 1002 and ed.log.has("2001 refused edits were not logged", sevInfo)
     doAssert rollbackJournal(path, path & ".edits.nif").len == 0 and readBytes(path) == original
+
+  # Seen fail first with the write skipped (replaceTextHeader returned true and
+  # changed nothing): the read-back text and the 3200-byte window stayed the
+  # old header.
+  block replace_text_header_ebcdic_ascii_label_and_undo:
+    let lines = ["C 1 replaced textual header", "second line"]
+    let path = tmp / "text_ebcdic.sgy"
+    writeTinySegy(path, teEbcdic)
+    let journal = path & ".edits.nif"
+    if fileExists(journal): removeFile(journal)
+    let original = readBytes(path)
+    let at = textOffset(path)
+    doAssert at == 0
+    var ed = openEditor(path)
+    doAssert ed.replaceTextHeader(lines)
+    doAssert "replaced textual header" in ed.file.textHeader
+    doAssert ed.edits == 1
+    doAssert ed.rollbackJournal().len == 0
+    doAssert "replaced textual header" notin ed.file.textHeader
+    doAssert ed.applyJournal().len == 0
+    doAssert "replaced textual header" in ed.file.textHeader
+    ed.close()
+    let edited = readBytes(path)
+    assertOutside(original, edited, at, TextHeaderSize)
+    doAssert edited[at ..< at + TextHeaderSize] == encodeText(paddedCards(lines), teEbcdic)
+    doAssert editLines(journal) == 1
+    var f = openSeismic(path)
+    let got = f.textHeader.split('\n')
+    doAssert got.len == CardCount
+    doAssert got[0] == lines[0] & repeat(' ', CardWidth - lines[0].len)
+    doAssert got[1] == lines[1] & repeat(' ', CardWidth - lines[1].len)
+    doAssert got[2] == repeat(' ', CardWidth)
+    doAssert got[38] == repeat(' ', CardWidth) and got[39] == repeat(' ', CardWidth)
+    doAssert f.fileField("binary.jobId").intVal == 77
+    doAssert "keep-me-stanza" in f.extendedTextHeaders[0]
+    doAssert f.traceField(0, "trace.fieldRecord").intVal == 9
+    f.close()
+    doAssert rollbackJournal(path, journal).len == 0
+    doAssert readBytes(path) == original
+
+    let ascii = tmp / "text_ascii.sgy"
+    writeTinySegy(ascii, teAscii)
+    let aj = ascii & ".edits.nif"
+    if fileExists(aj): removeFile(aj)
+    let a0 = readBytes(ascii)
+    doAssert a0[0] == byte('C')
+    var ea = openEditor(ascii)
+    doAssert ea.replaceTextHeader(lines) # keeps the file's ASCII
+    ea.close()
+    let a1 = readBytes(ascii)
+    assertOutside(a0, a1, 0, TextHeaderSize)
+    doAssert a1[0 ..< TextHeaderSize] == encodeText(paddedCards(lines), teAscii)
+    var fa = openSeismic(ascii)
+    doAssert fa.textHeader.split('\n')[0].startsWith(lines[0])
+    fa.close()
+
+    let forced = tmp / "text_forced.sgy"
+    writeTinySegy(forced, teEbcdic)
+    let fj = forced & ".edits.nif"
+    if fileExists(fj): removeFile(fj)
+    let f0 = readBytes(forced)
+    var ef = openEditor(forced)
+    doAssert ef.replaceTextHeader(["C 1 ascii forced"], some(teAscii))
+    ef.close()
+    let f1 = readBytes(forced)
+    assertOutside(f0, f1, 0, TextHeaderSize)
+    doAssert f1[0] == byte('C')
+    var ff = openSeismic(forced)
+    doAssert ff.textHeader.split('\n')[0].startsWith("C 1 ascii forced")
+    ff.close()
+
+    let labelled = tmp / "text_label.sgy"
+    writeTinySegy(labelled, teEbcdic, label = true)
+    let lj = labelled & ".edits.nif"
+    if fileExists(lj): removeFile(lj)
+    let l0 = readBytes(labelled)
+    let lat = textOffset(labelled)
+    doAssert lat == TapeLabelSize
+    var el = openEditor(labelled)
+    doAssert el.replaceTextHeader(lines)
+    el.close()
+    let l1 = readBytes(labelled)
+    assertOutside(l0, l1, lat, TextHeaderSize)
+    doAssert l1[lat ..< lat + TextHeaderSize] == encodeText(paddedCards(lines), teEbcdic)
+    var fl = openSeismic(labelled)
+    doAssert fl.textHeader.split('\n')[0].startsWith(lines[0])
+    doAssert fl.index.segy.tapeLabel.len == TapeLabelSize
+    fl.close()
+
+    var full = newSeq[string](CardCount)
+    for i in 0 ..< CardCount: full[i] = alignLeft($i, CardWidth)
+    let wide = tmp / "text_full.sgy"
+    writeTinySegy(wide, teAscii)
+    var ew = openEditor(wide)
+    doAssert ew.replaceTextHeader(full)
+    doAssert ew.file.textHeader.split('\n')[39] == full[39]
+    ew.close()
+
+  block replace_text_header_rejects_bad_lines_and_other_kinds:
+    let path = tmp / "text_reject.sgy"
+    writeTinySegy(path, teEbcdic)
+    let journal = path & ".edits.nif"
+    if fileExists(journal): removeFile(journal)
+    let original = readBytes(path)
+    var ed = openEditor(path)
+    var many = newSeq[string](CardCount + 1)
+    doAssertRaises(ValueError):
+      discard ed.replaceTextHeader(many)
+    doAssertRaises(ValueError):
+      discard ed.replaceTextHeader([repeat('x', CardWidth + 1)])
+    ed.close()
+    doAssert readBytes(path) == original
+    doAssert editLines(journal) == 0
+    ed = openEditor(path)
+    doAssert ed.replaceTextHeader([repeat('y', CardWidth)])
+    ed.close()
+    doAssert editLines(journal) == 1
+    doAssert readBytes(path) != original
+    doAssert rollbackJournal(path, journal).len == 0
+    doAssert readBytes(path) == original
+
+    let seg2 = tmp / "text_seg2.sg2"
+    copyFile(demoDir() / "line.sg2", seg2)
+    let sj = seg2 & ".edits.nif"
+    if fileExists(sj): removeFile(sj)
+    let s0 = readBytes(seg2)
+    var es = openEditor(seg2)
+    doAssert not es.replaceTextHeader(["C 1 no"])
+    doAssert es.log.has("not a SEG-Y file", sevError)
+    es.close()
+    doAssert readBytes(seg2) == s0
+    doAssert editLines(sj) == 0
 
 when isMainModule: main()

@@ -172,10 +172,17 @@ read-write and keeps its index (keys joined by `applySurvey` included), no secon
 `ValueError` for a closed file, a demultiplexed copy, or a file whose size changed since it
 was opened. `release(ed): SeismicFile` ends the session (as `close`) and returns the file,
 still mapped and as edited.
+`replaceTextHeader(ed, lines, encoding = none(TextEncoding))` replaces the 3200-byte textual
+header of a SEG-Y file (after a tape label, when the file has one) with up to 40 lines of
+up to 80 characters, padded with spaces. `encoding` none keeps the file's present encoding;
+`some(teEbcdic)` or `some(teAscii)` forces one. Raises `ValueError` for more lines or a
+longer line, before any byte changes; another standard is refused (false, a diagnostic in
+`log`). Journaled, so `rollbackJournal` undoes it. Extended textual headers, the binary
+header and traces are left alone; cards 39 and 40 are whatever `lines` says.
 `rollbackJournal(path, journal)` / `applyJournal(path, journal)` undo or redo them;
 `readJournal(journal)` lists its edits (`JournalEdit`, oldest first).
 `rollbackJournal(ed)` / `applyJournal(ed)` do the same on the editor's open file and re-read
-the index's copies of the headers (SEG-Y binary, SEG-D GH#1 and source headers).
+the index's copies of the headers (SEG-Y textual and binary, SEG-D GH#1 and source headers).
 Stored keys follow the edits (Phase 16): each trace, record or keyed binary field edit
 (`binary.sampleInterval`, `extSampleInterval`, `timeBasisCode`) refreshes the affected
 traces' keys once its bytes reach the map (a batch: at `endBatch`), and `keysRevision` goes

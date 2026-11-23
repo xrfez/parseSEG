@@ -71,8 +71,8 @@ export headerfields.fieldNames, headerfields.fieldByName, headerfields.traceFiel
 export edit.HeaderEditor, edit.openEditor, edit.close, edit.release, edit.file, edit.log,
   edit.journalPath, edit.edits, edit.beginBatch, edit.endBatch, edit.currentTraceField,
   edit.currentRecordField, edit.currentFileField, edit.setTraceField, edit.setRecordField,
-  edit.setFileField, edit.JournalEdit, edit.readJournal, edit.rollbackJournal,
-  edit.applyJournal
+  edit.setFileField, edit.replaceTextHeader, edit.JournalEdit, edit.readJournal,
+  edit.rollbackJournal, edit.applyJournal
 export gathers, prefetch, headernif, summary, headerlist, sorting, writefile, tracerows,
   statics
 

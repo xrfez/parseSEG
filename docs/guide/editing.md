@@ -53,7 +53,33 @@ What the editor refuses, and why:
   (`openEditor` raises `ValueError`: convert to a demultiplexed file first), tape;
 - blocks without editable fields. The editor names `trace`, `ext1` (SEG-Y and SEG-D),
   `binary` (SEG-Y), `gh1`, and for SEG-D Rev 1/2 the source headers `gh3`, `gh4`, ...
-  (`setRecordField`).
+  (`setRecordField`). The textual header is not a field block; `replaceTextHeader`
+  replaces it whole.
+
+## The textual header
+
+The SEG-Y textual header is not a named field. `replaceTextHeader(ed, lines)` replaces its
+3200 bytes in place, after a tape label when the file has one, with up to 40 lines of up to
+80 characters. Shorter lines and missing lines are padded with spaces. The caller gives the
+full text: cards 39 and 40 are not rewritten. By default the bytes are written in the
+encoding the file already uses (EBCDIC or ASCII); `some(teEbcdic)` or `some(teAscii)` forces
+one (`import std/options`). More than 40 lines, or a line longer than 80 characters, raises
+`ValueError` before any byte changes. Another standard is refused (`false`, the reason in
+`ed.log`). The edit is journaled, so `rollbackJournal` undoes it. Extended textual headers,
+the binary header and traces are left alone.
+
+```nim
+import std/os
+import parseSEG
+
+copyFile("survey.sgy", "text.sgy")
+var ed = openEditor("text.sgy")
+doAssert ed.replaceTextHeader(["C 1 replaced textual header"])
+ed.close()
+var f = openSeismic("text.sgy")
+doAssert f.textHeader[0 .. 26] == "C 1 replaced textual header"
+f.close()
+```
 
 ## Editing a file that is already open
 

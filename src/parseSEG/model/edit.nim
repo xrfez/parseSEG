@@ -45,6 +45,11 @@
 ##   layout of its record), and via `setRecordField` `gh1` and, for Rev 1/2,
 ##   `gh3`, `gh4`, ... (source headers).
 ##
+## The SEG-Y textual header is not one of those blocks. `replaceTextHeader`
+## replaces its 3200 bytes in place, after a tape label when the file has
+## one, journaled like a field edit. More than 40 lines, or a line longer
+## than 80 characters, raises `ValueError` before any byte changes.
+##
 ## The journal is NIF, one entry per line, so it can be read back even when
 ## the last line was cut short:
 ##
@@ -1008,18 +1013,71 @@ proc setRecordField*(ed: var HeaderEditor, record: int, name: string,
   ## `setRecordField` with a plain number or text.
   ed.setRecordField(record, name, toFieldValue(value))
 
+proc checkTextLines(lines: openArray[string]) =
+  # `ValueError` before a textual-header edit when `lines` cannot be 40 cards.
+  if lines.len > CardCount:
+    raise newException(ValueError, "the textual header holds " & $CardCount &
+      " lines, not " & $lines.len)
+  for line in lines:
+    if line.len > CardWidth:
+      raise newException(ValueError, "a textual header line holds " & $CardWidth &
+        " characters, not " & $line.len)
+
+func textualHeaderBytes(lines: openArray[string], encoding: TextEncoding): seq[byte] =
+  # 40 cards of 80 columns: each given line padded with spaces, the rest blank.
+  var text = repeat(' ', TextHeaderSize)
+  var at = 0
+  for line in lines:
+    for j, c in line: text[at + j] = c
+    at += CardWidth
+  encodeText(text, encoding)
+
+proc storeTextHeader(ed: var HeaderEditor, bytes: openArray[byte], encoding: TextEncoding) =
+  # The index's copy, so `textHeader` shows the edit without a reopen.
+  # `encoding` is the one written: detection can disagree with a forced set.
+  var h = decodeTextHeader(bytes)
+  h.encoding = encoding
+  ed.file.mindex.segy.text = h
+
+proc replaceTextHeader*(ed: var HeaderEditor, lines: openArray[string],
+    encoding: Option[TextEncoding] = none(TextEncoding)): bool =
+  ## Replaces the 3200-byte SEG-Y textual header (after a tape label, when
+  ## the file has one) with up to 40 lines of up to 80 characters, each padded
+  ## with spaces and missing lines left blank. `encoding` none keeps the
+  ## file's present encoding; `some(teEbcdic)` or `some(teAscii)` forces one.
+  ## Cards 39 and 40 are whatever `lines` says. Journaled like a field edit,
+  ## so `rollbackJournal` undoes it. Extended textual headers, the binary
+  ## header and traces are left alone. Raises `ValueError` for more lines or
+  ## a longer line, before any byte changes. Another standard is refused
+  ## (false, a diagnostic in `log`), as is a write the editor cannot make.
+  checkTextLines(lines)
+  if ed.file.kind != skSegy:
+    return ed.refuseName("text", "not a SEG-Y file", Location(file: ed.file.path))
+  let enc = if encoding.isSome: encoding.get else: ed.file.index.segy.text.encoding
+  let bytes = textualHeaderBytes(lines, enc)
+  let at = int64(ed.file.index.segy.tapeLabel.len)
+  let before = ed.edits
+  result = ed.writeBytes(at, bytes, "text", Location(file: ed.file.path, field: "text"))
+  if result and ed.batch and not ed.flushBatch(): return false
+  if result and ed.edits != before: ed.storeTextHeader(bytes, enc)
+
 # ------------------------------------------------ journal on an open editor --
 
 proc reloadHeaders(ed: var HeaderEditor) =
-  # The index's copies of the headers a journal can touch (the SEG-Y binary
-  # header, SEG-D GH#1 and Rev 1/2 source headers) and the stored keys,
-  # re-read from the map after a replay.
+  # The index's copies of the headers a journal can touch (the SEG-Y textual
+  # and binary headers, SEG-D GH#1 and Rev 1/2 source headers) and the stored
+  # keys, re-read from the map after a replay.
   template ix: untyped = ed.file.mindex
   let mem = ed.file.unsafeMemory
   let size = ed.file.mappedSize
   var held: Hold
   case ix.kind
   of skSegy:
+    let textAt = int64(ix.segy.tapeLabel.len)
+    if textAt >= 0 and textAt + int64(TextHeaderSize) <= size:
+      ed.file.holdBytes(held, textAt, textAt + TextHeaderSize)
+      ix.segy.text = decodeTextHeader(mem.toOpenArray(int(textAt),
+        int(textAt) + TextHeaderSize - 1))
     let b = ix.locateBlock(hsFile, 0, "binary").blk
     if b.offset >= 0 and b.offset + b.size <= size:
       ed.file.holdBytes(held, b.offset, b.offset + b.size)
@@ -1076,8 +1134,9 @@ proc replayHere(ed: var HeaderEditor, undo: bool): DiagLog =
 proc rollbackJournal*(ed: var HeaderEditor): DiagLog =
   ## Undoes the editor's journal on its open file, as
   ## `rollbackJournal(path, journalPath)` does on disk, then re-reads the
-  ## index's copies of the edited headers and refreshes the stored keys
-  ## (bumping `keysRevision` when they change), so a viewer holding the
+  ## index's copies of the edited headers (SEG-Y textual and binary, SEG-D
+  ## GH#1 and source headers) and refreshes the stored keys (bumping
+  ## `keysRevision` when they change), so a viewer holding the
   ## editor sees the file as it was. A batch is written first; when its
   ## journal entries cannot be synced, nothing is undone (a fatal
   ## diagnostic). The journal keeps its entries: `applyJournal(ed)` redoes
