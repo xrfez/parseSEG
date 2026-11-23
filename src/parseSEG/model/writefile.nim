@@ -12,7 +12,8 @@
 ##
 ## `openSeismicWriter` takes the file-level headers from `like`: the SEG-Y
 ## tape label, textual, binary and extended textual headers and trailer; the
-## SEG-D storage unit label; the SEG-2 File Descriptor Block. `writeTrace`
+## SEG-D storage unit label; the SEG-2 File Descriptor Block. A non-empty
+## `fullText` replaces the SEG-Y textual header. `writeTrace`
 ## copies trace `trace` of `src` (usually `like` itself) with its headers
 ## unchanged, except for what the new samples change:
 ##
@@ -107,7 +108,15 @@ type
       ## Textual header lines, cards 1-38 (longer ones are cut to the card,
       ## characters outside ASCII 32-126 become spaces). Empty: one card
       ## naming the writer. Cards 39 and 40 are the revision and
-      ## `END TEXTUAL HEADER`.
+      ## `END TEXTUAL HEADER`. Ignored when `fullText` is set.
+    fullText*: seq[string]
+      ## The whole textual header: up to 40 lines of up to 80 characters,
+      ## written exactly as given and padded with spaces. No card prefix is
+      ## added. Non-empty replaces `text`. Empty means unset.
+    fixCards*: bool = true
+      ## With a non-empty `fullText`, true (the default) sets cards 39 and 40
+      ## to the standard revision and end-marker strings for `revision`.
+      ## False writes `fullText` untouched. Ignored when `fullText` is empty.
     traceSorting*: int16 = 0 ## Binary 3229-3230: 1 as recorded, 2 CDP ensembles, 4 stack, ...
     measurementSystem*: int16 = 0 ## Binary 3255-3256: 1 metres, 2 feet, 0 unknown.
 
@@ -405,7 +414,31 @@ func definedIn(f: SegdSampleFormat, r: SegdRevision): bool =
   elif f == sd8080: r.major >= 3
   else: true
 
-proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat) =
+func textFault(lines: openArray[string], rev: SegyRevision, encoding: TextEncoding): string =
+  # The first length or character fault, or "" when `lines` may be written.
+  for p in checkTextHeader(lines, rev, encoding):
+    if p.kind in {thfTooManyLines, thfLineTooLong, thfBadCharacter}:
+      return p.message
+
+proc fillFullText(h: var SegyTextHeader, lines: openArray[string], rev: SegyRevision,
+    fixCards: bool) =
+  # `lines` already fit. Each line is written as given and padded with spaces.
+  var body = newString(TextHeaderSize)
+  for i in 0 ..< TextHeaderSize: body[i] = ' '
+  let n = min(lines.len, CardCount)
+  for i in 0 ..< n:
+    let line = lines[i]
+    let start = i * CardWidth
+    let take = min(line.len, CardWidth)
+    for j in 0 ..< take: body[start + j] = line[j]
+  h.text = body
+  if fixCards:
+    h.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
+      elif rev.major == 1: "SEG Y REV1" else: ""))
+    h.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+
+proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat,
+    fullText: seq[string], fixCards: bool) =
   var f = like.index.segy
   let fmt = if format == stKeep: f.format else: some(format.toSampleFormat)
   if fmt.isNone:
@@ -421,6 +454,7 @@ proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat) =
   f.binary.numTraces = 0 # set by `close` when the input declares one
   s.segyFixed = f.revision.major >= 1 and f.binary.fixedLengthTraces == 1
   s.segyCount = -1
+  if fullText.len > 0: fillFullText(f.text, fullText, f.revision, fixCards)
   # Validate now; the real writer opens at the first trace.
   discard openSegyWriter(NullSink(name: s.path), f, initSegyWriteOptions(f))
   s.segyFile = f
@@ -447,9 +481,15 @@ proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
   s.segd = openSegdWriter(s.sink, SegdWriteOptions(), like.index.segdLabel)
 
 proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTargetFormat,
-    segdFormat: SegdTargetFormat, seg2Format: Seg2TargetFormat): SeismicWriter =
+    segdFormat: SegdTargetFormat, seg2Format: Seg2TargetFormat, fullText: seq[string],
+    fixCards: bool): SeismicWriter =
   # `openSeismicWriter(path, like)` and `openSeismicWriterBytes(like)`; see there.
   let kind = like.kind
+  if fullText.len > 0:
+    if kind != skSegy:
+      refuse("a full textual header is only written for SEG-Y, not " & $kind)
+    let fault = textFault(fullText, like.index.segy.revision, like.index.segy.text.encoding)
+    if fault.len > 0: refuse(fault)
   if kind == skUnknown: refuse("the file " & like.path & " is not SEG-Y, SEG-D or SEG-2")
   if like.demuxPath.len > 0:
     refuse(like.path & " holds multiplexed SEG-D; convert it to a demultiplexed file " &
@@ -468,7 +508,7 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
     tmp: if memory: "" else: createTempFor(path)))
   try:
     case kind
-    of skSegy: result.s.openSegy(like, segyFormat)
+    of skSegy: result.s.openSegy(like, segyFormat, fullText, fixCards)
     of skSegd: result.s.openSegd(like, segdFormat)
     of skSeg2:
       if seg2Format != s2tKeep: result.s.seg2Format = toSeg2Format(ord(seg2Format))
@@ -479,28 +519,36 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
     raise
 
 proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
-    segdFormat = tfKeep, seg2Format = s2tKeep): SeismicWriter =
+    segdFormat = tfKeep, seg2Format = s2tKeep, fullText: seq[string] = @[],
+    fixCards = true): SeismicWriter =
   ## A writer of a file at `path` in `like`'s standard, revision and byte
   ## order, with `like`'s file-level headers (see the module doc). The
   ## sample format is the input's unless `segyFormat`, `segdFormat` or
-  ## `seg2Format` (for `like`'s standard only) names one. Only `like`'s
+  ## `seg2Format` (for `like`'s standard only) names one. A non-empty
+  ## `fullText` replaces the SEG-Y textual header: up to 40 lines of up to
+  ## 80 characters, written as given and padded with spaces. `fixCards`
+  ## (true by default) then sets cards 39 and 40 to the standard strings for
+  ## the file's revision; false writes `fullText` untouched. Only `like`'s
   ## index is used, so it may be closed. Raises `ValueError` for an unrecognized or
   ## multiplexed SEG-D `like`, a format for another standard or one the
   ## revision lacks, SEG-D 8015 for traces whose sample count is not a
-  ## multiple of 4, or `path` being `like`'s file; `SegFormatError` for
+  ## multiple of 4, `path` being `like`'s file, `fullText` on a non-SEG-Y
+  ## `like`, or a `fullText` that `checkTextHeader` faults for length or
+  ## characters (before any file is created); `SegFormatError` for
   ## file headers the writer refuses; `IOError` when the output cannot be
   ## created.
-  openLike(path, false, like, segyFormat, segdFormat, seg2Format)
+  openLike(path, false, like, segyFormat, segdFormat, seg2Format, fullText, fixCards)
 
 proc openSeismicWriterBytes*(like: SeismicFile, name = "memory", segyFormat = stKeep,
-    segdFormat = tfKeep): SeismicWriter =
+    segdFormat = tfKeep, fullText: seq[string] = @[], fixCards = true): SeismicWriter =
   ## `openSeismicWriter(path, like)` that collects the file in memory:
   ## `finishBytes` returns its bytes, and nothing touches the disk. `name`
   ## is the display name in diagnostics and `path`. SEG-Y and SEG-D only
   ## (`ValueError` for SEG-2 `like`: its writer needs a file); otherwise the
   ## same checks and refusals as the file writer, except those about the
-  ## output file. `like` may itself be a file in memory.
-  openLike(name, true, like, segyFormat, segdFormat, s2tKeep)
+  ## output file. `fullText` and `fixCards` are as for the file writer.
+  ## `like` may itself be a file in memory.
+  openLike(name, true, like, segyFormat, segdFormat, s2tKeep, fullText, fixCards)
 
 func textCard(s: string): string =
   # A line as card text: printable ASCII only, cut to the card after its prefix.
@@ -520,15 +568,22 @@ proc openNewSegy(path: string, memory: bool, opts: SegyOutputOptions): SeismicWr
     refuse("the 3-byte SEG-Y format " & $ord(fmt) & " cannot be pair-swapped")
   if rev.major < 2 and opts.byteOrder != boBig:
     refuse($opts.byteOrder & " output needs Rev 2 (only its byte-order marker declares it)")
-  if opts.text.len > 38: refuse("the textual header holds 38 lines of text, not " & $opts.text.len)
+  if opts.fullText.len > 0:
+    let fault = textFault(opts.fullText, rev, opts.textEncoding)
+    if fault.len > 0: refuse(fault)
+  elif opts.text.len > 38:
+    refuse("the textual header holds 38 lines of text, not " & $opts.text.len)
   var f = SegyFile(byteOrder: opts.byteOrder, format: some(fmt), revision: rev,
     extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
     text: initTextHeader(opts.textEncoding))
-  let lines = if opts.text.len > 0: opts.text else: @["WRITTEN BY parseSEG " & PackageVersion]
-  for i, line in lines: f.text.setCard(i + 1, cardPrefix(i + 1) & line.textCard)
-  f.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
-    elif rev.major == 1: "SEG Y REV1" else: ""))
-  f.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+  if opts.fullText.len > 0:
+    fillFullText(f.text, opts.fullText, rev, opts.fixCards)
+  else:
+    let lines = if opts.text.len > 0: opts.text else: @["WRITTEN BY parseSEG " & PackageVersion]
+    for i, line in lines: f.text.setCard(i + 1, cardPrefix(i + 1) & line.textCard)
+    f.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
+      elif rev.major == 1: "SEG Y REV1" else: ""))
+    f.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
   f.binary = SegyBinaryHeader(formatCode: int16(ord(fmt)), segyMajor: rev.major,
     segyMinor: rev.minor, traceSorting: opts.traceSorting,
     measurementSystem: opts.measurementSystem, sampleInterval: 1000, samplesPerTrace: 1)
@@ -559,7 +614,9 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
   ## Header Extension 1. Raises `ValueError` for a format the revision lacks
   ## (8-byte and 3-byte formats need Rev 2), a 3-byte format pair-swapped,
   ## a byte order other than big-endian before Rev 2, or a revision other
-  ## than 0, 1, 2.0 or 2.1; `IOError` when the output cannot be created.
+  ## than 0, 1, 2.0 or 2.1, or a `fullText` that `checkTextHeader` faults
+  ## for length or characters (before any file is created); `IOError` when
+  ## the output cannot be created.
   openNewSegy(path, false, opts)
 
 proc openSeismicWriterBytes*(opts: SegyOutputOptions, name = "memory"): SeismicWriter =
