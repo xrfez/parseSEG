@@ -6,13 +6,20 @@
 ; source line, source point) was checked against the files' survey (SPS) stations; the divisor is the
 ; text's "X 100". A point number with a fraction (100.5) is stored as 10050; the keys hold the quotient,
 ; exact for a whole number.
+; The OFFSET (bytes 37-40) is stored in the same units as the coordinates, though the sentence does not
+; say so, so it is read through the coordinate scalar (bytes 71-72), as the coordinates are: in every
+; trace with an offset of one shot record of such a file, the stored offset is 100 times the distance
+; between the source and receiver coordinates of the same trace, and the coordinates carry the
+; scalar -100. This was seen on one file only. A trace with an unset offset (0) stays unset: the keys then
+; derive it from the coordinates.
 ; RECOGNITION: a SEG-Y file whose textual header holds the words below, so a file without the sentence is
-; read as before. The map reads no other field and has no target to decode.
+; read as before. The map reads no other field than these and has no target to decode.
 (vendormap "segy-x100-stations" (version 1)
   (match (format segy) (textContains "LINE AND POINT NUMBERS ARE X 100 IN TRACE HEADERS"))
-  (doc "SEG-Y trace headers that hold source and receiver line and point times 100 (bytes 181-196)")
+  (doc "SEG-Y trace headers that hold source and receiver line and point and the offset times 100")
   (layout
     (entry rec_line (at 181) (type int4) (divisor 100))
     (entry rec_point (at 185) (type int4) (divisor 100))
     (entry sht_line (at 189) (type int4) (divisor 100))
-    (entry sht_point (at 193) (type int4) (divisor 100))))
+    (entry sht_point (at 193) (type int4) (divisor 100))
+    (entry offset (at 37) (type coor4))))

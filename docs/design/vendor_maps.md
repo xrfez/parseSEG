@@ -133,8 +133,15 @@ target.
     (entry rec_line  (at 181) (type int4) (divisor 100))
     (entry rec_point (at 185) (type int4) (divisor 100))
     (entry sht_line  (at 189) (type int4) (divisor 100))
-    (entry sht_point (at 193) (type int4) (divisor 100))))
+    (entry sht_point (at 193) (type int4) (divisor 100))
+    (entry offset (at 37) (type coor4))))
 ```
+The shipped `segy-x100-stations.nif` also reads the offset (bytes 37-40) as `coor4`: through
+the coordinate scalar, as the coordinates are (seen on one file, where the stored offset is
+100 times the distance under the scalar -100), its sign kept; a stored 0 stays unset and the
+keys derive the offset from the coordinates. From 0.19.2 this is how such a file's offset is
+read (before, it was the stored integer). There is no cache to clear: an index read through a
+vendor layout is never cached.
 - `(entry name (at N) (type T) [(divisor D)] [(extension NAME)] [(ifNonZero)])`: `name` is a
   layout name (`sht_line`, `sht_point`, `rec_line`, `rec_point`, `iline`, `cdp_x`, ...), `at`
   is 1-based in the 240-byte header, `type` one of the layout types (`int2`, `int4`,

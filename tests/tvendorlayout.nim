@@ -1,7 +1,10 @@
 ## A vendor map's `(layout)` and the layout entry `divisor`: the line and point
 ## numbers a file stores times 100 (its textual header says so) are read as the
 ## numbers themselves, by the keys of an open file, whole numbers exactly and a
-## fraction (100.5 stored as 10050) kept. Hand-built Rev 0 and Rev 1 files.
+## fraction (100.5 stored as 10050) kept; and the map's offset entry (bytes 37-40, `coor4`):
+## the offset is read through the coordinate scalar, its sign kept, a stored 0 stays unset and
+## is derived from the coordinates, and a file without the sentence is read as before.
+## Hand-built Rev 0 and Rev 1 files.
 ##
 ## Seen failing (each by breaking the code, then restoring it): the division
 ## in `segykeys.read` removed (every key 100 times too large), the map's
@@ -45,6 +48,25 @@ proc writeStored(path: string, rev: int, text: string, stored: openArray[array[4
     b.put16(at + 116, 2000)
     if t < codes.len: b.put16(at + 28, codes[t])
     for k in 0..3: b.put32(at + 180 + 4 * k, s[k])
+  writeBytes(path, b)
+
+proc writeOffsets(path, text: string; scalar: int; offsets: openArray[int]) =
+  ## Big-endian Rev 0, one sample per trace; per trace the stored offset (bytes 37-40), the
+  ## coordinate scalar and the coordinates: the source at (1000, 500) and the receiver 200
+  ## to the east, both stored under `scalar` (-100: hundredths).
+  var b = newSeq[byte](3600 + offsets.len * 244)
+  for i, c in text: b[i] = byte(c)
+  b.put16(3216, 2000)
+  b.put16(3220, 1)
+  b.put16(3224, 5)
+  for t, o in offsets:
+    let at = 3600 + t * 244
+    b.put32(at, t + 1)
+    b.put32(at + 36, o)
+    b.put16(at + 70, scalar and 0xFFFF)
+    for (k, v) in [(72, 1000), (76, 500), (80, 1200), (84, 500)]: b.put32(at + k, v * -scalar)
+    b.put16(at + 114, 1)
+    b.put16(at + 116, 2000)
   writeBytes(path, b)
 
 proc registry(): VendorRegistry =
@@ -105,6 +127,24 @@ proc main*() =
     doAssert not f.fromCache
     f.checkKeys()
     f.close()
+
+  block offset_is_read_through_the_coordinate_scalar:
+    # stored 12345 (123.45), -5000 (-50), and 0 (unset: derived from the coordinates, 200)
+    let p = tmp / "offs.sgy"
+    writeOffsets(p, Sentence, -100, [12345, -5000, 0])
+    var f = openSeismic(p, keys = true, opts = OpenOptions(vendors: reg))
+    let ks = f.traceKeys(0 ..< f.len)
+    doAssert abs(ks[0].offset - 123.45) < 1e-9, $ks[0].offset
+    doAssert abs(ks[1].offset + 50.0) < 1e-9, "the sign is kept: " & $ks[1].offset
+    doAssert abs(ks[2].offset - 200.0) < 1e-6, "an unset offset is derived: " & $ks[2].offset
+    f.close()
+    # a file without the sentence: the stored integer is the offset, as before
+    let q = tmp / "offs-plain.sgy"
+    writeOffsets(q, "C 1 NOTHING SAID", -100, [12345, -5000, 0])
+    var g = openSeismic(q, keys = true, opts = OpenOptions(vendors: reg))
+    let kg = g.traceKeys(0 ..< g.len)
+    doAssert kg[0].offset == 12345.0 and kg[1].offset == -5000.0, $kg[0].offset
+    g.close()
 
   block rev1_cdp_phrase_reads_as_before:
     # "... ARE X 100 IN TRACE HEADERS" about something else (CDP coordinates): no map

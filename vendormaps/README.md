@@ -17,6 +17,6 @@ in the map's `match`), decode a field only under `(when ...)` or in a `(group ..
 | `mfr09-rev2.nif` | Geospace GeoRes System (GeoRes Imagine and XTC) files that carry the Acquisition Detail extended header module: the extended header modules and trace header extensions #2 and #3 | SEG-D Rev 2.0 | 9 |
 | `mfr50-rev3.nif` | INOVA files: trace header extension block 0xB0 (device code and device serial number), inferred from one third-party compliance report, not the vendor's own document | SEG-D Rev 3.0 | 50 |
 
-| `segy-x100-stations.nif` | SEG-Y files whose textual header says the source and receiver line and point numbers are times 100 in the trace headers: bytes 181-196 read as `rec_line`, `rec_point`, `sht_line`, `sht_point`, divided by 100 (a `(layout)`, no target) | SEG-Y Rev 0 | none |
+| `segy-x100-stations.nif` | SEG-Y files whose textual header says the source and receiver line and point numbers are times 100 in the trace headers: bytes 181-196 read as `rec_line`, `rec_point`, `sht_line`, `sht_point`, divided by 100, and the offset (bytes 37-40) read through the coordinate scalar (`coor4`), as the coordinates are (a `(layout)`, no target) | SEG-Y Rev 0 | none |
 
 The header comment of each map gives its source, what it applies to and what it leaves out.
