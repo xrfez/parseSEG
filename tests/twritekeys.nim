@@ -308,4 +308,52 @@ proc main*() =
     doAssert g.traceKeys(0).intervalUs == 1000.999
     g.close()
 
+  # Seen to fail first: checkTextHeader returned no problems.
+  block check_text_header:
+    let rev0 = SegyRevision()
+    let rev1 = SegyRevision(major: 1)
+    let rev20 = SegyRevision(major: 2, minor: 0)
+    let rev21 = SegyRevision(major: 2, minor: 1)
+    var many = newSeq[string](41)
+    many[0] = "\x01" & 'y'.repeat(80)
+    let all = checkTextHeader(many, rev1, teAscii)
+    var kinds: set[TextHeaderFault]
+    for p in all: kinds.incl p.kind
+    doAssert thfTooManyLines in kinds and thfLineTooLong in kinds
+    doAssert thfBadCharacter in kinds and thfRevisionCard in kinds
+    doAssert thfEndMarker in kinds
+    doAssert all[0].kind == thfTooManyLines and all[0].line == 41
+    doAssert "41" in all[0].message
+    let long = checkTextHeader(@['x'.repeat(81)], rev0, teAscii)
+    doAssert long.len == 1 and long[0].kind == thfLineTooLong and long[0].line == 1
+    doAssert "81" in long[0].message
+    let bad = checkTextHeader(@["ok\x01"], rev0, teAscii)
+    doAssert bad.len == 1 and bad[0].kind == thfBadCharacter and bad[0].line == 1
+    doAssert bad[0].message.contains("column 3")
+    doAssert checkTextHeader(@["ok\x01"], rev0, teEbcdic).len == 0
+    let missing = checkTextHeader(@["hello"], rev1, teAscii)
+    doAssert missing.len == 2
+    doAssert missing[0].kind == thfRevisionCard and missing[0].line == 39
+    doAssert missing[1].kind == thfEndMarker and missing[1].line == 40
+    var ok = newSeq[string](40)
+    ok[38] = "SEG Y REV1"
+    ok[39] = "END EBCDIC"
+    doAssert checkTextHeader(ok, rev1, teEbcdic).len == 0
+    ok[39] = "C40 END TEXTUAL HEADER"
+    doAssert checkTextHeader(ok, rev1, teEbcdic).len == 0
+    ok[38] = "C39 SEG Y REV1"
+    doAssert checkTextHeader(ok, rev1, teAscii).len == 0
+    ok[38] = "SEG-Y_REV2.0"
+    doAssert checkTextHeader(ok, rev20, teEbcdic).len == 0
+    ok[38] = "SEG-Y_REV2.1"
+    doAssert checkTextHeader(ok, rev21, teEbcdic).len == 0
+    ok[38] = "SEG Y REV1"
+    let wrong = checkTextHeader(ok, rev21, teEbcdic)
+    doAssert wrong.len == 1 and wrong[0].kind == thfRevisionCard
+    doAssert checkTextHeader(newSeq[string](40), rev0, teEbcdic).len == 0
+    var srcLines = @["hello"]
+    discard checkTextHeader(srcLines, rev1, teAscii)
+    doAssert srcLines == @["hello"]
+    discard checkTextHeader(@["\x00".repeat(100)], rev21, teAscii)
+
 when isMainModule: main()
