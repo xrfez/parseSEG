@@ -30,7 +30,7 @@ proc main*() =
     const privateMods = ["bytestore", "checks", "coordscalar", "decodeentry", "fieldaccess",
       "filemap", "indexcache", "mapguard", "netfs", "pagehints", "progressticker", "readcache",
       "sampleconv", "seg2conv", "segyencode", "segyfixed", "segykeys", "segywalk",
-      "sharedfile", "tensorrows"]
+      "sharedfile", "tensorrows", "textlabel"]
     doAssert sorted(privateModules()) == @privateMods,
       "update privateMods (and the hidden-name check below) for " & $privateModules()
     for path in sourceFiles():
