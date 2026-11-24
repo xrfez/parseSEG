@@ -27,11 +27,13 @@
 ##   count (binary bytes 3513-3520), when the input declares one, becomes
 ##   the number written.
 ## - SEG-D: the sample count of a record, taken from the first trace written
-##   to it. Every later trace of that record must have the same count. The
-##   record length, the end time of each channel set that has channels and the
-##   sample count in an existing trace header extension follow. A count of 0
-##   is refused. A channel set with no channels is left unchanged. A trace
-##   written with its own count leaves those headers unchanged.
+##   to it. Every later trace of that record must have the same count, unless
+##   it is written with its own source count and the traces so far were too
+##   (channel sets may then differ). The record length, the end time of each
+##   channel set that has channels and the sample count in an existing trace
+##   header extension follow. A count of 0 is refused. A channel set with no
+##   channels is left unchanged. A trace written with its own count leaves
+##   those headers unchanged.
 ##
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
@@ -61,7 +63,9 @@
 ## Records may be skipped, repeated or reordered. A record's traces may have
 ## a new sample count: the first trace's count is the record's, and every
 ## later trace must match it (`ValueError`, naming the record and the counts,
-## otherwise, and nothing of that record is written). The record length (the
+## otherwise, and nothing of that record is written), unless that trace is
+## written with its own source count and the traces so far were too (channel
+## sets may then differ). The record length (the
 ## longest, over channel sets that have channels, of the trace length and the
 ## end time, so a negative start still covers the trace; a negative end time
 ## is written as it is), each of those sets' end time (start plus count times
@@ -70,8 +74,8 @@
 ## same way (a short-form record length of 000 is indeterminate, not 0). A
 ## channel set with no channels is left unchanged. A written SEG-D 8015 count still
 ## needs a multiple of 4 (the source count is not checked at open). A trace
-## written with its own count leaves those headers unchanged. The
-## record headers and trailer come from the trace's own record in `src`; a
+## written with its own count leaves those headers unchanged. The record
+## headers and trailer come from the trace's own record in `src`; a
 ## new format sets the format code and, for Rev 3, the General Header #3 data
 ## and record sizes. Multiplexed SEG-D input is refused (convert it first).
 ##

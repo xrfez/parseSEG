@@ -262,7 +262,9 @@ Options and rules:
   the SEG-Y binary header gets the count of the traces written (the largest when they
   differ). A fixed-length SEG-Y file needs one count for all traces. A SEG-D record takes
   one count, the first trace written to it; a later trace with another count is
-  `ValueError`, and nothing of that record is written. The record length is the longest,
+  `ValueError`, and nothing of that record is written, unless that trace is written
+  with its own source count and the traces so far were too: those are accepted even
+  when channel sets differ. The record length is the longest,
   over channel sets that have channels, of the trace length and the end time, so a
   negative start still covers the trace; a negative end time is written as it is. Each
   of those sets' end time and the sample count in an existing trace header extension

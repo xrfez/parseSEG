@@ -622,8 +622,63 @@ proc mainFive*() =
     doAssertRaises(ValueError): w.writeTrace(g, 0, wave(0))
   doAssert not fileExists(tmp / "z3_out.sgd")
 
+proc makeTwoCounts(): SegdRecordData =
+  ## Two channel sets, 8 and 12 samples, each with one trace.
+  let fmt = sd8058
+  var r = SegdRecord(layout: slRev2, format: some(fmt),
+    revision: SegdRevision(major: 2, minor: 1))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 9, formatCode: ord(fmt), year: 26,
+    additionalGhBlocks: 1, manufacturerCode: 9, baseScanInterval16: 32, recordType: 8,
+    recordLength: BcdAllF, scanTypesPerRecord: 1, channelSetsPerScanType: 2)
+  r.gh2 = some SegdGeneralHeader2(extFileNumber: 9, revisionMajor: 2, revisionMinor: 1,
+    extRecordLength: 24, blockNumber: 2)
+  let a = SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: 1,
+    endTime: 8, channelCount: 1, channelType: 1, traceHeaderExtensions: 1)
+  let b = SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: 2,
+    endTime: 12, channelCount: 1, channelType: 1, traceHeaderExtensions: 1)
+  r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: @[a, b])]
+  r.traceCount = 2
+  let counts = [8, 12]
+  for k in 0 .. 1:
+    let ns = counts[k]
+    var t = SegdTrace(index: k, numSamples: ns)
+    t.header = SegdTraceHeader(fileNumber: 9, scanTypeNumber: 1,
+      channelSetNumber: k + 1, traceNumber: 1, traceHeaderExtensions: 1)
+    t.ext1 = some SegdTraceHeaderExt1(samplesPerTrace: uint32(ns), sensorType: 1)
+    var vals = newSeq[float64](ns)
+    for i in 0 ..< ns: vals[i] = float64((i mod 5) - 2) * 0.25
+    t.samples = newSeq[byte](dataBytes(fmt, ns))
+    encodeSamples(fmt, vals, t.samples)
+    result.traces.add t
+  result.record = r
+
+proc mainSix*() =
+  ## Traces written with their own source counts are accepted when channel
+  ## sets differ. The api.md sentence is what was missing.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  let src = tmp / "sets.sgd"
+  put(src, SegdData(records: @[makeTwoCounts()]))
+  var f = openSeismic(src)
+  doAssert f.traceEntry(0).numSamples == 8
+  doAssert f.traceEntry(1).numSamples == 12
+  let dst = tmp / "sets_out.sgd"
+  var w = openSeismicWriter(dst, f)
+  let x = f.readTraces(0 ..< f.len, float32)
+  for i in 0 ..< f.len: w.writeTrace(f, i, x, i)
+  doAssert not w.close().isFatal
+  doAssert readAll(src) == readAll(dst)
+  var g = openSeismic(dst)
+  doAssert g.traceEntry(0).numSamples == 8
+  doAssert g.traceEntry(1).numSamples == 12
+  doAssert g.index.segdRecords[0].scanTypes[0].descriptors[0].endTime == 8
+  doAssert g.index.segdRecords[0].scanTypes[0].descriptors[1].endTime == 12
+  let api = readFile(currentSourcePath().parentDir.parentDir / "docs" / "api.md")
+  doAssert "own source count" in api, "docs/api.md does not state the own-count exception"
+  doAssert "channel sets differ" in api
+
 main()
 mainTwo()
 mainThree()
 mainFour()
 mainFive()
+mainSix()
