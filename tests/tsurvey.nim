@@ -890,7 +890,8 @@ proc main*() =
     doAssert unk.sensorClass == scUnknown
     doAssert unk.applySurvey(g) and unk.rcvX == 3000
     doAssert g.receiverPointCode(unk) == "H1"
-    doAssert g.log.has("ambiguous", sevWarning), $g.log
+    # G1 and H1 each match a class: not ambiguous.
+    doAssert not g.log.has("ambiguous", sevWarning), $g.log
 
     let kl1 = r21('R', "13.00", "3.00", '1', "KL", "1.0", "2.0", "1.0")
     let kl2 = r21('R', "13.00", "3.00", '1', "KL", "9.0", "8.0", "1.0")
@@ -952,6 +953,28 @@ proc main*() =
     doAssert k.sensorClass == scGeophone
     k.component = 1
     doAssert k.sensorClass == scUnknown
+
+  block r_then_h_geophone_takes_r_without_warning:
+    # Break: chooseRow matches a class letter only, so a geophone with R1 then
+    # H1 takes the later H1 and the station is logged ambiguous.
+    let r1 = r21('R', "21.00", "8.00", '1', "R1", "100.0", "200.0", "1.0")
+    let h1 = r21('R', "21.00", "8.00", '1', "H1", "300.0", "400.0", "2.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, r1, h1].join("\n")))
+    doAssert not g.log.has("ambiguous", sevWarning), $g.log
+    let n = g.log.len
+    var geo = initTraceKeys()
+    (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (21.0, 8.0, 1'i16)
+    geo.traceCode = 12
+    doAssert geo.sensorClass == scGeophone
+    doAssert geo.applySurvey(g) and geo.rcvX == 100, $geo.rcvX
+    doAssert g.receiverPointCode(geo) == "R1"
+    var hydro = initTraceKeys()
+    (hydro.rcvLine, hydro.rcvPoint, hydro.rcvIndex) = (21.0, 8.0, 1'i16)
+    hydro.traceCode = 11
+    doAssert hydro.applySurvey(g) and hydro.rcvX == 300
+    doAssert g.receiverPointCode(hydro) == "H1"
+    doAssert g.log.len == n
 
   block geometry_copies_do_not_share_rows_or_log:
     # Break: SurveyGeometry.codes and logRef are refs (join.nim), so a copy

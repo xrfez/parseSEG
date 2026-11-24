@@ -147,11 +147,13 @@ stays, and an index no join changed can still be saved with `saveIndex`).
 
 Receiver point codes stay with each R record. A station with one code is joined as before,
 whatever the code; `KL` and `PM` still replace an earlier row at that station. Several codes
-(`G1` and `H1` at different coordinates) are matched to the trace's sensor class
-(`sensorClass`): a hydrophone takes `H*`, a geophone or other particle-motion sensor `G*`,
-any other identified receiver `R*`. When the class does not choose one row, the later row is
-used. `g.log` says the station was ambiguous when the rows were loaded (a join does not
-log); further warnings of that kind are a count. `receiverPointCode(g, keys)` is that code,
+are matched to the trace's sensor class (`sensorClass`): a hydrophone takes the last `H*`,
+a geophone the last `G*` else the last `R*` (so `R1` then `H1` gives a geophone `R1` and a
+hydrophone `H1`, with no warning), another identified receiver the last `R*` else the last
+`G*`. Unknown, or none of those rows, takes the later row. Two rows of one letter (`G1`,
+`G2`) use the later one, and `g.log` says the station was ambiguous when the rows were
+loaded (a join does not log); further warnings of that kind are a count.
+`receiverPointCode(g, keys)` is that code,
 so a viewer can show it. Source rows are unchanged.
 
 ```nim

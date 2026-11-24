@@ -35,8 +35,10 @@
 ## `applySurvey` then takes coordinates from the table by station
 ## (`keys.applyGeometry`), then the offset and midpoint. A receiver row keeps
 ## its SPS point code: several codes at one station are matched by
-## `sensorClass` (one row is taken as stored; `KL` and `PM` still replace the
-## station). The row each class gets is decided when the rows are loaded, and
+## `sensorClass` (hydrophone last `H*`; geophone last `G*` else last `R*`;
+## other last `R*` else last `G*`; else the later row). One row is taken as
+## stored; `KL` and `PM` still replace the station. The row each class gets
+## is decided when the rows are loaded, and
 ## an ambiguous choice is logged then. A join does not log and does not
 ## mutate the geometry. `receiverPointCode` is the code that join used.
 ## Source rows are unchanged. Auxiliary traces are left alone. The channel →
@@ -924,28 +926,50 @@ proc joinStations*(k: var TraceKeys, g: SurveyGeometry): JoinMatch =
   if rel.component > 0 and k.component == 0:
     k.component = uint8(min(rel.component, 255))
 
-func codeClass(code: string): SensorClass =
-  if code.len == 0: return scUnknown
-  case code[0].toUpperAscii
-  of 'H': scHydrophone
-  of 'G': scGeophone
-  of 'R': scOther
-  else: scUnknown
+func lastOf(rows: openArray[ReceiverRow], letter: char): int =
+  result = -1
+  for i, row in rows:
+    if row.code.len > 0 and row.code[0].toUpperAscii == letter:
+      result = i
+
+func letterRepeats(rows: openArray[ReceiverRow]): bool =
+  var h, g, r = false
+  for row in rows:
+    if row.code.len == 0: continue
+    case row.code[0].toUpperAscii
+    of 'H':
+      if h: return true
+      h = true
+    of 'G':
+      if g: return true
+      g = true
+    of 'R':
+      if r: return true
+      r = true
+    else: discard
 
 func chooseRow(rows: openArray[ReceiverRow], class: SensorClass): tuple[i: int, ambiguous: bool] =
-  # One row: take it. Several: the unique row of the trace's class, else the
-  # last loaded of the candidates (the matching class, or every row).
+  # Hydrophone: last H*. Geophone: last G*, else last R*. Other: last R*,
+  # else last G*. Unknown, or none of those: the later row. A repeated letter
+  # is ambiguous; so is an identified class with no row of its rule. Unknown
+  # alone is not.
   if rows.len == 0: return (-1, false)
   if rows.len == 1: return (0, false)
-  var last = -1
-  var n = 0
-  if class != scUnknown:
-    for i, row in rows:
-      if codeClass(row.code) == class:
-        last = i
-        inc n
-  if n == 1: return (last, false)
-  if n > 1: return (last, true)
+  let repeated = letterRepeats(rows)
+  let h = lastOf(rows, 'H')
+  let gv = lastOf(rows, 'G')
+  let r = lastOf(rows, 'R')
+  case class
+  of scHydrophone:
+    if h >= 0: return (h, repeated)
+  of scGeophone:
+    if gv >= 0: return (gv, repeated)
+    if r >= 0: return (r, repeated)
+  of scOther:
+    if r >= 0: return (r, repeated)
+    if gv >= 0: return (gv, repeated)
+  of scUnknown:
+    return (rows.high, repeated)
   (rows.high, true)
 
 proc dropPicks(g: var SurveyGeometry, key: StationKey) =
@@ -954,7 +978,8 @@ proc dropPicks(g: var SurveyGeometry, key: StationKey) =
 
 proc decideStation(g: var SurveyGeometry, cap: var RepeatCap, file: string, key: StationKey) =
   # The row each class gets, stored so a join only reads coordinates. One
-  # warning when any class falls to the later row; further ones are a count.
+  # warning when a letter repeats or an identified class has no row of its
+  # rule; further ones are a count. Unknown alone does not warn.
   if key notin g.codes or g.codes[key].len < 2:
     g.dropPicks(key)
     g.notedAmbiguous.excl(key)
@@ -1014,10 +1039,11 @@ proc applyReceiverChoice(stations: SurveyGeometry, k: var TraceKeys, overwrite: 
 func receiverPointCode*(g: SurveyGeometry, k: TraceKeys): string =
   ## The SPS point code of the receiver row `applySurvey` uses for `k`
   ## ("" when that station has no coded row). One row is returned as stored.
-  ## Several are matched by `sensorClass`: `H*` hydrophone, `G*` geophone or
-  ## other particle-motion sensor, `R*` any other identified receiver. No
-  ## unique match is the later candidate, the same row the coordinates come
-  ## from. The choice was made when the rows were loaded.
+  ## Several are matched by `sensorClass`: a hydrophone takes the last `H*`,
+  ## a geophone the last `G*` else the last `R*`, another identified receiver
+  ## the last `R*` else the last `G*`. Unknown, or none of those rows, is the
+  ## later row (two rows of one letter use the later one). The choice was
+  ## made when the rows were loaded.
   let hit = g.codedKey(k.rcvLine, k.rcvPoint, k.rcvIndex)
   if not hit.found: return ""
   let rows = g.codes[hit.key]
