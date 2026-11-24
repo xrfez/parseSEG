@@ -287,6 +287,86 @@ proc main*() =
     doAssert g.traceEntry(0).numSamples == 4
     doAssert not g.log.isFatal, $g.log
 
+proc makeRev3At(ns, startUs, intervalUs: int): SegdRecordData =
+  ## One Rev 3.0 seismic trace. End time is start + ns * interval.
+  var r = SegdRecord(layout: slRev3, format: some(sd8058),
+    revision: SegdRevision(major: 3, minor: 0))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 7, formatCode: ord(sd8058), year: 26,
+    additionalGhBlocks: 2, julianDay: 311, hour: 12, manufacturerCode: 50,
+    baseScanInterval16: 16, recordType: 8, recordLength: BcdAllF, scanTypesPerRecord: 1,
+    channelSetsPerScanType: 1)
+  let endUs = startUs + ns * intervalUs
+  r.gh2Rev3 = SegdGeneralHeader2Rev3(extFileNumber: 7, revisionMajor: 3,
+    extRecordLength: uint32(max(ns * intervalUs, endUs)), blockType: 2)
+  r.gh3 = SegdGeneralHeader3(timeZero: 1474994765504000, blockType: 3)
+  let seis = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: 1,
+    channelType: 0x10, startTime: int32(startUs), endTime: int32(endUs),
+    numSamples: uint32(ns), descaleMultiplier: 1.0, channelsInSet: 1,
+    samplingInterval: uint32(intervalUs), traceHeaderExtensions: 1, blockType1: 0x30,
+    blockType2: 0x31, blockType3: 0x32)
+  r.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: @[seis])]
+  var t = SegdTrace(layout: slRev3, index: 0, numSamples: ns)
+  t.header = SegdTraceHeader(fileNumber: 7, scanTypeNumber: 1, channelSetNumber: 1,
+    traceNumber: 1, traceHeaderExtensions: 1)
+  t.ext1Rev3 = some SegdTraceHeaderExt1Rev3(receiverLineNumber: 7, receiverPointNumber: 1,
+    numSamples: uint32(ns), sensorType: 2, groupIndex: 1, blockType: 0x40)
+  var vals = newSeq[float64](ns)
+  for i in 0 ..< ns: vals[i] = float64(i - 1) * 0.5
+  t.samples = newSeq[byte](dataBytes(sd8058, ns))
+  encodeSamples(sd8058, vals, t.samples)
+  computeRev3Sizes(r, [t])
+  r.traceCount = 1
+  result.record = r
+  result.traces = @[t]
+
+proc mainThree*() =
+  ## Negative Rev 3 starts. Seen failing before the change: start -5000 us,
+  ## interval 1000, n=2 raised ValueError "end time of -3000 us does not fit";
+  ## start -2000, n=6 wrote a record length of 4000, shorter than the 6000 us
+  ## trace.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  block rev3_negative_start_is_written_and_the_trace_is_covered:
+    let src = tmp / "neg.sgd"
+    put(src, SegdData(records: @[makeRev3At(8, -5000, 1000)]))
+    let dst = tmp / "neg_out.sgd"
+    writeLike(src, dst, 2)
+    var g = openSeismic(dst)
+    let rec = g.index.segdRecords[0]
+    let c = rec.scanTypes[0].descriptorsRev3[0]
+    doAssert c.startTime == -5000
+    doAssert c.endTime == -3000
+    doAssert c.numSamples == 2
+    doAssert recordLengthUs(rec.gh1, rec.gh2Rev3) == 2000
+    doAssert g.traceEntry(0).numSamples == 2
+    doAssert not g.log.isFatal, $g.log
+    let later = tmp / "neg2.sgd"
+    put(later, SegdData(records: @[makeRev3At(4, -2000, 1000)]))
+    let covered = tmp / "neg2_out.sgd"
+    writeLike(later, covered, 6)
+    var h = openSeismic(covered)
+    let hrec = h.index.segdRecords[0]
+    let hc = hrec.scanTypes[0].descriptorsRev3[0]
+    doAssert hc.endTime == 4000
+    doAssert hc.numSamples == 6
+    doAssert recordLengthUs(hrec.gh1, hrec.gh2Rev3) == 6000, $recordLengthUs(hrec.gh1,
+      hrec.gh2Rev3)
+    doAssert not h.log.isFatal, $h.log
+    let pos = tmp / "pos.sgd"
+    put(pos, SegdData(records: @[makeRev3At(4, 1000, 1000)]))
+    let posOut = tmp / "pos_out.sgd"
+    writeLike(pos, posOut, 8)
+    var p = openSeismic(posOut)
+    let prec = p.index.segdRecords[0]
+    doAssert prec.scanTypes[0].descriptorsRev3[0].endTime == 9000
+    doAssert recordLengthUs(prec.gh1, prec.gh2Rev3) == 9000
+    let over = tmp / "over.sgd"
+    put(over, SegdData(records: @[makeRev3At(1, 2_000_000_000, 1_000_000)]))
+    var f = openSeismic(over)
+    block:
+      var w = openSeismicWriter(tmp / "over_out.sgd", f)
+      doAssertRaises(ValueError): w.writeTrace(f, 0, wave(200))
+    doAssert not fileExists(tmp / "over_out.sgd")
+
 proc mainTwo*() =
   let tmp = scratchDir("parseseg_twritelikesegd")
   let fmt = sd8058
@@ -375,3 +455,4 @@ proc mainTwo*() =
 
 main()
 mainTwo()
+mainThree()

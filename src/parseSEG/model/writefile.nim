@@ -60,11 +60,14 @@
 ## Records may be skipped, repeated or reordered. A record's traces may have
 ## a new sample count: the first trace's count is the record's, and every
 ## later trace must match it (`ValueError`, naming the record and the counts,
-## otherwise, and nothing of that record is written). The record length, each
-## channel set's end time (start plus count times the interval) and the sample
-## count in each existing trace header extension follow; a count the headers
-## cannot hold is refused the same way. SEG-D 8015 still needs a multiple of
-## 4. A trace written with its own count leaves those headers unchanged. The
+## otherwise, and nothing of that record is written). The record length (the
+## longest, over channel sets that have channels, of the trace length and the
+## end time, so a negative start still covers the trace; a negative end time
+## is written as it is), each channel set's end time (start plus count times
+## the interval) and the sample count in each existing trace header extension
+## follow; a count the headers cannot hold is refused the same way. SEG-D 8015
+## still needs a multiple of 4. A trace written with its own count leaves those
+## headers unchanged. The
 ## record headers and trailer come from the trace's own record in `src`; a
 ## new format sets the format code and, for Rev 3, the General Header #3 data
 ## and record sizes. Multiplexed SEG-D input is refused (convert it first).
@@ -1071,7 +1074,7 @@ proc setRev3End(c: var SegdChannelSetDescriptorRev3, n: int, which: string) =
       return
     refuse(which & " has no sample interval")
   let endAt = int64(c.startTime) + int64(n) * interval
-  if endAt < 0 or endAt > int64(high(int32)):
+  if endAt < int64(low(int32)) or endAt > int64(high(int32)):
     refuse(which & ": an end time of " & $endAt & " µs does not fit a channel set")
   c.endTime = int32(endAt)
   c.numSamples = uint32(n)
@@ -1110,17 +1113,18 @@ proc applySegdCount(rec: var SegdRecord, n, recNo: int, path: string) =
       if rec.scanTypes[i].layout != slRev3:
         refuse(segdRec(recNo, path) & " has a channel set the record's revision cannot update")
       for j in 0 ..< rec.scanTypes[i].descriptorsRev3.len:
-        any = true
         let c = addr rec.scanTypes[i].descriptorsRev3[j]
         let st = if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1
         let cs = if c.channelSetNumber > 0: int(c.channelSetNumber) else: j + 1
         setRev3End(c[], n, segdRec(recNo, path) & ", " & setName(st, cs))
-        longest = max(longest, int64(c.endTime))
+        if c.channelsInSet > 0:
+          any = true
+          # A negative start makes the end time shorter than the trace.
+          let span = int64(n) * int64(c.samplingInterval)
+          longest = max(longest, max(span, int64(c.endTime)))
     if not any:
       refuse(segdRec(recNo, path) &
         " has no channel set, so a new sample count cannot be written")
-    if longest < 0:
-      refuse(segdRec(recNo, path) & ": a record length of " & $longest & " µs is negative")
     setRev3RecordLength(rec, longest, recNo, path)
 
 proc noteRev3Sizes(rec: var SegdRecord, traces: openArray[SegdTrace]) =
