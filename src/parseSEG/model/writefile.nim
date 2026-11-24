@@ -1435,7 +1435,7 @@ proc checkOrientation(o: TraceOrientation) =
   if us < -9.0e18 or us > 9.0e18:
     refuse("orientation time does not fit a SEG-D timestamp (" & $o.time & ")")
 
-func orientationBlock(o: TraceOrientation, recorded: float64): SegdOrientation =
+proc orientationBlock(o: TraceOrientation, recorded: float64): SegdOrientation =
   let t = if o.time.isNaN: recorded else: o.time
   SegdOrientation(rotationX: o.rotationX, rotationY: o.rotationY, rotationZ: o.rotationZ,
     referenceOrientation: o.referenceOrientation, timestamp: unixToTimestamp(t),

@@ -283,10 +283,12 @@ proc useLeapTable*(t: LeapTable) =
     raise newException(ValueError, problems[0])
   currentSlot.store(allocPublished(t), moRelease)
 
-proc leapOffsetAt(unixSec: int64): int {.gcsafe.} =
+proc leapOffsetAt*(unixSec: int64): int {.gcsafe, raises: [].} =
   # GPS − UTC at POSIX second `unixSec`. Before the first entry, that
   # entry's offset (the documented start covers every earlier instant).
+  # Not on the umbrella: converters call it; callers use `gpsMinusUtc`.
   let p = loadSlot(currentSlot)
+  doAssert p.count > 0
   result = entriesOf(p)[0].gpsMinusUtc
   let ents = entriesOf(p)
   for i in 0 ..< p.count:

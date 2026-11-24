@@ -14,7 +14,8 @@ import parseSEG/version
 export version
 
 import parseSEG/common/[errors, diagnostics, endians, coordref, leapseconds]
-export errors, diagnostics, endians, coordref, leapseconds
+export errors, diagnostics, endians, coordref
+export leapseconds except leapOffsetAt
 
 import parseSEG/segy/[textheader, binheader, traceheader, samples, exttext, layout, reader,
   writer, fields]

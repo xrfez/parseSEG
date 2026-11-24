@@ -11,7 +11,7 @@
 ## changed fields.
 
 import std/[strutils, math]
-import ../common/[endians, fieldlayout, years]
+import ../common/[endians, fieldlayout, years, leapseconds]
 import ./headers
 
 type
@@ -436,27 +436,6 @@ func size*(s: SegdSourceDescription): int32 =
 
 const
   GpsEpochUnix* = 315_964_800'i64 ## POSIX seconds of 1980-01-06T00:00:00.
-  leapSecondDays = [
-    # (year, month, day) after which a leap second was inserted into UTC.
-    (1972, 6, 30), (1972, 12, 31), (1973, 12, 31), (1974, 12, 31), (1975, 12, 31),
-    (1976, 12, 31), (1977, 12, 31), (1978, 12, 31), (1979, 12, 31), (1981, 6, 30),
-    (1982, 6, 30), (1983, 6, 30), (1985, 6, 30), (1987, 12, 31), (1989, 12, 31),
-    (1990, 12, 31), (1992, 6, 30), (1993, 6, 30), (1994, 6, 30), (1995, 12, 31),
-    (1997, 6, 30), (1998, 12, 31), (2005, 12, 31), (2008, 12, 31), (2012, 6, 30),
-    (2015, 6, 30), (2016, 12, 31)]
-    ## The spec's table (to 2014) plus 2015-06-30 and 2016-12-31 (IERS).
-    ## Complete through 2016-12-31; a later leap second needs a new release.
-
-func computeLeapUnix(): array[leapSecondDays.len, int64] =
-  for i, (y, m, d) in leapSecondDays:
-    result[i] = (daysFromCivil(y, m, d) + 1) * 86400 # POSIX time just after the leap second
-
-const leapUnix = computeLeapUnix()
-
-func leapsBefore(unix: int64): int64 =
-  # Leap seconds inserted into UTC before POSIX time `unix` (9 at the GPS epoch).
-  for t in leapUnix:
-    if t <= unix: inc result
 
 func splitUs(us: int64): tuple[sec: int64, sub: int] =
   # Floor division into a POSIX second and a microsecond in 0 .. 999999.
@@ -467,55 +446,48 @@ func splitUs(us: int64): tuple[sec: int64, sub: int] =
     dec sec
   (sec, sub)
 
-func gpsOffsetAt(unixSec: int64): int {.inline.} =
-  # GPS − UTC in whole seconds at POSIX second `unixSec`.
-  int(leapsBefore(unixSec) - 9)
-
-func gpsUsToUtcUs*(gpsUs: int64): int64 =
+proc gpsUsToUtcUs*(gpsUs: int64): int64 {.gcsafe, raises: [].} =
   ## UTC microseconds since 1970 of a SEG-D timestamp `gpsUs` (GPS
   ## microseconds since 1980-01-06), in integer arithmetic, never through
-  ## float64 seconds. The leap-second table is complete through 2016-12-31;
-  ## a later leap second needs a new release.
+  ## float64 seconds. The offset is `currentLeapTable` (shipped complete
+  ## through 2016-12-31; `useLeapTable` replaces it). After `checkedTo` the
+  ## last offset is still used.
   let (gpsSec, sub) = splitUs(gpsUs)
   var unixSec = gpsSec + GpsEpochUnix
-  # GPS − UTC = leapsBefore − 9; two passes settle on a leap boundary.
+  # Two passes settle on a leap boundary.
   for _ in 0 .. 1:
-    unixSec = gpsSec + GpsEpochUnix - int64(gpsOffsetAt(unixSec))
+    unixSec = gpsSec + GpsEpochUnix - int64(leapOffsetAt(unixSec))
   unixSec * 1_000_000 + int64(sub)
 
-func utcUsToGpsUs*(utcUs: int64): int64 =
+proc utcUsToGpsUs*(utcUs: int64): int64 {.gcsafe, raises: [].} =
   ## The SEG-D timestamp (GPS microseconds since 1980-01-06) of UTC
-  ## microseconds `utcUs` (since 1970), in integer arithmetic. The
-  ## leap-second table is complete through 2016-12-31; a later leap second
-  ## needs a new release.
+  ## microseconds `utcUs` (since 1970), in integer arithmetic. The offset
+  ## is `currentLeapTable`. After `checkedTo` the last offset is still used.
   let (sec, sub) = splitUs(utcUs)
-  (sec - GpsEpochUnix + int64(gpsOffsetAt(sec))) * 1_000_000 + int64(sub)
+  (sec - GpsEpochUnix + int64(leapOffsetAt(sec))) * 1_000_000 + int64(sub)
 
-func gpsMinusUtc*(gpsUs: int64): int =
+proc gpsMinusUtc*(gpsUs: int64): int {.gcsafe, raises: [].} =
   ## GPS − UTC in whole seconds at `gpsUs`, a SEG-D timestamp (GPS
   ## microseconds since 1980-01-06, not microseconds since 1970). 18 since
-  ## 2017-01-01. The leap-second table is complete through 2016-12-31; a
-  ## later leap second needs a new release.
+  ## 2017-01-01 on the shipped table. The offset is `currentLeapTable`.
   let (sec, _) = splitUs(gpsUsToUtcUs(gpsUs))
-  gpsOffsetAt(sec)
+  leapOffsetAt(sec)
 
-func utcMinusGps*(utcUs: int64): int =
+proc utcMinusGps*(utcUs: int64): int {.gcsafe, raises: [].} =
   ## UTC − GPS in whole seconds at UTC microseconds `utcUs` (since 1970,
   ## POSIX). The inverse of `gpsMinusUtc`:
-  ## `utcMinusGps(gpsUsToUtcUs(gpsUs)) == -gpsMinusUtc(gpsUs)`. The
-  ## leap-second table is complete through 2016-12-31; a later leap second
-  ## needs a new release.
+  ## `utcMinusGps(gpsUsToUtcUs(gpsUs)) == -gpsMinusUtc(gpsUs)`.
   let (sec, _) = splitUs(utcUs)
-  -gpsOffsetAt(sec)
+  -leapOffsetAt(sec)
 
-func timestampToUnix*(ts: int64): float64 =
+proc timestampToUnix*(ts: int64): float64 {.gcsafe, raises: [].} =
   ## UTC POSIX seconds of a SEG-D timestamp (GPS µs). The leap-second offset
   ## comes from `gpsUsToUtcUs` (one table); the seconds stay the historical
   ## float expression, so a value already stored does not move.
   let (sec, _) = splitUs(gpsUsToUtcUs(ts))
-  float64(ts) / 1e6 + float64(GpsEpochUnix) - float64(gpsOffsetAt(sec))
+  float64(ts) / 1e6 + float64(GpsEpochUnix) - float64(leapOffsetAt(sec))
 
-func unixToTimestamp*(unix: float64): int64 =
+proc unixToTimestamp*(unix: float64): int64 {.gcsafe, raises: [].} =
   ## The SEG-D timestamp (GPS µs) of UTC POSIX seconds `unix`. The offset
   ## comes from `utcUsToGpsUs`; the rounding stays the historical one.
   let sec = int64(floor(unix))

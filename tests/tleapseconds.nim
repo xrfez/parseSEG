@@ -1,11 +1,13 @@
 ## Leap-second table as a .nif file a caller can replace (PLEAP1).
 ##
 ## Seen to fail first: validation accepted a step of +2 and a first entry
-## after 1980-01-06 (problems stayed empty).
+## after 1980-01-06 (problems stayed empty). Converters ignored
+## `useLeapTable`, so an instant after the added date stayed at offset 18.
 
-import std/[assertions, atomics, os, strutils, typedthreads]
+import std/[assertions, atomics, options, os, strutils, typedthreads]
 
 import parseSEG
+import parseSEG/common/years
 
 const oldDays = [
   (1972, 6, 30), (1972, 12, 31), (1973, 12, 31), (1974, 12, 31), (1975, 12, 31),
@@ -51,6 +53,7 @@ proc reader() {.thread.} =
 
 proc main*() =
   defer: useLeapTable(defaultLeapTable())
+  doAssert not declared(leapOffsetAt)
 
   block default_equals_the_old_table:
     let root = currentSourcePath().parentDir.parentDir
@@ -141,5 +144,47 @@ proc main*() =
     readerStop.store(true, moRelease)
     joinThread(th)
     useLeapTable(defaultLeapTable())
+
+  block conversion_follows_the_table:
+    let added = defaultLeapTable().withLeap(LeapDate(year: 2018, month: 1, day: 1))
+    let down = defaultLeapTable().withLeap(LeapDate(year: 2018, month: 1,
+        day: 1),
+      step = -1)
+    let boundary = daysFromCivil(2018, 1, 1) * 86400 * 1_000_000
+    let before = daysFromCivil(2017, 6, 1) * 86400 * 1_000_000
+    let after = daysFromCivil(2018, 6, 1) * 86400 * 1_000_000
+    proc keyAt(stamp: int64): TraceKeys =
+      var rec = SegdRecord(layout: slRev3)
+      var t = SegdTrace(layout: slRev3, channelSet: -1, scanType: -1)
+      var ts = SegdTimestampHeader(timeZeroOfData: stamp, blockType: 0x42)
+      let raw = ts.encoded
+      t.extensions = @raw
+      traceKeys(rec, t)
+    let stampBefore = utcUsToGpsUs(before)
+    let stampAfter = utcUsToGpsUs(after)
+    let keyBefore0 = keyAt(stampBefore)
+    let keyAfter0 = keyAt(stampAfter)
+    let unixAfter0 = timestampToUnix(stampAfter)
+    useLeapTable(added)
+    doAssert utcMinusGps(boundary - 1) == -18
+    doAssert utcMinusGps(boundary) == -19
+    doAssert utcMinusGps(boundary + 1) == -19
+    doAssert gpsMinusUtc(utcUsToGpsUs(boundary)) == 19
+    doAssert gpsUsToUtcUs(utcUsToGpsUs(before)) == before
+    doAssert timestampToUnix(utcUsToGpsUs(before)) == float64(
+        before div 1_000_000)
+    doAssert gpsUsToUtcUs(stampAfter) == after - 1_000_000
+    doAssert timestampToUnix(stampAfter) == unixAfter0 - 1.0
+    let keyBefore1 = keyAt(stampBefore)
+    let keyAfter1 = keyAt(stampAfter)
+    doAssert keyBefore1.time == keyBefore0.time
+    doAssert keyBefore1.firstSampleUs.get == keyBefore0.firstSampleUs.get
+    doAssert keyAfter1.firstSampleUs.get == keyAfter0.firstSampleUs.get - 1_000_000
+    doAssert keyAfter1.time == keyAfter0.time - 1.0
+    useLeapTable(down)
+    doAssert utcMinusGps(boundary - 1) == -18
+    doAssert utcMinusGps(boundary) == -17
+    doAssert gpsMinusUtc(utcUsToGpsUs(boundary)) == 17
+    doAssert gpsUsToUtcUs(utcUsToGpsUs(before)) == before
 
 when isMainModule: main()
