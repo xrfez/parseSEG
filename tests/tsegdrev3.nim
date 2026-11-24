@@ -5,6 +5,7 @@
 
 import std/[assertions, os, times, math, strutils]
 
+import parseSEG/common/years
 import parseSEG/segd/[headers, rev3, reader]
 
 import parseSEG/io/[records, diskio]
@@ -230,5 +231,70 @@ proc main*() =
     let k4 = traceKeys(rec, t)
     doAssert k4.srcLine == 4 and k4.srcPoint == 8
     doAssert k4.srcX.isNaN and k4.rcvX == 111 and k4.rcvY == 222
+
+  block integer_leap_seconds:
+    # Seen to fail first: gpsUsToUtcUs returned one microsecond low, so a
+    # round trip and the ±1 µs leap checks failed.
+    proc bits(x: float64): uint64 = cast[uint64](x)
+    let samples = [
+      0'i64, 1_123_456, 1'i64, -1_000_000'i64,
+      1474994765504000'i64, 684035213123457'i64, 824035214123457'i64,
+      914803212504000'i64, 914803213504000'i64, 914803215504000'i64, 914803216504000'i64,
+      1167264015504000'i64, 1167264016504000'i64, 1167264018504000'i64, 1167264019504000'i64]
+    let want = [
+      4734080618437017600'u64, 4734080618455866064'u64, 4734080618437017617'u64,
+      4734080618420240384'u64, 4745298636787696009'u64, 4741671816367426928'u64,
+      4742568314554279608'u64, 4742949023132959113'u64, 4742949023137153417'u64,
+      4742949023141347721'u64, 4742949023145542025'u64, 4744007920476242313'u64,
+      4744007920480436617'u64, 4744007920484630921'u64, 4744007920488825225'u64]
+    for i, ts in samples:
+      let u = timestampToUnix(ts)
+      doAssert bits(u) == want[i]
+      doAssert unixToTimestamp(u) == ts
+    doAssert unixToTimestamp(1230767999.504) == 914803213504000'i64
+    doAssert unixToTimestamp(1483228800.504) == 1167264018504000'i64
+    doAssert unixToTimestamp(1_000_000_000.123456789) == 684035213123457'i64
+    doAssert gpsMinusUtc(1474994765504000'i64) == 18
+    doAssert utcMinusGps(gpsUsToUtcUs(1474994765504000'i64)) == -18
+
+    for us in [-1_000_001'i64, -1_000_000, -999_999, -1, 0, 1, 999_999, 1_000_000, 1_000_001]:
+      doAssert gpsUsToUtcUs(utcUsToGpsUs(us)) == us
+      doAssert utcUsToGpsUs(gpsUsToUtcUs(us)) == us
+
+    # 4.8 h steps from mid-1972 through 2027. POSIX microseconds always
+    # round-trip. A SEG-D timestamp in a leap second POSIX skips has no
+    # image; those misses are exactly 1 s.
+    var lo = high(int64)
+    var hi = low(int64)
+    var gaps = 0
+    for i in -14_000 ..< 86_000:
+      let step = int64(i) * 17_280_000_001
+      doAssert gpsUsToUtcUs(utcUsToGpsUs(step)) == step
+      let utc = gpsUsToUtcUs(step)
+      let back = utcUsToGpsUs(utc)
+      if back != step:
+        doAssert abs(back - step) == 1_000_000
+        inc gaps
+      else:
+        doAssert utcMinusGps(utc) == -gpsMinusUtc(step)
+      if utc < lo: lo = utc
+      if utc > hi: hi = utc
+    doAssert gaps < 30
+    doAssert lo <= daysFromCivil(1972, 6, 30) * 86_400 * 1_000_000
+    doAssert hi >= daysFromCivil(2027, 1, 1) * 86_400 * 1_000_000
+
+    proc atLeap(y, m, d, before, after: int) =
+      let t = (daysFromCivil(y, m, d) + 1) * 86400
+      for (us, off) in [(t * 1_000_000 - 1, before), (t * 1_000_000, after),
+          (t * 1_000_000 + 1, after)]:
+        doAssert utcMinusGps(us) == -off
+        let gps = utcUsToGpsUs(us)
+        doAssert gpsUsToUtcUs(gps) == us
+        doAssert gpsMinusUtc(gps) == off
+    atLeap(1972, 6, 30, -9, -8)
+    atLeap(1979, 12, 31, -1, 0)
+    atLeap(1981, 6, 30, 0, 1)
+    atLeap(2008, 12, 31, 14, 15)
+    atLeap(2016, 12, 31, 17, 18)
 
 when isMainModule: main()
