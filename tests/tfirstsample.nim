@@ -3,6 +3,10 @@
 ## Seen to fail first: `firstSampleUs` returned the recorded instant and did
 ## not add `t0Ms`, so a GH#3 time zero of 2.5 ms and a SEG-Y delay of 5 ms
 ## were short.
+##
+## A stored sub-second of 500000 us with a float fraction below 0.5 was
+## taken as a crossed second, so `firstSampleUs` was 1000000 us early
+## (SEG-Y rev 2, 2024-01-01 00:00:00, Ext1 nanoseconds 499999500, delay 0).
 
 import std/[assertions, math, options]
 
@@ -113,6 +117,47 @@ proc segyFile(rev: int, delay: int16, ns: int32, basis: int16, hasNs: bool): seq
 
 proc nearest(ns: int64): int64 = int64(round(float64(ns) / 1000.0))
 
+proc halfSecondNs(): seq[int32] =
+  # 499990000..500010000 step 10, plus the ends the fraction can sit on.
+  result = newSeqOfCap[int32](2004)
+  var ns = 499_990_000
+  while ns <= 500_010_000:
+    result.add int32(ns)
+    inc ns, 10
+  result.add 0
+  result.add 1
+  result.add 999_999_999
+
+proc segyNsFile(basis: int16, counts: openArray[int32]): seq[byte] =
+  var f = SegyFile(text: initTextHeader(teEbcdic), byteOrder: boBig, format: some(sfFloat32),
+    revision: SegyRevision(major: 2), extended: initExtendedTextHeader())
+  f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 2, segyMinor: 1, samplesPerTrace: 4,
+    sampleInterval: 1000, measurementSystem: 1, maxAddlTraceHeaders: 1,
+    byteOrderMarker: ByteOrderMarker, timeBasisCode: basis)
+  let sink = openMemSink("ns")
+  var w = openSegyWriter(sink, f, initSegyWriteOptions(f, lenient = true))
+  for i, ns in counts:
+    var t = SegyTrace(numSamples: 4, sampleInterval: 1000, samples: newSeq[byte](16))
+    t.header = SegyTraceHeader(fieldRecord: 10, traceNumberInField: int32(i + 1),
+      traceSeqFile: int32(i + 1), numSamples: 4, sampleInterval: 1000, year: 2024,
+      dayOfYear: 1, hour: 0, minute: 0, second: 0, timeBasisCode: basis,
+      delayRecordingTime: 0, traceIdCode: 1)
+    t.hasExt1 = true
+    t.ext1 = initTraceHeaderExt1()
+    t.ext1.nanoseconds = ns
+    t.ext1.numAddlTraceHeaders = 1
+    t.ext1.extNumSamples = 4
+    w.writeTrace(t)
+  w.close()
+  sink.takeBytes()
+
+proc keysAll(b: seq[byte], name: string): seq[TraceKeys] =
+  var f = openSeismicBytes(b, name, keys = true)
+  doAssert f.log.count(sevError) == 0
+  result = newSeq[TraceKeys](f.len)
+  for i in 0 ..< f.len: result[i] = f.traceKeys(i)
+  f.close()
+
 proc main*() =
   let civil = daysFromCivil(2024, 1, 1) * 86400
 
@@ -175,6 +220,20 @@ proc main*() =
     doAssert gpsMinusUtc(gpsUs) == 18
     doAssert k.firstSampleUs.get == gpsUsToUtcUs(gpsUs) + 12_000
     doAssert k.firstSampleUs.get != civil * 1_000_000 + 12_000
+
+  block segy_half_second:
+    let civil = daysFromCivil(2024, 1, 1) * 86400
+    let counts = halfSecondNs()
+    let gpsBase = gpsUsToUtcUs(int64(round((float64(civil) - float64(GpsEpochUnix)) * 1e6)))
+    for basis in [4'i16, 5'i16]:
+      let ks = keysAll(segyNsFile(basis, counts), "half" & $basis)
+      doAssert ks.len == counts.len
+      let base = if basis == 5: gpsBase else: civil * 1_000_000
+      for i, ns in counts:
+        let want = base + nearest(int64(ns))
+        let got = ks[i].firstSampleUs
+        doAssert got.isSome, $basis & " ns " & $ns
+        doAssert got.get == want, $basis & " ns " & $ns & " got " & $got.get & " want " & $want
 
   block sample_index:
     let k = keysOf(segyFile(1, 0, 0, 4, false), "idx")

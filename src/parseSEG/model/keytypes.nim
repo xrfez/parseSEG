@@ -138,15 +138,13 @@ proc noteRecordedTime*(k: var TraceKeys, origin: TimeOrigin, utcUs: int64) =
   k.timePack = uint32(origin.ord) or (uint32(fractionUs(utcUs)) shl OriginBits)
 
 func recordedUs(k: TraceKeys): Option[int64] =
-  # The recorded instant in UTC microseconds, from `time`'s POSIX second and
-  # the stored fraction. The float can round across a second; the fraction
-  # says which side the exact microsecond was on.
+  # The recorded instant in UTC microseconds. Remove the stored sub-second
+  # first, then round to the whole second: a float64 POSIX time can sit on
+  # either side of a boundary, and a 0.5 test takes a stored fraction of
+  # 500000 us for that crossing.
   if k.timeOrigin == toNone or k.time.isNaN: return none(int64)
   let sub = int64(k.timePack shr OriginBits)
-  var sec = int64(floor(k.time))
-  let frac = k.time - float64(sec)
-  if sub >= 500_000 and frac < 0.5: dec sec
-  elif sub < 500_000 and frac >= 0.5: inc sec
+  let sec = int64(round(k.time - float64(sub) / 1e6))
   some(sec * 1_000_000 + sub)
 
 func delayUs(k: TraceKeys): Option[int64] =
