@@ -150,7 +150,8 @@ whatever the code; `KL` and `PM` still replace an earlier row at that station. S
 are matched to the trace's sensor class (`sensorClass`): a hydrophone takes the last `H*`,
 a geophone the last `G*` else the last `R*` (so `R1` then `H1` gives a geophone `R1` and a
 hydrophone `H1`, with no warning), another identified receiver the last `R*` else the last
-`G*`. Unknown, or none of those rows, takes the later row. Two rows of one letter (`G1`,
+`G*`. Unknown, or none of those rows, takes the later row. A coded row at another index does not
+replace an exact table key (`addReceiver` at index 0 stands against SPS at index 1). Two rows of one letter (`G1`,
 `G2`) use the later one, and `g.log` says the station was ambiguous when the rows were
 loaded (a join does not log); further warnings of that kind are a count.
 `receiverPointCode(g, keys, overwrite = false)` is that code when `applySurvey` would

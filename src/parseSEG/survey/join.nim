@@ -1009,10 +1009,14 @@ proc decideStation(g: var SurveyGeometry, cap: var RepeatCap, file: string, key:
 func codedKey(g: SurveyGeometry, line, point: float64, index: int16):
     tuple[found: bool, key: StationKey] =
   # The same index rules as `lookup`: exact, then index 0, and a trace with
-  # index 0 also tries index 1. The first key that has coded rows.
+  # index 0 also tries index 1. An exact table key is never replaced by
+  # coded rows stored under a different index.
   if line.isNaN or point.isNaN: return
-  let keys = [stationKey(line, point, index), stationKey(line, point, 0),
-    stationKey(line, point, 1)]
+  let exact = stationKey(line, point, index)
+  if exact in g.table.receivers:
+    if exact in g.codes: return (true, exact)
+    return
+  let keys = [exact, stationKey(line, point, 0), stationKey(line, point, 1)]
   for i in 0 .. (if index == 0: 2 else: 1):
     if keys[i] in g.codes:
       return (true, keys[i])

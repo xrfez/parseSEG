@@ -976,6 +976,33 @@ proc main*() =
     doAssert hydro.applySurvey(g) and hydro.rcvX == 300
     doAssert g.log.len == n
 
+  block exact_table_index_is_not_replaced:
+    # Break: codedKey (join.nim) uses a coded row at another index, so SPS
+    # G1 at index 1 replaces addReceiver at index 0.
+    let g1 = r21('R', "10.00", "104.00", '1', "G1", "1000.0", "2000.0", "1.0")
+    let h1 = r21('R', "10.00", "104.00", '1', "H1", "3000.0", "4000.0", "2.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, g1].join("\n")))
+    g.addReceiver(10, 104, 0, 50, 60, 7)
+    var k = initTraceKeys()
+    (k.rcvLine, k.rcvPoint, k.rcvIndex) = (10.0, 104.0, 0'i16)
+    k.traceCode = 12
+    doAssert g.receiverPointCode(k) == "", $g.receiverPointCode(k)
+    doAssert k.applySurvey(g) and k.rcvX == 50 and k.rcvY == 60, $k.rcvX
+    var both: SurveyGeometry
+    both.addSps(parseSps([H00, g1, h1].join("\n")))
+    both.addReceiver(10, 104, 0, 50, 60, 7)
+    var geo = initTraceKeys()
+    (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (10.0, 104.0, 0'i16)
+    geo.traceCode = 12
+    doAssert geo.applySurvey(both) and geo.rcvX == 50, $geo.rcvX
+    doAssert both.receiverPointCode(geo) == ""
+    var at1 = initTraceKeys()
+    (at1.rcvLine, at1.rcvPoint, at1.rcvIndex) = (10.0, 104.0, 1'i16)
+    at1.traceCode = 12
+    doAssert both.receiverPointCode(at1) == "G1"
+    doAssert at1.applySurvey(both) and at1.rcvX == 1000, $at1.rcvX
+
   block receiver_point_code_only_when_applied:
     # Break: receiverPointCode (join.nim) ignores auxiliary traces and a
     # header position applySurvey would keep, so it names a row that is not
