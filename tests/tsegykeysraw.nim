@@ -160,13 +160,8 @@ proc refKeys(f: SegyFile, t: SegyTrace): TraceKeys =
         minute notin 0..59 or second notin 0..60: NaN
       else: float64(dateTime(year, mJan, 1, zone = utc()).toTime.toUnix +
         int64(day - 1) * 86400 + int64(hour) * 3600 + int64(minute) * 60 + int64(second))
-    let ns = if g("nanosecs").isNaN: 0.0 else: g("nanosecs") * 1e-9
-    result.time = case basis
-      of 0, 2, 4: s + ns
-      of 5:
-        if s.isNaN: NaN
-        else: timestampToUnix(int64(round((s - float64(GpsEpochUnix)) * 1e6))) + ns
-      else: NaN
+    # Same origin and sub-second as the readers: one clock rule, not a copy.
+    result.noteHeaderClock(s, g("nanosecs"), basis)
   # Phase 16: timing, trace code and status.
   result.traceCode = int16(code)
   let rev = int(f.revision.major)

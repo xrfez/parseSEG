@@ -427,15 +427,49 @@ func nearestUs(ns: int64): int64 {.inline.} =
   # and every count this layout can produce, exactly.
   int64(round(float64(ns) / 1000.0))
 
+func nanosOf(x: float64): tuple[frac: float64, count: int64, has: bool] =
+  # A nanosecond count as the fraction of `time`, the count kept for
+  # `firstSampleUs`, and whether a sub-second was present. NaN is none.
+  if x.isNaN: return
+  result.frac = x * 1e-9
+  result.count =
+    if x == trunc(x) and x >= float64(low(int32)) and x <= float64(high(int32)):
+      int64(int32(x))
+    else:
+      int64(round(x))
+  result.has = result.count != 0
+
+proc noteHeaderClock*(k: var TraceKeys, seconds, nanosecs: float64, basis: int) =
+  ## Sets `k.time` and records where it came from, for a SEG-Y header clock.
+  ## `seconds` is the civil POSIX second (NaN when the date does not resolve);
+  ## `nanosecs` is the nanosecond count, NaN when the trace has none. Basis
+  ## 0, 2 and 4 are UTC as stored, 5 is GPS time of day, and any other basis
+  ## leaves the time unknown and the origin unrecorded. Every SEG-Y key path
+  ## calls this, so the same header bytes record the same origin and
+  ## sub-second.
+  let n = nanosOf(nanosecs)
+  let origin = if n.has: toHeaderSubsec else: toHeaderSeconds
+  case basis
+  of 0, 2, 4:
+    k.time = seconds + n.frac
+    if not k.time.isNaN:
+      k.noteRecordedTime(origin, int64(seconds) * 1_000_000 + nearestUs(n.count))
+  of 5: # GPS time of day, converted with the leap seconds like a SEG-D timestamp
+    if seconds.isNaN:
+      k.time = NaN
+    else:
+      let gpsUs = int64(round((seconds - float64(GpsEpochUnix)) * 1e6))
+      k.time = timestampToUnix(gpsUs) + n.frac
+      k.noteRecordedTime(origin, gpsUsToUtcUs(gpsUs) + nearestUs(n.count))
+  else:
+    k.time = NaN
+
 proc noteSegyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
     cache: var ScalarCache, timeBasis: int16, k: var TraceKeys) =
   # The date and time fields (standard: trace bytes 157-168 and Ext1
-  # 141-144) in their time basis. `k.time` is the historical float; the
-  # nanosecond count is kept to the microsecond for `firstSampleUs`.
+  # 141-144). The clock rule is `noteHeaderClock`.
   var year, day, hour, minute, second, code: int
-  var ns = 0.0
-  var nsCount = 0'i64
-  var hasNs = false
+  var nanosecs = NaN
   if p.stdTime:
     template i16(at: int): int = int(loadNum[int16](h.std, at, o))
     year = i16(156)
@@ -444,9 +478,7 @@ proc noteSegyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
       return
     (day, hour, minute, second, code) = (i16(158), i16(160), i16(162), i16(164), i16(166))
     if p.nanos and h.ext1 != nil:
-      nsCount = int64(loadNum[int32](h.ext1, 140, o))
-      ns = float64(nsCount) * 1e-9
-      hasNs = nsCount != 0
+      nanosecs = float64(loadNum[int32](h.ext1, 140, o))
   else:
     # A Layout stanza moved a field or reuses its bytes: a field the layout
     # no longer has makes the time unknown (-1 is no day, hour, ...).
@@ -459,31 +491,9 @@ proc noteSegyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
     (day, hour, minute, second) = (part(kfDay, -1), part(kfHour, -1), part(kfMinute, -1),
       part(kfSecond, -1))
     code = part(kfTimebase, 0)
-    let x = keyValue(p, kfNanosecs, h, o, cache)
-    if not x.isNaN:
-      ns = x * 1e-9
-      if x == trunc(x) and x >= float64(low(int32)) and x <= float64(high(int32)):
-        nsCount = int64(int32(x))
-      else:
-        nsCount = int64(round(x))
-      hasNs = nsCount != 0
+    nanosecs = keyValue(p, kfNanosecs, h, o, cache)
   let basis = if code != 0: code else: int(timeBasis)
-  let s = civilSeconds(fullYear(year), day, hour, minute, second)
-  let origin = if hasNs: toHeaderSubsec else: toHeaderSeconds
-  case basis
-  of 0, 2, 4:
-    k.time = s + ns
-    if not k.time.isNaN:
-      k.noteRecordedTime(origin, int64(s) * 1_000_000 + nearestUs(nsCount))
-  of 5: # GPS time of day: as a SEG-D timestamp, which converts with the leap seconds
-    if s.isNaN:
-      k.time = NaN
-    else:
-      let gpsUs = int64(round((s - float64(GpsEpochUnix)) * 1e6))
-      k.time = timestampToUnix(gpsUs) + ns
-      k.noteRecordedTime(origin, gpsUsToUtcUs(gpsUs) + nearestUs(nsCount))
-  else:
-    k.time = NaN
+  k.noteHeaderClock(civilSeconds(fullYear(year), day, hour, minute, second), nanosecs, basis)
 
 proc intervalIn(h: RawHeaders, o: static ByteOrder, fixedUs: float64): float64 {.inline.} =
   if not fixedUs.isNaN: return fixedUs

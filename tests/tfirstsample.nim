@@ -6,12 +6,17 @@
 ##
 ## A write from keys stored time zero in the SEG-D Rev 3 Timestamp block,
 ## so a trace with `t0Ms` 2.5 read back 2500 us early.
+##
+## The generic reader and the index walk must agree on `firstSampleUs`.
+## Skipping `noteRecordedTime` in `noteHeaderClock` left the origin
+## unrecorded, so sample 0 was missing (SEG-Y rev 2, 2024-01-01, Ext1
+## nanoseconds 1234567, delay 4 ms).
 
 import std/[assertions, math, options]
 
 import parseSEG
 
-import parseSEG/io/memsink
+import parseSEG/io/[memsink, memsource]
 
 import parseSEG/common/years
 
@@ -178,6 +183,25 @@ proc writeKeys(rows: openArray[TraceKeys]): seq[TraceKeys] =
 
 proc main*() =
   let civil = daysFromCivil(2024, 1, 1) * 86400
+
+  block both_segy_key_paths:
+    # keysOf walks raw header bytes; traceKeys re-encodes the decoded header.
+    let ns = 1_234_567'i32
+    let b = segyFile(2, 4, ns, 4, true)
+    let rawK = keysOf(b, "rawpath")
+    var src = openMemorySource(b, "genpath")
+    var full = openSegy(src, headersOnly = true)
+    doAssert full.log.count(sevError) == 0
+    var ft: SegyTrace
+    doAssert full.readTrace(ft)
+    let generic = full.file.traceKeys(ft)
+    let want = civil * 1_000_000 + nearest(int64(ns)) + 4_000
+    doAssert generic.timeOrigin == rawK.timeOrigin
+    doAssert generic.timeOrigin == toHeaderSubsec
+    doAssert generic.firstSampleUs.isSome and rawK.firstSampleUs.isSome
+    doAssert generic.firstSampleUs.get == rawK.firstSampleUs.get
+    doAssert generic.firstSampleUs.get == want
+    src.close()
 
   block size_and_caller:
     doAssert sizeof(TraceKeys) == 184
