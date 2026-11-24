@@ -1267,7 +1267,10 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace, n: int, t: SegdTra
   var last = trace
   while last + 1 < entries.len and int(entries[last + 1].record) == r: inc last
   let srcN = int(entries[trace].numSamples)
-  if fOut == sd8015 and n mod 4 != 0: refuse8015(trace, src.path, n)
+  # An 8015 source written with its own count keeps whatever count it has;
+  # a count that is new, or a conversion to 8015, must fill whole groups.
+  if fOut == sd8015 and n mod 4 != 0 and (rec.format.get != sd8015 or n != srcN):
+    refuse8015(trace, src.path, n)
   if n != srcN:
     var trial = rec
     applySegdCount(trial, n, r, src.path)
@@ -1343,7 +1346,9 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     if n != s.likeN and not (s.likeSame and n == srcN):
       refuse(segdRec(r, src.path) & " has " & $s.likeN & " samples; trace " & $trace &
         " has " & $n)
-    if s.recFormat == sd8015 and n mod 4 != 0: refuse8015(trace, src.path, n)
+    if s.recFormat == sd8015 and n mod 4 != 0 and
+        (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
+      refuse8015(trace, src.path, n)
     if s.likeSame and n != srcN:
       var trial = s.likeRec
       applySegdCount(trial, n, r, src.path)
