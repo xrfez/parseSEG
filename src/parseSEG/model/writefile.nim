@@ -44,6 +44,8 @@
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
 ## source trace's headers and its own CDP, fold, offset and coordinates.
+## SEG-D overrides named `vendor.<field>` set a field of a vendor header map
+## in the trace's extension blocks (`useVendorMaps`; `HeaderOverride`).
 ##
 ## `writeTrace(w, src, trace, samples, keys)` writes the geometry of `keys`
 ## into the template's headers first, where it differs from what they hold:
@@ -105,6 +107,7 @@ import ../io/[records, diskio, memsink]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
   samples as segysamples, textheader, exttext]
 import ../segd/[reader as segdreader, writer as segdwriter]
+import ../vendor/apply as vendorapply
 import ../seg2/[reader as seg2reader, writer as seg2writer]
 import ../convert
 import std/strutils
@@ -124,7 +127,9 @@ type
     name*: string
       ## `trace.<field>` or `ext1.<field>`, with the field names of the
       ## header types (as `HeaderEditor.setTraceField`); SEG-2:
-      ## `trace.<KEYWORD>`, a trace string.
+      ## `trace.<KEYWORD>`, a trace string. SEG-D: `vendor.<field>`, a field
+      ## of a vendor header map in the trace's extension blocks (see
+      ## `useVendorMaps`); an integer value (`fvInt`) is passed exactly.
     value*: FieldValue ## The value as stored (SEG-Y: before its scalar).
 
   SubsetPatch* = object
@@ -375,6 +380,7 @@ type
     likeN: int                 ## The count the record's traces must share.
     likeSame: bool             ## Every buffered trace kept its source count.
     likeRec: SegdRecord        ## Headers to write; a new format is already applied.
+    vendor: VendorRegistry     ## From `useVendorMaps`: the maps `vendor.<field>` overrides use.
     subset: seq[int]           ## From `startSubset`: the source traces of the next record.
     subPath: string            ## That subset's file and `memoryId`.
     subMem: int
@@ -1637,7 +1643,46 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
   s.nextTrace = s.recFirst
   s.recFormat = fOut
 
-proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
+const NoVendorMaps = VendorRegistry()
+
+proc vendorOverride(t: var SegdTrace, o: HeaderOverride, field: string,
+    reg: VendorRegistry, rec: SegdRecord) =
+  # Writes a vendor map field into the trace's extension blocks: the first block
+  # (Rev 2: by extension number from 2; Rev 3: by type byte) where it applies.
+  if reg.maps.len == 0: refuse(o.name & ": no vendor maps are set (useVendorMaps)")
+  let ctx = vendorContext(rec, reg.usesRecordBlocks)
+  let v = case o.value.kind
+    of fvInt: VendorValue(kind: vvInt, intVal: o.value.intVal)
+    of fvFloat: VendorValue(kind: vvFloat, floatVal: o.value.floatVal)
+    of fvText: VendorValue(kind: vvText, text: o.value.text)
+  var why: seq[string]
+  var done = false
+  var at = 0
+  var k = 0
+  while not done and at + SegdBlockSize <= t.extensions.len:
+    var span = SegdBlockSize
+    var area = VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1, extIndex: k + 2)
+    if t.layout == slRev3:
+      let ty = t.extensions[at + 31]
+      area = VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(ty),
+        where: "traceHeader", extIndex: -1)
+      if ty == BlockTypePosition1 and at + 96 <= t.extensions.len and
+          t.extensions[at + 63] == BlockTypePosition2 and
+          t.extensions[at + 95] == BlockTypePosition3:
+        span = 3 * SegdBlockSize
+    try:
+      reg.setVendorField(ctx, area, t.extensions.toOpenArray(at, at + span - 1), field, v)
+      done = true
+    except ValueError as e:
+      if e.msg notin why: why.add e.msg
+    at += span
+    inc k
+  if not done:
+    refuse(o.name & ": " & (if why.len == 0: "the trace has no extension blocks"
+      else: why.join("; ")))
+
+proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride],
+    reg: VendorRegistry = NoVendorMaps, rec: SegdRecord = SegdRecord()) =
   for o in overrides:
     let (blk, field) = splitName(o)
     case blk
@@ -1654,6 +1699,7 @@ proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
         var x = t.ext1Rev3.get
         x.setOverride(hbSegdExt1Rev3, field, o)
         t.ext1Rev3 = some(x)
+    of "vendor": t.vendorOverride(o, field, reg, rec)
     of "timestamp":
       # Rev 3: the Timestamp block's fields, e.g. the instant of the first sample.
       var at = -1
@@ -1667,7 +1713,7 @@ proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
       x.setOverride(hbSegdTimestamp, field, o)
       let e = x.encoded
       for q in 0 ..< SegdBlockSize: t.extensions[at + q] = e[q]
-    else: refuse(o.name & ": SEG-D trace blocks are trace, ext1 and (Rev 3) timestamp")
+    else: refuse(o.name & ": SEG-D trace blocks are trace, ext1, vendor and (Rev 3) timestamp")
 
 proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
@@ -1692,7 +1738,8 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
       (trace == 0 or int(src.index.entries[trace - 1].record) != r):
     s.finishRecord()
   # A subset's traces take the record's patch first, then the overrides.
-  if s.subset.len == 0 and s.likeKept.len == 0: t.overrideSegd(overrides)
+  if s.subset.len == 0 and s.likeKept.len == 0:
+    t.overrideSegd(overrides, s.vendor, src.index.segdRecords[r])
   let begun = s.subset.len > 0
   if begun: s.beginSubset(src, trace)
   let sameRec = s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and
@@ -1729,7 +1776,7 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
       let startUs = if s.likeRec.layout == slRev3: int64(s.likeRec.scanTypes[
         sets[at].scan].descriptorsRev3[sets[at].chan].startTime) else: 0'i64
       t.applyTracePatch(s.subPatch, startUs)
-      t.overrideSegd(overrides)
+      t.overrideSegd(overrides, s.vendor, s.likeRec)
       if fresh: s.likeSets = sets
     elif sameRec:
       if trace != s.nextTrace:
@@ -2529,6 +2576,16 @@ proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int]
   w.s.subset = @traces
   w.s.subPath = src.path
   w.s.subMem = src.memoryId
+
+proc useVendorMaps*(w: var SeismicWriter, reg: VendorRegistry) =
+  ## Sets the vendor header maps that `vendor.<field>` overrides of a SEG-D
+  ## trace (`HeaderOverride`) use, replacing any set before. The field is
+  ## written into the first of the copied trace's extension blocks (Rev 2:
+  ## extension numbers 2 and up; Rev 3: user-defined block types) where the
+  ## map decodes it, as `setVendorField` does, with the output record's
+  ## headers as the context of `(when (record ...))`. A map set after the
+  ## writer opened serves every later trace; the registry is copied.
+  w.s.vendor = reg
 
 proc abandonRecord*(w: var SeismicWriter) =
   ## Drops the SEG-D record in progress, or the subset listed by
