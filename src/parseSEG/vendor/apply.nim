@@ -43,15 +43,13 @@ proc addDecoded(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorCo
   # Decodes one area and keeps the block, if anything applies.
   blocks.add reg.decodeAll(ctx, area, bytes, log, loc)
 
-proc decodeArea(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorContext,
-    kind: VendorTargetKind, bytes: openArray[byte], log: var DiagLog, loc: Location) =
+template eachBlockArea(k: VendorTargetKind, bytes: untyped, visit: untyped) =
   # The whole area, then each 32-byte block.
   if bytes.len > 0:
-    blocks.addDecoded(reg, ctx, VendorArea(kind: kind, blockIndex: -1, blockType: -1,
-      extIndex: -1), bytes, log, loc)
+    visit(VendorArea(kind: k, blockIndex: -1, blockType: -1, extIndex: -1), bytes)
   for i in 0 ..< bytes.len div SegdBlockSize:
-    blocks.addDecoded(reg, ctx, VendorArea(kind: kind, blockIndex: i + 1, blockType: -1,
-      extIndex: -1), bytes.toOpenArray(i * SegdBlockSize, (i + 1) * SegdBlockSize - 1), log, loc)
+    visit(VendorArea(kind: k, blockIndex: i + 1, blockType: -1, extIndex: -1),
+      bytes.toOpenArray(i * SegdBlockSize, (i + 1) * SegdBlockSize - 1))
 
 func typedBlockSpan*(area: openArray[byte], i: int): int =
   ## **Internal.** Bytes of the Rev 3 typed block at `i` of `area`: 96 for a Position block
@@ -61,29 +59,58 @@ func typedBlockSpan*(area: openArray[byte], i: int): int =
     3 * SegdBlockSize
   else: SegdBlockSize
 
-proc decodeTypedBlocks(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorContext,
-    area: openArray[byte], where: string, log: var DiagLog, loc: Location) =
+template eachTypedBlock(bytes: untyped, place: string, visit: untyped) =
   # Rev 3 typed blocks by type byte. A Position block (0x50 0x51 0x52) is
   # offered as its 96 bytes, under type 0x50.
   var i = 0
-  while i + SegdBlockSize <= area.len:
-    let t = area[i + 31]
-    let span = area.typedBlockSpan(i)
-    blocks.addDecoded(reg, ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(t),
-      where: where, extIndex: -1), area.toOpenArray(i, i + span - 1), log, loc)
+  while i + SegdBlockSize <= bytes.len:
+    let span = bytes.typedBlockSpan(i)
+    visit(VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(bytes[i + 31]),
+      where: place, extIndex: -1), bytes.toOpenArray(i, i + span - 1))
     i += span
 
-proc decodeRev3Trailer(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorContext,
-    tb: openArray[byte], log: var DiagLog, loc: Location) =
+template eachRev3TrailerBlock(tb: untyped, visit: untyped) =
   # Each description block's data, by trailer block type.
   var i = 0
-  while i + SegdBlockSize <= tb.len and tb[i + 31] == BlockTypeTrailerDescription:
+  while i + SegdBlockSize <= tb.len and tb[i + 31] == BlockTypeTrailerDescription and
+      i + SegdBlockSize + SegdBlockSize * int(beU32(tb, i + 4)) <= tb.len:
     let n = SegdBlockSize * int(beU32(tb, i + 4))
-    if i + SegdBlockSize + n > tb.len: return
-    blocks.addDecoded(reg, ctx, VendorArea(kind: vtTrailer, blockIndex: -1,
-      blockType: int(tb[i]), where: blockText(tb.toOpenArray(i, i + 31), 9, 24), extIndex: -1),
-      tb.toOpenArray(i + SegdBlockSize, i + SegdBlockSize + n - 1), log, loc)
+    visit(VendorArea(kind: vtTrailer, blockIndex: -1, blockType: int(tb[i]),
+      where: blockText(tb.toOpenArray(i, i + 31), 9, 24), extIndex: -1),
+      tb.toOpenArray(i + SegdBlockSize, i + SegdBlockSize + n - 1))
     i += SegdBlockSize + n
+
+template eachRecordArea*(rec: SegdRecord, visit: untyped) =
+  ## **Internal.** Calls `visit(area, bytes)` for each vendor area of a SEG-D record, in
+  ## the order `decodeVendorAreas` decodes them (it and `vendorColumn` share this walk).
+  case rec.layout
+  of slRev2:
+    eachBlockArea(vtExtendedHeader, rec.extended, visit)
+    eachBlockArea(vtExternalHeader, rec.external, visit)
+    for i, g in rec.sourceHeaders:
+      visit(VendorArea(kind: vtGeneralHeader, blockIndex: i + 3, blockType: -1, extIndex: -1),
+        g.raw)
+    var trailer: seq[byte]
+    for t in rec.trailer: trailer.add t.raw
+    eachBlockArea(vtTrailer, trailer, visit)
+  of slRev3:
+    eachTypedBlock(rec.generalBlocks, "generalHeader", visit)
+    eachRev3TrailerBlock(rec.trailerRev3, visit)
+    eachBlockArea(vtExtendedHeader, rec.extended, visit)
+    eachBlockArea(vtExternalHeader, rec.external, visit)
+
+template eachFileArea*(f: SegyFile, visit: untyped) =
+  ## **Internal.** Calls `visit(area, bytes, key)` for the SEG-Y binary header (`key`
+  ## "binary") and each stanza of the extended header and trailer (`key` the stanza's), in
+  ## the order `decodeVendorAreas` decodes them.
+  var bin = newSeq[byte](BinaryHeaderSize)
+  f.binary.encode(bin, f.byteOrder)
+  visit(VendorArea(kind: vtBinaryHeaderBytes, blockIndex: -1, blockType: -1, extIndex: -1),
+    bin, "binary")
+  for h in [f.extended, f.trailer]:
+    for s in h.stanzas:
+      visit(VendorArea(kind: vtStanza, blockIndex: -1, blockType: -1, extIndex: -1,
+        stanza: s.company & ":" & s.name), h.stanzaBytes(s), s.key)
 
 proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
     file = ""): seq[VendorBlock] =
@@ -98,21 +125,9 @@ proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, log: var DiagLog,
   ## block. `file` names the file in the diagnostics.
   let ctx = vendorContext(rec, reg.usesRecordBlocks)
   let loc = Location(file: file, record: rec.index)
-  case rec.layout
-  of slRev2:
-    result.decodeArea(reg, ctx, vtExtendedHeader, rec.extended, log, loc)
-    result.decodeArea(reg, ctx, vtExternalHeader, rec.external, log, loc)
-    for i, g in rec.sourceHeaders:
-      result.addDecoded(reg, ctx, VendorArea(kind: vtGeneralHeader, blockIndex: i + 3,
-        blockType: -1, extIndex: -1), g.raw, log, loc)
-    var trailer: seq[byte]
-    for t in rec.trailer: trailer.add t.raw
-    result.decodeArea(reg, ctx, vtTrailer, trailer, log, loc)
-  of slRev3:
-    result.decodeTypedBlocks(reg, ctx, rec.generalBlocks, "generalHeader", log, loc)
-    result.decodeRev3Trailer(reg, ctx, rec.trailerRev3, log, loc)
-    result.decodeArea(reg, ctx, vtExtendedHeader, rec.extended, log, loc)
-    result.decodeArea(reg, ctx, vtExternalHeader, rec.external, log, loc)
+  template decodeOne(area: VendorArea, bytes: untyped) =
+    result.addDecoded(reg, ctx, area, bytes, log, loc)
+  eachRecordArea(rec, decodeOne)
 
 proc decodeVendorAreas*(reg: VendorRegistry, ctx: VendorContext, rec: SegdRecord,
     t: SegdTrace, log: var DiagLog, file = ""): seq[VendorBlock] =
@@ -122,14 +137,15 @@ proc decodeVendorAreas*(reg: VendorRegistry, ctx: VendorContext, rec: SegdRecord
   ## diagnostics. `ctx` is `vendorContext(rec, reg.usesRecordBlocks)`, built once
   ## per record: a caller that decodes many traces of a record should pass it.
   let loc = Location(file: file, record: rec.index, trace: t.index)
+  template decodeOne(area: VendorArea, bytes: untyped) =
+    result.addDecoded(reg, ctx, area, bytes, log, loc)
   case t.layout
   of slRev2:
     for i in 0 ..< t.extensions.len div SegdBlockSize:
-      result.addDecoded(reg, ctx, VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1,
-        extIndex: i + 2), t.extensions.toOpenArray(SegdBlockSize * i, SegdBlockSize * i + 31),
-        log, loc)
+      decodeOne(VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1, extIndex: i + 2),
+        t.extensions.toOpenArray(SegdBlockSize * i, SegdBlockSize * i + 31))
   of slRev3:
-    result.decodeTypedBlocks(reg, ctx, t.extensions, "traceHeader", log, loc)
+    eachTypedBlock(t.extensions, "traceHeader", decodeOne)
 
 proc decodeVendorAreas*(reg: VendorRegistry, rec: SegdRecord, t: SegdTrace,
     log: var DiagLog, file = ""): seq[VendorBlock] =
@@ -146,15 +162,9 @@ proc decodeVendorAreas*(reg: VendorRegistry, f: SegyFile, log: var DiagLog,
   ## `COMPANY:NAME`) of the extended header and trailer. `file` names the
   ## file in the diagnostics.
   let ctx = vendorContext(f)
-  var bin = newSeq[byte](BinaryHeaderSize)
-  f.binary.encode(bin, f.byteOrder)
-  result.addDecoded(reg, ctx, VendorArea(kind: vtBinaryHeaderBytes, blockIndex: -1,
-    blockType: -1, extIndex: -1), bin, log, Location(file: file, field: "binary"))
-  for h in [f.extended, f.trailer]:
-    for s in h.stanzas:
-      result.addDecoded(reg, ctx, VendorArea(kind: vtStanza, blockIndex: -1, blockType: -1,
-        extIndex: -1, stanza: s.company & ":" & s.name), h.stanzaBytes(s), log,
-        Location(file: file, field: s.key))
+  template decodeOne(area: VendorArea, bytes: untyped, key: string) =
+    result.addDecoded(reg, ctx, area, bytes, log, Location(file: file, field: key))
+  eachFileArea(f, decodeOne)
 
 proc decodeVendorAreas*(reg: VendorRegistry, f: SegyFile, t: SegyTrace,
     log: var DiagLog, file = ""): seq[VendorBlock] =

@@ -24,7 +24,7 @@
 ## (`registerVendorDecoder`) have no field plans and are not consulted.
 
 import std/[algorithm, math, options, strutils, tables]
-import ../common/[diagnostics, endians]
+import ../common/endians
 import ../segd/[headers as segdheaders, reader as segdreader]
 import ../segy/[reader as segyreader, traceheader]
 import ../model/[indextypes, traceindex]
@@ -340,42 +340,43 @@ proc raiseOutside(trace: int) {.noinline, noreturn.} =
 
 proc recordValues(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): bool,
     s: var Sink): bool =
-  # A record-level field: one value per record, repeated for its traces. `stop` is asked
-  # once per record; false when it ended the read.
-  let n = f.len
+  # A record-level field: one value per record, repeated for its traces. Each record area is
+  # offered in decode order; the first whose map (chosen as `decodeAll` chooses it) has a
+  # candidate's target for it gives the value of that target's own field, as `scanTraces`
+  # does for a trace block. `stop` is asked once per record; false when it ended the read.
   let records = max(1, f.recordCount)
-  var want = a.entry.info.fieldName
-  if a.elem >= 0: want.add "[" & $a.elem & "]"
-  var vals = newSeq[Option[VendorValue]](records)
-  var log: DiagLog
+  var vals = newSink(s.mode, records)
+  var got = newSeq[bool](records)
+  var tie = false
   for r in 0 ..< records:
     if stop != nil and stop(): return false
     let ctx = if f.kind == skSegd: vendorContext(f.index.segdRecords[r], reg.usesRecordBlocks)
       else: vendorContext(f.index.segy)
-    let specs = reg.applicableSpecs(ctx)
-    # The maps whose candidates apply to this record and agree with the column, and the
-    # names of the blocks they can give the field in: a block of positional targets is
-    # named after the last of them, so any positional target's name stands for it.
-    var maps, blocks: seq[string]
-    var positional: seq[string]
-    for c in a.entry.cands:
-      if specs[c.map] >= 0 and reg.compatible(c, a, s):
-        maps.add reg.maps[c.map].name
-        if c.matched: blocks.add a.entry.info.blockName
-        else:
-          for t in reg.maps[c.map].targets:
-            if t.matches.len == 0: positional.add t.name
-    if maps.len > 0:
-      let decoded = if f.kind == skSegd: reg.decodeVendorAreas(f.index.segdRecords[r], log)
-        else: reg.decodeVendorAreas(f.index.segy, log)
-      for blk in decoded:
-        if vals[r].isNone and blk.mapName in maps and
-            (blk.name in blocks or blk.name in positional):
-          for fld in blk.fields:
-            if vals[r].isNone and fld.name == want: vals[r] = some(fld.value)
-  for i in 0 ..< n:
+    let rc = reg.recState(ctx, a, s)
+    var hit = false
+    template offer(area: VendorArea, b: untyped) =
+      if not hit:
+        let chosen = reg.selectMapWith(rc.specs, area, b, tie)
+        for c in rc.cands:
+          if not hit and c.map == chosen and
+              reg.maps[c.map].targets[c.target].targetMatches(area, b):
+            reg.readCand(c, b, rc, a.elem, vals, r)
+            hit = true
+    template offer(area: VendorArea, b: untyped, key: string) = offer(area, b)
+    let before = vals.absent
+    if rc.cands.len > 0:
+      if f.kind == skSegd: eachRecordArea(f.index.segdRecords[r], offer)
+      else: eachFileArea(f.index.segy, offer)
+    if not hit: vals.putAbsent(r)
+    got[r] = vals.absent == before
+  for i in 0 ..< f.len:
     let r = min(int(f.index.entries[i].record), records - 1)
-    if vals[r].isSome: s.putValue(i, vals[r].get) else: s.putAbsent(i)
+    if not got[r]: s.putAbsent(i)
+    else:
+      case s.mode
+      of smFloat: s.putFloat(i, vals.floats[r])
+      of smInt: s.putInt(i, vals.ints[r])
+      of smText: s.texts[i] = vals.texts[r]
   true
 
 proc scanTraces(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): bool,
@@ -481,20 +482,24 @@ proc vendorColumn*(f: SeismicFile, reg: VendorRegistry, name: string,
   ## among the maps that apply to the file's first record (SEG-D) or the file (SEG-Y);
   ## other records use the maps that apply to them, so a record no map applies to gives
   ## absent values. A record-level field gives its record's value for each of the
-  ## record's traces. A trace reads the first block its target is for (as `decodeAll` does
-  ## for "the first block of that name"): when the field is off there (its `(when)`, its
-  ## sentinel) a later block that has it is not looked at. `absent` counts the traces with no
-  ## value; a field that holds NaN (a float with that value) is present and reads NaN in
-  ## `numbers` as an absent one does.
+  ## record's traces. A trace (for a record-level field, a record) reads the first block its
+  ## target is for, in the order `decodeVendorAreas` decodes them (as `decodeAll` does for
+  ## "the first block of that name"): when the field is off there (its `(when)`, its
+  ## sentinel) a later block that has it is not looked at. The value is that target's own
+  ## field, also when targets without `(match)` share the block and another of them has a
+  ## field of the same name. `absent` counts the traces with no value; a field that holds
+  ## NaN (a float with that value) is present and reads NaN in `numbers` as an absent one
+  ## does.
   ##
   ## `kind`, `unit` and `level` are those of the first record's map. When a later record's
   ## map defines the same name with another kind or level, that record's values are absent
   ## (never converted); with another unit they are kept; either way `mixed` is set and
   ## `mixedWhy` says what differs. An integer beyond 2^53 loses its low bits as a float64: use
-  ## `vendorColumnInt`. `stop` is asked every 4096 traces (a record-level field: once per record); when it returns true the
-  ## column is empty and `stopped` is set. Raises `ValueError` for an unknown or
-  ## ambiguous name, a repeat field named without `[i]`, a closed file, SEG-2, and
-  ## headers that lie outside the file, and `SegTruncatedError` for a file cut short.
+  ## `vendorColumnInt`. `stop` is asked every 4096 traces (a record-level field: once per
+  ## record); when it returns true the column is empty and `stopped` is set. Raises
+  ## `ValueError` for an unknown or ambiguous name, a repeat field named without `[i]`, a
+  ## closed file, SEG-2, and headers that lie outside the file, and `SegTruncatedError` for
+  ## a file cut short.
   f.requireOpen()
   let a = reg.resolve(f.fileContext, name)
   let info = a.entry.info

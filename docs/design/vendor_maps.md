@@ -90,9 +90,13 @@ not where it is:
   no allocation per trace (about 30 ns a trace, 100k traces in 3 ms in a release build). Absent
   values (a failed `(when)`, the sentinel, a missing or short block, a record no map applies to)
   are NaN, or "" for text, and counted. A record-level field gives its record's value for each
-  of its traces. `vendorColumnInt` keeps an unscaled integer exact with a `present` flag per
-  trace. Code decoders have no field plans and are not consulted; a map's `(layout)` entries are
-  keys (`OpenOptions.vendors`), not vendor fields, and are not listed.
+  of its traces, read the same way from the record's areas in decode order. Each address reads
+  its own target's field: two targets without `match` on one block give one decoded block,
+  and a field name both have is read from the target the address names. A trace or record
+  reads the first block its target is for, as decode's first block of that name.
+  `vendorColumnInt` keeps an unscaled integer exact with a `present` flag per trace. Code
+  decoders have no field plans and are not consulted; a map's `(layout)` entries are keys
+  (`OpenOptions.vendors`), not vendor fields, and are not listed.
 - **Rev 3 trailer.** A target `(kind trailer)` with `match` and no `blockIndex` is tried on
   the data of each Rev 3 trailer description block (matched from its first byte, not limited
   to 32 bytes); the whole trailer area of Rev 0-2 is never offered to it.

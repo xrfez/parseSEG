@@ -6,7 +6,10 @@
 ## `selectMapWith` fails `most_specific_map_per_block`; ignoring `stop` fails
 ## `stop_ends_early`; dropping the sentinel test of `readNumber` fails `segd_columns`;
 ## keeping a clashing field's bare name fails `shipped_maps_listing`; passing the integer
-## through float64 in `vendorColumnInt` fails `exact_integers`.
+## through float64 in `vendorColumnInt` fails `exact_integers`. Taking a record-level field
+## from any block of the map's targets without (match) by its name fails
+## `record_fields_of_several_areas` and `one_name_twice_in_a_block`; reading later blocks
+## when the field is off in the first fails `record_field_reads_the_first_block`.
 
 import std/[assertions, math, monotimes, options, os, sequtils, strutils, times]
 
@@ -577,6 +580,79 @@ proc main*() =
     var f = openSeismicBytes(bytesOf(d), "nan")
     let col = f.vendorColumn(registry(), "gain")
     doAssert col.absent == 0 and col.numbers[1].isNaN and not col.numbers[0].isNaN
+    f.close()
+
+  # A record with two extended header blocks (bytes 100..163) and one external header
+  # block (bytes 1..32), for record-level fields in several areas.
+  proc twoAreas(): SegdData =
+    result = build([RecSpec(manufacturer: 9, second: 1, traces: 2, exts: 1)])
+    template r: untyped = result.records[0].record
+    r.extended = newSeq[byte](64)
+    for i in 0 .. 63: r.extended[i] = byte(i + 100)
+    r.gh1.extendedHeaderBlocks = 2
+    r.external = newSeq[byte](32)
+    for i in 0 .. 31: r.external[i] = byte(i + 1)
+    r.gh1.externalHeaderBlocks = 1
+
+  proc decoded(reg: VendorRegistry, f: SeismicFile, blockName: string): seq[VendorField] =
+    # The fields of the record's first decoded block named `blockName`.
+    var log: DiagLog
+    for blk in reg.decodeVendorAreas(f.index.segdRecords[0], log):
+      if blk.name == blockName: return blk.fields
+    doAssert false, blockName & " is not decoded"
+
+  block record_fields_of_several_areas:
+    # One name in positional targets of different areas: each address reads its own
+    # target's block. Matching the field by name in any positional target's block gave all
+    # three columns the extended header block 1 value (102).
+    let reg = registry("""(.nif27)
+(vendormap "m" (version 1) (match (format segd))
+  (target (kind extendedHeader) (blockIndex 1) (name ext) (field x (at 3) (enc u8)))
+  (target (kind externalHeader) (blockIndex 1) (name xh) (field x (at 5) (enc u8)))
+  (target (kind extendedHeader) (blockIndex 2) (name ext2) (field x (at 7) (enc u8))))""")
+    var f = openSeismicBytes(bytesOf(twoAreas()), "areas")
+    for (name, blockName, want) in [("ext.x", "ext", 102.0), ("ext2.x", "ext2", 138.0),
+        ("xh.x", "xh", 5.0)]:
+      let col = f.vendorColumn(reg, name)
+      doAssert reg.decoded(f, blockName)[0].value.intVal == int64(want)
+      doAssert col.level == vlRecord and col.numbers == @[want, want], name & " " & $col.numbers
+      doAssert f.vendorColumnInt(reg, name).values == @[int64(want), int64(want)]
+    f.close()
+
+  block one_name_twice_in_a_block:
+    # Two positional targets of one block both have x: decode gives one block (named after
+    # the last) listing p's x, then q's. An address reads the x its own target decodes:
+    # p.x the first, q.x the second (matching by name gave q.x the first).
+    let reg = registry("""(.nif27)
+(vendormap "m" (version 1) (match (format segd))
+  (target (kind extendedHeader) (blockIndex 1) (name p) (field x (at 1) (enc u8))
+    (field y (at 4) (enc u8)))
+  (target (kind extendedHeader) (blockIndex 1) (name q) (field x (at 2) (enc u8))))""")
+    var f = openSeismicBytes(bytesOf(twoAreas()), "twice")
+    let fields = reg.decoded(f, "q")
+    doAssert fields.len == 3 and fields[0].name == "x" and fields[2].name == "x"
+    doAssert f.vendorColumn(reg, "p.x").numbers == @[float64(fields[0].value.intVal), 100.0]
+    doAssert f.vendorColumn(reg, "q.x").numbers == @[float64(fields[2].value.intVal), 101.0]
+    doAssert f.vendorColumn(reg, "y").numbers == @[103.0, 103.0]
+    f.close()
+
+  block record_field_reads_the_first_block:
+    # As for a trace: a target with (match) and no blockIndex reads the first block it holds
+    # for; when the field is off there (its sentinel) a later block is not looked at.
+    let reg = registry("""(.nif27)
+(vendormap "m" (version 1) (match (format segd))
+  (target (kind extendedHeader) (match (at 1) (bytes 0x64)) (name hit)
+    (field v (at 2) (enc u8) (sentinel 101))))""")
+    var d = twoAreas()
+    d.records[0].record.extended[32] = 0x64
+    var f = openSeismicBytes(bytesOf(d), "first")
+    var log: DiagLog
+    var shown: seq[string]
+    for blk in reg.decodeVendorAreas(f.index.segdRecords[0], log):
+      shown.add blk.name & ":" & $blk.fields.len
+    doAssert shown == @["hit:0", "hit:1"], $shown
+    let col = f.vendorColumn(reg, "v")
+    doAssert col.absent == 2 and col.numbers[0].isNaN
     f.close()
 
   block timing_and_allocations:
