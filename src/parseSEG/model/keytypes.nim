@@ -23,6 +23,13 @@ type
     tcrRev1   ## Read from a Rev 1 file (codes 1-22 defined).
     tcrRev2   ## Read from a Rev 2 file (codes 1-41 defined).
 
+  SensorClass* = enum
+    ## Which SPS receiver point-code letter a trace matches (`sensorClass`).
+    scUnknown = "unknown"       ## Sensor not identified: matches no letter.
+    scHydrophone = "hydrophone" ## Pressure / hydrophone: `H*`.
+    scGeophone = "geophone"     ## Geophone or particle motion: `G*`.
+    scOther = "other"           ## Another identified receiver: `R*`.
+
   TraceKeys* = object
     ## Geometry of one trace (NaN / 0 where unknown).
     record*: float64     ## SEG-Y field record number; SEG-D file number.
@@ -103,6 +110,45 @@ func hasSourceXY*(k: TraceKeys): bool {.inline.} =
 func hasReceiverXY*(k: TraceKeys): bool {.inline.} =
   ## Both receiver coordinates are known.
   not (k.rcvX.isNaN or k.rcvY.isNaN)
+
+func classOfSegd(t: uint8): SensorClass {.inline.} =
+  case t
+  of 1: scHydrophone
+  of 2 .. 9: scGeophone
+  of 21, 22: scOther
+  else: scUnknown
+
+func classOfSegy(code: int): SensorClass {.inline.} =
+  # Rev 2 bit 14 is the interpolated flag, not part of the identification.
+  let base = if code >= 0: code and 0x3FFF else: code
+  case base
+  of 11: scHydrophone
+  of 12 .. 17, 39 .. 41: scGeophone
+  of 27 .. 38: scOther
+  else: scUnknown
+
+func sensorClass*(k: TraceKeys): SensorClass =
+  ## The sensor class of a trace, for matching an SPS receiver point code
+  ## (`H*` hydrophone, `G*` geophone or other particle-motion sensor, `R*`
+  ## any other identified receiver). Unknown matches no letter.
+  ##
+  ## SEG-D `sensorType` (THE#1 byte 21), when it is not 0, decides and
+  ## `component` is not consulted (Rev 3 stores a group index there):
+  ## 1 hydrophone; 2-5 geophone and 6-9 accelerometer (particle motion);
+  ## 21 (0x15) electric dipole and 22 (0x16) magnetic coil (other). Any
+  ## other non-zero value is unknown.
+  ##
+  ## Otherwise the SEG-Y trace identification code (`traceCode`, bit 14
+  ## cleared when the code is non-negative), or `component` when `traceCode`
+  ## is 0 and `component` holds a component code (SEG-2 writes 12, 13 or 14):
+  ## 11 pressure sensor (hydrophone); 12-17 vertical, cross-line, in-line
+  ## and rotated particle motion, and 39-41 rotational pitch, roll and yaw
+  ## (geophone); 27-38 electric and magnetic field components (other).
+  ## Anything else, including 0, -1 and 1 (seismic, sensor not named), is
+  ## unknown.
+  if k.sensorType != 0: return classOfSegd(k.sensorType)
+  let code = if k.traceCode != 0: int(k.traceCode) else: int(k.component)
+  classOfSegy(code)
 
 func deriveGeometry*(k: var TraceKeys, overwrite = false) =
   ## Fills `offset` (the source-receiver distance) and the midpoint from the

@@ -145,6 +145,14 @@ says how the traces matched and how many changed: a trace that already holds the
 values is not a change, so joining the same survey again changes nothing (`keysRevision`
 stays, and an index no join changed can still be saved with `saveIndex`).
 
+Receiver point codes stay with each R record. A station with one code is joined as before,
+whatever the code; `KL` and `PM` still replace an earlier row at that station. Several codes
+(`G1` and `H1` at different coordinates) are matched to the trace's sensor class
+(`sensorClass`): a hydrophone takes `H*`, a geophone or other particle-motion sensor `G*`,
+any other identified receiver `R*`. When the class does not choose one row, the later row is
+used and `g.log` says the station was ambiguous. `receiverPointCode(g, keys)` is that code,
+so a viewer can show it. Source rows are unchanged.
+
 ```nim
 import std/math
 import parseSEG
