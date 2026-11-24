@@ -959,10 +959,12 @@ proc writeInPlace(path: string, g: SurveyGeometry, fields: GeometryFields, overw
   # through a writable map, without a journal: the file is new output that
   # its caller drops whole when anything fails, so there is nothing to undo
   # (journaling it and removing the journal afterwards was a third of the
-  # time, and 770 bytes of journal per trace on disk meanwhile).
+  # time, and 770 bytes of journal per trace on disk meanwhile). The survey's
+  # `pointCodeWarnings` go to `log` once, with the join.
   var f = openSeismic(path, keys = true, progress = progress)
   try:
     discard f.applySurvey(g, overwrite)
+    log.add g.pointCodeWarnings
     f.remapWritable()
     let map = f.unsafeMemory
     var unwritten = ""
@@ -1027,7 +1029,8 @@ proc copyWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, fields = Geo
   ## as there) and written (`writeGeometry`; `result.changes` says what changed).
   ## Multiplexed SEG-D is written demultiplexed. `srcPath` is never changed.
   ## SEG-2 is not supported yet (a fatal diagnostic). Never raises: problems
-  ## are in `result.log`, with an info summary. The output goes through
+  ## are in `result.log`, with an info summary; the join adds the survey's
+  ## `pointCodeWarnings` there once. The output goes through
   ## a new temporary file next to `dstPath` and is renamed when complete.
   ## `progress` spans the passes over the input (index, copy, index of the
   ## copy; see `convertFile`); when it cancels, `result.log` holds a fatal
@@ -1069,7 +1072,8 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
   ## `overwrite` as there) and written into the SEG-Y output: SEG-D keys are
   ## joined before they become SEG-Y headers; SEG-Y output is written with
   ## `writeGeometry` before it is moved into place. Never raises: problems
-  ## are in the result. `progress` as for `convertFile` (SEG-Y input: the
+  ## are in the result, among them the survey's `pointCodeWarnings` (once,
+  ## when the join runs). `progress` as for `convertFile` (SEG-Y input: the
   ## conversion, then the index of the output).
   var kind = skUnknown
   try:
@@ -1087,6 +1091,7 @@ proc convertWithGeometry*(srcPath, dstPath: string, g: SurveyGeometry, opts = Co
     return
   case kind
   of skSegd:
+    result.add g.pointCodeWarnings
     result.add convertJoined(srcPath, dstPath, opts,
       GeometryJoin(survey: addr g, fields: fields, overwrite: overwrite), progress)
   of skSegy:

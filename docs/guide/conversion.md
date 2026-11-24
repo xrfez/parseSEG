@@ -145,6 +145,29 @@ says how the traces matched and how many changed: a trace that already holds the
 values is not a change, so joining the same survey again changes nothing (`keysRevision`
 stays, and an index no join changed can still be saved with `saveIndex`).
 
+Receiver point codes stay with each R record. A station with one code is joined as before,
+whatever the code; `KL` and `PM` still replace an earlier row at that station. Several codes
+are matched to the trace's sensor class (`sensorClass`): a hydrophone takes the last `H*`,
+a geophone the last `G*` else the last `R*` (so `R1` then `H1` gives a geophone `R1` and a
+hydrophone `H1`, with no warning), another identified receiver the last `R*` else the last
+`G*`. Unknown, or none of those rows, takes the later row. The sensor class reads the SEG-Y
+trace identification code with bit 14 (the interpolated flag) cleared only for SEG-Y rev 2;
+rev 0, rev 1 and a caller-supplied code are used as stored, and a negative code is left
+alone. A coded row at another index does not replace an exact table key (`addReceiver` at
+index 0 stands against SPS at index 1). Two rows of one letter (`G1`, `G2`) use the later
+one.
+
+`pointCodeWarnings(g)` says where that choice is not clear: one warning per station whose
+letter repeats or whose identified class has none of its rows, naming the codes and what
+each class gets (`receiver 10.0/104.0/1 has several point codes (G1, G2, H1): hydrophone
+H1, geophone G2, other G2, unknown H1`), sorted by station, the first five and then a
+count. It is derived from the rows held when it is called, so a later `KL` row or
+`addReceiver` at that station removes the warning; `g.log` holds none of them, and a join
+does not log. `copyWithGeometry` and `convertWithGeometry` add them once to the log they
+return. `receiverPointCode(g, keys, overwrite = false)` is that code when `applySurvey`
+would apply the row, and "" for an auxiliary trace or when the header receiver position is
+kept (`overwrite` false, the default). Source rows are unchanged.
+
 ```nim
 import std/math
 import parseSEG

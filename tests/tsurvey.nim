@@ -826,6 +826,427 @@ proc main*() =
     doAssert g.log.count(sevWarning) == 1 and g.log.has("other coordinates", sevWarning), $g.log
     doAssert g.log.count(sevInfo) == 1 and g.log.has("same coordinates", sevInfo), $g.log
 
+  block receiver_point_code_matches_sensor_class:
+    # Break: drop the point code when storing a receiver (join.nim
+    # addReceiverRow) so a second code at the same station overwrites the
+    # first; a geophone then gets the later H1 coordinates. G1 with H1 is
+    # not a point-code warning, and the load log says nothing of codes.
+    let g1 = r21('R', "10.00", "104.00", '1', "G1", "1000.0", "2000.0", "1.0")
+    let h1 = r21('R', "10.00", "104.00", '1', "H1", "3000.0", "4000.0", "2.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, g1, h1].join("\n")))
+    doAssert g.receiverCount == 1
+    doAssert g.table.receivers[stationKey(10, 104, 1)].x == 3000
+    doAssert g.log.len == 0, $g.log
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
+
+    var hydro = initTraceKeys()
+    (hydro.rcvLine, hydro.rcvPoint, hydro.rcvIndex) = (10.0, 104.0, 1'i16)
+    hydro.sensorType = 1
+    doAssert hydro.sensorClass == scHydrophone
+    doAssert g.receiverPointCode(hydro) == "H1"
+    doAssert hydro.applySurvey(g)
+    doAssert hydro.rcvX == 3000 and hydro.rcvY == 4000
+
+    var geo = initTraceKeys()
+    (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (10.0, 104.0, 1'i16)
+    geo.traceCode = 12
+    doAssert geo.sensorClass == scGeophone
+    doAssert g.receiverPointCode(geo) == "G1"
+    doAssert geo.applySurvey(g)
+    doAssert geo.rcvX == 1000 and geo.rcvY == 2000, $geo.rcvX
+
+    var press = initTraceKeys()
+    (press.rcvLine, press.rcvPoint) = (10.0, 104.0)
+    press.traceCode = 11
+    doAssert press.sensorClass == scHydrophone
+    doAssert g.receiverPointCode(press) == "H1"
+    doAssert press.applySurvey(g) and press.rcvX == 3000
+
+    let only = r21('R', "11.00", "1.00", '1', "H1", "50.0", "60.0", "3.0")
+    var gOnly: SurveyGeometry
+    gOnly.addSps(parseSps([H00, only].join("\n")))
+    var anyk = initTraceKeys()
+    (anyk.rcvLine, anyk.rcvPoint) = (11.0, 1.0)
+    anyk.traceCode = 12
+    doAssert gOnly.receiverPointCode(anyk) == "H1"
+    doAssert anyk.applySurvey(gOnly) and anyk.rcvX == 50
+    doAssert gOnly.pointCodeWarnings.len == 0, $gOnly.pointCodeWarnings
+
+    let a = r21('R', "12.00", "2.00", '1', "G1", "10.0", "20.0", "1.0")
+    let b = r21('R', "12.00", "2.00", '1', "G2", "30.0", "40.0", "2.0")
+    var gAmb: SurveyGeometry
+    gAmb.addSps(parseSps([H00, a, b].join("\n")))
+    var gk = initTraceKeys()
+    (gk.rcvLine, gk.rcvPoint) = (12.0, 2.0)
+    gk.sensorType = 2
+    doAssert gAmb.receiverPointCode(gk) == "G2"
+    doAssert gk.applySurvey(gAmb) and gk.rcvX == 30 and gk.rcvY == 40
+    doAssert gAmb.pointCodeWarnings.has("several point codes (G1, G2)", sevWarning),
+      $gAmb.pointCodeWarnings
+    doAssert not gAmb.log.has("point codes", sevWarning), $gAmb.log
+
+    var unk = initTraceKeys()
+    (unk.rcvLine, unk.rcvPoint) = (10.0, 104.0)
+    unk.traceCode = 1
+    doAssert unk.sensorClass == scUnknown
+    doAssert g.receiverPointCode(unk) == "H1"
+    doAssert unk.applySurvey(g) and unk.rcvX == 3000
+    # G1 and H1 each match a class: not ambiguous.
+    doAssert g.pointCodeWarnings.len == 0
+
+    let kl1 = r21('R', "13.00", "3.00", '1', "KL", "1.0", "2.0", "1.0")
+    let kl2 = r21('R', "13.00", "3.00", '1', "KL", "9.0", "8.0", "1.0")
+    var gKl: SurveyGeometry
+    gKl.addSps(parseSps([H00, kl1, kl2].join("\n")))
+    doAssert gKl.receiverCount == 1
+    doAssert gKl.table.receivers[stationKey(13, 3, 1)].x == 9
+    doAssert gKl.log.has("other coordinates", sevWarning), $gKl.log
+    doAssert gKl.pointCodeWarnings.len == 0
+    var kk = initTraceKeys()
+    (kk.rcvLine, kk.rcvPoint) = (13.0, 3.0)
+    doAssert gKl.receiverPointCode(kk) == "KL"
+    doAssert kk.applySurvey(gKl) and kk.rcvX == 9
+
+    let pm = r21('R', "14.00", "4.00", '1', "PM", "7.0", "8.0", "1.0")
+    let later = r21('R', "14.00", "4.00", '1', "G1", "70.0", "80.0", "1.0")
+    var gPm: SurveyGeometry
+    gPm.addSps(parseSps([H00, pm, later].join("\n")))
+    doAssert gPm.receiverCount == 1
+    doAssert gPm.table.receivers[stationKey(14, 4, 1)].x == 70
+    doAssert gPm.pointCodeWarnings.len == 0, $gPm.pointCodeWarnings
+
+    let again = r21('R', "15.00", "5.00", '1', "G1", "4.0", "5.0", "1.0")
+    let again2 = r21('R', "15.00", "5.00", '1', "G1", "6.0", "7.0", "1.0")
+    var gSame: SurveyGeometry
+    gSame.addSps(parseSps([H00, again, again2].join("\n")))
+    doAssert gSame.receiverCount == 1
+    doAssert gSame.table.receivers[stationKey(15, 5, 1)].x == 6
+    doAssert gSame.log.has("other coordinates", sevWarning)
+    doAssert gSame.pointCodeWarnings.len == 0
+
+    let rg = r21('R', "16.00", "6.00", '1', "G1", "1.0", "2.0", "1.0")
+    let rr = r21('R', "16.00", "6.00", '1', "R1", "8.0", "9.0", "1.0")
+    var gR: SurveyGeometry
+    gR.addSps(parseSps([H00, rg, rr].join("\n")))
+    var em = initTraceKeys()
+    (em.rcvLine, em.rcvPoint) = (16.0, 6.0)
+    em.sensorType = 21
+    doAssert em.sensorClass == scOther
+    doAssert gR.receiverPointCode(em) == "R1"
+    doAssert em.applySurvey(gR) and em.rcvX == 8
+
+    var k = initTraceKeys()
+    k.sensorType = 6
+    doAssert k.sensorClass == scGeophone
+    k.sensorType = 22
+    doAssert k.sensorClass == scOther
+    k.sensorType = 0
+    k.traceCode = 11 or 0x4000
+    k.traceCodeRev = tcrRev2
+    doAssert k.sensorClass == scHydrophone
+    k.traceCodeRev = tcrCaller
+    k.traceCode = 41
+    doAssert k.sensorClass == scGeophone
+    k.traceCode = 27
+    doAssert k.sensorClass == scOther
+    k.traceCode = 0
+    k.component = 13
+    doAssert k.sensorClass == scGeophone
+    k.component = 1
+    doAssert k.sensorClass == scUnknown
+
+  block r_then_h_geophone_takes_r_without_warning:
+    # Break: `decide` (join.nim) matches a class letter only, so a geophone
+    # with R1 then H1 takes the later H1 and the station is a point-code
+    # warning.
+    let r1 = r21('R', "21.00", "8.00", '1', "R1", "100.0", "200.0", "1.0")
+    let h1 = r21('R', "21.00", "8.00", '1', "H1", "300.0", "400.0", "2.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, r1, h1].join("\n")))
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
+    let n = g.log.len
+    var geo = initTraceKeys()
+    (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (21.0, 8.0, 1'i16)
+    geo.traceCode = 12
+    doAssert geo.sensorClass == scGeophone
+    doAssert g.receiverPointCode(geo) == "R1"
+    doAssert geo.applySurvey(g) and geo.rcvX == 100, $geo.rcvX
+    var hydro = initTraceKeys()
+    (hydro.rcvLine, hydro.rcvPoint, hydro.rcvIndex) = (21.0, 8.0, 1'i16)
+    hydro.traceCode = 11
+    doAssert g.receiverPointCode(hydro) == "H1"
+    doAssert hydro.applySurvey(g) and hydro.rcvX == 300
+    doAssert g.log.len == n
+
+  block exact_table_index_is_not_replaced:
+    # Break: codedKey (join.nim) uses a coded row at another index, so SPS
+    # G1 at index 1 replaces addReceiver at index 0.
+    let g1 = r21('R', "10.00", "104.00", '1', "G1", "1000.0", "2000.0", "1.0")
+    let h1 = r21('R', "10.00", "104.00", '1', "H1", "3000.0", "4000.0", "2.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, g1].join("\n")))
+    g.addReceiver(10, 104, 0, 50, 60, 7)
+    var k = initTraceKeys()
+    (k.rcvLine, k.rcvPoint, k.rcvIndex) = (10.0, 104.0, 0'i16)
+    k.traceCode = 12
+    doAssert g.receiverPointCode(k) == "", $g.receiverPointCode(k)
+    doAssert k.applySurvey(g) and k.rcvX == 50 and k.rcvY == 60, $k.rcvX
+    var both: SurveyGeometry
+    both.addSps(parseSps([H00, g1, h1].join("\n")))
+    both.addReceiver(10, 104, 0, 50, 60, 7)
+    var geo = initTraceKeys()
+    (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (10.0, 104.0, 0'i16)
+    geo.traceCode = 12
+    doAssert geo.applySurvey(both) and geo.rcvX == 50, $geo.rcvX
+    doAssert both.receiverPointCode(geo) == ""
+    var at1 = initTraceKeys()
+    (at1.rcvLine, at1.rcvPoint, at1.rcvIndex) = (10.0, 104.0, 1'i16)
+    at1.traceCode = 12
+    doAssert both.receiverPointCode(at1) == "G1"
+    doAssert at1.applySurvey(both) and at1.rcvX == 1000, $at1.rcvX
+
+  block receiver_point_code_only_when_applied:
+    # Break: receiverPointCode (join.nim) ignores auxiliary traces and a
+    # header position applySurvey would keep, so it names a row that is not
+    # applied.
+    let g1 = r21('R', "22.00", "9.00", '1', "G1", "1000.0", "2000.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, g1].join("\n")))
+    var open = initTraceKeys()
+    (open.rcvLine, open.rcvPoint) = (22.0, 9.0)
+    open.traceCode = 12
+    doAssert g.receiverPointCode(open) == "G1"
+    var aux = open
+    aux.status = tsAuxiliary
+    doAssert g.receiverPointCode(aux) == "", "auxiliary"
+    var held = open
+    (held.rcvX, held.rcvY) = (9.0, 8.0)
+    doAssert g.receiverPointCode(held) == "", "header position kept"
+    doAssert g.receiverPointCode(held, overwrite = true) == "G1"
+    doAssert not aux.applySurvey(g) and aux.rcvX.isNaN
+    doAssert not held.applySurvey(g) and held.rcvX == 9
+    doAssert held.applySurvey(g, overwrite = true) and held.rcvX == 1000
+
+  block geometry_copies_do_not_share_rows_or_log:
+    # Break: make SurveyGeometry.several (join.nim) a ref, so a copy shares
+    # the coded rows (and a ref log would share the log). addSps after the copy changes what
+    # the copy's applySurvey returns, and one log is the other.
+    let g1 = r21('R', "10.00", "104.00", '1', "G1", "1000.0", "2000.0", "1.0")
+    let h1 = r21('R', "10.00", "104.00", '1', "H1", "3000.0", "4000.0", "2.0")
+    var g: SurveyGeometry
+    var before = g
+    g.addSps(parseSps([H00, g1, h1].join("\n")))
+    var after = g
+    doAssert before.receiverCount == 0 and before.log.len == 0
+    var early = initTraceKeys()
+    (early.rcvLine, early.rcvPoint, early.rcvIndex) = (10.0, 104.0, 1'i16)
+    early.traceCode = 12
+    doAssert not early.applySurvey(before), $early.rcvX
+    doAssert early.rcvX.isNaN
+    var mid = initTraceKeys()
+    (mid.rcvLine, mid.rcvPoint, mid.rcvIndex) = (10.0, 104.0, 1'i16)
+    mid.traceCode = 12
+    doAssert mid.applySurvey(after) and mid.rcvX == 1000, $mid.rcvX
+    let moved = r21('R', "10.00", "104.00", '1', "G1", "7000.0", "8000.0", "3.0")
+    let extra = r21('R', "30.00", "1.00", '1', "G1", "42.0", "43.0", "1.0")
+    g.addSps(parseSps([H00, moved, extra].join("\n")))
+    doAssert g.log.has("other coordinates", sevWarning), $g.log
+    doAssert not after.log.has("other coordinates", sevWarning), $after.log
+    doAssert before.log.len == 0
+    var still = initTraceKeys()
+    (still.rcvLine, still.rcvPoint, still.rcvIndex) = (10.0, 104.0, 1'i16)
+    still.traceCode = 12
+    doAssert still.applySurvey(after) and still.rcvX == 1000, $still.rcvX
+    var added = initTraceKeys()
+    (added.rcvLine, added.rcvPoint) = (30.0, 1.0)
+    doAssert not added.applySurvey(after) and added.rcvX.isNaN
+    var fromG = initTraceKeys()
+    (fromG.rcvLine, fromG.rcvPoint) = (30.0, 1.0)
+    doAssert fromG.applySurvey(g) and fromG.rcvX == 42, $fromG.rcvX
+    before.addReceiver(1, 1, 1, 5, 6, 7)
+    doAssert g.receiverCount == 2 and after.receiverCount == 1
+    after.addReceiver(10, 104, 1, 9, 9, 9)
+    doAssert g.table.receivers[stationKey(10, 104, 1)].x == 7000
+    doAssert after.table.receivers[stationKey(10, 104, 1)].x == 9
+    var kept = initTraceKeys()
+    (kept.rcvLine, kept.rcvPoint, kept.rcvIndex) = (10.0, 104.0, 1'i16)
+    kept.traceCode = 12
+    doAssert g.receiverPointCode(kept) == "G1"
+    doAssert after.receiverPointCode(kept) == ""
+    let n = g.log.len
+    let nAfter = after.log.len
+    discard fromG.applySurvey(after)
+    doAssert g.log.len == n and after.log.len == nAfter
+
+  block point_code_warning_is_gone_after_a_replace:
+    # Break: in addReceiverRow (join.nim) keep the station in `several` when
+    # KL replaces it, and in pointCodeWarnings skip the check that the table
+    # row still holds several codes. The warning then names G1, G2 although
+    # the station is KL. (Before the warnings were derived, the load-time
+    # warning stayed in `g.log` in this scenario.)
+    let a = r21('R', "10.00", "104.00", '1', "G1", "10.0", "20.0", "1.0")
+    let b = r21('R', "10.00", "104.00", '1', "G2", "30.0", "40.0", "1.0")
+    let kl = r21('R', "10.00", "104.00", '1', "KL", "90.0", "80.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, a, b].join("\n")))
+    doAssert g.pointCodeWarnings.len == 1, $g.pointCodeWarnings
+    g.addSps(parseSps([H00, kl].join("\n")))
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
+    doAssert not g.log.has("point codes", sevWarning) and not g.log.has("more diagnostics",
+      sevInfo), $g.log
+    var k = initTraceKeys()
+    (k.rcvLine, k.rcvPoint) = (10.0, 104.0)
+    k.traceCode = 12
+    doAssert g.receiverPointCode(k) == "KL"
+    doAssert k.applySurvey(g) and k.rcvX == 90, $k.rcvX
+    var one: SurveyGeometry # the same within one file
+    one.addSps(parseSps([H00, a, b, kl].join("\n")))
+    doAssert one.pointCodeWarnings.len == 0 and one.log.count(sevWarning) == 1, $one.log
+    doAssert one.log.has("other coordinates", sevWarning)
+
+  block point_code_warning_is_gone_after_add_receiver:
+    # Break: in addReceiver (join.nim) keep the station in `several`, and in
+    # pointCodeWarnings skip the check that the table row still holds
+    # several codes: the warning for G1, G2 stays after the station is set
+    # by hand. A row written straight into `table` drops it too.
+    let a = r21('R', "31.00", "1.00", '1', "G1", "10.0", "20.0", "1.0")
+    let b = r21('R', "31.00", "1.00", '1', "G2", "30.0", "40.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, a, b].join("\n")))
+    var raw = g
+    doAssert g.pointCodeWarnings.len == 1
+    g.addReceiver(31, 1, 1, 5, 6, 7)
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
+    var k = initTraceKeys()
+    (k.rcvLine, k.rcvPoint, k.rcvIndex) = (31.0, 1.0, 1'i16)
+    k.traceCode = 12
+    doAssert g.receiverPointCode(k) == ""
+    doAssert k.applySurvey(g) and k.rcvX == 5, $k.rcvX
+    raw.table.addReceiver(31, 1, 1, 8, 9, 7)
+    doAssert raw.pointCodeWarnings.len == 0, $raw.pointCodeWarnings
+    doAssert raw.receiverPointCode(k, overwrite = true) == ""
+    doAssert k.applySurvey(raw, overwrite = true) and k.rcvX == 8, $k.rcvX
+
+  block point_code_warnings_do_not_depend_on_station_order:
+    # Break: drop the sort in pointCodeWarnings (join.nim): the warnings come
+    # in table order, not by line and point. Codes are listed sorted, not as
+    # they arrived (G2 before G1 here).
+    var rows: seq[(string, string)] = @[]
+    for (line, point) in [("7.00", "3.00"), ("2.00", "9.00"), ("5.00", "1.00"),
+        ("2.00", "4.00"), ("9.00", "8.00")]:
+      rows.add (r21('R', line, point, '1', "G2", "1.0", "2.0", "1.0"),
+        r21('R', line, point, '1', "G1", "3.0", "4.0", "1.0"))
+    var forward = @[H00]
+    for r in rows: forward.add [r[0], r[1]]
+    var backward = @[H00]
+    for i in countdown(rows.high, 0): backward.add [rows[i][0], rows[i][1]]
+    var gf, gb: SurveyGeometry
+    gf.addSps(parseSps(forward.join("\n")))
+    gb.addSps(parseSps(backward.join("\n")))
+    let wf = gf.pointCodeWarnings
+    let wb = gb.pointCodeWarnings
+    doAssert wf.len == 5 and wb.len == 5, $wf
+    var stations: seq[string] = @[]
+    for i in 0 ..< wf.len:
+      doAssert $wf[i] == $wb[i], $wf[i] & " / " & $wb[i]
+      stations.add wf[i].msg.split(' ')[1]
+    doAssert stations == @["2.0/4.0/1", "2.0/9.0/1", "5.0/1.0/1", "7.0/3.0/1", "9.0/8.0/1"],
+      $stations
+    doAssert wf[0].msg.contains("(G1, G2)"), wf[0].msg
+
+  block point_code_warning_names_each_class:
+    # Break: end pointCodeWarning (join.nim) with "the later row is used",
+    # as the load-time warning did, instead of the row each class gets: the
+    # text then hides that a hydrophone takes H1 and a geophone G2.
+    let g1 = r21('R', "10.00", "104.00", '1', "G1", "10.0", "20.0", "1.0")
+    let g2 = r21('R', "10.00", "104.00", '1', "G2", "30.0", "40.0", "1.0")
+    let h1 = r21('R', "10.00", "104.00", '1', "H1", "50.0", "60.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, g1, g2, h1].join("\n")))
+    let w = g.pointCodeWarnings
+    doAssert w.len == 1 and w[0].severity == sevWarning, $w
+    doAssert w[0].msg == "receiver 10.0/104.0/1 has several point codes (G1, G2, H1): " &
+      "hydrophone H1, geophone G2, other G2, unknown H1", w[0].msg
+    var later: SurveyGeometry
+    later.addSps(parseSps([H00, h1, g1, g2].join("\n")))
+    doAssert later.pointCodeWarnings[0].msg == "receiver 10.0/104.0/1 has several point " &
+      "codes (G1, G2, H1): hydrophone H1, geophone G2, other G2, unknown G2",
+      later.pointCodeWarnings[0].msg
+    let r1 = r21('R', "11.00", "1.00", '1', "R1", "1.0", "2.0", "1.0")
+    let gx = r21('R', "11.00", "1.00", '1', "G1", "3.0", "4.0", "1.0")
+    var noHydro: SurveyGeometry
+    noHydro.addSps(parseSps([H00, gx, r1].join("\n")))
+    doAssert noHydro.pointCodeWarnings.len == 1 and noHydro.pointCodeWarnings[0].msg.endsWith(
+      "(G1, R1): hydrophone R1, geophone G1, other R1, unknown R1"),
+      $noHydro.pointCodeWarnings
+    for pair in [["R1", "H1"], ["G1", "H1"], ["H1", "R1"]]:
+      var quiet: SurveyGeometry
+      quiet.addSps(parseSps([H00, r21('R', "12.00", "1.00", '1', pair[0], "1.0", "2.0", "1.0"),
+        r21('R', "12.00", "1.00", '1', pair[1], "3.0", "4.0", "1.0")].join("\n")))
+      doAssert quiet.pointCodeWarnings.len == 0, $pair & ": " & $quiet.pointCodeWarnings
+
+  block point_code_warning_cap_follows_the_rows:
+    # Break: in addReceiverRow (join.nim) keep the station in `several` when
+    # KL replaces it, and skip pointCodeWarnings' check of the table row: the
+    # five warnings and the count of one more then stay after five of the six
+    # stations are KL. (Counted at load, the count stayed in `g.log`.)
+    var lines = @[H00]
+    var kills = @[H00]
+    for i in 1 .. 6:
+      let point = $(100 + i) & ".00"
+      lines.add r21('R', "20.00", point, '1', "G1", $(1000 + i) & ".0", "2000.0", "1.0")
+      lines.add r21('R', "20.00", point, '1', "G2", $(2000 + i) & ".0", "3000.0", "2.0")
+      if i > 1: kills.add r21('R', "20.00", point, '1', "KL", "1.0", "1.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps(lines.join("\n")))
+    var w = g.pointCodeWarnings
+    doAssert w.len == 6 and w.count(sevWarning) == 5, $w
+    doAssert w[5].severity == sevInfo and
+      w[5].msg == "1 more diagnostics of this kind for point codes were not logged", $w[5]
+    doAssert g.log.len == 0, $g.log
+    g.addSps(parseSps(kills.join("\n")))
+    w = g.pointCodeWarnings
+    doAssert w.len == 1 and w[0].msg.startsWith("receiver 20.0/101.0/1 has"), $w
+    doAssert not g.log.has("more diagnostics", sevInfo) and g.log.count(sevWarning) == 5, $g.log
+
+  block point_code_warnings_of_a_copy:
+    # Break: make SurveyGeometry.several (join.nim) a ref: the copy shares
+    # the coded rows, and KL in the copy clears the original's warning.
+    let a = r21('R', "40.00", "1.00", '1', "G1", "1.0", "2.0", "1.0")
+    let b = r21('R', "40.00", "1.00", '1', "G2", "3.0", "4.0", "1.0")
+    let kl = r21('R', "40.00", "1.00", '1', "KL", "5.0", "6.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, a].join("\n")))
+    let before = g
+    g.addSps(parseSps([H00, b].join("\n")))
+    doAssert before.pointCodeWarnings.len == 0 and g.pointCodeWarnings.len == 1
+    var copy = g
+    copy.addSps(parseSps([H00, kl].join("\n")))
+    doAssert copy.pointCodeWarnings.len == 0 and g.pointCodeWarnings.len == 1
+    doAssert before.pointCodeWarnings.len == 0
+
+  block trace_code_bit14_only_for_rev2:
+    # Break: clear bit 14 for every revision (keytypes.nim classOfSegy), so
+    # 16400 under rev 1 is read as geophone (code 16) and a caller-supplied
+    # 16395 is hydrophone. Rev 2 alone treats bit 14 as the interpolated flag.
+    var rev1 = initTraceKeys()
+    rev1.traceCode = 16400
+    rev1.traceCodeRev = tcrRev1
+    doAssert rev1.sensorClass != scGeophone, $rev1.sensorClass
+    var rev0 = initTraceKeys()
+    rev0.traceCode = 16400
+    rev0.traceCodeRev = tcrRev0
+    doAssert rev0.sensorClass != scGeophone, $rev0.sensorClass
+    var caller = initTraceKeys()
+    caller.traceCode = 16395
+    doAssert caller.traceCodeRev == tcrCaller
+    doAssert caller.sensorClass != scHydrophone, $caller.sensorClass
+    var rev2 = initTraceKeys()
+    rev2.traceCode = 16395
+    rev2.traceCodeRev = tcrRev2
+    doAssert rev2.sensorClass == scHydrophone, $rev2.sensorClass
+
   block a_byte_order_mark_is_not_a_record:
     const bom = "\xEF\xBB\xBF"
     var f = parseSps(bom & [H00, rcv1, x1].join("\n") & "\n")

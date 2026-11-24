@@ -275,6 +275,7 @@ proc joinSurvey(a: Args, f: var SeismicFile): DiagLog =
   ## Joins the SURVEY options' geometry to `f` (opened with keys) and prints
   ## what was joined.
   let g = loadSurvey(a, result)
+  result.add g.pointCodeWarnings
   var stats: JoinStats
   discard f.applySurvey(g, stats, a.has("overwrite"))
   echo "survey:      ", g.table.sources.len, " sources, ", g.table.receivers.len,
@@ -940,6 +941,7 @@ proc surveyApply(a: Args): int =
       "(the copy is written demultiplexed)")
   var log: DiagLog
   let g = loadSurvey(a, log)
+  if output.len == 0: log.add g.pointCodeWarnings # (a copy's log has them)
   let overwrite = a.has("overwrite")
   var stats: JoinStats
   discard f.applySurvey(g, stats, overwrite)
