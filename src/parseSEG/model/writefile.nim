@@ -1493,7 +1493,8 @@ proc ghTimeZeroGpsUs(k: TraceKeys, recTime: float64): int64 =
   # GPS µs of the record time zero (GH#3, and GH#1's whole second). A
   # re-read Rev 3 trace has origin `toFirstSample` and `time` at sample 0,
   # so the shot is that instant minus `t0Ms` (integer µs; NaN is 0). Any
-  # other origin is `recTime`, as before. Does not change `recorded`.
+  # other origin, or a first-sample instant that is not known, is `recTime`,
+  # as before. Does not change `recorded`.
   if k.timeOrigin == toFirstSample:
     let fs = k.firstSampleUs
     if fs.isSome:
@@ -2246,8 +2247,11 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## trace's origin is `toFirstSample`, the time zero written is its
   ## first-sample instant minus `t0Ms` (integer microseconds; a NaN `t0Ms`
   ## is 0): a re-read Rev 3 trace has `time` at sample 0, and this keeps
-  ## the shot. It is written in General Header #1 (year, julian day and the
-  ## whole second of that time) and in General Header #3's timestamp.
+  ## the shot. This applies only when that trace's first-sample instant is
+  ## known (`firstSampleUs` is some); otherwise the time zero is
+  ## `SegdOutputOptions.time`. It is written in General Header #1 (year,
+  ## julian day and the whole second of that time) and in General Header
+  ## #3's timestamp.
   ## The Timestamp block (0x42) holds the first-sample instant:
   ## `firstSampleUs` when the keys carry an origin, otherwise `keys.time`
   ## plus `t0Ms` (caller-built keys: `time` is time zero; a trace with no

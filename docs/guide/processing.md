@@ -460,7 +460,7 @@ is held until the next record number or `close`, then written whole; record numb
 go backwards. A record's time zero is its first trace's `keys.time`, or `SegdOutputOptions.time`
 when that trace has none, except when that trace's origin is `toFirstSample`: then it is
 the first-sample instant minus `t0Ms` (integer microseconds; a NaN `t0Ms` is 0), so writing
-keys just read back keeps the shot. A record with neither time is refused (the writer does
+keys just read back keeps the shot. This applies only when that trace's first-sample instant is known (`firstSampleUs` is some); otherwise the time zero is `SegdOutputOptions.time`. A record with neither time is refused (the writer does
 not invent a time). That time zero is written in General Header #1 and General Header #3.
 Each trace's
 Timestamp block (0x42) holds the first-sample instant: `firstSampleUs` when the keys carry
