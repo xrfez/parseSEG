@@ -293,10 +293,11 @@ proc main*() =
     doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgy", sy, segdFormat = tf8058)
     doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgy", r1, segyFormat = st6)
     doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgd", sd, segdFormat = tf8080)
-    block: # 8015 packs 4 samples in 10 bytes: shot.sgd's traces have 4001
+    block: # 8015 packs 4 samples in 10 bytes: the written count is checked
       var odd = openSeismic(demoDir() / "shot.sgd")
       doAssert odd.maxSamples mod 4 != 0
-      doAssertRaises(ValueError): discard openSeismicWriter(tmp / "a.sgd", odd, segdFormat = tf8015)
+      var wOdd = openSeismicWriter(tmp / "a.sgd", odd, segdFormat = tf8015)
+      doAssertRaises(ValueError): wOdd.writeTrace(odd, 0, odd.readTraces(0..0), 0)
       var w8015 = openSeismicWriter(tmp / "a.sgd", sd, segdFormat = tf8015) # 1000 samples: fine
       doAssertRaises(ValueError): w8015.writeTrace(odd, 0, odd.readTraces(0..0), 0)
       odd.close()

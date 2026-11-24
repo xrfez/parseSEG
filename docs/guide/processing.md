@@ -255,8 +255,8 @@ Options and rules:
   is a value beyond the range of an integer format or of the SEG-D exponent formats (8015
   ends at ±32767, 8022 at ±15360, 8024 at ±16380, 8042 at 3968, 8044 at 4095.5), and NaN or
   an infinity in every format but the IEEE floats (SEG-Y 5 and 6, SEG-D 8058 and 8080,
-  SEG-2 4 and 5). SEG-D 8015 packs four samples into ten bytes, so it is refused for
-  traces whose sample count is not a multiple of 4.
+  SEG-2 4 and 5). SEG-D 8015 packs four samples into ten bytes, so a written count
+  that is not a multiple of 4 is refused; the source count is not checked at open.
 - **Sample count.** A SEG-Y or SEG-2 trace may get more or fewer samples than it had (the
   tensor form takes `count = n`: the first `n` of the row). The trace header follows, and
   the SEG-Y binary header gets the count of the traces written (the largest when they

@@ -551,6 +551,32 @@ proc mainTwo*() =
     doAssert orec.gh2.get.extRecordLength == 200
     doAssert orec.scanTypes[0].descriptors[0].endTime == 100
 
+proc mainFour*() =
+  ## Conversion to 8015 checks the count that is written, not the source's.
+  ## Seen failing before the change: opening the writer on a 6-sample source
+  ## raised ValueError before any trace was written.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  let src = tmp / "src6.sgd"
+  put(src, SegdData(records: @[makeRev2(1, sd8058, 6)]))
+  var f = openSeismic(src)
+  doAssert f.traceEntry(0).numSamples == 6
+  let dst = tmp / "to8015.sgd"
+  var w = openSeismicWriter(dst, f, segdFormat = tf8015)
+  let s = wave(4)
+  for i in 0 ..< f.len: w.writeTrace(f, i, s)
+  doAssert not w.close().isFatal
+  var g = openSeismic(dst)
+  doAssert g.index.segdRecords[0].format.get == sd8015
+  doAssert g.traceEntry(0).numSamples == 4
+  doAssert g.index.segdRecords[0].gh2.get.extRecordLength == 8
+  doAssert not g.log.isFatal, $g.log
+  let bad = tmp / "to8015bad.sgd"
+  block:
+    var w2 = openSeismicWriter(bad, f, segdFormat = tf8015)
+    doAssertRaises(ValueError): w2.writeTrace(f, 0, wave(6))
+  doAssert not fileExists(bad)
+
 main()
 mainTwo()
 mainThree()
+mainFour()

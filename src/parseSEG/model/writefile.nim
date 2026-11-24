@@ -67,9 +67,9 @@
 ## is written as it is), each of those sets' end time (start plus count times
 ## the interval) and the sample count in each existing trace header extension
 ## follow; a count the headers cannot hold is refused the same way. A channel
-## set with no channels is left unchanged. SEG-D 8015
-## still needs a multiple of 4. A trace written with its own count leaves those
-## headers unchanged. The
+## set with no channels is left unchanged. A written SEG-D 8015 count still
+## needs a multiple of 4 (the source count is not checked at open). A trace
+## written with its own count leaves those headers unchanged. The
 ## record headers and trailer come from the trace's own record in `src`; a
 ## new format sets the format code and, for Rev 3, the General Header #3 data
 ## and record sizes. Multiplexed SEG-D input is refused (convert it first).
@@ -503,14 +503,6 @@ proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat,
   s.segyFile = f
   s.makeSink()
 
-proc checkGroups(src: SeismicFile, first, last: int) =
-  # 8015 packs 4 samples into 10 bytes: a trace whose count is not a
-  # multiple of 4 cannot go into that format.
-  for i in first..last:
-    if src.index.entries[i].numSamples mod 4 != 0:
-      refuse("SEG-D format 8015 holds samples in groups of 4; trace " & $i & " of " & src.path &
-        " has " & $src.index.entries[i].numSamples)
-
 proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
   if format != tfKeep:
     let fmt = segdSampleFormats[ord(format) - 1]
@@ -518,7 +510,6 @@ proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
       if not fmt.definedIn(rec.revision):
         refuse("SEG-D format " & $format & " is not defined in Rev " & $rec.revision &
           " (record " & $rec.index & ")")
-    if fmt == sd8015: checkGroups(like, 0, like.len - 1)
     s.segdFormat = some(fmt)
   s.makeSink()
   s.segd = openSegdWriter(s.sink, SegdWriteOptions(), like.index.segdLabel)
@@ -575,8 +566,7 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## the file's revision; false writes `fullText` untouched. Only `like`'s
   ## index is used, so it may be closed. Raises `ValueError` for an unrecognized or
   ## multiplexed SEG-D `like`, a format for another standard or one the
-  ## revision lacks, SEG-D 8015 for traces whose sample count is not a
-  ## multiple of 4, `path` being `like`'s file, `fullText` on a non-SEG-Y
+  ## revision lacks, `path` being `like`'s file, `fullText` on a non-SEG-Y
   ## `like`, or a `fullText` that `checkTextHeader` faults for length,
   ## characters or a header the reader would misread (before any file is
   ## created); `SegFormatError` for
@@ -1177,8 +1167,6 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace, n: int, t: SegdTra
       " (record " & $r & ")")
   var last = trace
   while last + 1 < entries.len and int(entries[last + 1].record) == r: inc last
-  # A chosen 8015 (the input's own is written as it is): `src` need not be `like`.
-  if fOut == sd8015 and rec.format.get != sd8015: checkGroups(src, trace, last)
   let srcN = int(entries[trace].numSamples)
   if fOut == sd8015 and n mod 4 != 0: refuse8015(trace, src.path, n)
   if n != srcN:
