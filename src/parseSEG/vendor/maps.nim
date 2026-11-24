@@ -1021,7 +1021,9 @@ func headerKey(name: string): string =
   # A proprietary header name without its space/NUL padding.
   name.strip(chars = {' ', '\0'})
 
-func targetMatches(t: VendorTarget, a: VendorArea, b: openArray[byte]): bool =
+func targetMatches*(t: VendorTarget, a: VendorArea, b: openArray[byte]): bool =
+  ## **Internal.** True when target `t` is for the block `b` of area `a` (kind, block
+  ## number or `(match ...)`, type, where, header name, stanza, extension number).
   # With `match` clauses and no `blockIndex`, the target is for every block of
   # the area (never for the whole area of a 32-byte block kind; a Rev 3 trailer
   # description block's data has a block type and counts as one block).
@@ -1102,66 +1104,93 @@ func sentinelMask(f: VendorFieldPlan): uint64 =
   elif f.enc == veBcd or w >= 8: not 0'u64
   else: (1'u64 shl (8 * w)) - 1
 
-proc decodeField(f: VendorFieldPlan, b: openArray[byte], base: int,
-    order: ByteOrder): Option[VendorValue] =
-  # None when the field does not fit `b` or holds its sentinel.
+type
+  NumberRead* = enum
+    ## What `readNumber` found (**internal**, for `vendor/columns`).
+    nrNone  ## The field does not fit, or holds its sentinel: absent.
+    nrInt   ## An integer encoding: `iv` is the raw value, `fv` its value as shown.
+    nrFloat ## A float encoding: `fv` is the value (scale and offset applied).
+    nrOther ## Text, raw bytes, or a BCD field with an invalid digit.
+
+func readNumber*(f: VendorFieldPlan, b: openArray[byte], base: int, order: ByteOrder,
+    iv: var int64, fv: var float64): NumberRead =
+  ## **Internal.** Reads the number of field `f` at `base` in `b` without allocating;
+  ## `decodeField` and `vendorColumn` read alike. For an integer encoding `iv` is the raw
+  ## value and `fv` the shown one (`raw * scale + offset` when `scaled`, else `raw`).
   let pos = base + f.byteOff
-  if not f.fits(b, pos):
-    return none(VendorValue)
+  if not f.fits(b, pos): return nrNone
   let o = f.order.get(order)
-  var iv: int64
-  var isInt = true
-  var fv: float64
   case f.enc
   of veU8, veI8, veU16, veI16, veU24, veI24, veU32, veI32, veU64, veI64, veUNib, veINib:
     iv = f.readInt(b, pos, o)
-  of veF32:
-    isInt = false
-    fv = float64(getNum[float32](b, pos, o))
-  of veF64:
-    isInt = false
-    fv = getNum[float64](b, pos, o)
-  of veIbm32:
-    isInt = false
-    fv = ibmToFloat64(getNum[uint32](b, pos, o))
-  of veFixedPt:
-    isInt = false
-    var u = 0'u64
-    for i in 0..4: u = (u shl 8) or uint64(b[pos + i])
-    fv = float64(cast[int64](u shl 24) shr 24) / 65536.0
+  of veF32, veF64, veIbm32, veFixedPt:
+    case f.enc
+    of veF32: fv = float64(getNum[float32](b, pos, o))
+    of veF64: fv = getNum[float64](b, pos, o)
+    of veIbm32: fv = ibmToFloat64(getNum[uint32](b, pos, o))
+    else:
+      var u = 0'u64
+      for i in 0..4: u = (u shl 8) or uint64(b[pos + i])
+      fv = float64(cast[int64](u shl 24) shr 24) / 65536.0
+    if f.scaled: fv = fv * f.scale + f.offset
+    return nrFloat
   of veBcd:
     let first = 2 * pos + ord(f.lowNibble)
     iv = 0
     for n in first ..< first + f.nibbles:
       let d = nibble(b, n)
-      if d > 9:
-        let last = pos + (f.nibbles + ord(f.lowNibble) + 1) div 2
-        return some VendorValue(kind: vvBytes, bytes: b[pos ..< last], unit: f.unit,
-          label: "invalid BCD")
+      if d > 9: return nrOther
       iv = iv * 10 + int64(d)
-  of veAscii, veEbcdic:
-    var s = newString(f.len)
-    for i in 0..<f.len:
-      s[i] = if f.enc == veAscii: char(b[pos + i]) else: char(ebcdicToLatin1[b[pos + i]])
-    return some VendorValue(kind: vvText, text: trimText(s, f.trim), unit: f.unit)
-  of veRaw:
-    return some VendorValue(kind: vvBytes, bytes: b[pos ..< pos + f.len], unit: f.unit)
-  if not isInt:
-    return some VendorValue(kind: vvFloat,
-      floatVal: (if f.scaled: fv * f.scale + f.offset else: fv), unit: f.unit)
+  of veAscii, veEbcdic, veRaw:
+    return nrOther
   if f.sentinel.isSome:
     # Compare the raw bit pattern: (sentinel 0xFFFFFF) matches an i24 of -1.
     let mask = f.sentinelMask
     if (cast[uint64](iv) and mask) == (cast[uint64](f.sentinel.get) and mask):
-      return none(VendorValue)
-  var v = if f.scaled:
-            VendorValue(kind: vvFloat, floatVal: float64(iv) * f.scale + f.offset, unit: f.unit)
+      return nrNone
+  fv = if f.scaled: float64(iv) * f.scale + f.offset else: float64(iv)
+  nrInt
+
+proc decodeField*(f: VendorFieldPlan, b: openArray[byte], base: int,
+    order: ByteOrder): Option[VendorValue] =
+  ## **Internal.** The value of field `f` at `base` in `b`: none when it does not fit or
+  ## holds its sentinel. `decodeTarget` reads each field so; `vendorColumn` reads text so.
+  let pos = base + f.byteOff
+  var iv: int64
+  var fv: float64
+  case f.readNumber(b, base, order, iv, fv)
+  of nrNone: return none(VendorValue)
+  of nrFloat: return some VendorValue(kind: vvFloat, floatVal: fv, unit: f.unit)
+  of nrOther:
+    case f.enc
+    of veBcd:
+      let last = pos + (f.nibbles + ord(f.lowNibble) + 1) div 2
+      return some VendorValue(kind: vvBytes, bytes: b[pos ..< last], unit: f.unit,
+        label: "invalid BCD")
+    of veAscii, veEbcdic:
+      var s = newString(f.len)
+      for i in 0..<f.len:
+        s[i] = if f.enc == veAscii: char(b[pos + i]) else: char(ebcdicToLatin1[b[pos + i]])
+      return some VendorValue(kind: vvText, text: trimText(s, f.trim), unit: f.unit)
+    else:
+      return some VendorValue(kind: vvBytes, bytes: b[pos ..< pos + f.len], unit: f.unit)
+  of nrInt: discard
+  var v = if f.scaled: VendorValue(kind: vvFloat, floatVal: fv, unit: f.unit)
           else: VendorValue(kind: vvInt, intVal: iv, unit: f.unit)
   for e in f.enums:
     if e.value == iv: v.label = e.label
   for flag in f.bits:
     if ((cast[uint64](iv) shr flag.bit) and 1) != 0: v.flags.add flag.name
   some(v)
+
+func valueKind*(f: VendorFieldPlan): VendorValueKind =
+  ## The kind of value `decode` gives for `f` (a BCD field with an invalid digit gives
+  ## bytes instead of the integer it plans).
+  case f.enc
+  of veAscii, veEbcdic: vvText
+  of veRaw: vvBytes
+  of veF32, veF64, veIbm32, veFixedPt: vvFloat
+  else: (if f.scaled: vvFloat else: vvInt)
 
 func testHolds(c: VendorCondition, v: int64): bool =
   if c.isRange: v >= c.lo and v <= c.hi else: v in c.values
@@ -1188,6 +1217,17 @@ func condHolds(c: VendorCondition, t: VendorTarget, b: openArray[byte], order: B
       of csHighNibble: int64(x shr 4)
       else: int64(x and 15)
   c.testHolds(v)
+
+func fieldIsOn*(t: VendorTarget, i: int, b: openArray[byte], order: ByteOrder,
+    ctx: VendorContext): bool =
+  ## **Internal.** True when field `i` of `t` passes its own `(when)` conditions, as
+  ## `decodeTarget` reckons it: a condition on an earlier field that is itself off fails.
+  ## Allocates nothing; `vendorColumn` asks it for one field instead of the whole target.
+  const noOff: array[0, bool] = []
+  for c in t.fields[i].conds:
+    if c.source == csField and not t.fieldIsOn(c.fieldIndex, b, order, ctx): return false
+    if not c.condHolds(t, b, order, ctx, noOff): return false
+  true
 
 func elementCount(r: VendorRepeatPlan, decoded: openArray[VendorField], areaLen: int,
     problems: var seq[string]): int =
@@ -1260,16 +1300,20 @@ func applies*(m: VendorMap, ctx: VendorContext): bool =
   ## True when every clause of the map's `match` holds for `ctx`.
   specificity(m.match, ctx) >= 0
 
-proc selectMap(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
+proc applicableSpecs*(reg: VendorRegistry, ctx: VendorContext): seq[int] =
+  ## **Internal.** Per map of `reg`, its specificity for `ctx` (-1: it does not apply).
+  for m in reg.maps: result.add specificity(m.match, ctx)
+
+proc selectMapWith*(reg: VendorRegistry, specs: openArray[int], area: VendorArea,
     bytes: openArray[byte], tie: var bool): int =
-  # The index of the most specific map that applies to `ctx` and has a target for
-  # `area` (the first one when several are equally specific, and then `tie` is set);
-  # -1 when none does. Reading and writing a field select alike.
+  ## **Internal.** The index of the most specific map (by `specs`, from `applicableSpecs`)
+  ## that has a target for `area` (the first one when several are equally specific, and
+  ## then `tie` is set); -1 when none does. Allocates nothing.
   result = -1
   var bestSpec = -1
   tie = false
   for i, m in reg.maps:
-    let s = specificity(m.match, ctx)
+    let s = specs[i]
     if s >= 0:
       var has = false
       for t in m.targets:
@@ -1281,6 +1325,11 @@ proc selectMap(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
           tie = false
         elif s == bestSpec:
           tie = true
+
+proc selectMap(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
+    bytes: openArray[byte], tie: var bool): int =
+  # The map reading and writing a field select alike (see `selectMapWith`).
+  reg.selectMapWith(reg.applicableSpecs(ctx), area, bytes, tie)
 
 proc decodeAll*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
     bytes: openArray[byte], log: var DiagLog, loc = Location()): seq[VendorBlock] =
@@ -1510,8 +1559,8 @@ func offFlags(t: VendorTarget, b: openArray[byte], order: ByteOrder,
         result[i] = true
         break
 
-func elementIndex(field: string, baseName: var string): int =
-  # `name[i]` with i a run of decimal digits: -1 for any other name, else i.
+func elementIndex*(field: string, baseName: var string): int =
+  ## **Internal.** `name[i]` with i a run of decimal digits: -1 for any other name, else i.
   result = -1
   let open = field.find('[')
   if open > 0 and field[^1] == ']':

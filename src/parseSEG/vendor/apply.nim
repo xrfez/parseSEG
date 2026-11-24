@@ -53,6 +53,14 @@ proc decodeArea(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorCo
     blocks.addDecoded(reg, ctx, VendorArea(kind: kind, blockIndex: i + 1, blockType: -1,
       extIndex: -1), bytes.toOpenArray(i * SegdBlockSize, (i + 1) * SegdBlockSize - 1), log, loc)
 
+func typedBlockSpan*(area: openArray[byte], i: int): int =
+  ## **Internal.** Bytes of the Rev 3 typed block at `i` of `area`: 96 for a Position block
+  ## (0x50 0x51 0x52), else 32. The caller checks that 32 bytes remain.
+  if area[i + 31] == BlockTypePosition1 and i + 96 <= area.len and
+      area[i + 63] == BlockTypePosition2 and area[i + 95] == BlockTypePosition3:
+    3 * SegdBlockSize
+  else: SegdBlockSize
+
 proc decodeTypedBlocks(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: VendorContext,
     area: openArray[byte], where: string, log: var DiagLog, loc: Location) =
   # Rev 3 typed blocks by type byte. A Position block (0x50 0x51 0x52) is
@@ -60,10 +68,7 @@ proc decodeTypedBlocks(blocks: var seq[VendorBlock], reg: VendorRegistry, ctx: V
   var i = 0
   while i + SegdBlockSize <= area.len:
     let t = area[i + 31]
-    let span = if t == BlockTypePosition1 and i + 96 <= area.len and
-                  area[i + 63] == BlockTypePosition2 and area[i + 95] == BlockTypePosition3:
-                 3 * SegdBlockSize
-               else: SegdBlockSize
+    let span = area.typedBlockSpan(i)
     blocks.addDecoded(reg, ctx, VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(t),
       where: where, extIndex: -1), area.toOpenArray(i, i + span - 1), log, loc)
     i += span

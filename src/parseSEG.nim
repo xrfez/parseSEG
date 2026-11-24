@@ -34,8 +34,8 @@ import parseSEG/seg2/[headers as seg2headers, samples as seg2samples, reader as 
 export seg2samples except decodeSamplesRaw
 export seg2headers, seg2reader, seg2writer
 
-import parseSEG/vendor/[maps, apply, scaffold]
-export maps, apply, scaffold
+import parseSEG/vendor/[maps, apply, scaffold, columns]
+export maps, apply, scaffold, columns
 
 import parseSEG/convert
 import parseSEG/convert/[tosegy, tosegd, toseg2]
