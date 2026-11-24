@@ -1249,6 +1249,28 @@ func applies*(m: VendorMap, ctx: VendorContext): bool =
   ## True when every clause of the map's `match` holds for `ctx`.
   specificity(m.match, ctx) >= 0
 
+proc selectMap(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
+    bytes: openArray[byte], tie: var bool): int =
+  # The index of the most specific map that applies to `ctx` and has a target for
+  # `area` (the first one when several are equally specific, and then `tie` is set);
+  # -1 when none does. Reading and writing a field select alike.
+  result = -1
+  var bestSpec = -1
+  tie = false
+  for i, m in reg.maps:
+    let s = specificity(m.match, ctx)
+    if s >= 0:
+      var has = false
+      for t in m.targets:
+        if targetMatches(t, area, bytes): has = true
+      if has:
+        if s > bestSpec:
+          result = i
+          bestSpec = s
+          tie = false
+        elif s == bestSpec:
+          tie = true
+
 proc decodeAll*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
     bytes: openArray[byte], log: var DiagLog, loc = Location()): seq[VendorBlock] =
   ## Decodes a vendor area: a registered code decoder for (manufacturer,
@@ -1270,22 +1292,8 @@ proc decodeAll*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
       except CatchableError as e:
         log.report(sevWarning, dcVendorMap, "vendor decoder " & d.name & " failed: " & e.msg,
           loc = loc)
-  var best = -1
-  var bestSpec = -1
   var tie = false
-  for i, m in reg.maps:
-    let s = specificity(m.match, ctx)
-    if s >= 0:
-      var has = false
-      for t in m.targets:
-        if targetMatches(t, area, bytes): has = true
-      if has:
-        if s > bestSpec:
-          best = i
-          bestSpec = s
-          tie = false
-        elif s == bestSpec:
-          tie = true
+  let best = reg.selectMap(ctx, area, bytes, tie)
   if best < 0:
     return @[]
   template m: untyped = reg.maps[best]
@@ -1315,6 +1323,229 @@ proc decode*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea, bytes: o
   ## `decodeAll` when a map has several targets with `match`.
   let all = reg.decodeAll(ctx, area, bytes, log, loc)
   if all.len > 0: some(all[0]) else: none(VendorBlock)
+
+# ----------------------------------------------------------------- encode --
+
+func rawBits(f: VendorFieldPlan): int =
+  # The width in bits of an integer field's raw value.
+  if f.enc in {veUNib, veINib}: 4 * f.nibbles else: 8 * encWidth(f.enc)
+
+func isSignedEnc(e: VendorEncoding): bool =
+  e in {veI8, veI16, veI24, veI32, veI64, veINib}
+
+func rawValue(f: VendorFieldPlan, v: VendorValue): int64 {.raises: [ValueError].} =
+  # The raw integer that decodes to `v` (inverts `scale` and `offset`); ValueError
+  # for a value of the wrong kind, a fraction in an unscaled field, or a number
+  # beyond int64.
+  var x: float64
+  case v.kind
+  of vvInt:
+    if not f.scaled: return v.intVal
+    x = float64(v.intVal)
+  of vvFloat:
+    x = v.floatVal
+  else:
+    raise newException(ValueError, "field " & f.name & " (" & $f.enc & ") takes a number")
+  if f.scaled:
+    if f.scale == 0.0:
+      raise newException(ValueError, "field " & f.name & " has a zero scale")
+    x = (x - f.offset) / f.scale
+    if x.classify in {fcNan, fcInf, fcNegInf}:
+      raise newException(ValueError, "field " & f.name & ": " & $v.floatVal & " has no raw value")
+    x = round(x)
+  elif x.classify in {fcNan, fcInf, fcNegInf} or x != floor(x):
+    raise newException(ValueError, "field " & f.name & " (" & $f.enc &
+      ") holds whole numbers, not " & $x)
+  if x >= 9.2233720368547758e18 or x < -9.2233720368547758e18:
+    raise newException(ValueError, "field " & f.name & ": " & $x & " does not fit " & $f.enc)
+  int64(x)
+
+proc putRawInt(f: VendorFieldPlan, b: var openArray[byte], pos: int, o: ByteOrder, raw: int64) =
+  # Writes `raw` (already range-checked, or a masked sentinel) into the field.
+  let u = cast[uint64](raw)
+  case f.enc
+  of veU8, veI8: b[pos] = byte(u and 0xFF)
+  of veU16, veI16: putNum[uint16](b, pos, uint16(u and 0xFFFF), o)
+  of veU24, veI24:
+    let w = uint32(u and 0xFFFFFF)
+    if o == boLittle:
+      b[pos] = byte(w and 0xFF)
+      b[pos + 1] = byte((w shr 8) and 0xFF)
+      b[pos + 2] = byte(w shr 16)
+    else: putBeU24(b, pos, w)
+  of veU32, veI32: putNum[uint32](b, pos, uint32(u and 0xFFFFFFFF'u64), o)
+  of veU64, veI64: putNum[uint64](b, pos, u, o)
+  of veUNib, veINib:
+    let first = 2 * pos + ord(f.lowNibble)
+    var rest = u
+    for n in countdown(first + f.nibbles - 1, first):
+      setNibble(b, n, uint8(rest and 15))
+      rest = rest shr 4
+  of veBcd:
+    let first = 2 * pos + ord(f.lowNibble)
+    var rest = raw
+    for n in countdown(first + f.nibbles - 1, first):
+      setNibble(b, n, uint8(rest mod 10))
+      rest = rest div 10
+  else: discard
+
+proc encodeField*(f: VendorFieldPlan, b: var openArray[byte], base: int, order: ByteOrder,
+    value: Option[VendorValue]) =
+  ## Writes `value` into the bytes of field `f` of block `b` (`base`: the offset of the
+  ## repeat element, else 0): the exact inverse of the decoding. `none` writes the
+  ## field's `sentinel` ("no value"). Only the field's own bytes (nibbles) change.
+  ## Raises `ValueError`, leaving `b` as it was, when the field does not fit `b`, the
+  ## value is of the wrong kind or does not fit the encoding (nothing is truncated),
+  ## there is no sentinel to write, or the encoding is unsupported (`ibm32`, `fixedpt`).
+  let pos = base + f.byteOff
+  if not f.fits(b, pos):
+    raise newException(ValueError, "field " & f.name & " lies beyond the " & $b.len &
+      "-byte area")
+  let o = f.order.get(order)
+  case f.enc
+  of veU8, veI8, veU16, veI16, veU24, veI24, veU32, veI32, veU64, veI64, veUNib, veINib,
+      veBcd:
+    var raw: int64
+    if value.isNone:
+      if f.sentinel.isNone:
+        raise newException(ValueError, "field " & f.name & " has no sentinel to mean no value")
+      raw = f.sentinel.get
+    else:
+      raw = f.rawValue(value.get)
+    var lo, hi: int64
+    if f.enc == veBcd:
+      lo = 0
+      hi = if f.nibbles >= 19: int64.high else: 10'i64 ^ f.nibbles - 1
+    else:
+      let bits = f.rawBits
+      if f.enc.isSignedEnc:
+        lo = if bits >= 64: int64.low else: -(1'i64 shl (bits - 1))
+        hi = if bits >= 64: int64.high else: (1'i64 shl (bits - 1)) - 1
+      else:
+        lo = 0
+        hi = if bits >= 63: int64.high else: (1'i64 shl bits) - 1
+    # A sentinel is a bit pattern (0xFFFFFF in an i24): only a value is range-checked.
+    if (value.isSome or f.enc == veBcd) and (raw < lo or raw > hi):
+      raise newException(ValueError, "field " & f.name & ": " & $raw & " does not fit " &
+        $f.enc & (if f.enc in {veUNib, veINib, veBcd}: " of " & $f.nibbles & " nibbles"
+                  else: ""))
+    f.putRawInt(b, pos, o, raw)
+  of veF32, veF64:
+    if value.isNone:
+      raise newException(ValueError, "field " & f.name & " (" & $f.enc & ") has no sentinel")
+    let v = value.get
+    var x: float64
+    case v.kind
+    of vvInt: x = float64(v.intVal)
+    of vvFloat: x = v.floatVal
+    else: raise newException(ValueError, "field " & f.name & " (" & $f.enc & ") takes a number")
+    if f.scaled:
+      if f.scale == 0.0:
+        raise newException(ValueError, "field " & f.name & " has a zero scale")
+      x = (x - f.offset) / f.scale
+    if f.enc == veF32:
+      if x.classify notin {fcNan, fcInf, fcNegInf} and abs(x) > 3.4028234663852886e38:
+        raise newException(ValueError, "field " & f.name & ": " & $x & " does not fit f32")
+      putNum[float32](b, pos, float32(x), o)
+    else:
+      putNum[float64](b, pos, x, o)
+  of veAscii, veEbcdic:
+    if value.isNone:
+      raise newException(ValueError, "field " & f.name & " (" & $f.enc & ") has no sentinel")
+    if value.get.kind != vvText:
+      raise newException(ValueError, "field " & f.name & " (" & $f.enc & ") takes text")
+    let t = value.get.text
+    if t.len > f.len:
+      raise newException(ValueError, "field " & f.name & ": text of " & $t.len &
+        " bytes does not fit " & $f.len)
+    for c in t:
+      if f.enc == veAscii and ord(c) > 127:
+        raise newException(ValueError, "field " & f.name & ": text is not ASCII")
+    let pad = repeat(' ', f.len - t.len)
+    let text = if f.trim == trimLeft: pad & t else: t & pad
+    for i in 0..<f.len:
+      b[pos + i] = if f.enc == veAscii: byte(text[i]) else: encodeEbcdic([text[i]])[0]
+  of veRaw:
+    if value.isNone:
+      raise newException(ValueError, "field " & f.name & " (raw) has no sentinel")
+    if value.get.kind != vvBytes or value.get.bytes.len != f.len:
+      raise newException(ValueError, "field " & f.name & " (raw) takes " & $f.len & " bytes")
+    for i in 0..<f.len: b[pos + i] = value.get.bytes[i]
+  of veIbm32, veFixedPt:
+    raise newException(ValueError, "field " & f.name & ": writing " & $f.enc &
+      " is not supported")
+
+func activeFlags(t: VendorTarget, upTo: int, b: openArray[byte], order: ByteOrder,
+    ctx: VendorContext): seq[bool] =
+  # For fields 0..upTo of `t`: true where the field's own `(when)` conditions failed,
+  # as `decodeTarget` reckons it.
+  result = newSeq[bool](t.fields.len)
+  for i in 0..upTo:
+    for c in t.fields[i].conds:
+      if not c.condHolds(t, b, order, ctx, result):
+        result[i] = true
+        break
+
+proc writeVendorField(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
+    bytes: var openArray[byte], field: string, value: Option[VendorValue]) =
+  var tie = false
+  let at = reg.selectMap(ctx, area, bytes, tie)
+  if at < 0:
+    raise newException(ValueError, "no vendor map applies to this " & $area.kind &
+      " (field " & field & ")")
+  template m: untyped = reg.maps[at]
+  let open = field.find('[')
+  let isElem = field.len > 0 and field[^1] == ']' and open > 0
+  let baseName = if isElem: field[0 ..< open] else: field
+  var elem = -1
+  if isElem:
+    try: elem = parseInt(field[open + 1 ..< field.len - 1])
+    except ValueError: elem = -1
+  for t in m.targets:
+    if targetMatches(t, area, bytes):
+      for i, f in t.fields:
+        if f.name == field:
+          if f.conds.len > 0 and
+              t.activeFlags(i, bytes, ctx.byteOrder, ctx)[i]:
+            raise newException(ValueError, "field " & field & " is absent here: its (when) " &
+              "condition does not hold")
+          f.encodeField(bytes, 0, ctx.byteOrder, value)
+          return
+      if elem >= 0:
+        for r in t.repeats:
+          for f in r.fields:
+            if f.name == baseName:
+              var count = r.count
+              if r.countRef.len > 0:
+                count = -1
+                for cf in t.fields:
+                  var iv: int64
+                  if cf.name == r.countRef and cf.readRaw(bytes, ctx.byteOrder, iv):
+                    count = int(max(min(iv, 1_000_000), -1))
+              if elem >= count:
+                raise newException(ValueError, "field " & field & " is beyond the repeat's " &
+                  $max(count, 0) & " elements")
+              f.encodeField(bytes, r.byteOff + elem * r.stride, ctx.byteOrder, value)
+              return
+  raise newException(ValueError, "map " & m.name & " has no field " & field & " for this " &
+    $area.kind)
+
+proc setVendorField*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
+    bytes: var openArray[byte], field: string, value: VendorValue) =
+  ## Sets the field `field` (`name[i]` inside a repeat) in the bytes of a vendor area, as
+  ## `decode` would read it back: the same map and target are chosen (code decoders
+  ## are not consulted: they have no field plans), `scale` and `offset` are inverted,
+  ## and only the field's own bytes change. Raises `ValueError`, leaving `bytes` as
+  ## they were, when no map or target applies, the field is unknown, its `(when)`
+  ## condition does not hold, the area is too short, the value does not fit or the
+  ## encoding cannot be written (see `encodeField`).
+  reg.writeVendorField(ctx, area, bytes, field, some(value))
+
+proc clearVendorField*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
+    bytes: var openArray[byte], field: string) =
+  ## Writes the field's `sentinel` into the bytes, so `decode` finds no value. Raises
+  ## `ValueError` as `setVendorField` does, and when the field has no sentinel.
+  reg.writeVendorField(ctx, area, bytes, field, none(VendorValue))
 
 func `[]`*(blk: VendorBlock, name: string): lent VendorValue =
   ## The value of field `name`. Raises `KeyError` if it was not decoded.
