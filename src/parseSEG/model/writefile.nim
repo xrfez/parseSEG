@@ -29,9 +29,9 @@
 ## - SEG-D: the sample count of a record, taken from the first trace written
 ##   to it. Every later trace of that record must have the same count. The
 ##   record length, the end time of each channel set that has channels and the
-##   sample count in an existing trace header extension follow. A channel set
-##   with no channels is left unchanged. A trace written with its own count
-##   leaves those headers unchanged.
+##   sample count in an existing trace header extension follow. A count of 0
+##   is refused. A channel set with no channels is left unchanged. A trace
+##   written with its own count leaves those headers unchanged.
 ##
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
@@ -66,8 +66,9 @@
 ## end time, so a negative start still covers the trace; a negative end time
 ## is written as it is), each of those sets' end time (start plus count times
 ## the interval) and the sample count in each existing trace header extension
-## follow; a count the headers cannot hold is refused the same way. A channel
-## set with no channels is left unchanged. A written SEG-D 8015 count still
+## follow; a count the headers cannot hold, or a count of 0, is refused the
+## same way (a short-form record length of 000 is indeterminate, not 0). A
+## channel set with no channels is left unchanged. A written SEG-D 8015 count still
 ## needs a multiple of 4 (the source count is not checked at open). A trace
 ## written with its own count leaves those headers unchanged. The
 ## record headers and trailer come from the trace's own record in `src`; a
@@ -1063,6 +1064,8 @@ proc setRev3End(c: var SegdChannelSetDescriptorRev3, n: int, which: string) =
 
 proc applySegdCount(rec: var SegdRecord, n, recNo: int, path: string) =
   # Rewrites the headers a new sample count changes. The caller passes a copy.
+  if n == 0:
+    refuse(segdRec(recNo, path) & ": a sample count of 0 cannot be written")
   if rec.isRev3 and rec.gh3.extendedRecordingMode == 1:
     refuse(segdRec(recNo, path) & " is in extended recording mode, which keeps the " &
       "record length at 0, so the sample count cannot change")

@@ -266,8 +266,9 @@ Options and rules:
   over channel sets that have channels, of the trace length and the end time, so a
   negative start still covers the trace; a negative end time is written as it is. Each
   of those sets' end time and the sample count in an existing trace header extension
-  follow. A channel set with no channels is left unchanged. A trace written with its
-  own count leaves those headers unchanged.
+  follow. A count of 0 is refused (a short-form record length of 000 is indeterminate,
+  not 0), and nothing of that record is written. A channel set with no channels is left
+  unchanged. A trace written with its own count leaves those headers unchanged.
 - **Which traces.** SEG-Y and SEG-2 traces can be written in any order and any subset (a
   declared Rev 2 trace count becomes the number written). SEG-D records are written
   whole, each record's traces in input order: a record ends when a trace of another record

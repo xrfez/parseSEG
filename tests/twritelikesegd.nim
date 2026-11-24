@@ -576,7 +576,54 @@ proc mainFour*() =
     doAssertRaises(ValueError): w2.writeTrace(f, 0, wave(6))
   doAssert not fileExists(bad)
 
+proc mainFive*() =
+  ## A new sample count of 0 is refused before any record byte is written.
+  ## Seen failing before the change: the write succeeded, and a short-form
+  ## record length became BCD 000 (indeterminate, not 0 ms).
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  let fmt = sd8058
+  let src = tmp / "z.sgd"
+  put(src, SegdData(records: @[makeRev2(1, fmt, 8)]))
+  var f = openSeismic(src)
+  block:
+    var w = openSeismicWriter(tmp / "z_out.sgd", f)
+    doAssertRaises(ValueError): w.writeTrace(f, 0, wave(0))
+  doAssert not fileExists(tmp / "z_out.sgd")
+  var r = SegdRecord(layout: slRev2, format: some(fmt),
+    revision: SegdRevision(major: 2, minor: 1))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 4, formatCode: ord(fmt), year: 26,
+    additionalGhBlocks: 1, manufacturerCode: 9, baseScanInterval16: 32, recordType: 8,
+    recordLength: 10, scanTypesPerRecord: 1, channelSetsPerScanType: 1)
+  r.gh2 = some SegdGeneralHeader2(extFileNumber: 4, revisionMajor: 2, revisionMinor: 1,
+    extRecordLength: 0, blockNumber: 2)
+  let seis = SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: 1,
+    endTime: 8, channelCount: 1, channelType: 1, traceHeaderExtensions: 1)
+  r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: @[seis])]
+  r.traceCount = 1
+  var t = SegdTrace(index: 0, numSamples: 8)
+  t.header = SegdTraceHeader(fileNumber: 4, scanTypeNumber: 1, channelSetNumber: 1,
+    traceNumber: 1, traceHeaderExtensions: 1)
+  t.ext1 = some SegdTraceHeaderExt1(samplesPerTrace: 8, sensorType: 1)
+  t.samples = newSeq[byte](dataBytes(fmt, 8))
+  encodeSamples(fmt, newSeq[float64](8), t.samples)
+  let bcd = tmp / "zbcd.sgd"
+  put(bcd, SegdData(records: @[SegdRecordData(record: r, traces: @[t])]))
+  var b = openSeismic(bcd)
+  doAssert b.index.segdRecords[0].gh1.recordLength == 10
+  block:
+    var w = openSeismicWriter(tmp / "zbcd_out.sgd", b)
+    doAssertRaises(ValueError): w.writeTrace(b, 0, wave(0))
+  doAssert not fileExists(tmp / "zbcd_out.sgd")
+  let src3 = tmp / "z3.sgd"
+  put(src3, SegdData(records: @[makeRev3(fmt, 8)]))
+  var g = openSeismic(src3)
+  block:
+    var w = openSeismicWriter(tmp / "z3_out.sgd", g)
+    doAssertRaises(ValueError): w.writeTrace(g, 0, wave(0))
+  doAssert not fileExists(tmp / "z3_out.sgd")
+
 main()
 mainTwo()
 mainThree()
 mainFour()
+mainFive()
