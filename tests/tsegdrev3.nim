@@ -325,4 +325,22 @@ proc main*() =
         doAssert timestampToUnix(us) == historical(us)
         us += 100
 
+  block integer_converters_saturate_at_int64_ends:
+    # An input within one day of either int64 end is not supported. The
+    # microsecond converters saturate to that end and raise nothing. Broken
+    # by converting it: `sec * 1_000_000 + sub` overflowed.
+    const day = 86_400_000_000'i64
+    doAssert gpsUsToUtcUs(high(int64)) == high(int64)
+    doAssert gpsUsToUtcUs(high(int64) - day + 1) == high(int64)
+    doAssert gpsUsToUtcUs(low(int64)) == low(int64)
+    doAssert gpsUsToUtcUs(low(int64) + day - 1) == low(int64)
+    doAssert utcUsToGpsUs(high(int64)) == high(int64)
+    doAssert utcUsToGpsUs(high(int64) - day + 1) == high(int64)
+    doAssert utcUsToGpsUs(low(int64)) == low(int64)
+    doAssert utcUsToGpsUs(low(int64) + day - 1) == low(int64)
+    doAssert gpsUsToUtcUs(high(int64) - day - 1) == high(int64)
+    doAssert utcUsToGpsUs(low(int64) + day + 1) == low(int64)
+    doAssert gpsMinusUtc(high(int64)) == 18
+    doAssert utcMinusGps(low(int64)) == 9
+
 when isMainModule: main()

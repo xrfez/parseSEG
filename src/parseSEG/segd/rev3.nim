@@ -436,6 +436,7 @@ func size*(s: SegdSourceDescription): int32 =
 
 const
   GpsEpochUnix* = 315_964_800'i64 ## POSIX seconds of 1980-01-06T00:00:00.
+  UnsupportedEdgeUs = 86_400_000_000'i64
 
 func splitUs(us: int64): tuple[sec: int64, sub: int] =
   # Floor division into a POSIX second and a microsecond in 0 .. 999999.
@@ -446,30 +447,61 @@ func splitUs(us: int64): tuple[sec: int64, sub: int] =
     dec sec
   (sec, sub)
 
+func scaleToUs(sec: int64, sub: int): int64 =
+  # `sec * 1_000_000 + sub`, or the int64 end if that product does not fit.
+  # `sub` is 0 .. 999999. `div` truncates toward zero, so a negative `sec`
+  # below `low div 1_000_000` is exactly a product that underflows.
+  if sec > 0 and sec > (high(int64) - int64(sub)) div 1_000_000:
+    return high(int64)
+  if sec < 0 and sec < low(int64) div 1_000_000:
+    return low(int64)
+  sec * 1_000_000 + int64(sub)
+
 proc gpsUsToUtcUs*(gpsUs: int64): int64 {.gcsafe, raises: [].} =
   ## UTC microseconds since 1970 of a SEG-D timestamp `gpsUs` (GPS
   ## microseconds since 1980-01-06), in integer arithmetic, never through
-  ## float64 seconds. The offset is `currentLeapTable` (shipped complete
-  ## through 2016-12-31; `useLeapTable` replaces it). After `checkedTo` the
-  ## last offset is still used.
+  ## float64 seconds. Before 1980-01-06 `gpsUs` is negative; table entries
+  ## before the epoch apply, and GPS−UTC is 0 at the epoch. Inside an
+  ## inserted leap second, `utcUsToGpsUs` of this result differs by one
+  ## second (the round trip is not the identity). An input within one day of
+  ## either `int64` end is not supported: this saturates to that end and
+  ## raises nothing. A product that does not fit saturates the same way, so
+  ## a release or danger build does not overflow. The offset is
+  ## `currentLeapTable` (shipped complete through 2016-12-31; `useLeapTable`
+  ## replaces it). After `checkedTo` the last offset is still used.
+  if gpsUs > high(int64) - UnsupportedEdgeUs: return high(int64)
+  if gpsUs < low(int64) + UnsupportedEdgeUs: return low(int64)
   let (gpsSec, sub) = splitUs(gpsUs)
   var unixSec = gpsSec + GpsEpochUnix
   # Two passes settle on a leap boundary.
   for _ in 0 .. 1:
     unixSec = gpsSec + GpsEpochUnix - int64(leapOffsetAt(unixSec))
-  unixSec * 1_000_000 + int64(sub)
+  scaleToUs(unixSec, sub)
 
 proc utcUsToGpsUs*(utcUs: int64): int64 {.gcsafe, raises: [].} =
   ## The SEG-D timestamp (GPS microseconds since 1980-01-06) of UTC
-  ## microseconds `utcUs` (since 1970), in integer arithmetic. The offset
-  ## is `currentLeapTable`. After `checkedTo` the last offset is still used.
+  ## microseconds `utcUs` (since 1970), in integer arithmetic. Before
+  ## 1980-01-06 the timestamp is negative; table entries before the epoch
+  ## apply, and GPS−UTC is 0 at the epoch. Inside an inserted leap second,
+  ## `gpsUsToUtcUs` of this result differs by one second. An input within one
+  ## day of either `int64` end is not supported: this saturates to that end
+  ## and raises nothing. A product that does not fit saturates the same way.
+  ## The offset is `currentLeapTable`. After `checkedTo` the last offset is
+  ## still used.
+  if utcUs > high(int64) - UnsupportedEdgeUs: return high(int64)
+  if utcUs < low(int64) + UnsupportedEdgeUs: return low(int64)
   let (sec, sub) = splitUs(utcUs)
-  (sec - GpsEpochUnix + int64(leapOffsetAt(sec))) * 1_000_000 + int64(sub)
+  scaleToUs(sec - GpsEpochUnix + int64(leapOffsetAt(sec)), sub)
 
 proc gpsMinusUtc*(gpsUs: int64): int {.gcsafe, raises: [].} =
   ## GPS − UTC in whole seconds at `gpsUs`, a SEG-D timestamp (GPS
   ## microseconds since 1980-01-06, not microseconds since 1970). 18 since
-  ## 2017-01-01 on the shipped table. The offset is `currentLeapTable`.
+  ## 2017-01-01 on the shipped table. Before 1980-01-06 the timestamp is
+  ## negative and earlier table entries apply; at the epoch the offset is 0.
+  ## Inside an inserted second, `utcUsToGpsUs(gpsUsToUtcUs(gpsUs))` differs
+  ## from `gpsUs` by one second. An input within one day of either `int64`
+  ## end is not supported: `gpsUsToUtcUs` saturates it, and this returns the
+  ## offset at that end. The offset is `currentLeapTable`.
   let (sec, _) = splitUs(gpsUsToUtcUs(gpsUs))
   leapOffsetAt(sec)
 
@@ -477,6 +509,11 @@ proc utcMinusGps*(utcUs: int64): int {.gcsafe, raises: [].} =
   ## UTC − GPS in whole seconds at UTC microseconds `utcUs` (since 1970,
   ## POSIX). The inverse of `gpsMinusUtc`:
   ## `utcMinusGps(gpsUsToUtcUs(gpsUs)) == -gpsMinusUtc(gpsUs)`.
+  ## Before 1980-01-06 earlier table entries apply, and the offset is 0 at
+  ## the epoch. Inside an inserted second the GPS round trip is not the
+  ## identity, by one second. An input within one day of either `int64` end
+  ## is not supported; this raises nothing and returns the offset at that
+  ## second.
   let (sec, _) = splitUs(utcUs)
   -leapOffsetAt(sec)
 
