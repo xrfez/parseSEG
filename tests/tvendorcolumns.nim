@@ -11,7 +11,8 @@
 ## `record_fields_of_several_areas` and `one_name_twice_in_a_block`; reading later blocks
 ## when the field is off in the first fails `record_field_reads_the_first_block`. Letting
 ## `fieldIsOn` recurse into a field at or after the one asked about fails
-## `when_on_a_later_field` (the recursion never ends).
+## `when_on_a_later_field` (the recursion never ends). Leaving out a candidate whose map
+## gives the field another kind fails `another_kind_in_the_first_block_is_absent`.
 
 import std/[assertions, math, monotimes, options, os, sequtils, strutils, times]
 
@@ -655,6 +656,43 @@ proc main*() =
     doAssert shown == @["hit:0", "hit:1"], $shown
     let col = f.vendorColumn(reg, "v")
     doAssert col.absent == 2 and col.numbers[0].isNaN
+    f.close()
+
+  block another_kind_in_the_first_block_is_absent:
+    # Manufacturer 50's map is the more specific one for block 1 and defines X.f as text:
+    # that record's value is absent and the column mixed. Dropping such a candidate let the
+    # read go on to block 2 (extension 3 for a trace), where the general map gave 81.
+    let reg = block:
+      var g = registry("""(.nif27)
+(vendormap "A" (version 1) (match (format segd))
+  (target (kind extendedHeader) (match (at 1) (bytes 0x11)) (name X) (field f (at 2) (enc u8)))
+  (target (kind traceExt) (match (at 1) (bytes 0x11)) (name T) (field g (at 2) (enc u8))))""")
+      g.addMap loadVendorMap("""(.nif27)
+(vendormap "B" (version 1) (match (format segd) (manufacturer 50))
+  (target (kind extendedHeader) (blockIndex 1) (name X) (field f (at 2) (len 2) (enc ascii)))
+  (target (kind traceExt) (extension 2) (name T) (field g (at 2) (len 2) (enc ascii))))""")
+      g
+    var d = build([RecSpec(manufacturer: 9, second: 1, traces: 2, exts: 2),
+      RecSpec(manufacturer: 50, second: 1, traces: 2, exts: 2)])
+    for rec in d.records.mitems:
+      rec.record.extended = newSeq[byte](64)
+      for i in 0 .. 63: rec.record.extended[i] = byte(0x30 + i)
+      rec.record.extended[0] = 0x11
+      rec.record.extended[32] = 0x11
+      rec.record.gh1.extendedHeaderBlocks = 2
+      for t in rec.traces.mitems:
+        for i in 0 .. 63: t.extensions[i] = byte(0x30 + i)
+        t.extensions[0] = 0x11
+        t.extensions[32] = 0x11
+    var f = openSeismicBytes(bytesOf(d), "kinds")
+    let col = f.vendorColumn(reg, "f")
+    doAssert col.mixed and col.absent == 2, $col.numbers
+    doAssert col.numbers[0] == 49.0 and col.numbers[1] == 49.0 and col.numbers[2].isNaN
+    let ci = f.vendorColumnInt(reg, "f")
+    doAssert ci.mixed and ci.present == @[true, true, false, false]
+    let tc = f.vendorColumn(reg, "g")
+    doAssert tc.mixed and tc.absent == 2, $tc.numbers
+    doAssert tc.numbers[0] == 49.0 and tc.numbers[3].isNaN
     f.close()
 
   block when_on_a_later_field:

@@ -81,6 +81,8 @@ type
     map, target, field, rep: int
       ## `rep` -1: `t.fields[field]`, else `t.repeats[rep].fields[field]`.
     matched: bool        ## The target has `(match)`: decoded after those without.
+    clash: bool          ## Defines the field with another kind or level than the column:
+                         ## a block it is chosen for gives an absent value.
 
   Entry = object
     info: VendorFieldInfo
@@ -230,7 +232,8 @@ proc readCand(reg: VendorRegistry, c: Cand, b: openArray[byte], rc: RecState, el
   # Field `c` of the block `b` into slot `i`.
   template t: untyped = reg.maps[c.map].targets[c.target]
   let order = rc.ctx.byteOrder
-  if c.rep >= 0:
+  if c.clash: s.putAbsent(i)
+  elif c.rep >= 0:
     # A repeat's element: the whole target is decoded, as its count may be a field.
     var blk: VendorBlock
     var problems: seq[string]
@@ -301,8 +304,8 @@ proc resolve(reg: VendorRegistry, ctx: VendorContext, name: string): Address =
 
 proc compatible(reg: VendorRegistry, c: Cand, a: Address, s: var Sink): bool =
   # Whether the candidate defines the field as the column does (the first record's
-  # definition); a disagreement in kind or level leaves the candidate out, a different
-  # unit only marks the column `mixed`.
+  # definition); a disagreement in kind or level makes its values absent (`clash`), a
+  # different unit only marks the column `mixed`.
   template t: untyped = reg.maps[c.map].targets[c.target]
   let fp = reg.plan(c)
   let info = a.entry.info
@@ -322,10 +325,14 @@ proc compatible(reg: VendorRegistry, c: Cand, a: Address, s: var Sink): bool =
     s.mixedWhy = why
 
 proc recState(reg: VendorRegistry, ctx: VendorContext, a: Address, s: var Sink): RecState =
+  # The candidates of the maps that apply, in decode order; one that disagrees with the
+  # column is kept (`clash`): a block chosen for it is that trace's or record's block.
   result.ctx = ctx
   result.specs = reg.applicableSpecs(result.ctx)
   for c in a.entry.cands:
-    if result.specs[c.map] >= 0 and reg.compatible(c, a, s): result.cands.add c
+    if result.specs[c.map] >= 0:
+      result.cands.add c
+      result.cands[^1].clash = not reg.compatible(c, a, s)
   for i, m in reg.maps:
     if result.specs[i] >= 0:
       for t in m.targets:
