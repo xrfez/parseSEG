@@ -7,9 +7,10 @@
 ## complete. Each `leap` is the UTC date a new offset starts (00:00:00 that
 ## day) and the total GPS−UTC in whole seconds from then. Dates are in order,
 ## each step is +1 or −1 (a negative leap second is allowed), and every date
-## is a real proleptic Gregorian date. The first entry is at or before
-## 1980-01-06, with offset 0 or `LeapStartOffset` (−9: GPS−UTC from 1972-01-01
-## until the leap of 1972-06-30, which is (TAI−UTC) − 19).
+## is a real proleptic Gregorian date, and each offset is inside −1000..1000.
+## The first entry is at or before 1980-01-06, with offset 0 or
+## `LeapStartOffset` (−9: GPS−UTC from 1972-01-01 until the leap of 1972-06-30,
+## which is (TAI−UTC) − 19).
 ##
 ## The shipped table is `data/leapseconds.nif` (IERS Bulletin C, through the
 ## leap of 2016-12-31), embedded with `staticRead`, so the library works with
@@ -76,6 +77,14 @@ func dateText(y, m, d: int): string = $y & "-" & $m & "-" & $d
 func dateStart(y, m, d: int): int64 =
   daysFromCivil(y, m, d) * 86400
 
+func offsetInRange(off: int): bool =
+  off >= -1000 and off <= 1000
+
+func oneApart(a, b: int): bool =
+  # True when a and b differ by exactly 1. The larger is not low(int), so
+  # subtracting 1 cannot overflow.
+  (a > b and a - 1 == b) or (b > a and b - 1 == a)
+
 proc validate(t: LeapTable, problems: var seq[string]) =
   if not isRealDate(t.checkedTo):
     problems.add "checkedTo " & dateText(t.checkedTo.year, t.checkedTo.month,
@@ -90,6 +99,8 @@ proc validate(t: LeapTable, problems: var seq[string]) =
       GpsEpoch.month, GpsEpoch.day):
     problems.add "first entry " & dateText(first.year, first.month, first.day) &
       " is after 1980-01-06"
+  if not offsetInRange(first.gpsMinusUtc):
+    problems.add "offset " & $first.gpsMinusUtc & " is outside -1000..1000"
   if first.gpsMinusUtc != 0 and first.gpsMinusUtc != LeapStartOffset:
     problems.add "first entry offset is " & $first.gpsMinusUtc & ", not 0 or " &
       $LeapStartOffset
@@ -102,8 +113,11 @@ proc validate(t: LeapTable, problems: var seq[string]) =
       problems.add "dates are not in order: " & dateText(e.year, e.month,
           e.day) &
         " is not after " & dateText(prev.year, prev.month, prev.day)
-    let step = e.gpsMinusUtc - prev.gpsMinusUtc
-    if step notin [-1, 1]:
+    if not offsetInRange(e.gpsMinusUtc):
+      problems.add "offset " & $e.gpsMinusUtc & " is outside -1000..1000"
+    if not oneApart(e.gpsMinusUtc, prev.gpsMinusUtc) and
+        offsetInRange(e.gpsMinusUtc) and offsetInRange(prev.gpsMinusUtc):
+      let step = e.gpsMinusUtc - prev.gpsMinusUtc
       problems.add "leap step is " & $step & ", not +1 or -1"
 
 proc readLeap(n: var NifIn, problems: var seq[string]): LeapSecond =
@@ -277,8 +291,9 @@ proc currentLeapTable*(): LeapTable {.gcsafe, raises: [].} =
 proc useLeapTable*(t: LeapTable) =
   ## Makes `t` the table every converter and every reader uses from then on.
   ## Raises `ValueError` when `t` would not parse cleanly (no entries, a bad
-  ## date, a step other than ±1, a first entry after 1980-01-06 or with an
-  ## offset other than 0 or `LeapStartOffset`). Keys already read keep the
+  ## date, a step other than ±1, an offset outside −1000..1000, a first entry
+  ## after 1980-01-06 or with an offset other than 0 or `LeapStartOffset`).
+  ## Keys already read keep the
   ## instants they were given.
   var problems: seq[string] = @[]
   validate(t, problems)

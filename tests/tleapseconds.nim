@@ -98,6 +98,12 @@ proc main*() =
     doAssert mentions(parseLeapTable(nif([(1980, 13, 1, 0)])).problems, "not a real date")
     doAssert mentions(parseLeapTable(nif([(1981, 7, 1, 0)])).problems, "after 1980-01-06")
     doAssert mentions(parseLeapTable(nif([(1980, 1, 6, 5)])).problems, "not 0 or -9")
+    # An offset outside -1000..1000 is a problem. Broken by dropping the
+    # range check (1001 was accepted).
+    doAssert mentions(parseLeapTable(nif([(1980, 1, 6, 0), (1981, 7, 1,
+        1001)])).problems, "outside -1000..1000")
+    doAssert mentions(parseLeapTable(nif([(1980, 1, 6, 0), (1981, 7, 1,
+        -1001)])).problems, "outside -1000..1000")
     doAssert mentions(parseLeapTable("(leapSeconds)").problems, "version is missing")
     doAssert mentions(parseLeapTable("not a document").problems, "expected (leapSeconds")
     doAssert mentions(parseLeapTable(newString(MaxProbe)).problems, "1 MB")
@@ -237,6 +243,15 @@ proc main*() =
     let bad = capture("leapseconds", "--file", badPath)
     doAssert bad.code == 1
     doAssert bad.output.find("version is missing") >= 0
+    # `9223372036854775807 - (-9)` overflowed (OverflowDefect), which
+    # `{.raises: [].}` and the CLI's `except CatchableError` do not catch.
+    # Broken by restoring that subtraction.
+    let hugePath = getTempDir() / "huge-leap.nif"
+    writeFile(hugePath, nif([(1972, 1, 1, LeapStartOffset),
+      (1972, 7, 1, high(int))]))
+    let huge = capture("leapseconds", "--file", hugePath)
+    doAssert huge.code == 1, huge.output
+    doAssert huge.output.find("outside -1000..1000") >= 0, huge.output
     let goodPath = getTempDir() / "good-leap.nif"
     writeFile(goodPath, leapTableNif(defaultLeapTable()))
     let good = capture("--file", goodPath, "leapseconds")

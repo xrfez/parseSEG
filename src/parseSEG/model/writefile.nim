@@ -1478,7 +1478,7 @@ proc t0Of(k: TraceKeys): int32 =
     refuse("start time " & $k.t0Ms & " ms does not fit a SEG-D Rev 3 channel set")
   int32(us)
 
-func firstSampleGpsUs(k: TraceKeys, recorded: float64): int64 =
+proc firstSampleGpsUs(k: TraceKeys, recorded: float64): int64 =
   # 0x42 is the instant of sample 0, not time zero. An origin uses
   # `firstSampleUs`; caller-built keys (`toNone`) have `time` as time zero,
   # so add `t0Ms`. `recorded` is that time, or the record's when the trace
