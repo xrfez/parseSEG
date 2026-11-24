@@ -1,11 +1,4 @@
-## Leap-second table as a .nif file a caller can replace (PLEAP1).
-##
-## Seen to fail first: validation accepted a step of +2 and a first entry
-## after 1980-01-06 (problems stayed empty). Converters ignored
-## `useLeapTable`, so an instant after the added date stayed at offset 18.
-## `leapKnownAt` was missing, so the checked-to cases did not compile.
-## Truncating division made `leapKnownAt(-1)` false on 1969-12-31.
-## `leapseconds` was an unknown command, so the CLI check exited 2.
+## Leap-second table as a .nif file a caller can replace.
 
 import std/[assertions, atomics, options, os, strutils, typedthreads]
 
