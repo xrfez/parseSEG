@@ -27,10 +27,10 @@ atlas use https://github.com/xrfez/parseSEG
 With Nimble, in your `.nimble` file:
 
 ```nim
-requires "https://github.com/xrfez/parseSEG >= 0.21.0"
+requires "https://github.com/xrfez/parseSEG >= 0.21.1"
 ```
 
-Releases are git tags (`v0.21.0`). Then:
+Releases are git tags (`v0.21.1`). Then:
 
 ```nim
 import parseSEG   # the whole public API
