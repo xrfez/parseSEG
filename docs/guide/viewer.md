@@ -982,6 +982,15 @@ and `fields`. What a viewer should expect from maps that find blocks by content:
   `openSeismic(path, keys = true, opts = OpenOptions(vendors: reg))`. Pass it on every open
   of a file (also the one that reads the index cache: it is not used for a file such a map
   applies to), so the keys, the map and the joins all see the true numbers.
+- To show a field in every trace's row, sort by it or put it in a file name, ask for it by
+  name instead of decoding every area of every trace: `reg.vendorFieldNames(ctx)` lists the
+  fields the maps in force can decode (`name`, `kind`, `unit`, `hasLabels`, `level`;
+  `<block>.<name>` when two blocks share a field name; `name[i]` for a repeat's element), and
+  `f.vendorColumn(reg, name, stop)` returns that one field for every trace of an open file
+  (`numbers` with NaN, or `texts` with "", where absent, and `absent` counting them). It reads
+  only the target that holds the field from the mapped headers; run it on a job and pass `stop`
+  (asked every 4096 traces) so it can be cancelled. An integer beyond 2^53 (a microsecond time)
+  loses digits as a float64: use `vendorColumnInt`, whose `present` says which traces have one.
 
 ## Geometry, time and annotation
 

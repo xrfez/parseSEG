@@ -78,6 +78,21 @@ not where it is:
   and raise `ValueError` (bytes unchanged) for an unknown field, a false `(when)`, a value
   that does not fit or equals the sentinel, a repeat element `decode` would not show, and
   `ibm32`/`fixedpt` fields, which are not written yet.
+- **Fields by name.** `vendorFieldNames(reg, ctx)` lists the fields of the maps that apply
+  (name, kind, unit, whether it has enum labels, record or trace level, whether it is a
+  repeat's) in map, target, field order. A field is addressed by its bare name when no other
+  listed field has it, else `<block>.<name>` with the target's `(name ...)`; a repeat's field is
+  listed once and asked for as `name[i]`. `vendorColumn(f, reg, name)` reads one field for every
+  trace of an open file: it finds the target in the trace's mapped header bytes (SEG-D Rev 2
+  extension blocks by number, Rev 3 blocks by type, SEG-Y trace header bytes and proprietary
+  headers by name), chooses the map per block as `decodeAll` does (most specific, first on a
+  tie), tests the field's `(when)` conditions and reads only that field, so a numeric field costs
+  no allocation per trace (about 30 ns a trace, 100k traces in 3 ms in a release build). Absent
+  values (a failed `(when)`, the sentinel, a missing or short block, a record no map applies to)
+  are NaN, or "" for text, and counted. A record-level field gives its record's value for each
+  of its traces. `vendorColumnInt` keeps an unscaled integer exact with a `present` flag per
+  trace. Code decoders have no field plans and are not consulted; a map's `(layout)` entries are
+  keys (`OpenOptions.vendors`), not vendor fields, and are not listed.
 - **Rev 3 trailer.** A target `(kind trailer)` with `match` and no `blockIndex` is tried on
   the data of each Rev 3 trailer description block (matched from its first byte, not limited
   to 32 bytes); the whole trailer area of Rev 0-2 is never offered to it.
