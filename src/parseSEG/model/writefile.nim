@@ -152,9 +152,10 @@ type
       ## override it.
     headers*: seq[HeaderOverride]
       ## Record header fields by name, applied before `fileNumber` and `time`:
-      ## `gh1.<field>` and, in Rev 2, `gh3.<field>`, `gh4.<field>`, ... (the
-      ## source headers), with the field names `recordField` uses. Fields
-      ## that size the file are refused.
+      ## `gh1.<field>` (not the file number or the time fields `year`, `julianDay`,
+      ## `hour`, `minute`, `second`: use `fileNumber` and `time`) and, in Rev 2,
+      ## `gh3.<field>`, `gh4.<field>`, ... (the source headers), with the field
+      ## names `recordField` uses. Fields that size the file are refused.
 
   SegyOutputOptions* = object
     ## A SEG-Y file not modelled on an input (`openSeismicWriter(path,
@@ -384,9 +385,11 @@ type
     likeSame: bool             ## Every buffered trace kept its source count.
     likeRec: SegdRecord        ## Headers to write; a new format is already applied.
     vendor: VendorRegistry     ## From `useVendorMaps`: the maps `vendor.<field>` overrides use.
-    chPath: string             ## The source record `chIdx` was worked out for: its file,
-    chMem, chRec, chFirst: int ## `memoryId`, record number and first trace.
-    chIdx: seq[int]            ## Of each of its traces, the place among those of its channel set.
+    chOpen, chRec, chFirst: int ## The source record `chIdx` was worked out for: the open
+                               ## file (`openId`), its record number and first trace.
+    chIdx: seq[int32]          ## Of each of its traces, the place among those of its channel set.
+    vctx: VendorContext        ## The vendor context of the record being written,
+    vctxKey: string            ## made when an override needs it, for the record `vctxKey` names.
     subset: seq[int]           ## From `startSubset`: the source traces of the next record.
     subPath: string            ## That subset's file and `memoryId`.
     subMem: int
@@ -440,7 +443,9 @@ proc splitName(o: HeaderOverride): (string, string) =
 
 proc setOverride[H](h: var H, kind: HeaderBlock, field: string, o: HeaderOverride) =
   if field in structural(kind):
-    refuse(o.name & ": changes the file's structure (sizes or counts); it cannot be overridden")
+    refuse(o.name & (if field == "blockType":
+      ": is the block's type byte, which says what the block is; it cannot be overridden"
+      else: ": changes the file's structure (sizes or counts); it cannot be overridden"))
   var err = ""
   if not setByName(h, field, o.value, err): refuse(o.name & ": " & err)
 
@@ -1598,8 +1603,7 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
   # Each kept trace's channel: its place among the record's traces of its set. Only a
   # Rev 2 skew rebuild reads it; the walk over the record is kept for the next subset.
   let wantChans = rec.layout == slRev2 and rec.gh1.skewBlocks in 1 .. 98
-  if wantChans and not (s.chPath == src.path and s.chMem == src.memoryId and s.chRec == r and
-      s.chIdx.len > 0):
+  if wantChans and not (s.chOpen == src.openId and s.chRec == r and s.chIdx.len > 0):
     var first = trace
     while first > 0 and int(entries[first - 1].record) == r: dec first
     var counts: seq[tuple[key, n: int]] = @[]
@@ -1613,11 +1617,10 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
       if c < 0:
         counts.add (key: key, n: 0)
         c = counts.high
-      s.chIdx.add counts[c].n
+      s.chIdx.add int32(counts[c].n)
       inc counts[c].n
       inc at0
-    s.chPath = src.path
-    s.chMem = src.memoryId
+    s.chOpen = src.openId
     s.chRec = r
     s.chFirst = first
   for pos, k in s.subset:
@@ -1634,13 +1637,14 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
       sets.add SubsetSet(scan: st, chan: cs, n: -1, srcN: int(e.numSamples))
       at = sets.high
     inc sets[at].kept
-    sets[at].chans.add(if wantChans: s.chIdx[k - s.chFirst] else: 0)
+    sets[at].chans.add(if wantChans: int(s.chIdx[k - s.chFirst]) else: 0)
     setOf.add at
   if fOut != rec.format.get:
     rec.gh1.formatCode = ord(fOut)
     rec.format = some(fOut)
   rec.applyRecordPatch(s.subPatch)
   s.likeRec = rec
+  s.vctxKey = ""
   s.likeSets = sets
   s.likeSetOf = setOf
   s.likeKept = s.subset
@@ -1661,11 +1665,11 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
 const NoVendorMaps = VendorRegistry()
 
 proc vendorOverride(t: var SegdTrace, o: HeaderOverride, field: string,
-    reg: VendorRegistry, rec: SegdRecord) =
+    reg: VendorRegistry, ctx: VendorContext) =
   # Writes a vendor map field into the trace's extension blocks: the first block
   # (Rev 2: by extension number from 2; Rev 3: by type byte) where it applies.
-  if reg.maps.len == 0: refuse(o.name & ": no vendor maps are set (useVendorMaps)")
-  let ctx = vendorContext(rec, reg.usesRecordBlocks)
+  if reg.maps.len == 0: refuse(o.name & ": no vendor maps are set: vendor overrides need a writer opened like " &
+    "a SEG-D file (openSeismicWriter(path, like = f)) and useVendorMaps")
   let v = case o.value.kind
     of fvInt: VendorValue(kind: vvInt, intVal: o.value.intVal)
     of fvFloat: VendorValue(kind: vvFloat, floatVal: o.value.floatVal)
@@ -1688,16 +1692,34 @@ proc vendorOverride(t: var SegdTrace, o: HeaderOverride, field: string,
     try:
       reg.setVendorField(ctx, area, t.extensions.toOpenArray(at, at + span - 1), field, v)
       done = true
-    except ValueError as e:
+    except VendorFieldAbsentError as e:
       if e.msg notin why: why.add e.msg
+    except ValueError as e:
+      # The field is decoded here: a value that does not fit is refused, not tried elsewhere.
+      refuse(o.name & ": " & e.msg)
     at += span
     inc k
   if not done:
     refuse(o.name & ": " & (if why.len == 0: "the trace has no extension blocks"
       else: why.join("; ")))
 
+func hasVendorOverride(overrides: openArray[HeaderOverride]): bool =
+  for o in overrides:
+    if o.name.startsWith("vendor."): return true
+
+proc ensureVendorContext(s: var WriterState, key: string, rec: SegdRecord) =
+  # The context `(when (record ...))` reads, for the record as it will be written
+  # (the source headers as encoded, after a subset's patch); made once per record.
+  if s.vctxKey != key:
+    let blocks = s.vendor.usesRecordBlocks
+    s.vctx = vendorContext(rec, blocks)
+    if blocks and rec.layout == slRev2:
+      s.vctx.general.setLen 0
+      for g in rec.sourceHeaders: s.vctx.general.add g.encoded
+    s.vctxKey = key
+
 proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride],
-    reg: VendorRegistry = NoVendorMaps, rec: SegdRecord = SegdRecord()) =
+    reg: VendorRegistry = NoVendorMaps, ctx: VendorContext = VendorContext()) =
   for o in overrides:
     let (blk, field) = splitName(o)
     case blk
@@ -1714,7 +1736,7 @@ proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride],
         var x = t.ext1Rev3.get
         x.setOverride(hbSegdExt1Rev3, field, o)
         t.ext1Rev3 = some(x)
-    of "vendor": t.vendorOverride(o, field, reg, rec)
+    of "vendor": t.vendorOverride(o, field, reg, ctx)
     of "timestamp":
       # Rev 3: the Timestamp block's fields, e.g. the instant of the first sample.
       var at = -1
@@ -1754,7 +1776,9 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     s.finishRecord()
   # A subset's traces take the record's patch first, then the overrides.
   if s.subset.len == 0 and s.likeKept.len == 0:
-    t.overrideSegd(overrides, s.vendor, src.index.segdRecords[r])
+    if overrides.hasVendorOverride:
+      s.ensureVendorContext($src.openId & ":" & $r, src.index.segdRecords[r])
+    t.overrideSegd(overrides, s.vendor, s.vctx)
   let begun = s.subset.len > 0
   if begun: s.beginSubset(src, trace)
   let sameRec = s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and
@@ -1791,7 +1815,8 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
       let startUs = if s.likeRec.layout == slRev3: int64(s.likeRec.scanTypes[
         sets[at].scan].descriptorsRev3[sets[at].chan].startTime) else: 0'i64
       t.applyTracePatch(s.subPatch, startUs)
-      t.overrideSegd(overrides, s.vendor, s.likeRec)
+      if overrides.hasVendorOverride: s.ensureVendorContext("subset", s.likeRec)
+      t.overrideSegd(overrides, s.vendor, s.vctx)
       if fresh: s.likeSets = sets
     elif sameRec:
       if trace != s.nextTrace:
@@ -2596,11 +2621,20 @@ proc useVendorMaps*(w: var SeismicWriter, reg: VendorRegistry) =
   ## Sets the vendor header maps that `vendor.<field>` overrides of a SEG-D
   ## trace (`HeaderOverride`) use, replacing any set before. The field is
   ## written into the first of the copied trace's extension blocks (Rev 2:
-  ## extension numbers 2 and up; Rev 3: user-defined block types) where the
-  ## map decodes it, as `setVendorField` does, with the output record's
-  ## headers as the context of `(when (record ...))`. A map set after the
-  ## writer opened serves every later trace; the registry is copied.
+  ## extension numbers 2 and up; Rev 3: every block type, a Position triple as
+  ## one block) where the map decodes it, as `setVendorField` does, with the
+  ## output record's headers (a subset's patch applied) as the context of
+  ## `(when (record ...))`. A value that does not fit the field is refused, not
+  ## tried in a later block. A map set after the writer opened serves every
+  ## later trace; the registry is copied. Raises `ValueError` for a closed
+  ## writer, a SEG-Y or SEG-2 one, or one opened from `SegdOutputOptions`.
+  if not w.s.open: refuse("the writer is closed")
+  if w.s.kind != skSegd or w.s.segdFresh:
+    refuse("vendor maps serve a SEG-D writer opened like a SEG-D file " &
+      "(openSeismicWriter(path, like = f))")
   w.s.vendor = reg
+  w.s.vctxKey = ""
+  w.s.vctx = VendorContext()
 
 proc abandonRecord*(w: var SeismicWriter) =
   ## Drops the SEG-D record in progress, or the subset listed by
@@ -2950,9 +2984,16 @@ proc addTextStanza*(w: var SeismicWriter, company, name, text: string,
   ## (`isBinary` false). The same rules and refusals.
   w.addSegyStanza(company, name, encodeText(text, teAscii), contentType, false)
 
+proc dropRecordCaches(s: var WriterState) =
+  # What was worked out for a source record is not kept past the writer's end.
+  s.chIdx = @[]
+  s.vctx = VendorContext()
+  s.vctxKey = ""
+
 proc finishWork(w: var SeismicWriter, log: var DiagLog) =
   # What `close` and `finishBytes` share: everything up to the last byte
   # going to the sink; a raise discards the output.
+  w.s.dropRecordCaches()
   try:
     case w.s.kind
     of skSegy: w.s.closeSegy(log)

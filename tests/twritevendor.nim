@@ -5,7 +5,7 @@
 ## 64-bit time passed through float64, 2^53+1 read back as 2^53; with the record
 ## condition read from an empty record, the time field was refused as absent.
 
-import std/[assertions, options, os, strutils]
+import std/[assertions, options, os, strformat, strutils]
 
 import parseSEG
 import parseSEG/common/diagnostics
@@ -255,6 +255,48 @@ proc refusedWith(w: var SeismicWriter, f: SeismicFile, x: Tensor[float32],
   doAssert part in msg, "message: " & msg
   w.abandonRecord()
 
+proc skewRec(n1, n2, seed: int): SegdRecordData =
+  ## Rev 2, one scan type of two sets of `n1` and `n2` traces, one skew block from `seed`.
+  let fmt = sd8058
+  var r = SegdRecord(layout: slRev2, format: some(fmt), revision: SegdRevision(major: 2, minor: 1))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 12, formatCode: ord(fmt), year: 26,
+    additionalGhBlocks: 1, julianDay: 311, manufacturerCode: 9, baseScanInterval16: 32,
+    recordType: 8, recordLength: BcdAllF, scanTypesPerRecord: 1, channelSetsPerScanType: 2,
+    skewBlocks: 1)
+  r.gh2 = some SegdGeneralHeader2(extFileNumber: 12, revisionMajor: 2, revisionMinor: 1,
+    extRecordLength: uint32(2 * Ns), blockNumber: 2)
+  var sets: seq[SegdChannelSetDescriptor]
+  for k in 1 .. 2:
+    sets.add SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: k,
+      endTime: uint16(Ns), channelCount: (if k == 1: n1 else: n2), channelType: 1,
+      traceHeaderExtensions: 1, arrayForming: 1)
+  var skew = newSeq[byte](32)
+  for i in 0 ..< 32: skew[i] = byte(seed + i)
+  r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: sets, skew: skew)]
+  r.traceCount = n1 + n2
+  for k in 0 ..< n1 + n2:
+    var t = SegdTrace(layout: slRev2, index: k, numSamples: Ns)
+    t.header = SegdTraceHeader(fileNumber: 12, scanTypeNumber: 1,
+      channelSetNumber: (if k < n1: 1 else: 2), traceNumber: (if k < n1: k + 1 else: k - n1 + 1),
+      traceHeaderExtensions: 1'u8)
+    t.ext1 = some SegdTraceHeaderExt1(receiverLineNumber: 2000, receiverPointNumber: int32(k),
+      receiverPointIndex: 1, samplesPerTrace: uint32(Ns), sensorType: 2)
+    t.samples = newSeq[byte](dataBytes(fmt, Ns))
+    result.traces.add t
+  result.record = r
+
+proc firstDifference(a, b: openArray[byte]): int =
+  for i in 0 ..< a.len:
+    if a[i] != b[i]: return i
+  -1
+
+proc mapOf(kind3: bool, cond: string): string =
+  ## The block-A map with the time field under `cond` (Rev 2).
+  fmt"""(.nif27)
+(vendormap "cond" (match (format segd) (manufacturer 77))
+  (target (kind traceExt) (extension 2) (name blkA)
+    (field time (at 5) (enc i64) (when {cond}))))"""
+
 proc main*() =
   runCase(false)
   runCase(true)
@@ -307,5 +349,124 @@ proc main*() =
       SubsetPatch(headers: @[headerOverride("gh99999999999999999999.sourceSetNumber", 3)]),
       "the record fields are gh1")
     w2.refusedWith(f2, x2, SubsetPatch(headers: @[headerOverride("gh3.nosuch", 3)]), "nosuch")
+
+  block value_that_does_not_fit_is_not_tried_later:
+    # Seen failing: `vendor.x` of 300 (u8 in the first block, u16 in the second) was
+    # written into the second block, which the reader does not read it from; so was
+    # a value equal to the first block's sentinel and one of the wrong kind.
+    for rev3 in [false, true]:
+      let tmp = scratchDir("parseseg_twritevendor_fit" & $rev3)
+      let src = tmp / "src.sgd"
+      put(src, SegdData(records: @[makeRec(rev3, 3)]))
+      var f = openSeismic(src)
+      let x = f.readTraces(0 ..< f.len, float32)
+      let head = if rev3: "(target (kind block) (type 0xB0) (where traceHeader) (name a)"
+        else: "(target (kind traceExt) (extension 2) (name a)"
+      let tail = if rev3: "(target (kind block) (type 0xB1) (where traceHeader) (name b)"
+        else: "(target (kind traceExt) (extension 3) (name b)"
+      let reg = regOf("(.nif27)\n(vendormap \"fit\" (match (format segd) (manufacturer 77))\n" &
+        head & " (field x (at 1) (enc u8) (sentinel 0xFF)))\n" &
+        tail & " (field x (at 1) (enc u16))))")
+      var w = openSeismicWriter(tmp / "o.sgd", f)
+      w.useVendorMaps(reg)
+      for v in [300'i64, 255, -1]:
+        doAssertRaises(ValueError):
+          w.writeTrace(f, 0, x, 0, overrides = [headerOverride("vendor.x", v)])
+      doAssertRaises(ValueError):
+        w.writeTrace(f, 0, x, 0, overrides = [headerOverride("vendor.x", "ab")])
+      w.writeTrace(f, 0, x, 0, overrides = [headerOverride("vendor.x", 200)])
+      for i in 1 .. 2: w.writeTrace(f, i, x, i)
+      doAssert not w.close().isFatal
+      let g = openSeismic(tmp / "o.sgd")
+      doAssert g.blocks(0)[0][0] == 200
+      doAssert g.blocks(0)[1] == f.blocks(0)[1]
+      doAssert g.blocks(0)[0][1 .. ^1] == f.blocks(0)[0][1 .. ^1]
+
+  block record_context_is_the_patched_record:
+    # Seen failing: the condition read the source's source-header bytes, so a patched
+    # sourceSetNumber or file number did not change what the map saw.
+    let tmp = scratchDir("parseseg_twritevendor_ctx")
+    var a = SegdGeneralHeaderN(extFileNumber: 12, blockNumber: 3, sourceSetNumber: 1)
+    var b = a
+    b.sourceSetNumber = 2
+    let eA = a.encoded
+    let eB = b.encoded
+    let setAt = firstDifference(eA, eB)
+    var c = a
+    c.extFileNumber = 33
+    let fileAt = firstDifference(eA, c.encoded)
+    doAssert setAt >= 0 and fileAt >= 0
+    # The matched byte: the one after the last 2 bytes that never change.
+    let mAt = block:
+      var q = 0
+      while q in [setAt, fileAt]: inc q
+      q
+    let match = fmt"(match (at {mAt + 1}) (bytes {eA[mAt]}))"
+    for (cond, patch, ok) in [
+        (fmt"(record generalHeader {match} (byte {setAt + 1})) (is 1)",
+          SubsetPatch(headers: @[headerOverride("gh3.sourceSetNumber", 2)]), false),
+        (fmt"(record generalHeader {match} (byte {setAt + 1})) (is 2)",
+          SubsetPatch(headers: @[headerOverride("gh3.sourceSetNumber", 2)]), true),
+        (fmt"(record generalHeader {match} (byte {setAt + 1})) (is 1)", SubsetPatch(), true),
+        (fmt"(record generalHeader {match} (byte {fileAt + 1})) (is 33)",
+          SubsetPatch(fileNumber: 33), true),
+        (fmt"(record generalHeader {match} (byte {fileAt + 1})) (is 33)", SubsetPatch(), false)]:
+      let src = tmp / "src.sgd"
+      put(src, SegdData(records: @[makeRec(false, 3)]))
+      var d = makeRec(false, 3)
+      d.record.sourceHeaders = @[a]
+      d.record.gh1.additionalGhBlocks = 2
+      put(src, SegdData(records: @[d]))
+      var f = openSeismic(src)
+      let x = f.readTraces(0 ..< f.len, float32)
+      let reg = regOf(mapOf(false, cond))
+      let dst = tmp / "o.sgd"
+      var w = openSeismicWriter(dst, f)
+      w.useVendorMaps(reg)
+      w.startSubset(f, [0, 1], patch)
+      if ok:
+        w.writeTrace(f, 0, x, 0, overrides = [headerOverride("vendor.time", Big)])
+        w.writeTrace(f, 1, x, 1, overrides = [headerOverride("vendor.time", 7)])
+        doAssert not w.close().isFatal
+        let g = openSeismic(dst)
+        doAssert g.decodeA(reg, 0, false)["time"].intVal == Big, cond
+        doAssert g.decodeA(reg, 1, false)["time"].intVal == 7
+      else:
+        doAssertRaises(ValueError):
+          w.writeTrace(f, 0, x, 0, overrides = [headerOverride("vendor.time", Big)])
+        w.abandonRecord()
+
+  block skew_cache_is_per_open_file:
+    # Seen failing: a path rewritten with another layout and opened again used the
+    # first file's channel positions (IndexDefect or wrong skew bytes).
+    let tmp = scratchDir("parseseg_twritevendor_skew")
+    let pa = tmp / "a.sgd"
+    put(pa, SegdData(records: @[skewRec(3, 2, 0)]))
+    var fa = openSeismic(pa)
+    var w = openSeismicWriter(tmp / "o.sgd", fa)
+    w.startSubset(fa, [1, 4])
+    for k in [1, 4]: w.writeTrace(fa, k, newSeq[float32](Ns))
+    fa.close()
+    put(pa, SegdData(records: @[skewRec(1, 5, 30)]))
+    var fb = openSeismic(pa)
+    w.startSubset(fb, [0, 2, 5])
+    for k in [0, 2, 5]: w.writeTrace(fb, k, newSeq[float32](Ns))
+    doAssert not w.close().isFatal
+    let g = openSeismic(tmp / "o.sgd")
+    let sk = g.index.segdRecords[1].scanTypes[0].skew
+    # Kept: set 1 channel 0; set 2 channels 1 and 4 (traces 2 and 5).
+    doAssert sk[0 .. 2] == @[byte(30), byte(30 + 1 + 1), byte(30 + 1 + 4)]
+
+  block vendor_maps_need_a_like_segd_writer:
+    let tmp = scratchDir("parseseg_twritevendor_kinds")
+    var w = openSeismicWriter(tmp / "k.sgy", SegyOutputOptions())
+    doAssertRaises(ValueError): w.useVendorMaps(regOf(Rev2Map))
+    let src = tmp / "src.sgd"
+    put(src, SegdData(records: @[makeRec(false, 3)]))
+    var f = openSeismic(src)
+    var v = openSeismicWriter(tmp / "v.sgd", f)
+    v.useVendorMaps(regOf(Rev2Map))
+    discard v.close()
+    doAssertRaises(ValueError): v.useVendorMaps(regOf(Rev2Map))
 
 when isMainModule: main()

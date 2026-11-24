@@ -147,6 +147,7 @@ type
     map: MapRef       ## nil once closed.
     stamp: FileStamp  ## The file as opened, for `saveIndex`.
     memId: int        ## See `inMemory`: 0 for a disk file, else unique to the open.
+    openNo: int       ## See `openId`: unique to the open, disk or memory.
     walkLog: int      ## Entries of `index.log` the walk (or the cache) made.
     twos: bool        ## Opened with `twosComplement8015`.
     cached: bool      ## See `fromCache`.
@@ -400,6 +401,7 @@ proc requireWholeOpen(f: SeismicFile) =
       "once it stops changing")
 
 var memoryOpens: int # opens of files in memory, for `SeismicFile.memId`; under `mapLock`
+var totalOpens: int # every open, for `SeismicFile.openNo`; under `mapLock`
 
 proc openSource(src: MemFileSource, path: string, twosComplement8015, keys, writable: bool,
     demuxDir: string, progress: Progress, cache: string, verify: VerifyMode,
@@ -411,13 +413,14 @@ proc openSource(src: MemFileSource, path: string, twosComplement8015, keys, writ
   # raises (96 bytes per failed open).
   let memory = src.isMemory
   var f = SeismicFile(path: path, map: MapRef(src: src), twos: twosComplement8015)
+  acquire(mapLock)
+  inc totalOpens
+  f.openNo = totalOpens
   if memory:
-    acquire(mapLock)
     inc memoryOpens
     f.memId = memoryOpens
-    release(mapLock)
-  else:
-    f.stamp = stampOf(path)
+  release(mapLock)
+  if not memory: f.stamp = stampOf(path)
   var why = ""
   if memory and cache.len > 0:
     why = "a file in memory has no index cache"
@@ -574,6 +577,11 @@ func memoryId*(f: SeismicFile): int {.inline.} =
   ## file in memory, so that two such files with one name are told apart. Not
   ## exported by `parseSEG`.
   f.memId
+
+func openId*(f: SeismicFile): int {.inline.} =
+  ## **Internal.** A number unique to each open of a file, on disk or in memory:
+  ## a path opened again has another one. Not exported by `parseSEG`.
+  f.openNo
 
 proc openSeismicRw*(path: string, access = DefaultAccess): SeismicFile =
   ## **Internal** (`openEditor`; not exported by `parseSEG`). `openSeismic`
