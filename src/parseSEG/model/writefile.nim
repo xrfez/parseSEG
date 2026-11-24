@@ -1406,7 +1406,7 @@ proc positionBlock(x, y, z: float64, valid: bool, stanza: uint16): SegdPositionB
 const
   SegdTimeMin = -631152000.0 ## 1950-01-01T00:00:00 UTC: the earliest GH#1 year.
   SegdTimeMax = 2524608000.0 ## 2050-01-01T00:00:00 UTC: past the latest GH#1 year.
-  BlockTypeTimestamp = 0x42'u8 ## Timestamp header: time of the trace's data.
+  BlockTypeTimestamp = 0x42'u8 ## Timestamp header: instant of sample 0.
   BlockTypeSourceInfo = 0x20'u8 ## Additional Source Info: source event time.
 
 func segdExtCount(hasPos, hasOrient, hasSrc, hasSrcInfo, hasSrcPos: bool): int {.inline.} =
@@ -1477,6 +1477,17 @@ proc t0Of(k: TraceKeys): int32 =
   if us < float64(low(int32)) or us > float64(high(int32)):
     refuse("start time " & $k.t0Ms & " ms does not fit a SEG-D Rev 3 channel set")
   int32(us)
+
+func firstSampleGpsUs(k: TraceKeys, recorded: float64): int64 =
+  # 0x42 is the instant of sample 0, not time zero. An origin uses
+  # `firstSampleUs`; caller-built keys (`toNone`) have `time` as time zero,
+  # so add `t0Ms`. `recorded` is that time, or the record's when the trace
+  # has none.
+  if k.timeOrigin != toNone:
+    let us = k.firstSampleUs
+    if us.isSome: return utcUsToGpsUs(us.get)
+  let delay = if k.t0Ms.isNaN: 0'i64 else: int64(round(k.t0Ms * 1000.0))
+  utcUsToGpsUs(int64(round(recorded * 1e6)) + delay)
 
 proc checkStation(line, point: float64, what: string): bool =
   # True when the station is known. A line and a point that are both 0, or
@@ -1746,8 +1757,9 @@ proc flushSegdKeys(s: var WriterState) =
       extBytes.add sourceExtBytes(p.keys, fileNo, p.recorded, s.segdRecTime, stanza,
         setSrc[si], setInfo[si], setSrcPos[si])
     # The reader takes a trace's time from this block when it is present,
-    # ahead of General Header #3.
-    extBytes.add SegdTimestampHeader(timeZeroOfData: unixToTimestamp(p.recorded),
+    # ahead of General Header #3, and takes it as the instant of sample 0.
+    # General Header #3 keeps the record's time zero.
+    extBytes.add SegdTimestampHeader(timeZeroOfData: firstSampleGpsUs(p.keys, p.recorded),
       blockType: BlockTypeTimestamp).encoded
     if setOrient[si]:
       extBytes.add orientationBlock(p.orientation.get, p.recorded).encoded
@@ -2216,15 +2228,19 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## channel, so `tsUnknown` reads back `tsLive`. An auxiliary channel type
   ## reads back as `tsAuxiliary` (including `tsUnknown`, and `tsAuxiliary`
   ## itself), so `tsLive` or `tsDead` with one is refused, as is
-  ## `tsAuxiliary` with seismic or EM. The record's time is the first
+  ## `tsAuxiliary` with seismic or EM. The record's time zero is the first
   ## trace's `keys.time` when that is set, otherwise `SegdOutputOptions.time`;
   ## with neither, the record is refused (the message names both). It is
   ## written in General Header #1 (year, julian day and the whole second of
   ## the time rounded to the microsecond) and in General Header #3's timestamp.
-  ## The reader takes a trace's time from its Timestamp block (0x42) when that
-  ## trace has one, else from General Header #3, so a trace's own `keys.time`
-  ## is written there and reads back; a trace without one reads back the
-  ## record's time. Traces of one record may
+  ## The Timestamp block (0x42) holds the first-sample instant:
+  ## `firstSampleUs` when the keys carry an origin, otherwise `keys.time`
+  ## plus `t0Ms` (caller-built keys: `time` is time zero; a trace with no
+  ## `time` uses the record's). The reader takes a trace's time from that
+  ## block when it is present, else from General Header #3, so a re-read
+  ## Rev 3 trace has origin `toFirstSample` and its `time` is the first
+  ## sample (the origin says so). A trace without a Timestamp block reads
+  ## back the record's time zero. Traces of one record may
   ## differ. The writer never invents a time.
   ## `orientation` (`some` of a `TraceOrientation`, or none) writes one
   ## Orientation header (0x60) after the Timestamp block of that trace. Its

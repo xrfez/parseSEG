@@ -7,6 +7,9 @@
 ## A stored sub-second of 500000 us with a float fraction below 0.5 was
 ## taken as a crossed second, so `firstSampleUs` was 1000000 us early
 ## (SEG-Y rev 2, 2024-01-01 00:00:00, Ext1 nanoseconds 499999500, delay 0).
+##
+## A write from keys stored time zero in the SEG-D Rev 3 Timestamp block,
+## so a trace with `t0Ms` 2.5 read back 2500 us early.
 
 import std/[assertions, math, options]
 
@@ -151,12 +154,31 @@ proc segyNsFile(basis: int16, counts: openArray[int32]): seq[byte] =
   w.close()
   sink.takeBytes()
 
+proc expectFirstUs(k: TraceKeys): int64 =
+  if k.timeOrigin != toNone: return k.firstSampleUs.get
+  int64(round(k.time * 1e6)) + int64(round(k.t0Ms * 1000.0))
+
+proc keysAt(origin: TimeOrigin, t0: float64): TraceKeys =
+  const Shot = 1_700_000_000.0
+  result = initTraceKeys()
+  result.time = Shot
+  result.t0Ms = t0
+  if origin != toNone: result.noteRecordedTime(origin, int64(Shot * 1e6))
+
 proc keysAll(b: seq[byte], name: string): seq[TraceKeys] =
   var f = openSeismicBytes(b, name, keys = true)
   doAssert f.log.count(sevError) == 0
   result = newSeq[TraceKeys](f.len)
   for i in 0 ..< f.len: result[i] = f.traceKeys(i)
   f.close()
+
+proc writeKeys(rows: openArray[TraceKeys]): seq[TraceKeys] =
+  var w = openSeismicWriterBytes(SegdOutputOptions(sampleIntervalUs: 1000, numSamples: 1))
+  for i, k in rows:
+    var t = k
+    t.record = float64(i + 1)
+    w.writeTrace(t, [1'f32])
+  result = keysAll(w.finishBytes(), "wd")
 
 proc main*() =
   let civil = daysFromCivil(2024, 1, 1) * 86400
@@ -234,6 +256,21 @@ proc main*() =
         let got = ks[i].firstSampleUs
         doAssert got.isSome, $basis & " ns " & $ns
         doAssert got.get == want, $basis & " ns " & $ns & " got " & $got.get & " want " & $want
+
+  block segd_timestamp_is_first_sample:
+    var rows: seq[TraceKeys] = @[]
+    for origin in [toNone, toFirstSample, toRecordTimeZero, toHeaderSeconds, toHeaderSubsec]:
+      for t0 in [0.0, 2.5, -2.5]:
+        rows.add keysAt(origin, t0)
+    let back = writeKeys(rows)
+    doAssert back.len == rows.len
+    for i, k in rows:
+      let want = expectFirstUs(k)
+      doAssert back[i].timeOrigin == toFirstSample, $k.timeOrigin & " t0 " & $k.t0Ms
+      let got = back[i].firstSampleUs
+      doAssert got.isSome, $k.timeOrigin & " t0 " & $k.t0Ms
+      doAssert got.get == want, $k.timeOrigin & " t0 " & $k.t0Ms & " got " & $got.get &
+        " want " & $want
 
   block sample_index:
     let k = keysOf(segyFile(1, 0, 0, 4, false), "idx")

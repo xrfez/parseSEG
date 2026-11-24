@@ -457,11 +457,13 @@ by `keys.record`, one channel set per channel type, in the order written. `Trace
 channel-type field, so pass one (`sctSeismic` when omitted; `sctTimeBreak`, `sctUpHole`,
 `sctSourceRefPilot`, `sctSourceRefSweep` and the other Rev 3 codes the reader knows). A record
 is held until the next record number or `close`, then written whole; record numbers must not
-go backwards. A record's time is its first trace's `keys.time`, or `SegdOutputOptions.time`
+go backwards. A record's time zero is its first trace's `keys.time`, or `SegdOutputOptions.time`
 when that trace has none; a record with neither is refused (the writer does not invent a
-time). The time is written in General Header #1 and General Header #3. A trace with its own
-time also gets a Timestamp block, which reads back as that trace's time; a trace without one
-reads back the record's time. Metres or feet are written as a P1/11 axis record when no CRS
+time). That time zero is written in General Header #1 and General Header #3. Each trace's
+Timestamp block (0x42) holds the first-sample instant: `firstSampleUs` when the keys carry
+an origin, otherwise `keys.time` plus `t0Ms` (caller-built keys: `time` is time zero).
+A re-read trace then has origin `toFirstSample`, and its `time` is the first sample
+(the origin says so). A trace without a Timestamp block reads back the record's time zero. Metres or feet are written as a P1/11 axis record when no CRS
 text is given, which `summary.coordinateUnits` reads.
 An unset depth index (0) is written, and reads back, as 1, because the standard forbids 0. A trace
 with `status` `tsUnknown` is written as a live trace and reads back `tsLive` on a seismic or EM
@@ -498,8 +500,8 @@ record or `close`). If any trace of the set has a source description or a source
 every trace gets those blocks: 0/0 and an invalid position where the trace has none. If any
 source-bearing trace is not at the record's time zero, every trace of the set gets
 Additional Source Info; a shot at record time zero is written with time 0, which the
-standard reads as at record time zero. The trace's own
-time is also in its Timestamp block, which is what `traceKeys` reads back. The file keeps
+standard reads as at record time zero. The Timestamp block holds the first-sample instant, which is what `traceKeys`
+reads back (`time` is then the first sample; the origin says so). The file keeps
 write order. Sort by source line then source point before writing (one system sorts by shot
 time); the writer does not sort. A record of only auxiliary traces is allowed, for example a
 vibrator pilot recorded for several sweeps: pass `sctSourceRefPilot`, `sctSourceRefSweep` or
