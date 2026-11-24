@@ -28,9 +28,10 @@
 ##   the number written.
 ## - SEG-D: the sample count of a record, taken from the first trace written
 ##   to it. Every later trace of that record must have the same count. The
-##   record length, each channel set's end time and the sample count in an
-##   existing trace header extension follow. A trace written with its own
-##   count leaves those headers unchanged.
+##   record length, the end time of each channel set that has channels and the
+##   sample count in an existing trace header extension follow. A channel set
+##   with no channels is left unchanged. A trace written with its own count
+##   leaves those headers unchanged.
 ##
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
@@ -63,9 +64,10 @@
 ## otherwise, and nothing of that record is written). The record length (the
 ## longest, over channel sets that have channels, of the trace length and the
 ## end time, so a negative start still covers the trace; a negative end time
-## is written as it is), each channel set's end time (start plus count times
+## is written as it is), each of those sets' end time (start plus count times
 ## the interval) and the sample count in each existing trace header extension
-## follow; a count the headers cannot hold is refused the same way. SEG-D 8015
+## follow; a count the headers cannot hold is refused the same way. A channel
+## set with no channels is left unchanged. SEG-D 8015
 ## still needs a multiple of 4. A trace written with its own count leaves those
 ## headers unchanged. The
 ## record headers and trailer come from the trace's own record in `src`; a
@@ -1042,11 +1044,7 @@ proc setName(scan, ch: int): string =
 proc setRev2End(c: var SegdChannelSetDescriptor, g1: SegdGeneralHeader1, n: int,
     which: string) =
   # End time is an exact multiple of 2 ms: start + n * BSI / (32 * 2^exp).
-  let dummy = c.channelCount == 0
   if c.subscanExponent < 0 or c.subscanExponent > 9 or int(g1.baseScanInterval16) <= 0:
-    if dummy:
-      c.endTime = c.startTime
-      return
     refuse(which & " has no usable sample interval")
   let denom = 32 * (1 shl c.subscanExponent)
   let num = int64(n) * int64(g1.baseScanInterval16)
@@ -1056,22 +1054,16 @@ proc setRev2End(c: var SegdChannelSetDescriptor, g1: SegdGeneralHeader1, n: int,
   if endAt < 0 or endAt > int64(high(uint16)):
     refuse(which & ": an end time of " & $endAt & " (2 ms units) does not fit a channel set")
   c.endTime = uint16(endAt)
-  if not dummy:
-    let si = c.sampleIntervalMs(g1)
-    let window = if si > 0: int(round((c.endTimeMs - c.startTimeMs) / si)) else: -1
-    if window != n:
-      refuse(which & ": the channel set window would not read back as " & $n & " samples")
+  let si = c.sampleIntervalMs(g1)
+  let window = if si > 0: int(round((c.endTimeMs - c.startTimeMs) / si)) else: -1
+  if window != n:
+    refuse(which & ": the channel set window would not read back as " & $n & " samples")
 
 proc setRev3End(c: var SegdChannelSetDescriptorRev3, n: int, which: string) =
   if n < 0 or n > int(high(uint32)):
     refuse(which & ": " & $n & " samples do not fit a channel set")
-  let dummy = c.channelsInSet == 0
   let interval = int64(c.samplingInterval)
   if interval <= 0:
-    if dummy:
-      c.endTime = c.startTime
-      c.numSamples = uint32(n)
-      return
     refuse(which & " has no sample interval")
   let endAt = int64(c.startTime) + int64(n) * interval
   if endAt < int64(low(int32)) or endAt > int64(high(int32)):
@@ -1093,18 +1085,24 @@ proc applySegdCount(rec: var SegdRecord, n, recNo: int, path: string) =
       for s in rec.scanTypes:
         if s.layout != slRev2: continue
         for c in s.descriptors:
-          if c.traceHeaderExtensions > 0:
+          if c.channelCount > 0 and c.traceHeaderExtensions > 0:
             refuseTraceCount(recNo, n, path)
     var longest = 0
+    var any = false
     for i in 0 ..< rec.scanTypes.len:
       if rec.scanTypes[i].layout != slRev2:
         refuse(segdRec(recNo, path) & " has a channel set the record's revision cannot update")
       for j in 0 ..< rec.scanTypes[i].descriptors.len:
         let c = addr rec.scanTypes[i].descriptors[j]
-        let st = if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1
-        let cs = if c.channelSetNumber > 0: c.channelSetNumber else: j + 1
-        setRev2End(c[], rec.gh1, n, segdRec(recNo, path) & ", " & setName(st, cs))
-        longest = max(longest, int(c.endTime) * 2)
+        if c.channelCount > 0:
+          any = true
+          let st = if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1
+          let cs = if c.channelSetNumber > 0: c.channelSetNumber else: j + 1
+          setRev2End(c[], rec.gh1, n, segdRec(recNo, path) & ", " & setName(st, cs))
+          longest = max(longest, int(c.endTime) * 2)
+    if not any:
+      refuse(segdRec(recNo, path) &
+        " has no channel set, so a new sample count cannot be written")
     setRev2RecordLength(rec, longest, recNo, path)
   of slRev3:
     var longest = low(int64)
@@ -1114,12 +1112,11 @@ proc applySegdCount(rec: var SegdRecord, n, recNo: int, path: string) =
         refuse(segdRec(recNo, path) & " has a channel set the record's revision cannot update")
       for j in 0 ..< rec.scanTypes[i].descriptorsRev3.len:
         let c = addr rec.scanTypes[i].descriptorsRev3[j]
-        let st = if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1
-        let cs = if c.channelSetNumber > 0: int(c.channelSetNumber) else: j + 1
-        setRev3End(c[], n, segdRec(recNo, path) & ", " & setName(st, cs))
         if c.channelsInSet > 0:
           any = true
-          # A negative start makes the end time shorter than the trace.
+          let st = if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1
+          let cs = if c.channelSetNumber > 0: int(c.channelSetNumber) else: j + 1
+          setRev3End(c[], n, segdRec(recNo, path) & ", " & setName(st, cs))
           let span = int64(n) * int64(c.samplingInterval)
           longest = max(longest, max(span, int64(c.endTime)))
     if not any:

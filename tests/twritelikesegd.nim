@@ -319,6 +319,66 @@ proc makeRev3At(ns, startUs, intervalUs: int): SegdRecordData =
   result.record = r
   result.traces = @[t]
 
+proc makeRev3Dummy(): SegdRecordData =
+  ## One live set (8 samples, 1000 us) and a dummy set (start 500000 us).
+  var r = SegdRecord(layout: slRev3, format: some(sd8058),
+    revision: SegdRevision(major: 3, minor: 0))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 8, formatCode: ord(sd8058), year: 26,
+    additionalGhBlocks: 2, julianDay: 311, hour: 12, manufacturerCode: 50,
+    baseScanInterval16: 16, recordType: 8, recordLength: BcdAllF, scanTypesPerRecord: 1,
+    channelSetsPerScanType: 2)
+  r.gh2Rev3 = SegdGeneralHeader2Rev3(extFileNumber: 8, revisionMajor: 3,
+    extRecordLength: 8000, blockType: 2)
+  r.gh3 = SegdGeneralHeader3(timeZero: 1474994765504000, blockType: 3)
+  let dummy = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: 1,
+    channelType: 0x20, startTime: 500000, endTime: 12345, numSamples: 3,
+    descaleMultiplier: 1.0, channelsInSet: 0, samplingInterval: 0,
+    traceHeaderExtensions: 1, blockType1: 0x30, blockType2: 0x31, blockType3: 0x32)
+  let seis = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: 2,
+    channelType: 0x10, endTime: 8000, numSamples: 8, descaleMultiplier: 1.0,
+    channelsInSet: 1, samplingInterval: 1000, traceHeaderExtensions: 1,
+    blockType1: 0x30, blockType2: 0x31, blockType3: 0x32)
+  r.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: @[dummy, seis])]
+  var t = SegdTrace(layout: slRev3, index: 0, numSamples: 8)
+  t.header = SegdTraceHeader(fileNumber: 8, scanTypeNumber: 1, channelSetNumber: 2,
+    traceNumber: 1, traceHeaderExtensions: 1)
+  t.ext1Rev3 = some SegdTraceHeaderExt1Rev3(receiverLineNumber: 8, receiverPointNumber: 1,
+    numSamples: 8, sensorType: 2, groupIndex: 1, blockType: 0x40)
+  t.samples = newSeq[byte](dataBytes(sd8058, 8))
+  encodeSamples(sd8058, newSeq[float64](8), t.samples)
+  computeRev3Sizes(r, [t])
+  r.traceCount = 1
+  result.record = r
+  result.traces = @[t]
+
+proc makeRev2Dummy(): SegdRecordData =
+  ## A 1 ms dummy set (subscan exponent 1) beside a 2 ms seismic set.
+  let fmt = sd8058
+  let ns = 20
+  var r = SegdRecord(layout: slRev2, format: some(fmt),
+    revision: SegdRevision(major: 2, minor: 1))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 2, formatCode: ord(fmt), year: 26,
+    additionalGhBlocks: 1, manufacturerCode: 9, baseScanInterval16: 32, recordType: 8,
+    recordLength: BcdAllF, scanTypesPerRecord: 1, channelSetsPerScanType: 2)
+  r.gh2 = some SegdGeneralHeader2(extFileNumber: 2, revisionMajor: 2, revisionMinor: 1,
+    extRecordLength: uint32(2 * ns), blockNumber: 2)
+  let dummy = SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: 1,
+    startTime: 250, endTime: 500, channelCount: 0, channelType: 1, subscanExponent: 1,
+    traceHeaderExtensions: 1)
+  let seis = SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: 2,
+    endTime: uint16(ns), channelCount: 1, channelType: 1, subscanExponent: 0,
+    traceHeaderExtensions: 1)
+  r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: @[dummy, seis])]
+  r.traceCount = 1
+  var t = SegdTrace(index: 0, numSamples: ns)
+  t.header = SegdTraceHeader(fileNumber: 2, scanTypeNumber: 1, channelSetNumber: 2,
+    traceNumber: 1, traceHeaderExtensions: 1)
+  t.ext1 = some SegdTraceHeaderExt1(samplesPerTrace: uint32(ns), sensorType: 1)
+  t.samples = newSeq[byte](dataBytes(fmt, ns))
+  encodeSamples(fmt, newSeq[float64](ns), t.samples)
+  result.record = r
+  result.traces = @[t]
+
 proc mainThree*() =
   ## Negative Rev 3 starts. Seen failing before the change: start -5000 us,
   ## interval 1000, n=2 raised ValueError "end time of -3000 us does not fit";
@@ -366,6 +426,44 @@ proc mainThree*() =
       var w = openSeismicWriter(tmp / "over_out.sgd", f)
       doAssertRaises(ValueError): w.writeTrace(f, 0, wave(200))
     doAssert not fileExists(tmp / "over_out.sgd")
+
+  block empty_channel_set_is_left_untouched:
+    ## Seen failing before the change: a Rev 3 dummy set with start 500000 us
+    ## was given numSamples 8 and its end time was rewritten; a Rev 2 dummy
+    ## with subscan exponent 1 refused n=11 for the whole record.
+    let src = tmp / "dum3.sgd"
+    put(src, SegdData(records: @[makeRev3Dummy()]))
+    let dst = tmp / "dum3_out.sgd"
+    writeLike(src, dst, 4)
+    var g = openSeismic(dst)
+    let rec = g.index.segdRecords[0]
+    let dummy = rec.scanTypes[0].descriptorsRev3[0]
+    let live = rec.scanTypes[0].descriptorsRev3[1]
+    doAssert dummy.channelsInSet == 0
+    doAssert dummy.startTime == 500000
+    doAssert dummy.endTime == 12345
+    doAssert dummy.numSamples == 3
+    doAssert live.numSamples == 4
+    doAssert live.endTime == 4000
+    doAssert recordLengthUs(rec.gh1, rec.gh2Rev3) == 4000
+    doAssert not g.log.isFatal, $g.log
+    let src2 = tmp / "dum2.sgd"
+    put(src2, SegdData(records: @[makeRev2Dummy()]))
+    let dst2 = tmp / "dum2_out.sgd"
+    writeLike(src2, dst2, 11)
+    var h = openSeismic(dst2)
+    let hrec = h.index.segdRecords[0]
+    let hd = hrec.scanTypes[0].descriptors[0]
+    let hl = hrec.scanTypes[0].descriptors[1]
+    doAssert hd.channelCount == 0
+    doAssert hd.startTime == 250
+    doAssert hd.endTime == 500
+    doAssert hd.subscanExponent == 1
+    doAssert hl.endTime == 11
+    doAssert hl.startTime == 0
+    doAssert hrec.gh2.get.extRecordLength == 22
+    doAssert h.traceEntry(0).numSamples == 11
+    doAssert not h.log.isFatal, $h.log
 
 proc mainTwo*() =
   let tmp = scratchDir("parseseg_twritelikesegd")
