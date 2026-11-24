@@ -13,7 +13,12 @@
 ## `openSeismicWriter` takes the file-level headers from `like`: the SEG-Y
 ## tape label, textual, binary and extended textual headers and trailer; the
 ## SEG-D storage unit label; the SEG-2 File Descriptor Block. A non-empty
-## `fullText` replaces the SEG-Y textual header. `writeTrace`
+## `fullText` replaces the SEG-Y textual header. `segyRevision` writes a
+## SEG-Y `like` file as another revision (the source headers, rewritten as
+## `convertSegy` rewrites them); `none` or the source's own revision leaves
+## the bytes unchanged. What that revision cannot hold is either refused
+## before any file exists or dropped and listed by `revisionNotes` (see
+## `openSeismicWriter`). `writeTrace`
 ## copies trace `trace` of `src` (usually `like` itself) with its headers
 ## unchanged, except for what the new samples change:
 ##
@@ -22,10 +27,11 @@
 ## - SEG-Y and SEG-2: the sample count, which may differ from the input's.
 ##   SEG-Y updates the trace header (Trace Header Extension 1 when it holds
 ##   the count or the count exceeds 65535) and the binary header, which gets
-##   the count of the traces written (the largest when they differ); a
-##   fixed-length file needs one count for all traces. The Rev 2 trace
-##   count (binary bytes 3513-3520), when the input declares one, becomes
-##   the number written.
+##   the count of the traces written (the largest when they differ; left as
+##   the source wrote it when every trace was skipped, because a variable
+##   file's flag does not require 0); a fixed-length file needs one count
+##   for all traces. The Rev 2 trace count (binary bytes 3513-3520), when
+##   the input declares one, becomes the number written.
 ## - SEG-D: the sample count of a record, taken from the first trace written
 ##   to it. Every later trace of that record must have the same count, unless
 ##   it is written with its own source count and the traces so far were too
@@ -104,7 +110,7 @@ from ./keys import traceKeys
 from ../survey/join import GeometryFields
 from ../survey/writeback import KeysPlan, planKeys, finishKeys
 import ../common/tensors
-import ../private/[tensorrows, fieldaccess, segyencode, readcache]
+import ../private/[tensorrows, fieldaccess, segyencode, readcache, segyrev]
 import ../version
 
 type
@@ -308,6 +314,10 @@ type
     segyNumTraces: uint64 ## The input's declared Rev 2 trace count.
     segyTrace: SegyTrace  ## Reused.
     segyFresh: bool       ## Opened from `SegyOutputOptions`: the first trace sets the interval.
+    segyRevOn: bool       ## `segyRevision` names a revision other than the source's.
+    segyRev: RevRewrite   ## That rewrite; file notes already in `segyRevLog`.
+    segyRevLog: DiagLog   ## `revisionNotes`: `convertSegy`'s words for the rewrite.
+    segyLenient: bool     ## A changed revision is validated as `convertSegy` validates.
     # SEG-D
     segd: SegdWriter
     segdFormat: Option[SegdSampleFormat] ## none: each record's own.
@@ -425,6 +435,15 @@ func path*(w: SeismicWriter): lent string {.inline.} =
   ## (`openSeismicWriterBytes`) its display name.
   w.s.path
 
+func revisionNotes*(w: SeismicWriter): lent DiagLog {.inline.} =
+  ## What a `segyRevision` change dropped or could not write, in
+  ## `convertSegy`'s words. File-level notes are there after open, including a
+  ## warning quoting a card 39 or 40 that held other text; a skipped
+  ## trace's error after that `writeTrace`; the Rev 0 time-clamp warning after
+  ## `close` or `finishBytes`. Empty when `segyRevision` was not set, or was
+  ## the source revision. `close`'s log does not include these.
+  w.s.segyRevLog
+
 # ------------------------------------------------------------------ open --
 
 {.push warning[HoleEnumConv]: off.}
@@ -439,11 +458,9 @@ func definedIn(f: SegdSampleFormat, r: SegdRevision): bool =
   elif f == sd8080: r.major >= 3
   else: true
 
-func revisionCard(rev: SegyRevision): string =
-  cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
-    elif rev.major == 1: "SEG Y REV1" else: "")
+func revisionCard(rev: SegyRevision): string = revisionCardText(rev)
 
-func endCard(): string = cardPrefix(40) & "END TEXTUAL HEADER"
+func endCard(): string = endCardText()
 
 func linesAfterFix(lines: openArray[string], rev: SegyRevision): seq[string] =
   # The lines `fillFullText` writes when `fixCards` is set: caller cards,
@@ -487,24 +504,27 @@ proc fillFullText(h: var SegyTextHeader, lines: openArray[string], rev: SegyRevi
 
 proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat,
     fullText: seq[string], fixCards: bool) =
-  var f = like.index.segy
-  let fmt = if format == stKeep: f.format else: some(format.toSampleFormat)
-  if fmt.isNone:
-    refuse("the input's SEG-Y format code " & $f.binary.formatCode & " is undefined; " &
-      "choose a segyFormat")
-  if fmt.get.isRev2Format and f.revision.major < 2:
-    refuse("SEG-Y format " & $ord(fmt.get) & " needs Rev 2; the input is Rev " & $f.revision)
-  if sampleSize(fmt.get) == 3 and f.byteOrder == boPairSwapped:
-    refuse("the 3-byte SEG-Y format " & $ord(fmt.get) & " cannot be pair-swapped")
-  f.binary.formatCode = int16(ord(fmt.get))
-  f.format = fmt
+  var f = if s.segyRevOn: s.segyFile else: like.index.segy
+  if not s.segyRevOn:
+    let fmt = if format == stKeep: f.format else: some(format.toSampleFormat)
+    if fmt.isNone:
+      refuse("the input's SEG-Y format code " & $f.binary.formatCode & " is undefined; " &
+        "choose a segyFormat")
+    if fmt.get.isRev2Format and f.revision.major < 2:
+      refuse("SEG-Y format " & $ord(fmt.get) & " needs Rev 2; the input is Rev " & $f.revision)
+    if sampleSize(fmt.get) == 3 and f.byteOrder == boPairSwapped:
+      refuse("the 3-byte SEG-Y format " & $ord(fmt.get) & " cannot be pair-swapped")
+    f.binary.formatCode = int16(ord(fmt.get))
+    f.format = fmt
+    if fullText.len > 0: fillFullText(f.text, fullText, f.revision, fixCards)
+  # The post-rewrite count: 0 when the target cleared it, so `close` does not
+  # restore a count that revision does not hold.
   s.segyNumTraces = f.binary.numTraces
   f.binary.numTraces = 0 # set by `close` when the input declares one
   s.segyFixed = f.revision.major >= 1 and f.binary.fixedLengthTraces == 1
   s.segyCount = -1
-  if fullText.len > 0: fillFullText(f.text, fullText, f.revision, fixCards)
   # Validate now; the real writer opens at the first trace.
-  discard openSegyWriter(NullSink(name: s.path), f, initSegyWriteOptions(f))
+  discard openSegyWriter(NullSink(name: s.path), f, initSegyWriteOptions(f, s.segyLenient))
   s.segyFile = f
   s.makeSink()
 
@@ -519,16 +539,48 @@ proc openSegd(s: var WriterState, like: SeismicFile, format: SegdTargetFormat) =
   s.makeSink()
   s.segd = openSegdWriter(s.sink, SegdWriteOptions(), like.index.segdLabel)
 
+proc prepareLikeRevision(path: string, like: SeismicFile, format: SegyTargetFormat,
+    fullText: seq[string], fixCards: bool, target: SegyRevision, f: var SegyFile,
+    rw: var RevRewrite, log: var DiagLog) =
+  # Fatals of a revision change, in `convertSegy`'s words, before any file exists.
+  let fault = revisionFault(target)
+  if fault.len > 0: refuse(fault)
+  let order = like.index.segy.byteOrder
+  let fmt = if format == stKeep: like.index.segy.format else: some(format.toSampleFormat)
+  if fmt.isNone:
+    refuse("the input's SEG-Y format code " & $like.index.segy.binary.formatCode &
+      " is undefined; choose a segyFormat")
+  if format != stKeep:
+    let ff = chosenFormatFault(target, fmt.get, $format, order)
+    if ff.len > 0: refuse(ff)
+  let endian = endianFault(target, order)
+  if endian.len > 0: refuse(endian)
+  if format == stKeep:
+    let ff = keptFormatFault(target, fmt.get, order)
+    if ff.len > 0: refuse(ff)
+  f = like.index.segy
+  let fatal = prepareRevision(f, target, log, Location(file: path), rw)
+  if fatal.len > 0: refuse(fatal)
+  f.binary.formatCode = int16(ord(fmt.get))
+  f.format = fmt
+  if fullText.len > 0: fillFullText(f.text, fullText, target, fixCards)
+
 proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTargetFormat,
     segdFormat: SegdTargetFormat, seg2Format: Seg2TargetFormat, fullText: seq[string],
-    fixCards: bool): SeismicWriter =
+    fixCards: bool, segyRevision: Option[SegyRevision]): SeismicWriter =
   # `openSeismicWriter(path, like)` and `openSeismicWriterBytes(like)`; see there.
   let kind = like.kind
+  if segyRevision.isSome and kind != skSegy:
+    refuse("segyRevision applies only to a SEG-Y like file, not " & $kind)
+  let changing = kind == skSegy and segyRevision.isSome and
+    segyRevision.get != like.index.segy.revision
+  let textRev = if kind == skSegy and segyRevision.isSome: segyRevision.get
+                elif kind == skSegy: like.index.segy.revision
+                else: SegyRevision()
   if fullText.len > 0:
     if kind != skSegy:
       refuse("a full textual header is only written for SEG-Y, not " & $kind)
-    let fault = textFault(fullText, like.index.segy.revision,
-      like.index.segy.text.encoding, fixCards)
+    let fault = textFault(fullText, textRev, like.index.segy.text.encoding, fixCards)
     if fault.len > 0: refuse(fault)
   if kind == skUnknown: refuse("the file " & like.path & " is not SEG-Y, SEG-D or SEG-2")
   if like.demuxPath.len > 0:
@@ -544,8 +596,20 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
     try: same = fileExists(path) and sameFile(like.path, path)
     except OSError: discard
   if same: refuse("the output " & path & " is the input file")
+  var prepared: SegyFile
+  var rw: RevRewrite
+  var revLog: DiagLog
+  if changing:
+    prepareLikeRevision(path, like, segyFormat, fullText, fixCards, segyRevision.get,
+      prepared, rw, revLog)
   result = SeismicWriter(s: WriterState(kind: kind, path: path, open: true, memory: memory,
     tmp: if memory: "" else: createTempFor(path)))
+  if changing:
+    result.s.segyRevOn = true
+    result.s.segyRev = rw
+    result.s.segyRevLog = revLog
+    result.s.segyLenient = true
+    result.s.segyFile = prepared
   try:
     case kind
     of skSegy: result.s.openSegy(like, segyFormat, fullText, fixCards)
@@ -560,7 +624,7 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
 
 proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
     segdFormat = tfKeep, seg2Format = s2tKeep, fullText: seq[string] = @[],
-    fixCards = true): SeismicWriter =
+    fixCards = true, segyRevision: Option[SegyRevision] = none(SegyRevision)): SeismicWriter =
   ## A writer of a file at `path` in `like`'s standard, revision and byte
   ## order, with `like`'s file-level headers (see the module doc). The
   ## sample format is the input's unless `segyFormat`, `segdFormat` or
@@ -569,26 +633,50 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## 80 characters, written as given and padded with spaces. `fixCards`
   ## (true by default) then sets cards 39 and 40 to the standard strings for
   ## the file's revision; false writes `fullText` untouched. Only `like`'s
-  ## index is used, so it may be closed. Raises `ValueError` for an unrecognized or
+  ## index is used, so it may be closed.
+  ##
+  ## `segyRevision` (`none`, the default) writes a SEG-Y `like` file as
+  ## another revision: the source headers, rewritten as `convertSegy`
+  ## rewrites them. `none`, or the source's own revision, leaves the bytes
+  ## as a writer without the parameter writes them. Cards 39 and 40 name the
+  ## target revision when it differs. `fixCards` false leaves the caller's
+  ## cards 39 and 40 untouched only when `fullText` replaces the header;
+  ## without `fullText`, a differing revision always rewrites them.
+  ## A trace identification code is kept as stored. What the target drops
+  ## (extended text, trailers, Trace Header Extension 1, a survey type, a
+  ## time rounded or clamped, a card 39 or 40 that held other text) is listed
+  ## by `revisionNotes`, in `convertSegy`'s
+  ## words, not by `close`. A variable-length trace whose count or interval
+  ## does not fit is skipped: an error in `revisionNotes`, and it is not
+  ## counted. A fixed-length count or interval that does not fit is refused.
+  ##
+  ## Raises `ValueError` for an unrecognized or
   ## multiplexed SEG-D `like`, a format for another standard or one the
   ## revision lacks, `path` being `like`'s file, `fullText` on a non-SEG-Y
-  ## `like`, or a `fullText` that `checkTextHeader` faults for length,
-  ## characters or a header the reader would misread (before any file is
+  ## `like`, a `fullText` that `checkTextHeader` faults for length,
+  ## characters or a header the reader would misread, `segyRevision` set on
+  ## a non-SEG-Y `like` (the message names the parameter), a `segyRevision`
+  ## other than 0, 1, 2.0 or 2.1, a sample format or byte order that
+  ## revision cannot hold, or a fixed-length count or interval that does not
+  ## fit it (each of these before any file is
   ## created); `SegFormatError` for
   ## file headers the writer refuses; `IOError` when the output cannot be
   ## created.
-  openLike(path, false, like, segyFormat, segdFormat, seg2Format, fullText, fixCards)
+  openLike(path, false, like, segyFormat, segdFormat, seg2Format, fullText, fixCards,
+    segyRevision)
 
 proc openSeismicWriterBytes*(like: SeismicFile, name = "memory", segyFormat = stKeep,
-    segdFormat = tfKeep, fullText: seq[string] = @[], fixCards = true): SeismicWriter =
+    segdFormat = tfKeep, fullText: seq[string] = @[], fixCards = true,
+    segyRevision: Option[SegyRevision] = none(SegyRevision)): SeismicWriter =
   ## `openSeismicWriter(path, like)` that collects the file in memory:
   ## `finishBytes` returns its bytes, and nothing touches the disk. `name`
   ## is the display name in diagnostics and `path`. SEG-Y and SEG-D only
   ## (`ValueError` for SEG-2 `like`: its writer needs a file); otherwise the
   ## same checks and refusals as the file writer, except those about the
-  ## output file. `fullText` and `fixCards` are as for the file writer.
-  ## `like` may itself be a file in memory.
-  openLike(name, true, like, segyFormat, segdFormat, s2tKeep, fullText, fixCards)
+  ## output file. `fullText`, `fixCards` and `segyRevision` are as for the
+  ## file writer. `like` may itself be a file in memory.
+  openLike(name, true, like, segyFormat, segdFormat, s2tKeep, fullText, fixCards,
+    segyRevision)
 
 func textCard(s: string): string =
   # A line as card text: printable ASCII only, cut to the card after its prefix.
@@ -735,11 +823,8 @@ proc setTraceCount(t: var SegyTrace, n: int) =
 
 proc setFileCount(b: var SegyBinaryHeader, n: int) =
   # The binary header's samples per trace.
-  if n > int(high(uint16)) or (b.rulesRevision.major >= 2 and b.extSamplesPerTrace != 0):
-    if b.rulesRevision.major < 2:
-      refuse($n & " samples per trace need SEG-Y Rev 2")
-    b.extSamplesPerTrace = uint32(n)
-  b.samplesPerTrace = if n > int(high(uint16)): 0'u16 else: uint16(n)
+  if not b.setBinarySampleCount(n):
+    refuse($n & " samples per trace need SEG-Y Rev 2")
 
 proc headerBytes(src: SeismicFile, trace: int, minimum: int): (int, int) =
   # Where trace `trace`'s header bytes start in the map, and how many there
@@ -821,7 +906,7 @@ proc applyStanzas(s: var WriterState) =
 
 proc startSegy(s: var WriterState) =
   s.applyStanzas()
-  s.segy = openSegyWriter(s.sink, s.segyFile, initSegyWriteOptions(s.segyFile))
+  s.segy = openSegyWriter(s.sink, s.segyFile, initSegyWriteOptions(s.segyFile, s.segyLenient))
   s.segyStarted = true
 
 proc overrideSegy(t: var SegyTrace, overrides: openArray[HeaderOverride]) =
@@ -836,7 +921,10 @@ proc overrideSegy(t: var SegyTrace, overrides: openArray[HeaderOverride]) =
 
 proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
-    fields: GeometryFields) =
+    fields: GeometryFields): bool =
+  # False when a revision change skips the trace (`convertSegy` would): not
+  # written, and the caller must not count it.
+  result = true
   if s.segyFresh:
     # Its binary header (interval, Ext1 count) is made for traces from keys;
     # a template trace's headers would disagree with it.
@@ -846,6 +934,13 @@ proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   template t: untyped = s.segyTrace
   withTemplateHeaders(s, src, trace, TraceHeaderSize, keys, fields, h):
     loadSegyTrace(src, trace, h, t)
+  if s.segyRevOn:
+    t.sampleInterval = readSampleInterval(src.index.segy, t)
+    if n != t.numSamples: t.numSamples = n
+    let fileLoc = Location(file: s.path)
+    let traceLoc = Location(file: s.path, trace: trace)
+    if not rewriteTrace(s.segyRev, t, s.segyFixed, s.segyRevLog, fileLoc, traceLoc):
+      return false
   t.overrideSegy(overrides)
   # Also when the headers do not say what the reader took: a Rev 0 trace
   # may give 0 samples and leave the count to the binary header.
@@ -865,20 +960,17 @@ proc writeSegy[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   s.noteCount(n)
 
 proc closeSegy(s: var WriterState, log: var DiagLog) =
+  if s.segyRevOn: finishRevision(s.segyRev, s.segyRevLog, Location(file: s.path))
   if not s.segyStarted: s.startSegy()
   s.segy.close()
   log.add s.segy.log
   s.sink.close()
   s.sink = nil
-  # The binary header's counts, now known: the samples of every trace
-  # written, the largest when they differ.
+  # The binary header's counts, now known. Same bytes as `convertSegy`.
   var b = s.segyFile.binary
-  if s.segyCount != -1 and uint32(s.segyMax) != b.effectiveSamplesPerTrace:
-    b.setFileCount(s.segyMax)
-  if s.segyNumTraces != 0: b.numTraces = uint64(s.written)
-  if b != s.segyFile.binary:
-    var bytes = newSeq[byte](BinaryHeaderSize)
-    b.encode(bytes, s.segyFile.byteOrder)
+  let bytes = writtenCountBytes(b, s.written, s.segyMax, s.segyCount != -1,
+    s.segyNumTraces, s.segyFile.byteOrder)
+  if bytes.len > 0:
     if s.memory:
       s.mem.patch(s.segyFile.tapeLabel.len + TextHeaderSize, bytes)
       return
@@ -1924,7 +2016,8 @@ proc writeLike[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int
   discard src.traceEntry(trace) # ValueError out of range
   try:
     case w.s.kind
-    of skSegy: w.s.writeSegy(src, trace, samples, overrides, keys, fields)
+    of skSegy:
+      if not w.s.writeSegy(src, trace, samples, overrides, keys, fields): return
     of skSegd: w.s.writeSegd(src, trace, samples, overrides, keys, fields)
     of skSeg2: w.s.writeSeg2(src, trace, samples, overrides, keys, fields)
     of skUnknown: discard
@@ -1953,7 +2046,9 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: i
   ## headers and its own CDP, fold, offset and coordinates. Fields that size
   ## the file (sample counts, channel set references, ...) cannot be
   ## overridden; an unknown field, a value that does not fit it or a missing
-  ## block raises `ValueError` and nothing is written.
+  ## block raises `ValueError` and nothing is written. A `segyRevision`
+  ## whose target cannot hold this trace's count or interval skips it (see
+  ## `openSeismicWriter`): nothing is written, and `len` does not count it.
   w.writeLike(src, trace, samples, overrides, nil, GeometryFields())
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,

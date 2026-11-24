@@ -5,6 +5,8 @@
 ##
 ## The full disk is a file size limit (RLIMIT_FSIZE, with SIGXFSZ ignored so
 ## that the write fails with EFBIG instead of ending the process): POSIX only.
+## Seen failing with the checked flush after `writeBytes` removed: a 400-byte
+## `patch` of a read-only descriptor returned, and `close` did too.
 
 import std/[assertions, os, strutils]
 
@@ -62,6 +64,22 @@ when defined(posix):
     let x = f.readTraces(0 ..< f.len)
     for i in 0 ..< f.len: w.writeTrace(f, i, x, i)
     discard w.close()
+
+  proc readOnlyBehind(path: string) =
+    # The sink's descriptor, replaced by a read-only open of the same file.
+    let abs = absolutePath(path)
+    let ro = posix.open(cstring(abs), O_RDONLY)
+    doAssert ro >= 0, "cannot open read-only: " & abs
+    var hit = 0
+    for _, p in walkDir("/proc/self/fd"):
+      let name = extractFilename(p)
+      if name == $int(ro): discard
+      elif expandSymlink(p) == abs:
+        let fd = cint(parseInt(name))
+        doAssert dup2(ro, fd) == fd, "dup2 failed for " & name
+        inc hit
+    discard posix.close(ro)
+    doAssert hit == 1, "descriptors for " & abs & ": " & $hit
 else:
   discard
 
@@ -261,6 +279,24 @@ proc main*() =
       doAssert failedAt > 0, "3.6 MB were written under a limit of 1.5 MiB"
       # With room again, the missing bytes are still missing.
       doAssertRaises(IOError): sink.writeRecord(rec)
+      doAssertRaises(IOError): sink.close()
+      removeFile(path)
+
+    block a_patch_flush_that_fits_the_buffer_raises:
+      # 400 bytes is the binary-header patch. It fits the stdio buffer, so
+      # `writeBytes` succeeds and only the flush can report the refusal.
+      let path = tmp / "patch_ro.bin"
+      let sink = openDiskSink(path)
+      sink.writeRecord(newSeq[byte](SinkBufferSize))
+      doAssert getFileSize(path) == SinkBufferSize
+      readOnlyBehind(path)
+      var data = newSeq[byte](400)
+      for i in 0 ..< data.len: data[i] = 0xA5
+      doAssertRaises(IOError): sink.patch(3200, data)
+      let b = readFile(path)
+      doAssert b.len == SinkBufferSize and b[3200 ..< 3600] == newString(400),
+        "the refused patch reached the file"
+      doAssertRaises(IOError): sink.writeRecord([0'u8])
       doAssertRaises(IOError): sink.close()
       removeFile(path)
   else:

@@ -1,8 +1,14 @@
 ## SEG-Y to SEG-Y with a new revision (`convertSegy`): the header bytes
 ## whose meaning the revision changes are rewritten, and what the target
 ## cannot hold is reported. Synthetic files, written by the library.
+## Seen failing before the card-39 warning: a custom card was replaced and
+## the log had no warning quoting it.
+## Seen failing when that warning quoted the card raw: `\n` and `\x01` stayed
+## in the message (the checked quote replaced with spaces, then trimmed).
+## Seen failing before the written-count patch: `convertSegy` bytes differed
+## from the `like:` writer (the source trace count was left in place).
 
-import std/[assertions, math, options, os]
+import std/[assertions, math, options, os, strutils]
 
 import parseSEG
 
@@ -106,6 +112,72 @@ proc rev2File(name: string, ns: int, fixed: bool, binNs: uint16, binExtNs: uint3
     w.writeTrace(tr)
   w.close()
   sink.close()
+
+proc cardFile(name, card39: string, encoding = teEbcdic): string =
+  ## One short fixed-length Rev 2.1 trace whose card 39 is `card39`.
+  result = tmp / name
+  var f = SegyFile(byteOrder: boBig, format: some(sfFloat32), revision: rev(2, 1),
+    extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
+    text: initTextHeader(encoding))
+  f.text.setCard(39, card39)
+  f.text.setCard(40, "C40 END TEXTUAL HEADER")
+  f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 2, segyMinor: 1,
+    samplesPerTrace: 8, sampleInterval: 2000, fixedLengthTraces: 1,
+    byteOrderMarker: ByteOrderMarker)
+  let sink = openDiskSink(result)
+  var w = openSegyWriter(sink, f, SegyWriteOptions(byteOrder: boBig, lenient: true))
+  var x = newSeq[float32](8)
+  for i in 0 ..< 8: x[i] = float32(i)
+  var tr = SegyTrace(index: 0, numSamples: 8)
+  tr.header = SegyTraceHeader(traceSeqLine: 1, fieldRecord: 1, traceNumberInField: 1,
+    traceIdCode: 1, numSamples: 8, sampleInterval: 2000)
+  tr.samples = newSeq[byte](32)
+  encodeSamples(sfFloat32, x, tr.samples, boBig)
+  w.writeTrace(tr)
+  w.close()
+  sink.close()
+
+proc card39Of(path: string): string =
+  var g = openSeismic(path)
+  result = g.index.segy.text.card(39)
+  g.close()
+
+proc varFile(name: string, counts: openArray[int]): (string, seq[seq[float32]]) =
+  ## A Rev 2.1 variable file, `extSamplesPerTrace` 70000, no Extension 1, with
+  ## `numTraces` declared. A count above 65535 stays only in the binary header.
+  result[0] = tmp / name
+  var samples = newSeq[seq[float32]](counts.len)
+  var f = SegyFile(byteOrder: boBig, format: some(sfFloat32), revision: rev(2, 1),
+    extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
+    text: initTextHeader(teEbcdic))
+  f.text.setCard(39, "C39 SEG-Y_REV2.1")
+  f.text.setCard(40, "C40 END TEXTUAL HEADER")
+  f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 2, segyMinor: 1,
+    samplesPerTrace: 0, extSamplesPerTrace: 70000, sampleInterval: 2000,
+    fixedLengthTraces: 0, numTraces: uint64(counts.len), byteOrderMarker: ByteOrderMarker)
+  let sink = openDiskSink(result[0])
+  var w = openSegyWriter(sink, f, SegyWriteOptions(byteOrder: boBig, lenient: true))
+  for t, n in counts:
+    samples[t] = newSeq[float32](n)
+    for i in 0 ..< n: samples[t][i] = float32((i + t) mod 1000)
+    var tr = SegyTrace(index: t, numSamples: n)
+    tr.header = SegyTraceHeader(traceSeqLine: int32(t + 1), fieldRecord: 1,
+      traceNumberInField: int32(t + 1), traceIdCode: 1,
+      numSamples: (if n > 65535: 0'u16 else: uint16(n)), sampleInterval: 2000)
+    tr.samples = newSeq[byte](4 * n)
+    encodeSamples(sfFloat32, samples[t], tr.samples, boBig)
+    w.writeTrace(tr)
+  w.close()
+  sink.close()
+  result[1] = samples
+
+proc likeFile(src: string, samples: seq[seq[float32]], r: SegyRevision, name: string): string =
+  var f = openSeismic(src)
+  result = tmp / name
+  var w = openSeismicWriter(result, like = f, segyRevision = some(r))
+  for i in 0 ..< f.len: w.writeTrace(f, i, samples[i])
+  discard w.close()
+  f.close()
 
 proc main*() =
   tmp = scratchDir("parseseg_tsegyrevconvert")
@@ -276,5 +348,60 @@ proc main*() =
             differences(want[i], g.traceKeys(i))
         g.close()
         doAssert sameSamples(src, dst)
+
+  block a_custom_card_39_is_replaced_and_reported:
+    let src = cardFile("custom39.sgy", "C39 CUSTOM REV TEXT HERE")
+    let (dst, log) = convertTo(src, rev(1), "custom39_r1.sgy")
+    doAssert log.has("CUSTOM REV TEXT HERE", sevWarning), $log
+    doAssert card39Of(dst).strip == "C39 SEG Y REV1", card39Of(dst)
+
+  block a_standard_card_39_is_replaced_without_a_report:
+    let src = cardFile("std39.sgy", "C39 SEG-Y_REV2.1")
+    let (dst, log) = convertTo(src, rev(1), "std39_r1.sgy")
+    doAssert not log.has("card 39 held", sevWarning), $log
+    doAssert card39Of(dst).strip == "C39 SEG Y REV1", card39Of(dst)
+
+  block a_blank_card_39_is_replaced_without_a_report:
+    let src = cardFile("blank39.sgy", "C39 ")
+    let (dst, log) = convertTo(src, rev(1), "blank39_r1.sgy")
+    doAssert not log.has("card 39 held", sevWarning), $log
+    doAssert card39Of(dst).strip == "C39 SEG Y REV1", card39Of(dst)
+
+  block a_replaced_card_is_quoted_without_control_characters:
+    for enc in [teAscii, teEbcdic]:
+      let src = cardFile("ctrl39_" & $enc & ".sgy", "C39 BAD\nLINE\x01", enc)
+      let (dst, log) = convertTo(src, rev(1), "ctrl39_" & $enc & "_r1.sgy")
+      doAssert log.has("card 39 held \"C39 BAD LINE\"", sevWarning), $enc & ": " & $log
+      for d in log:
+        if d.severity == sevWarning and "card 39 held" in d.msg:
+          doAssert '\n' notin d.msg and '\x01' notin d.msg, $enc & ": " & repr(d.msg)
+      doAssert card39Of(dst).strip == "C39 SEG Y REV1", card39Of(dst)
+
+  block skipped_traces_do_not_keep_the_source_count:
+    # Both traces need Extension 1, which they lack: Rev 2.0 skips both.
+    let (src, samples) = varFile("skip2.sgy", [70000, 70000])
+    let (dst, _) = convertTo(src, rev(2, 0), "skip2_out.sgy")
+    let like = likeFile(src, samples, rev(2, 0), "skip2_like.sgy")
+    doAssert readFile(dst) == readFile(like)
+    var g = openSeismic(dst)
+    doAssert not g.log.has("declares", sevWarning), $g.log
+    doAssert g.len == 0
+    doAssert g.index.segy.binary.numTraces == 0
+    # Variable: the binary sample count is not a per-trace declaration.
+    doAssert g.index.segy.binary.extSamplesPerTrace == 70000
+    doAssert not g.log.has("samples per trace is 0", sevWarning), $g.log
+    g.close()
+
+  block a_kept_trace_sets_the_count_a_skipped_one_does_not:
+    let (src, samples) = varFile("skip1.sgy", [8, 70000])
+    let (dst, _) = convertTo(src, rev(2, 0), "skip1_out.sgy")
+    let like = likeFile(src, samples, rev(2, 0), "skip1_like.sgy")
+    doAssert readFile(dst) == readFile(like)
+    var g = openSeismic(dst)
+    doAssert not g.log.has("declares", sevWarning), $g.log
+    doAssert g.len == 1 and g.index.segy.binary.numTraces == 1
+    doAssert g.index.segy.binary.effectiveSamplesPerTrace == 8
+    doAssert g.traceEntry(0).numSamples == 8
+    g.close()
 
 when isMainModule: main()

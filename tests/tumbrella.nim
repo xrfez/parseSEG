@@ -29,7 +29,7 @@ proc main*() =
     # cannot reach them whatever the re-export graph does.
     const privateMods = ["bytestore", "checks", "coordscalar", "decodeentry", "fieldaccess",
       "filemap", "indexcache", "mapguard", "netfs", "pagehints", "progressticker", "readcache",
-      "sampleconv", "seg2conv", "segyencode", "segyfixed", "segykeys", "segywalk",
+      "sampleconv", "seg2conv", "segyencode", "segyfixed", "segykeys", "segyrev", "segywalk",
       "sharedfile", "tensorrows", "textlabel"]
     doAssert sorted(privateModules()) == @privateMods,
       "update privateMods (and the hidden-name check below) for " & $privateModules()
