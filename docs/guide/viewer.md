@@ -985,7 +985,22 @@ and `fields`. What a viewer should expect from maps that find blocks by content:
 ## Geometry, time and annotation
 
 With `keys = true`, `traceKeys(i)` gives what an annotation bar or a base map needs.
-Unknown values are NaN. `time` is the trace's UTC time in POSIX seconds (fractional).
+Unknown values are NaN. `time` is the trace's UTC time in POSIX seconds (fractional):
+time zero, except when a SEG-D Rev 3 Timestamp block supplied it. `timeOrigin`
+says which header that was. `firstSampleUs` is sample 0 in whole UTC
+microseconds. Sample skew, time-drift blocks and relative time mode are not
+applied. SEG-2 stays `toNone`. A leap second after 2016-12-31 needs a new release.
+
+| `timeOrigin` | Where `time` came from | `firstSampleUs` |
+|---|---|---|
+| `toNone` | Unknown, keys a caller built, or SEG-2 | none |
+| `toFirstSample` | SEG-D Rev 3 Timestamp (0x42): time of sample 0 | that instant |
+| `toRecordTimeZero` | SEG-D Rev 3 GH#3 time zero | that instant plus `t0Ms` |
+| `toHeaderSeconds` | Header clock of whole seconds (SEG-D GH#1, SEG-Y without a fraction) | that instant plus `t0Ms` |
+| `toHeaderSubsec` | Header clock with a sub-second part (SEG-Y nanoseconds) | that instant plus `t0Ms` |
+
+`sampleTimeUs(k, n)` is sample `n` in UTC microseconds. `sampleAtUs(k, us)` is
+the fractional sample index (NaN when the start or the interval is missing).
 
 ```nim
 import std/[math, times]
