@@ -243,6 +243,18 @@ proc runCase(rev3: bool) =
     n.useVendorMaps(reg)
     n.writeTrace(f, 0, x, 0, overrides = [headerOverride("vendor.time", 1)])
 
+proc refusedWith(w: var SeismicWriter, f: SeismicFile, x: Tensor[float32],
+    patch: SubsetPatch, part: string) =
+  ## The patch is refused, at `startSubset` or at the first trace, with `part` in the message.
+  var msg = ""
+  try:
+    w.startSubset(f, [0, 1], patch)
+    w.writeTrace(f, 0, x, 0)
+  except ValueError as e:
+    msg = e.msg
+  doAssert part in msg, "message: " & msg
+  w.abandonRecord()
+
 proc main*() =
   runCase(false)
   runCase(true)
@@ -264,5 +276,36 @@ proc main*() =
     doAssert not w.close().isFatal
     let g = openSeismic(tmp / "o.sgd")
     doAssert g.decodeA(reg, 0, false)["serial"].intVal == 7
+
+  block patch_and_timestamp_refusals:
+    # Seen failing: `timestamp.blockType` 0x41 was accepted; `gh1.fileNumber` and the
+    # time fields were set in General Header #1 alone; a 20-digit `gh` number gave a
+    # bare integer-parse error.
+    let tmp = scratchDir("parseseg_twritevendor_patch")
+    var d = makeRec(true, 3)
+    for t in d.traces.mitems:
+      t.extensions[0 ..< 32] = @(SegdTimestampHeader(timeZeroOfData: 777, blockType: 0x42).encoded)
+    let src3 = tmp / "src3.sgd"
+    put(src3, SegdData(records: @[d]))
+    var f3 = openSeismic(src3)
+    let x3 = f3.readTraces(0 ..< f3.len, float32)
+    var w3 = openSeismicWriter(tmp / "o3.sgd", f3)
+    doAssertRaises(ValueError):
+      w3.writeTrace(f3, 0, x3, 0, overrides = [headerOverride("timestamp.blockType", 0x41)])
+    w3.writeTrace(f3, 0, x3, 0, overrides = [headerOverride("timestamp.timeZeroOfData", 5)])
+    w3.abandonRecord()
+    let src2 = tmp / "src2.sgd"
+    put(src2, SegdData(records: @[makeRec(false, 3)]))
+    var f2 = openSeismic(src2)
+    let x2 = f2.readTraces(0 ..< f2.len, float32)
+    var w2 = openSeismicWriter(tmp / "o2.sgd", f2)
+    for name in ["gh1.fileNumber", "gh1.year", "gh1.julianDay", "gh1.hour", "gh1.minute",
+        "gh1.second"]:
+      w2.refusedWith(f2, x2, SubsetPatch(headers: @[headerOverride(name, 3)]),
+        "SubsetPatch.fileNumber")
+    w2.refusedWith(f2, x2,
+      SubsetPatch(headers: @[headerOverride("gh99999999999999999999.sourceSetNumber", 3)]),
+      "the record fields are gh1")
+    w2.refusedWith(f2, x2, SubsetPatch(headers: @[headerOverride("gh3.nosuch", 3)]), "nosuch")
 
 when isMainModule: main()

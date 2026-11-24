@@ -146,7 +146,10 @@ type
       ## General Header #1 holds whole seconds (the fraction is dropped there).
       ## Rev 3: General Header #3's time zero is `time` to the microsecond,
       ## and a trace's Timestamp block (0x42) is the instant of its first
-      ## sample, `time` plus the start time of its channel set.
+      ## sample, `time` plus the start time of its channel set. A trace header's
+      ## first timing word and the Rev 3 additional source info's time are left as
+      ## the source's: a caller whose source has a non-zero first timing word must
+      ## override it.
     headers*: seq[HeaderOverride]
       ## Record header fields by name, applied before `fileNumber` and `time`:
       ## `gh1.<field>` and, in Rev 2, `gh3.<field>`, `gh4.<field>`, ... (the
@@ -381,6 +384,9 @@ type
     likeSame: bool             ## Every buffered trace kept its source count.
     likeRec: SegdRecord        ## Headers to write; a new format is already applied.
     vendor: VendorRegistry     ## From `useVendorMaps`: the maps `vendor.<field>` overrides use.
+    chPath: string             ## The source record `chIdx` was worked out for: its file,
+    chMem, chRec, chFirst: int ## `memoryId`, record number and first trace.
+    chIdx: seq[int]            ## Of each of its traces, the place among those of its channel set.
     subset: seq[int]           ## From `startSubset`: the source traces of the next record.
     subPath: string            ## That subset's file and `memoryId`.
     subMem: int
@@ -1517,11 +1523,16 @@ proc applyRecordPatch(rec: var SegdRecord, p: SubsetPatch) =
   if not p.time.isNaN: checkRecordingTime(p.time, "the subset's time")
   for o in p.headers:
     let (blk, field) = splitName(o)
-    if blk == "gh1": rec.gh1.setOverride(hbSegdGh1, field, o)
-    elif rec.layout == slRev2 and blk.len > 2 and blk.startsWith("gh") and
-        blk[2 .. ^1].allCharsInSet({'0' .. '9'}) and parseInt(blk[2 .. ^1]) >= 3 and
-        parseInt(blk[2 .. ^1]) - 3 < rec.sourceHeaders.len:
-      rec.sourceHeaders[parseInt(blk[2 .. ^1]) - 3].setOverride(hbSegdGhN, field, o)
+    let digits = if blk.len > 2 and blk.startsWith("gh"): blk[2 .. ^1] else: ""
+    let num = if digits.len in 1 .. 6 and digits.allCharsInSet({'0' .. '9'}): parseInt(digits)
+      else: -1
+    if blk == "gh1":
+      if field in ["fileNumber", "year", "julianDay", "hour", "minute", "second"]:
+        refuse(o.name & ": the file number and the time are set with SubsetPatch.fileNumber " &
+          "and SubsetPatch.time, which change every place that holds them")
+      rec.gh1.setOverride(hbSegdGh1, field, o)
+    elif rec.layout == slRev2 and num >= 3 and num - 3 < rec.sourceHeaders.len:
+      rec.sourceHeaders[num - 3].setOverride(hbSegdGhN, field, o)
     else:
       refuse(o.name & ": the record fields are gh1 and, in Rev 2, the source headers gh3, gh4, ...")
   if p.headers.len > 0:
@@ -1584,27 +1595,31 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
       " (record " & $r & ")")
   var sets: seq[SubsetSet] = @[]
   var setOf: seq[int] = @[]
-  # Each kept trace's channel: its place among the record's traces of its set.
-  var first = trace
-  while first > 0 and int(entries[first - 1].record) == r: dec first
-  var counts: seq[tuple[key, n: int]] = @[]
-  var chOf = newSeq[int](s.subset.len)
-  var nextKept = 0
-  var at0 = first
-  while nextKept < s.subset.len:
-    let e = entries[at0]
-    let key = int(e.scanType) * 65536 + e.channelSet.int
-    var c = -1
-    for q in 0 ..< counts.len:
-      if counts[q].key == key: c = q
-    if c < 0:
-      counts.add (key: key, n: 0)
-      c = counts.high
-    if at0 == s.subset[nextKept]:
-      chOf[nextKept] = counts[c].n
-      inc nextKept
-    inc counts[c].n
-    inc at0
+  # Each kept trace's channel: its place among the record's traces of its set. Only a
+  # Rev 2 skew rebuild reads it; the walk over the record is kept for the next subset.
+  let wantChans = rec.layout == slRev2 and rec.gh1.skewBlocks in 1 .. 98
+  if wantChans and not (s.chPath == src.path and s.chMem == src.memoryId and s.chRec == r and
+      s.chIdx.len > 0):
+    var first = trace
+    while first > 0 and int(entries[first - 1].record) == r: dec first
+    var counts: seq[tuple[key, n: int]] = @[]
+    s.chIdx.setLen 0
+    var at0 = first
+    while at0 < entries.len and int(entries[at0].record) == r:
+      let key = int(entries[at0].scanType) * 65536 + entries[at0].channelSet.int
+      var c = -1
+      for q in 0 ..< counts.len:
+        if counts[q].key == key: c = q
+      if c < 0:
+        counts.add (key: key, n: 0)
+        c = counts.high
+      s.chIdx.add counts[c].n
+      inc counts[c].n
+      inc at0
+    s.chPath = src.path
+    s.chMem = src.memoryId
+    s.chRec = r
+    s.chFirst = first
   for pos, k in s.subset:
     let e = entries[k]
     let (st, cs) = (int(e.scanType), e.channelSetIndex)
@@ -1619,7 +1634,7 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
       sets.add SubsetSet(scan: st, chan: cs, n: -1, srcN: int(e.numSamples))
       at = sets.high
     inc sets[at].kept
-    sets[at].chans.add chOf[pos]
+    sets[at].chans.add(if wantChans: s.chIdx[k - s.chFirst] else: 0)
     setOf.add at
   if fOut != rec.format.get:
     rec.gh1.formatCode = ord(fOut)
