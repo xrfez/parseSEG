@@ -35,7 +35,11 @@ export seg2samples except decodeSamplesRaw
 export seg2headers, seg2reader, seg2writer
 
 import parseSEG/vendor/[maps, apply, scaffold, columns]
-export maps, apply, scaffold, columns
+export maps except NumberRead, nrNone, nrInt, nrFloat, nrOther, readNumber, fieldIsOn,
+  targetMatches, decodeField, elementIndex, applicableSpecs, selectMapWith, valueKind
+export apply except typedBlockSpan, NumberRead, nrNone, nrInt, nrFloat, nrOther, readNumber,
+  fieldIsOn, targetMatches, decodeField, elementIndex, applicableSpecs, selectMapWith, valueKind
+export scaffold, columns
 
 import parseSEG/convert
 import parseSEG/convert/[tosegy, tosegd, toseg2]

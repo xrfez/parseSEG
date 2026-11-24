@@ -11,6 +11,7 @@
 import std/[assertions, math, monotimes, options, os, sequtils, strutils, times]
 
 import parseSEG
+import parseSEG/vendor/maps # valueKind, internal to the library
 
 import parseSEG/io/[memsink, memsource]
 
@@ -343,17 +344,18 @@ proc main*() =
     reg.addMap loadVendorMap("""(.nif27)
 (vendormap "specific" (version 1) (match (format segd) (manufacturer 9) (rev 2.0 2.0) (serial 0 100))
   (target (kind traceExt) (extension 2) (name unitInfo)
-    (field serial (at 1) (enc u32) (scale 10.0))))""")
+    (field serial (at 2) (enc u32))))""")
     let d = build([RecSpec(manufacturer: 9, second: 1, traces: 2, exts: 1)])
     var f = openSeismicBytes(bytesOf(d), "spec")
     let col = f.vendorColumn(reg, "unitInfo.serial")
-    # The record's serial is 0, inside 0..100: the second map decodes it, scaled.
+    # The record's serial is 0, inside 0..100: the second map decodes it, one byte on.
     var log: DiagLog
     let ctx = vendorContext(d.records[0].record)
     for j, t in d.records[0].traces:
       let blk = reg.decode(ctx, VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1,
         extIndex: 2), t.extensions.toOpenArray(0, 31), log).get
-      doAssert col.numbers[j] == blk["serial"].toFloat and col.numbers[j] == 10.0 * float64(j)
+      doAssert col.numbers[j] == blk["serial"].toFloat and
+        (j == 0 or col.numbers[j] != float64(beU32(t.extensions, 0)))
     f.close()
 
   block record_level_field:
@@ -422,6 +424,12 @@ proc main*() =
     doAssert f.vendorColumn(reg, "first").numbers == @[60.0, 61.0, 62.0]
     let second = f.vendorColumn(reg, "second")
     doAssert second.absent == 3 and second.numbers[0].isNaN
+    # A target for the standard header with a header name is for no trace: the name of the
+    # previous trace's proprietary block must not leak into the standard header's area.
+    let named = registry("""(.nif27)
+(vendormap "named" (version 1) (match (format segy))
+  (target (kind traceHeaderBytes) (headerName VENDOR01) (name std) (field seqFile (at 5) (enc i32))))""")
+    doAssert f.vendorColumn(named, "seqFile").absent == 3
     f.close()
 
   block shipped_map_on_a_file:
@@ -480,6 +488,95 @@ proc main*() =
           inc checked
         else: doAssert col.numbers[0].isNaN, info.name
     doAssert checked > 0
+    f.close()
+
+  block long_when_chain_is_linear:
+    # 30 fields, each conditioned on the 16 before it: a column must not walk the tree of
+    # conditions (that took time exponential in the depth).
+    var t = "(.nif27)\n(vendormap \"chain\" (version 1) (match (format segd))\n" &
+      "  (target (kind traceExt) (extension 2) (name chain)\n"
+    for i in 0 ..< 30:
+      t.add "    (field f" & $i & " (at " & $(1 + i) & ") (enc u8)"
+      for k in 1 .. min(16, i): t.add " (when (field f" & $(i - k) & ") (range 0 255))"
+      t.add ")\n"
+    t.add "))"
+    let reg = registry(t)
+    var f = openSeismicBytes(bytesOf(build([RecSpec(manufacturer: 9, second: 1, traces: 50,
+      exts: 1)])), "chain")
+    let t0 = getMonoTime()
+    let col = f.vendorColumn(reg, "f29")
+    doAssert (getMonoTime() - t0).inMilliseconds < 2000
+    doAssert col.absent == 0 and col.numbers[0] == float64(ext2(0, 0)[29])
+    f.close()
+
+  block positional_targets_at_record_level:
+    # Two targets without (match) on one block give one block, named after the last: the
+    # field of the first is still found.
+    let reg = registry("""(.nif27)
+(vendormap "pos" (version 1) (match (format segd))
+  (target (kind extendedHeader) (blockIndex 1) (name first) (field a (at 2) (enc u8)))
+  (target (kind extendedHeader) (blockIndex 1) (name second) (field b (at 1) (enc u8))))""")
+    var f = openSeismicBytes(bytesOf(build([RecSpec(manufacturer: 9, second: 5, traces: 2,
+      exts: 1)])), "pos")
+    doAssert f.vendorColumn(reg, "a").numbers == @[5.0, 5.0]
+    doAssert f.vendorColumn(reg, "b").numbers == @[170.0, 170.0]
+    # Asked per record: stop is asked once per record.
+    var asked = 0
+    let c = f.vendorColumn(reg, "a", proc(): bool =
+      inc asked
+      true)
+    doAssert c.stopped and asked == 1
+    f.close()
+
+  block records_that_disagree_are_mixed:
+    # Map for manufacturer 9 gives v as an integer in "a", manufacturer 7's as a float,
+    # manufacturer 5's as an integer in "b": the float record is absent, the other unit kept.
+    var reg: VendorRegistry
+    for (m, def) in [(9, "(enc u8) (unit \"a\")"), (7, "(enc f32)"), (5, "(enc u8) (unit \"b\")")]:
+      reg.addMap loadVendorMap("(.nif27)\n(vendormap \"m" & $m &
+        "\" (version 1) (match (format segd) (manufacturer " & $m &
+        "))\n  (target (kind traceExt) (extension 2) (name e) (field v (at 4) " & def & ")))")
+    let d = build([RecSpec(manufacturer: 9, second: 1, traces: 2, exts: 1),
+      RecSpec(manufacturer: 7, second: 1, traces: 2, exts: 1),
+      RecSpec(manufacturer: 5, second: 1, traces: 2, exts: 1)])
+    var f = openSeismicBytes(bytesOf(d), "mixed")
+    let col = f.vendorColumn(reg, "v")
+    doAssert col.kind == vvInt and col.unit == "a" and col.mixed
+    doAssert "map m7" in col.mixedWhy and "vvFloat" in col.mixedWhy, col.mixedWhy
+    doAssert col.numbers[0] == float64(ext2(0, 0)[3]) and col.numbers[2].isNaN and
+      col.numbers[3].isNaN and col.numbers[4] == float64(ext2(2, 0)[3]) and col.absent == 2
+    let ci = f.vendorColumnInt(reg, "v")
+    doAssert ci.mixed and ci.present == @[true, true, false, false, true, true]
+    # Without the disagreeing record the column is not mixed, and its unit is the first's.
+    var g = openSeismicBytes(bytesOf(build([RecSpec(manufacturer: 9, second: 1, traces: 2,
+      exts: 1)])), "plain")
+    doAssert not g.vendorColumn(reg, "v").mixed
+    # Only the unit differs: values kept.
+    var h = openSeismicBytes(bytesOf(build([RecSpec(manufacturer: 9, second: 1, traces: 1,
+      exts: 1), RecSpec(manufacturer: 5, second: 1, traces: 1, exts: 1)])), "unit")
+    let u = h.vendorColumn(reg, "v")
+    doAssert u.mixed and "unit" in u.mixedWhy and u.absent == 0
+    f.close()
+    g.close()
+    h.close()
+
+  block dotted_names_that_collide:
+    let reg = registry("""(.nif27)
+(vendormap "dots" (version 1) (match (format segd))
+  (target (kind traceExt) (extension 2) (name p) (field "v.w" (at 1) (enc u8)))
+  (target (kind traceExt) (extension 2) (name "p.v") (field w (at 2) (enc u8))))""")
+    var f = openSeismicBytes(bytesOf(build([RecSpec(manufacturer: 9, second: 1, traces: 1,
+      exts: 1)])), "dots")
+    expectError("several fields"):
+      discard f.vendorColumn(reg, "p.v.w")
+    f.close()
+
+  block present_nan_is_not_absent:
+    var d = build([RecSpec(manufacturer: 9, second: 1, traces: 3, exts: 1)])
+    d.records[0].traces[1].extensions.u32(4, 0x7FC00000'u32)
+    var f = openSeismicBytes(bytesOf(d), "nan")
+    let col = f.vendorColumn(registry(), "gain")
+    doAssert col.absent == 0 and col.numbers[1].isNaN and not col.numbers[0].isNaN
     f.close()
 
   block timing_and_allocations:

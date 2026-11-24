@@ -61,6 +61,8 @@ type
     absent*: int         ## Traces with no value: the field's `(when)` is off, it holds its
                          ## sentinel, the block is missing or short, or no map applies.
     stopped*: bool       ## `stop` returned true: the column is empty.
+    mixed*: bool         ## Records disagree about the field (see `vendorColumn`).
+    mixedWhy*: string    ## What differs, for the first record that disagrees.
 
   VendorColumnInt* = object
     ## An integer field's value for every trace, exact.
@@ -71,6 +73,8 @@ type
     present*: seq[bool]
     absent*: int
     stopped*: bool
+    mixed*: bool         ## As `VendorColumn.mixed`.
+    mixedWhy*: string
 
   Cand = object
     # One place that defines an address: a field of a target, or of a target's repeat.
@@ -91,6 +95,8 @@ type
     present: seq[bool]
     texts: seq[string]
     absent: int
+    mixed: bool
+    mixedWhy: string
 
   RecState = object
     # What one record needs to read its traces.
@@ -267,33 +273,59 @@ proc resolve(reg: VendorRegistry, ctx: VendorContext, name: string): Address =
   var base = name
   let elem = elementIndex(name, base)
   let key = if elem >= 0: base else: name
-  var found = -1
+  var found: seq[int]
   var clash: seq[string]
   for i, e in listed:
-    if e.info.name == key or e.info.blockName & "." & e.info.fieldName == key: found = i
+    if e.info.name == key or e.info.blockName & "." & e.info.fieldName == key: found.add i
     elif e.info.fieldName == key: clash.add e.info.blockName
-  if found < 0:
+  if found.len > 1:
+    for i in found: clash.add listed[i].info.blockName & "." & listed[i].info.fieldName
+    raise newException(ValueError, "vendor field " & name & " is spelled by several fields (" &
+      clash.join(", ") & "): rename a block or field in the map")
+  if found.len == 0:
     let why = if clash.len > 0:
         " is in several blocks (" & clash.join(", ") & "): address it as <block>.<name>"
       else: " is not a field of the vendor maps that apply to this file"
     raise newException(ValueError, "vendor field " & name & why)
-  let info = listed[found].info
+  let info = listed[found[0]].info
   if info.isRepeat and elem < 0:
     raise newException(ValueError, "vendor field " & name &
       " is in a repeat: address an element as " & name & "[i]")
   if not info.isRepeat and elem >= 0:
     raise newException(ValueError, "vendor field " & key & " is not in a repeat")
   result.elem = elem
-  result.entry = listed[found]
+  result.entry = listed[found[0]]
   for e in reg.collect(ctx, false):
     if e.info.blockName == info.blockName and e.info.fieldName == info.fieldName:
       result.entry.cands = e.cands
 
-proc recState(reg: VendorRegistry, ctx: VendorContext, a: Address): RecState =
+proc compatible(reg: VendorRegistry, c: Cand, a: Address, s: var Sink): bool =
+  # Whether the candidate defines the field as the column does (the first record's
+  # definition); a disagreement in kind or level leaves the candidate out, a different
+  # unit only marks the column `mixed`.
+  template t: untyped = reg.maps[c.map].targets[c.target]
+  let fp = reg.plan(c)
+  let info = a.entry.info
+  var why = ""
+  if fp.valueKind != info.kind:
+    why = "map " & reg.maps[c.map].name & " gives " & info.fieldName & " as " & $fp.valueKind &
+      ", the column is " & $info.kind
+  elif t.level != info.level:
+    why = "map " & reg.maps[c.map].name & " has " & info.fieldName & " at " & $t.level &
+      " level, the column is at " & $info.level & " level"
+  result = why.len == 0
+  if result and fp.unit != info.unit:
+    why = "map " & reg.maps[c.map].name & " gives " & info.fieldName & " the unit '" & fp.unit &
+      "', the column's is '" & info.unit & "'"
+  if why.len > 0 and not s.mixed:
+    s.mixed = true
+    s.mixedWhy = why
+
+proc recState(reg: VendorRegistry, ctx: VendorContext, a: Address, s: var Sink): RecState =
   result.ctx = ctx
   result.specs = reg.applicableSpecs(result.ctx)
   for c in a.entry.cands:
-    if result.specs[c.map] >= 0: result.cands.add c
+    if result.specs[c.map] >= 0 and reg.compatible(c, a, s): result.cands.add c
   for i, m in reg.maps:
     if result.specs[i] >= 0:
       for t in m.targets:
@@ -306,25 +338,45 @@ proc recState(reg: VendorRegistry, ctx: VendorContext, a: Address): RecState =
 proc raiseOutside(trace: int) {.noinline, noreturn.} =
   raise newException(ValueError, "the headers of trace " & $trace & " lie outside the file")
 
-proc recordValues(f: SeismicFile, reg: VendorRegistry, a: Address, s: var Sink, n: int) =
-  # A record-level field: one value per record, repeated for its traces.
+proc recordValues(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): bool,
+    s: var Sink): bool =
+  # A record-level field: one value per record, repeated for its traces. `stop` is asked
+  # once per record; false when it ended the read.
+  let n = f.len
   let records = max(1, f.recordCount)
-  var maps: seq[string]
-  for c in a.entry.cands: maps.add reg.maps[c.map].name
   var want = a.entry.info.fieldName
   if a.elem >= 0: want.add "[" & $a.elem & "]"
   var vals = newSeq[Option[VendorValue]](records)
   var log: DiagLog
   for r in 0 ..< records:
-    let blocks = if f.kind == skSegd: reg.decodeVendorAreas(f.index.segdRecords[r], log)
-      else: reg.decodeVendorAreas(f.index.segy, log)
-    for blk in blocks:
-      if vals[r].isNone and blk.name == a.entry.info.blockName and blk.mapName in maps:
-        for fld in blk.fields:
-          if vals[r].isNone and fld.name == want: vals[r] = some(fld.value)
+    if stop != nil and stop(): return false
+    let ctx = if f.kind == skSegd: vendorContext(f.index.segdRecords[r], reg.usesRecordBlocks)
+      else: vendorContext(f.index.segy)
+    let specs = reg.applicableSpecs(ctx)
+    # The maps whose candidates apply to this record and agree with the column, and the
+    # names of the blocks they can give the field in: a block of positional targets is
+    # named after the last of them, so any positional target's name stands for it.
+    var maps, blocks: seq[string]
+    var positional: seq[string]
+    for c in a.entry.cands:
+      if specs[c.map] >= 0 and reg.compatible(c, a, s):
+        maps.add reg.maps[c.map].name
+        if c.matched: blocks.add a.entry.info.blockName
+        else:
+          for t in reg.maps[c.map].targets:
+            if t.matches.len == 0: positional.add t.name
+    if maps.len > 0:
+      let decoded = if f.kind == skSegd: reg.decodeVendorAreas(f.index.segdRecords[r], log)
+        else: reg.decodeVendorAreas(f.index.segy, log)
+      for blk in decoded:
+        if vals[r].isNone and blk.mapName in maps and
+            (blk.name in blocks or blk.name in positional):
+          for fld in blk.fields:
+            if vals[r].isNone and fld.name == want: vals[r] = some(fld.value)
   for i in 0 ..< n:
     let r = min(int(f.index.entries[i].record), records - 1)
     if vals[r].isSome: s.putValue(i, vals[r].get) else: s.putAbsent(i)
+  true
 
 proc scanTraces(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): bool,
     s: var Sink): bool =
@@ -336,12 +388,19 @@ proc scanTraces(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): b
   let size = f.mappedSize
   let unmapped = f.unsafeCache != nil
   var cur: Cursor
-  var area = VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1, extIndex: -1)
+  # One area per kind of block, each set up once: only the numbers change per block.
+  var extArea = VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1, extIndex: -1)
+  var typedArea = VendorArea(kind: vtBlock, blockIndex: -1, blockType: -1, where: "traceHeader",
+    extIndex: -1)
+  var stdArea = VendorArea(kind: vtTraceHeaderBytes, blockIndex: -1, blockType: -1,
+    extIndex: -1)
+  var propArea = VendorArea(kind: vtTraceHeaderBlock, blockIndex: -1, blockType: -1,
+    extIndex: -1)
   var nameBytes: array[8, byte]
   var haveName = false
   var tie = false
   # Reads the first candidate whose target is for the block `b` of `area`.
-  template tryBlock(b: untyped, i: int, hit: var bool) =
+  template tryBlock(area: VendorArea, b: untyped, i: int, hit: var bool) =
     let chosen = if rc.contenders > 1: reg.selectMapWith(rc.specs, area, b, tie) else: -1
     for c in rc.cands:
       if (chosen < 0 or c.map == chosen) and
@@ -357,7 +416,7 @@ proc scanTraces(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): b
       let ctx = if f.kind == skSegd: vendorContext(f.index.segdRecords[haveRec],
           reg.usesRecordBlocks)
         else: vendorContext(f.index.segy)
-      rc = reg.recState(ctx, a)
+      rc = reg.recState(ctx, a, s)
     if unmapped: f.coverHeaders(cur, i)
     var hit = false
     if rc.cands.len > 0:
@@ -368,26 +427,22 @@ proc scanTraces(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): b
         let first = at + SegdTraceHeaderSize + SegdBlockSize
         let extra = hb - SegdTraceHeaderSize - SegdBlockSize
         if f.index.segdRecords[haveRec].layout == slRev2:
-          area.kind = vtTraceExt
           var k = 0
           while not hit and (k + 1) * SegdBlockSize <= extra:
-            area.extIndex = k + 2
-            tryBlock(mem.toOpenArray(first + k * SegdBlockSize,
+            extArea.extIndex = k + 2
+            tryBlock(extArea, mem.toOpenArray(first + k * SegdBlockSize,
               first + (k + 1) * SegdBlockSize - 1), i, hit)
             inc k
         else:
-          area.kind = vtBlock
-          area.where = "traceHeader"
           var k = 0
           while not hit and k + SegdBlockSize <= extra:
             let span = mem.toOpenArray(first + k, first + extra - 1).typedBlockSpan(0)
-            area.blockType = int(mem[first + k + SegdBlockSize - 1])
-            tryBlock(mem.toOpenArray(first + k, first + k + span - 1), i, hit)
+            typedArea.blockType = int(mem[first + k + SegdBlockSize - 1])
+            tryBlock(typedArea, mem.toOpenArray(first + k, first + k + span - 1), i, hit)
             k += span
       else:
         if e.offset < 0 or e.offset + max(hb, TraceHeaderSize) > size: raiseOutside(i)
-        area.kind = vtTraceHeaderBytes
-        tryBlock(mem.toOpenArray(at, at + TraceHeaderSize - 1), i, hit)
+        tryBlock(stdArea, mem.toOpenArray(at, at + TraceHeaderSize - 1), i, hit)
         var k = 2
         while not hit and (k + 1) * TraceHeaderSize <= hb:
           let first = at + k * TraceHeaderSize
@@ -397,10 +452,9 @@ proc scanTraces(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): b
             if mem[first + 232 + j] != nameBytes[j]: same = false
           if not same:
             for j in 0 .. 7: nameBytes[j] = mem[first + 232 + j]
-            area.headerName = headerBlockName(mem.toOpenArray(first, first + TraceHeaderSize - 1))
+            propArea.headerName = headerBlockName(mem.toOpenArray(first, first + TraceHeaderSize - 1))
             haveName = true
-          area.kind = vtTraceHeaderBlock
-          tryBlock(mem.toOpenArray(first, first + TraceHeaderSize - 1), i, hit)
+          tryBlock(propArea, mem.toOpenArray(first, first + TraceHeaderSize - 1), i, hit)
           inc k
     if not hit: s.putAbsent(i)
   true
@@ -410,8 +464,7 @@ proc fill(f: SeismicFile, reg: VendorRegistry, a: Address, stop: proc(): bool,
   # Fills `s` with the field of every trace; false when `stop` ended it.
   f.requireUncutFirst()
   if a.entry.info.level == vlRecord:
-    f.recordValues(reg, a, s, f.len)
-    result = true
+    result = f.recordValues(reg, a, stop, s)
   else:
     result = f.scanTraces(reg, a, stop, s)
   f.requireUncut()
@@ -428,8 +481,17 @@ proc vendorColumn*(f: SeismicFile, reg: VendorRegistry, name: string,
   ## among the maps that apply to the file's first record (SEG-D) or the file (SEG-Y);
   ## other records use the maps that apply to them, so a record no map applies to gives
   ## absent values. A record-level field gives its record's value for each of the
-  ## record's traces. An integer beyond 2^53 loses its low bits as a float64: use
-  ## `vendorColumnInt`. `stop` is asked every 4096 traces; when it returns true the
+  ## record's traces. A trace reads the first block its target is for (as `decodeAll` does
+  ## for "the first block of that name"): when the field is off there (its `(when)`, its
+  ## sentinel) a later block that has it is not looked at. `absent` counts the traces with no
+  ## value; a field that holds NaN (a float with that value) is present and reads NaN in
+  ## `numbers` as an absent one does.
+  ##
+  ## `kind`, `unit` and `level` are those of the first record's map. When a later record's
+  ## map defines the same name with another kind or level, that record's values are absent
+  ## (never converted); with another unit they are kept; either way `mixed` is set and
+  ## `mixedWhy` says what differs. An integer beyond 2^53 loses its low bits as a float64: use
+  ## `vendorColumnInt`. `stop` is asked every 4096 traces (a record-level field: once per record); when it returns true the
   ## column is empty and `stopped` is set. Raises `ValueError` for an unknown or
   ## ambiguous name, a repeat field named without `[i]`, a closed file, SEG-2, and
   ## headers that lie outside the file, and `SegTruncatedError` for a file cut short.
@@ -440,6 +502,8 @@ proc vendorColumn*(f: SeismicFile, reg: VendorRegistry, name: string,
   result = VendorColumn(name: name, kind: info.kind, unit: info.unit, level: info.level)
   if f.fill(reg, a, stop, s):
     result.absent = s.absent
+    result.mixed = s.mixed
+    result.mixedWhy = s.mixedWhy
     result.numbers = move s.floats
     result.texts = move s.texts
   else: result.stopped = true
@@ -461,6 +525,8 @@ proc vendorColumnInt*(f: SeismicFile, reg: VendorRegistry, name: string,
   result = VendorColumnInt(name: name, unit: info.unit, level: info.level)
   if f.fill(reg, a, stop, s):
     result.absent = s.absent
+    result.mixed = s.mixed
+    result.mixedWhy = s.mixedWhy
     result.values = move s.ints
     result.present = move s.present
   else: result.stopped = true

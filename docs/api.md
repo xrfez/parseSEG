@@ -271,8 +271,8 @@ fatal diagnostic.
   can decode (`VendorFieldInfo`: `name`, `kind`, `unit`, `hasLabels`, `level`, `isRepeat`; the bare
   field name, or `<block>.<name>` when two blocks have it), and `f.vendorColumn(reg, name, stop)`
   gives one field for every trace (`VendorColumn`: `numbers` with NaN where absent, or `texts`;
-  `unit`, `absent`, `stopped`) from the mapped header bytes, decoding only the target that holds
-  it. `f.vendorColumnInt(reg, name, stop)` gives an unscaled integer field exactly (`values`,
+  `unit`, `absent`, `stopped`, `mixed` for records whose maps disagree about the field) from the
+  mapped header bytes, decoding only the target that holds it. `f.vendorColumnInt(reg, name, stop)` gives an unscaled integer field exactly (`values`,
   `present`; a float64 loses an integer beyond 2^53).
   Maps find blocks by content (`VendorTarget.matches`, `VendorMatch.blocks`, `VendorBlock.blockNumber`),
   decode fields under `(when)` (`VendorFieldPlan.conds`) and read nibble fields; `VendorContext`

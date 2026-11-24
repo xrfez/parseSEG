@@ -1184,7 +1184,7 @@ proc decodeField*(f: VendorFieldPlan, b: openArray[byte], base: int,
   some(v)
 
 func valueKind*(f: VendorFieldPlan): VendorValueKind =
-  ## The kind of value `decode` gives for `f` (a BCD field with an invalid digit gives
+  ## **Internal.** The kind of value `decode` gives for `f` (a BCD field with an invalid digit gives
   ## bytes instead of the integer it plans).
   case f.enc
   of veAscii, veEbcdic: vvText
@@ -1217,17 +1217,6 @@ func condHolds(c: VendorCondition, t: VendorTarget, b: openArray[byte], order: B
       of csHighNibble: int64(x shr 4)
       else: int64(x and 15)
   c.testHolds(v)
-
-func fieldIsOn*(t: VendorTarget, i: int, b: openArray[byte], order: ByteOrder,
-    ctx: VendorContext): bool =
-  ## **Internal.** True when field `i` of `t` passes its own `(when)` conditions, as
-  ## `decodeTarget` reckons it: a condition on an earlier field that is itself off fails.
-  ## Allocates nothing; `vendorColumn` asks it for one field instead of the whole target.
-  const noOff: array[0, bool] = []
-  for c in t.fields[i].conds:
-    if c.source == csField and not t.fieldIsOn(c.fieldIndex, b, order, ctx): return false
-    if not c.condHolds(t, b, order, ctx, noOff): return false
-  true
 
 func elementCount(r: VendorRepeatPlan, decoded: openArray[VendorField], areaLen: int,
     problems: var seq[string]): int =
@@ -1558,6 +1547,33 @@ func offFlags(t: VendorTarget, b: openArray[byte], order: ByteOrder,
       if not c.condHolds(t, b, order, ctx, result):
         result[i] = true
         break
+
+func evalOn(t: VendorTarget, i: int, b: openArray[byte], order: ByteOrder,
+    ctx: VendorContext, computed, on: var uint64): bool =
+  # Field `i`'s own conditions, each field computed once (`computed`, `on`: bit per field).
+  const noOff: array[0, bool] = []
+  if ((computed shr i) and 1) != 0: return ((on shr i) and 1) != 0
+  result = true
+  for c in t.fields[i].conds:
+    if (c.source == csField and not t.evalOn(c.fieldIndex, b, order, ctx, computed, on)) or
+        not c.condHolds(t, b, order, ctx, noOff):
+      result = false
+      break
+  computed = computed or (1'u64 shl i)
+  if result: on = on or (1'u64 shl i)
+
+func fieldIsOn*(t: VendorTarget, i: int, b: openArray[byte], order: ByteOrder,
+    ctx: VendorContext): bool =
+  ## **Internal.** True when field `i` of `t` passes its own `(when)` conditions, as
+  ## `decodeTarget` reckons it: a condition on an earlier field that is itself off fails.
+  ## Each field is worked out once, so a long chain of `(when (field ...))` costs a pass,
+  ## not a tree; a target of up to 64 fields allocates nothing (`vendorColumn` asks it for one
+  ## field instead of the whole target), a larger one works out every field once (`offFlags`).
+  if t.fields.len <= 64:
+    var computed, on = 0'u64
+    t.evalOn(i, b, order, ctx, computed, on)
+  else:
+    not t.offFlags(b, order, ctx)[i]
 
 func elementIndex*(field: string, baseName: var string): int =
   ## **Internal.** `name[i]` with i a run of decimal digits: -1 for any other name, else i.
