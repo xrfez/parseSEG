@@ -623,8 +623,8 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## another revision: the source headers, rewritten as `convertSegy`
   ## rewrites them. `none`, or the source's own revision, leaves the bytes
   ## as a writer without the parameter writes them. Cards 39 and 40 name the
-  ## target revision when it differs; with `fullText`, `fixCards` and the
-  ## read-back check use that revision, on the bytes that will be written.
+  ## target revision when it differs. With `fixCards` false the caller's
+  ## cards 39 and 40 are written untouched, whatever revision they name.
   ## A trace identification code is kept as stored. What the target drops
   ## (extended text, trailers, Trace Header Extension 1, a survey type, a
   ## time rounded or clamped, a card 39 or 40 that held other text) is listed
