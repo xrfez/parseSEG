@@ -78,6 +78,131 @@ proc main*() =
     g.close()
     f.close()
 
+  block binary_header_overrides:
+    # Seen failing with the overrides not applied (withBinaryOverrides returning its argument at once):
+    # every read-back below found 0 and the refusals did not raise.
+    const names = ["jobId", "lineNumber", "reelNumber", "measurementSystem", "sweepFreqStart",
+      "sweepFreqEnd", "sweepLength", "sweepType", "sweepChannel", "sweepTaperStart",
+      "sweepTaperEnd", "taperType", "correlated", "binaryGainRecovered", "amplitudeRecovery",
+      "impulsePolarity", "vibratoryPolarity", "traceSorting", "verticalSumCode", "ensembleFold"]
+    proc ovs(): seq[HeaderOverride] =
+      for i, n in names: result.add headerOverride("binary." & n, 1000 * (i + 1) + 7)
+    proc check(g: SeismicFile, what: string) =
+      for i, n in names:
+        doAssert g.fileField("binary." & n).toFloat == float64(1000 * (i + 1) + 7), what & " " & n
+    proc fileBytes(path: string): string = readFile(path)
+    let x = @[1'f32, 2, 3, 4]
+    var k = initTraceKeys()
+    k.intervalUs = 2000
+    for (major, minor) in [(0, 0), (1, 0), (2, 1)]:
+      let r = SegyRevision(major: uint8(major), minor: uint8(minor))
+      let tag = "rev" & $major & $minor
+      # From options (keys path).
+      let a = tmp / (tag & "_opts.sgy")
+      var w = openSeismicWriter(a, SegyOutputOptions(revision: r, traceSorting: 3,
+        binaryOverrides: ovs()))
+      w.writeTrace(k, x)
+      discard w.close()
+      var g = openSeismic(a)
+      g.check(tag & " options")
+      g.close()
+      # Like a SEG-Y file (template path), copying that file's headers.
+      let base = tmp / (tag & "_base.sgy")
+      var wb = openSeismicWriter(base, SegyOutputOptions(revision: r))
+      wb.writeTrace(k, x)
+      discard wb.close()
+      var f = openSeismic(base)
+      let b = tmp / (tag & "_like.sgy")
+      var wl = openSeismicWriter(b, like = f, binaryOverrides = ovs())
+      wl.writeTrace(f, 0, f.readTraces(0 ..< 1), 0)
+      discard wl.close()
+      var h = openSeismic(b)
+      h.check(tag & " like")
+      doAssert h.readTraces(0 ..< 1) == f.readTraces(0 ..< 1)
+      h.close()
+      # No overrides, or overrides that set what is there: the same bytes.
+      let c = tmp / (tag & "_plain.sgy")
+      var wc = openSeismicWriter(c, like = f)
+      wc.writeTrace(f, 0, f.readTraces(0 ..< 1), 0)
+      discard wc.close()
+      let d = tmp / (tag & "_same.sgy")
+      var wd = openSeismicWriter(d, like = f, binaryOverrides = [
+        headerOverride("binary.jobId", 0), headerOverride("binary.sweepLength", 0)])
+      wd.writeTrace(f, 0, f.readTraces(0 ..< 1), 0)
+      discard wd.close()
+      doAssert fileBytes(c) == fileBytes(d), tag & " like bytes"
+      let e = tmp / (tag & "_plain_opts.sgy")
+      var we = openSeismicWriter(e, SegyOutputOptions(revision: r))
+      we.writeTrace(k, x)
+      discard we.close()
+      doAssert fileBytes(e) == fileBytes(base), tag & " options bytes"
+      let e2 = tmp / (tag & "_same_opts.sgy")
+      var we2 = openSeismicWriter(e2, SegyOutputOptions(revision: r,
+        binaryOverrides: @[headerOverride("binary.jobId", 0)]))
+      we2.writeTrace(k, x)
+      discard we2.close()
+      doAssert fileBytes(e2) == fileBytes(base), tag & " options same bytes"
+      # A revision change: applied to the rewritten header.
+      if major < 2:
+        var wr = openSeismicWriterBytes(f, segyRevision = some(SegyRevision(major: 2, minor: 1)),
+          binaryOverrides = ovs())
+        wr.writeTrace(f, 0, f.readTraces(0 ..< 1), 0)
+        let bytes = wr.finishBytes()
+        doAssert bytes.len > 3600
+      f.close()
+
+    # Refusals: before any file is created.
+    let refused = tmp / "refused_binary.sgy"
+    proc refusedBy(o: HeaderOverride, rev = SegyRevision(major: 2, minor: 1)) =
+      doAssertRaises(ValueError):
+        discard openSeismicWriter(refused, SegyOutputOptions(revision: rev,
+          binaryOverrides: @[o]))
+      doAssert not fileExists(refused)
+    for n in ["samplesPerTrace", "formatCode", "extSamplesPerTrace", "byteOrderMarker",
+        "segyMajor", "segyMinor", "fixedLengthTraces", "numExtTextHeaders",
+        "maxAddlTraceHeaders", "numTraces", "firstTraceOffset", "numTrailerRecords",
+        "sampleInterval", "sampleIntervalOrig", "extSampleInterval", "extSampleIntervalOrig"]:
+      refusedBy headerOverride("binary." & n, 1)
+    refusedBy headerOverride("binary.nope", 1)
+    refusedBy headerOverride("jobId", 1)
+    refusedBy headerOverride("trace.jobId", 1)
+    refusedBy headerOverride("binary.ensembleFold", 40000)
+    refusedBy headerOverride("binary.jobId", "abc")
+    refusedBy headerOverride("binary.sweepLength", 1.5)
+    refusedBy headerOverride("binary.extEnsembleFold", 1), SegyRevision(major: 0, minor: 0)
+    refusedBy headerOverride("binary.timeBasisCode", 1), SegyRevision(major: 1, minor: 0)
+    # Rev 2 holds its own fields.
+    var w2 = openSeismicWriter(tmp / "rev2fields.sgy", SegyOutputOptions(binaryOverrides: @[
+      headerOverride("binary.extEnsembleFold", 70000), headerOverride("binary.timeBasisCode", 4)]))
+    w2.writeTrace(k, x)
+    discard w2.close()
+    var g2 = openSeismic(tmp / "rev2fields.sgy")
+    doAssert g2.fileField("binary.extEnsembleFold").toFloat == 70000
+    doAssert g2.fileField("binary.timeBasisCode").toFloat == 4
+    g2.close()
+    # Like: the same refusals, on a SEG-Y file, and none for another standard.
+    var f = openSeismic(tmp / "rev00_base.sgy")
+    doAssertRaises(ValueError):
+      discard openSeismicWriter(refused, like = f, binaryOverrides = [headerOverride(
+        "binary.sampleInterval", 1)])
+    doAssertRaises(ValueError):
+      discard openSeismicWriter(refused, like = f, binaryOverrides = [headerOverride(
+        "binary.extEnsembleFold", 1)])
+    f.close()
+    # The revision the output is written in decides which fields exist.
+    f = openSeismic(tmp / "rev21_base.sgy")
+    doAssertRaises(ValueError):
+      discard openSeismicWriter(refused, like = f, binaryOverrides = [headerOverride(
+        "binary.extEnsembleFold", 1)], segyRevision = some(SegyRevision(major: 1, minor: 0)))
+    doAssert not fileExists(refused)
+    f.close()
+    var sd = openSeismic(demoDir() / "record.sgd", keys = true)
+    doAssertRaises(ValueError):
+      discard openSeismicWriter(refused, like = sd, binaryOverrides = [headerOverride(
+        "binary.jobId", 1)])
+    doAssert not fileExists(refused)
+    sd.close()
+
   echo "twriteoverrides: ok"
 
 when isMainModule: main()
