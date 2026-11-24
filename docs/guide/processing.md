@@ -215,6 +215,15 @@ hold, or a fixed-length count or interval that does not fit, is a `ValueError` b
 file exists; what is dropped is listed by `revisionNotes`. A non-SEG-Y file does not take
 `segyRevision`.
 
+`binaryOverrides = [headerOverride("binary.jobId", 7)]` sets named fields of the SEG-Y
+binary file header (after any revision change), written exactly; `SegyOutputOptions` has the
+same field for a file made from keys. A field that sizes the file or names the revision
+(`samplesPerTrace`, `formatCode`, `numTraces`, `segyMajor`, ...), the sample interval fields
+the writer sets (`sampleInterval`, `extSampleInterval`), an unknown name, a value out
+of range, a Rev 2 field in a Rev 0 or 1 output, or a 16-bit field whose set Rev 2 extended
+twin would hide it is a `ValueError` before any file exists.
+A non-SEG-Y `like` does not take `binaryOverrides`.
+
 Failures raise, and a failed output never appears under its name: `close` returns the
 writer's warnings and raises for everything else (a full disk shows at the latest there, as
 `IOError`), and a `writeTrace` that raised `IOError` has already discarded the output and

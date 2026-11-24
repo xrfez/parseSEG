@@ -75,9 +75,11 @@ not where it is:
 - **Writing a field.** `setVendorField` puts one named field (`name[i]` in a repeat) into a
   block's bytes, `clearVendorField` writes its `sentinel`. Both choose the map and target as
   `decode` does, invert `scale` and `offset`, change only the field's own bytes (or nibbles)
-  and raise `ValueError` (bytes unchanged) for an unknown field, a false `(when)`, a value
-  that does not fit or equals the sentinel, a repeat element `decode` would not show, and
-  `ibm32`/`fixedpt` fields, which are not written yet.
+  and leave the bytes unchanged when they raise. A map that does not apply, or a field not
+  decoded in that area (unknown, a false `(when)`, past the end of the area, a repeat element
+  `decode` would not show), raises `VendorFieldAbsentError` (a `ValueError`). A bad value (it
+  does not fit or equals the sentinel) and `ibm32`/`fixedpt` fields, which are not written
+  yet, raise plain `ValueError`.
 - **Fields by name.** `vendorFieldNames(reg, ctx)` lists the fields of the maps that apply
   (name, kind, unit, whether it has enum labels, record or trace level, whether it is a
   repeat's) in map, target, field order. A field is addressed by its bare name when no other
@@ -88,12 +90,14 @@ not where it is:
   headers by name), chooses the map per block as `decodeAll` does (most specific, first on a
   tie), tests the field's `(when)` conditions and reads only that field, so a numeric field costs
   no allocation per trace (about 30 ns a trace, 100k traces in 3 ms in a release build). Absent
-  values (a failed `(when)`, the sentinel, a missing or short block, a record no map applies to)
-  are NaN, or "" for text, and counted. A record-level field gives its record's value for each
-  of its traces, read the same way from the record's areas in decode order. Each address reads
-  its own target's field: two targets without `match` on one block give one decoded block,
-  and a field name both have is read from the target the address names. A trace or record
-  reads the first block its target is for, as decode's first block of that name.
+  values (a failed `(when)`, the sentinel, a missing or short block, a record no map applies to,
+  a block whose chosen map gives the field another kind or level, which also marks the column
+  `mixed`) are NaN, or "" for text, and counted. A record-level field gives its record's value
+  for each of its traces, read the same way from the record's areas in decode order. Each
+  address reads its own target's field: two targets without `match` on one block give one
+  decoded block, and a field name both have is read from the target the address names. A
+  trace or record reads the first block its target is for, as decode's first block of that
+  name.
   `vendorColumnInt` keeps an unscaled integer exact with a `present` flag per trace. Code
   decoders have no field plans and are not consulted; a map's `(layout)` entries are keys
   (`OpenOptions.vendors`), not vendor fields, and are not listed.

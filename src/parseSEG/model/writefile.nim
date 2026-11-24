@@ -44,6 +44,8 @@
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
 ## source trace's headers and its own CDP, fold, offset and coordinates.
+## SEG-D overrides named `vendor.<field>` set a field of a vendor header map
+## in the trace's extension blocks (`useVendorMaps`; `HeaderOverride`).
 ##
 ## `writeTrace(w, src, trace, samples, keys)` writes the geometry of `keys`
 ## into the template's headers first, where it differs from what they hold:
@@ -85,6 +87,10 @@
 ## new format sets the format code and, for Rev 3, the General Header #3 data
 ## and record sizes. Multiplexed SEG-D input is refused (convert it first).
 ##
+## `startSubset` writes a record from some of one source record's traces
+## instead: its channel set counts, a changed set's sample count and end time,
+## the record length and the Rev 3 sizes follow the traces kept.
+##
 ## The output goes to a temporary file next to `path`, renamed when `close`
 ## succeeds. A writer dropped without `close`, or whose `close` raises,
 ## leaves no output file; nor does one whose `writeTrace` raised `IOError`
@@ -101,6 +107,7 @@ import ../io/[records, diskio, memsink]
 import ../segy/[reader as segyreader, writer as segywriter, binheader, traceheader,
   samples as segysamples, textheader, exttext]
 import ../segd/[reader as segdreader, writer as segdwriter]
+import ../vendor/apply as vendorapply
 import ../seg2/[reader as seg2reader, writer as seg2writer]
 import ../convert
 import std/strutils
@@ -120,8 +127,37 @@ type
     name*: string
       ## `trace.<field>` or `ext1.<field>`, with the field names of the
       ## header types (as `HeaderEditor.setTraceField`); SEG-2:
-      ## `trace.<KEYWORD>`, a trace string.
+      ## `trace.<KEYWORD>`, a trace string. SEG-D: `vendor.<field>`, a field
+      ## of a vendor header map in the trace's extension blocks (see
+      ## `useVendorMaps`); an integer value (`fvInt`) is passed exactly.
+      ## The binary file header of a SEG-Y output (`SegyOutputOptions.binaryOverrides`,
+      ## `binaryOverrides` of the like SEG-Y writers): `binary.<field>`.
     value*: FieldValue ## The value as stored (SEG-Y: before its scalar).
+
+  SubsetPatch* = object
+    ## What a subset record (`startSubset`) changes of its source record's
+    ## identity; the defaults keep the source's.
+    fileNumber*: int64 = -1
+      ## The file number, 0..16777215 (-1 keeps it). It goes into General
+      ## Header #1 (BCD up to 9999, else `FFFF` and the extended number),
+      ## General Header #2 and the source headers' extended numbers, each
+      ## trace header, and, in Rev 3, the file number of the Source
+      ## Description blocks.
+    time*: float64 = NaN
+      ## The record's time, UTC POSIX seconds, 1950 to 2049 (NaN keeps it).
+      ## General Header #1 holds whole seconds (the fraction is dropped there).
+      ## Rev 3: General Header #3's time zero is `time` to the microsecond,
+      ## and a trace's Timestamp block (0x42) is the instant of its first
+      ## sample, `time` plus the start time of its channel set. A trace header's
+      ## first timing word and the Rev 3 additional source info's time are left as
+      ## the source's: a caller whose source has a non-zero first timing word must
+      ## override it.
+    headers*: seq[HeaderOverride]
+      ## Record header fields by name, applied before `fileNumber` and `time`:
+      ## `gh1.<field>` (not the file number or the time fields `year`, `julianDay`,
+      ## `hour`, `minute`, `second`: use `fileNumber` and `time`) and, in Rev 2,
+      ## `gh3.<field>`, `gh4.<field>`, ... (the source headers), with the field
+      ## names `recordField` uses. Fields that size the file are refused.
 
   SegyOutputOptions* = object
     ## A SEG-Y file not modelled on an input (`openSeismicWriter(path,
@@ -146,6 +182,13 @@ type
       ## False writes `fullText` untouched. Ignored when `fullText` is empty.
     traceSorting*: int16 = 0 ## Binary 3229-3230: 1 as recorded, 2 CDP ensembles, 4 stack, ...
     measurementSystem*: int16 = 0 ## Binary 3255-3256: 1 metres, 2 feet, 0 unknown.
+    binaryOverrides*: seq[HeaderOverride]
+      ## Further binary file header fields by name, `binary.<field>` (see
+      ## `HeaderOverride`; e.g. `binary.jobId`, `binary.sweepLength`), applied after
+      ## `traceSorting` and `measurementSystem` (which they replace) and written
+      ## exactly. Refused (`ValueError`, before any file is created): fields that size
+      ## the file or that the writer sets from the data or the revision, an unknown
+      ## field, a value outside the field's range and a field the revision lacks.
 
   SegdChannelType* = enum
     ## A Rev 3 channel type (channel set descriptor byte 4). The codes are
@@ -289,6 +332,14 @@ type
     nsLine = "a source line other than the receiver line (SEG-2 has one LINE_ID)"
     nsZ = "an elevation without its location's X/Y"
 
+  SubsetSet = object
+    ## A channel set of a SEG-D record written from some of its traces.
+    scan, chan: int   ## 0-based indexes of its scan type and descriptor.
+    kept: int         ## Traces of the set in the subset.
+    n: int            ## The sample count its traces share; -1 until one is written.
+    srcN: int         ## The source count of its first kept trace.
+    chans: seq[int]   ## The source channel (its place in the set) of each kept trace.
+
   PendingStanza = object
     company, name, contentType: string
     data: seq[byte]
@@ -342,6 +393,20 @@ type
     likeN: int                 ## The count the record's traces must share.
     likeSame: bool             ## Every buffered trace kept its source count.
     likeRec: SegdRecord        ## Headers to write; a new format is already applied.
+    vendor: VendorRegistry     ## From `useVendorMaps`: the maps `vendor.<field>` overrides use.
+    chOpen, chRec, chFirst: int ## The source record `chIdx` was worked out for: the open
+                               ## file (`openId`), its record number and first trace.
+    chIdx: seq[int32]          ## Of each of its traces, the place among those of its channel set.
+    vctx: VendorContext        ## The vendor context of the record being written,
+    vctxKey: string            ## made when an override needs it, for the record `vctxKey` names.
+    subset: seq[int]           ## From `startSubset`: the source traces of the next record.
+    subPath: string            ## That subset's file and `memoryId`.
+    subMem: int
+    subPatch: SubsetPatch      ## The patch of the subset listed, and of its record.
+    likeKept: seq[int]         ## The record in progress is these source traces; empty: whole.
+    likeSets: seq[SubsetSet]   ## Its channel sets with a kept trace.
+    likeSetOf: seq[int]        ## For each kept trace, its index in `likeSets`.
+    likePos: int               ## Kept traces written.
     # SEG-2
     seg2: Seg2Writer
     seg2Format: Option[Seg2SampleFormat] ## none: each trace's own.
@@ -387,9 +452,51 @@ proc splitName(o: HeaderOverride): (string, string) =
 
 proc setOverride[H](h: var H, kind: HeaderBlock, field: string, o: HeaderOverride) =
   if field in structural(kind):
-    refuse(o.name & ": changes the file's structure (sizes or counts); it cannot be overridden")
+    refuse(o.name & (if field == "blockType":
+      ": is the block's type byte, which says what the block is; it cannot be overridden"
+      else: ": changes the file's structure (sizes or counts); it cannot be overridden"))
   var err = ""
   if not setByName(h, field, o.value, err): refuse(o.name & ": " & err)
+
+const
+  binaryDerived = [
+    ("sampleInterval", "the writer sets it from the traces' interval"),
+    ("extSampleInterval", "the writer sets it from the traces' interval")]
+  # Fields only Rev 2 has (the others set by name are in every revision).
+  binaryRev2Only = ["extDataTracesPerEnsemble", "extAuxTracesPerEnsemble",
+    "extSamplesPerTraceOrig", "extSampleIntervalOrig", "extEnsembleFold", "timeBasisCode"]
+
+proc withBinaryOverrides(b: SegyBinaryHeader, rev: SegyRevision,
+    overrides: openArray[HeaderOverride]): SegyBinaryHeader =
+  # `b` with the binary header fields `overrides` (`binary.<field>`) set; a refusal
+  # names the override. The by-name setter alone would take a field of any
+  # revision and write its bytes whatever the revision says.
+  result = b
+  for o in overrides:
+    let (blk, field) = splitName(o)
+    if blk != "binary": refuse(o.name & ": the binary file header's fields are binary.<field>")
+    if field in structural(hbSegyBinary):
+      refuse(o.name & ": changes the file's structure (sizes, counts or the revision); " &
+        "it cannot be overridden")
+    for (name, why) in binaryDerived:
+      if field == name: refuse(o.name & ": " & why & "; it cannot be overridden")
+    if field in binaryRev2Only and rev.major < 2:
+      refuse(o.name & ": is a Rev 2 field, and the output is Rev " & $rev)
+    var err = ""
+    if not setByName(result, field, o.value, err): refuse(o.name & ": " & err)
+  # A Rev 2 extended twin that is set hides its 16-bit field (`effective...`): judged
+  # on the finished header, so the order of the overrides does not matter.
+  for o in overrides:
+    let field = splitName(o)[1]
+    let hidden = rev.major >= 2 and (
+      (field == "dataTracesPerEnsemble" and result.extDataTracesPerEnsemble != 0) or
+      (field == "auxTracesPerEnsemble" and result.extAuxTracesPerEnsemble != 0) or
+      (field == "ensembleFold" and result.extEnsembleFold != 0) or
+      (field == "samplesPerTraceOrig" and result.extSamplesPerTraceOrig != 0) or
+      (field == "sampleIntervalOrig" and usableExtInterval(result.extSampleIntervalOrig)))
+    if hidden:
+      refuse(o.name & ": the extended field binary.ext" & toUpperAscii(field[0]) &
+        field[1 .. ^1] & " is set and overrides it; set that one instead")
 
 method writeRecordImpl(s: NullSink; data: openArray[byte]) {.raises: [].} =
   s.offset += data.len
@@ -503,7 +610,7 @@ proc fillFullText(h: var SegyTextHeader, lines: openArray[string], rev: SegyRevi
     h.setCard(40, endCard())
 
 proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat,
-    fullText: seq[string], fixCards: bool) =
+    fullText: seq[string], fixCards: bool, binaryOverrides: openArray[HeaderOverride]) =
   var f = if s.segyRevOn: s.segyFile else: like.index.segy
   if not s.segyRevOn:
     let fmt = if format == stKeep: f.format else: some(format.toSampleFormat)
@@ -517,6 +624,7 @@ proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat,
     f.binary.formatCode = int16(ord(fmt.get))
     f.format = fmt
     if fullText.len > 0: fillFullText(f.text, fullText, f.revision, fixCards)
+  f.binary = f.binary.withBinaryOverrides(f.revision, binaryOverrides)
   # The post-rewrite count: 0 when the target cleared it, so `close` does not
   # restore a count that revision does not hold.
   s.segyNumTraces = f.binary.numTraces
@@ -567,9 +675,12 @@ proc prepareLikeRevision(path: string, like: SeismicFile, format: SegyTargetForm
 
 proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTargetFormat,
     segdFormat: SegdTargetFormat, seg2Format: Seg2TargetFormat, fullText: seq[string],
-    fixCards: bool, segyRevision: Option[SegyRevision]): SeismicWriter =
+    fixCards: bool, segyRevision: Option[SegyRevision],
+    binaryOverrides: openArray[HeaderOverride]): SeismicWriter =
   # `openSeismicWriter(path, like)` and `openSeismicWriterBytes(like)`; see there.
   let kind = like.kind
+  if binaryOverrides.len > 0 and kind != skSegy:
+    refuse("binaryOverrides applies only to a SEG-Y like file, not " & $kind)
   if segyRevision.isSome and kind != skSegy:
     refuse("segyRevision applies only to a SEG-Y like file, not " & $kind)
   let changing = kind == skSegy and segyRevision.isSome and
@@ -602,6 +713,10 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
   if changing:
     prepareLikeRevision(path, like, segyFormat, fullText, fixCards, segyRevision.get,
       prepared, rw, revLog)
+  if kind == skSegy:
+    # Refused here, before the output exists; `openSegy` applies them.
+    discard (if changing: prepared else: like.index.segy).binary.withBinaryOverrides(
+      if changing: segyRevision.get else: like.index.segy.revision, binaryOverrides)
   result = SeismicWriter(s: WriterState(kind: kind, path: path, open: true, memory: memory,
     tmp: if memory: "" else: createTempFor(path)))
   if changing:
@@ -612,7 +727,7 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
     result.s.segyFile = prepared
   try:
     case kind
-    of skSegy: result.s.openSegy(like, segyFormat, fullText, fixCards)
+    of skSegy: result.s.openSegy(like, segyFormat, fullText, fixCards, binaryOverrides)
     of skSegd: result.s.openSegd(like, segdFormat)
     of skSeg2:
       if seg2Format != s2tKeep: result.s.seg2Format = toSeg2Format(ord(seg2Format))
@@ -624,7 +739,8 @@ proc openLike(path: string, memory: bool, like: SeismicFile, segyFormat: SegyTar
 
 proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
     segdFormat = tfKeep, seg2Format = s2tKeep, fullText: seq[string] = @[],
-    fixCards = true, segyRevision: Option[SegyRevision] = none(SegyRevision)): SeismicWriter =
+    fixCards = true, segyRevision: Option[SegyRevision] = none(SegyRevision),
+    binaryOverrides: openArray[HeaderOverride] = []): SeismicWriter =
   ## A writer of a file at `path` in `like`'s standard, revision and byte
   ## order, with `like`'s file-level headers (see the module doc). The
   ## sample format is the input's unless `segyFormat`, `segdFormat` or
@@ -650,8 +766,20 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## does not fit is skipped: an error in `revisionNotes`, and it is not
   ## counted. A fixed-length count or interval that does not fit is refused.
   ##
+  ## `binaryOverrides` set named fields of the SEG-Y binary file header
+  ## (`binary.<field>`, e.g. `binary.jobId`), after the revision change and
+  ## written exactly; they apply to a SEG-Y `like` only. Refused: the fields
+  ## that size the file or name the revision (`samplesPerTrace`, `formatCode`,
+  ## `extSamplesPerTrace`, `byteOrderMarker`, `segyMajor`, `segyMinor`,
+  ## `fixedLengthTraces`, `numExtTextHeaders`, `maxAddlTraceHeaders`,
+  ## `numTraces`, `firstTraceOffset`, `numTrailerRecords`), the sample interval
+  ## fields the writer sets (`sampleInterval`, `extSampleInterval`), an unknown
+  ## field, a value outside the field's range, a Rev 2 field when the output is
+  ## Rev 0 or 1, and a 16-bit field whose Rev 2 extended twin is set and would hide it
+  ## (the message names the `binary.ext...` field to set instead).
+  ##
   ## Raises `ValueError` for an unrecognized or
-  ## multiplexed SEG-D `like`, a format for another standard or one the
+  ## multiplexed SEG-D `like`, a refused `binaryOverrides` entry, `binaryOverrides` on a non-SEG-Y `like`, a format for another standard or one the
   ## revision lacks, `path` being `like`'s file, `fullText` on a non-SEG-Y
   ## `like`, a `fullText` that `checkTextHeader` faults for length,
   ## characters or a header the reader would misread, `segyRevision` set on
@@ -663,20 +791,21 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## file headers the writer refuses; `IOError` when the output cannot be
   ## created.
   openLike(path, false, like, segyFormat, segdFormat, seg2Format, fullText, fixCards,
-    segyRevision)
+    segyRevision, binaryOverrides)
 
 proc openSeismicWriterBytes*(like: SeismicFile, name = "memory", segyFormat = stKeep,
     segdFormat = tfKeep, fullText: seq[string] = @[], fixCards = true,
-    segyRevision: Option[SegyRevision] = none(SegyRevision)): SeismicWriter =
+    segyRevision: Option[SegyRevision] = none(SegyRevision),
+    binaryOverrides: openArray[HeaderOverride] = []): SeismicWriter =
   ## `openSeismicWriter(path, like)` that collects the file in memory:
   ## `finishBytes` returns its bytes, and nothing touches the disk. `name`
   ## is the display name in diagnostics and `path`. SEG-Y and SEG-D only
   ## (`ValueError` for SEG-2 `like`: its writer needs a file); otherwise the
   ## same checks and refusals as the file writer, except those about the
-  ## output file. `fullText`, `fixCards` and `segyRevision` are as for the
-  ## file writer. `like` may itself be a file in memory.
+  ## output file. `fullText`, `fixCards`, `segyRevision` and `binaryOverrides` are
+  ## as for the file writer. `like` may itself be a file in memory.
   openLike(name, true, like, segyFormat, segdFormat, s2tKeep, fullText, fixCards,
-    segyRevision)
+    segyRevision, binaryOverrides)
 
 func textCard(s: string): string =
   # A line as card text: printable ASCII only, cut to the card after its prefix.
@@ -719,6 +848,7 @@ proc openNewSegy(path: string, memory: bool, opts: SegyOutputOptions): SeismicWr
     f.binary.maxAddlTraceHeaders = 1
     f.extended.addEndText()
     f.binary.numExtTextHeaders = int16(f.extended.recordCount)
+  f.binary = f.binary.withBinaryOverrides(rev, opts.binaryOverrides)
   result = SeismicWriter(s: WriterState(kind: skSegy, path: path,
     tmp: if memory: "" else: createTempFor(path),
     open: true, memory: memory, segyFresh: true, segyCount: -1))
@@ -742,8 +872,8 @@ proc openSeismicWriter*(path: string, opts: SegyOutputOptions): SeismicWriter =
   ## (8-byte and 3-byte formats need Rev 2), a 3-byte format pair-swapped,
   ## a byte order other than big-endian before Rev 2, or a revision other
   ## than 0, 1, 2.0 or 2.1, or a `fullText` that `checkTextHeader` faults
-  ## for length, characters or a header the reader would misread (before any
-  ## file is created); `IOError` when the output cannot be created.
+  ## for length, characters or a header the reader would misread, or a
+  ## refused `binaryOverrides` entry (before any file is created); `IOError` when the output cannot be created.
   openNewSegy(path, false, opts)
 
 proc openSeismicWriterBytes*(opts: SegyOutputOptions, name = "memory"): SeismicWriter =
@@ -1128,6 +1258,18 @@ proc setRev3RecordLength(rec: var SegdRecord, us: int64, recNo: int, path: strin
 proc setName(scan, ch: int): string =
   "channel set " & $ch & " of scan type " & $scan
 
+proc setLabel(rec: SegdRecord, i, j: int): string =
+  # A channel set by its own numbers, as `applySegdCount` names it.
+  case rec.layout
+  of slRev2:
+    let c = rec.scanTypes[i].descriptors[j]
+    setName(if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1,
+      if c.channelSetNumber > 0: c.channelSetNumber else: j + 1)
+  of slRev3:
+    let c = rec.scanTypes[i].descriptorsRev3[j]
+    setName(if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1,
+      if c.channelSetNumber > 0: int(c.channelSetNumber) else: j + 1)
+
 proc setRev2End(c: var SegdChannelSetDescriptor, g1: SegdGeneralHeader1, n: int,
     which: string) =
   # End time is an exact multiple of 2 ms: start + n * BSI / (32 * 2^exp).
@@ -1226,10 +1368,141 @@ proc noteRev3Sizes(rec: var SegdRecord, traces: openArray[SegdTrace]) =
   if rec.gh3.recordSize != 0:
     rec.gh3.recordSize = uint64(data + int64(rec.trailerRev3.len))
 
+proc rebuildSkew(rec: var SegdRecord, sets: openArray[SubsetSet]) =
+  # Rev 2 skew blocks hold one byte per channel and subscan of each channel set, in
+  # scan order. A kept channel keeps its own byte; the blocks are as many as
+  # the longest scan type needs.
+  if rec.layout != slRev2 or rec.gh1.skewBlocks <= 0 or rec.gh1.skewBlocks == BcdAllF:
+    return
+  var dropped = false
+  for ss in sets:
+    if ss.kept != max(rec.scanTypes[ss.scan].descriptors[ss.chan].channelCount, 0):
+      dropped = true
+  for i in 0 ..< rec.scanTypes.len:
+    for j in 0 ..< rec.scanTypes[i].descriptors.len:
+      var any = false
+      for ss in sets:
+        if ss.scan == i and ss.chan == j: any = true
+      if not any and rec.scanTypes[i].descriptors[j].channelCount > 0: dropped = true
+  if not dropped: return
+  var fresh = newSeq[seq[byte]](rec.scanTypes.len)
+  var most = 0
+  for i in 0 ..< rec.scanTypes.len:
+    var at = 0
+    for j in 0 ..< rec.scanTypes[i].descriptors.len:
+      let c = rec.scanTypes[i].descriptors[j]
+      let subs = 1 shl (if c.subscanExponent in 0..9: c.subscanExponent else: 0)
+      let have = max(c.channelCount, 0)
+      var kept: seq[int] = @[]
+      for ss in sets:
+        if ss.scan == i and ss.chan == j: kept = ss.chans
+      for sub in 0 ..< subs:
+        for ch in kept:
+          let from1 = at + sub * have + ch
+          fresh[i].add(if ch < have and from1 < rec.scanTypes[i].skew.len:
+            rec.scanTypes[i].skew[from1] else: 0'u8)
+      at += subs * have
+    most = max(most, (fresh[i].len + SegdBlockSize - 1) div SegdBlockSize)
+  for i in 0 ..< rec.scanTypes.len:
+    fresh[i].setLen most * SegdBlockSize
+    rec.scanTypes[i].skew = fresh[i]
+  rec.gh1.skewBlocks = most
+
+proc applySubset(rec: var SegdRecord, sets: openArray[SubsetSet], recNo: int,
+    path: string) =
+  # Headers a subset changes: each channel set's channel count (0 when no kept
+  # trace is in it), the Rev 2 skew bytes, the end time of a set whose count
+  # changed, and, when an end time changed or a set emptied, the record
+  # length. A set whose count is not known yet (-1) keeps its own. The
+  # caller passes a copy.
+  var recompute = false
+  var longest = low(int64)
+  template find(i, j: int): int =
+    var at = -1
+    for k in 0 ..< sets.len:
+      if sets[k].scan == i and sets[k].chan == j: at = k
+    at
+  for ss in sets:
+    if ss.n == 0: refuse(segdRec(recNo, path) & ": a sample count of 0 cannot be written")
+    if ss.n > 0 and ss.n != ss.srcN: recompute = true
+  rebuildSkew(rec, sets)
+  case rec.layout
+  of slRev2:
+    for i in 0 ..< rec.scanTypes.len:
+      for j in 0 ..< rec.scanTypes[i].descriptors.len:
+        let c = addr rec.scanTypes[i].descriptors[j]
+        let at = find(i, j)
+        if at < 0:
+          if c.channelCount > 0: recompute = true
+          c.channelCount = 0
+        else:
+          c.channelCount = sets[at].kept
+          if sets[at].n > 0 and sets[at].n != sets[at].srcN:
+            setRev2End(c[], rec.gh1, sets[at].n, segdRec(recNo, path) & ", " &
+              setLabel(rec, i, j))
+    for s in rec.scanTypes:
+      for c in s.descriptors:
+        if c.channelCount > 0: longest = max(longest, int64(c.endTime) * 2)
+  of slRev3:
+    for i in 0 ..< rec.scanTypes.len:
+      for j in 0 ..< rec.scanTypes[i].descriptorsRev3.len:
+        let c = addr rec.scanTypes[i].descriptorsRev3[j]
+        let at = find(i, j)
+        if at < 0:
+          if c.channelsInSet > 0: recompute = true
+          c.channelsInSet = 0
+        else:
+          c.channelsInSet = uint32(sets[at].kept)
+          if sets[at].n > 0 and sets[at].n != sets[at].srcN:
+            setRev3End(c[], sets[at].n, segdRec(recNo, path) & ", " & setLabel(rec, i, j))
+    for k in 0 ..< sets.len:
+      # The trace length, whether the count changed or not: a set that starts
+      # at a negative time ends before its traces do.
+      let c = rec.scanTypes[sets[k].scan].descriptorsRev3[sets[k].chan]
+      let n = if sets[k].n > 0: sets[k].n else: sets[k].srcN
+      longest = max(longest, max(int64(n) * int64(c.samplingInterval), int64(c.endTime)))
+  if recompute:
+    case rec.layout
+    of slRev2: setRev2RecordLength(rec, int(longest), recNo, path)
+    of slRev3: setRev3RecordLength(rec, longest, recNo, path)
+
+proc dropRecord(s: var WriterState) =
+  # Forgets the record in progress and a pending subset. Nothing of a record
+  # is written before it ends, so nothing is on disk.
+  s.written -= s.likeTraces.len
+  s.likeTraces.setLen 0
+  s.inRecord = false
+  s.subset.setLen 0
+  s.likeKept.setLen 0
+  s.likeSets.setLen 0
+  s.likeSetOf.setLen 0
+  s.likePos = 0
+  s.likeN = 0
+  s.likeSame = true
+
 proc finishRecord(s: var WriterState) =
   # The like: path buffers a record so a later count mismatch can be refused
   # before any byte of it is written. Headers go out only when it is complete.
   if not s.inRecord: return
+  if s.likeKept.len > 0:
+    if s.likePos != s.likeKept.len:
+      refuse("SEG-D record " & $s.recIndex & " of " & s.recPath & " is incomplete: " &
+        $s.likePos & " of the " & $s.likeKept.len & " traces of its subset were written")
+    var rec = s.likeRec
+    applySubset(rec, s.likeSets, s.recIndex, s.recPath)
+    if rec.isRev3: noteRev3Sizes(rec, s.likeTraces)
+    s.segd.writeRecordHeaders(rec)
+    for t in s.likeTraces: s.segd.writeTrace(t)
+    s.segd.endRecord()
+    s.inRecord = false
+    s.likeTraces.setLen 0
+    s.likeKept.setLen 0
+    s.likeSets.setLen 0
+    s.likeSetOf.setLen 0
+    s.likePos = 0
+    s.likeN = 0
+    s.likeSame = true
+    return
   if s.nextTrace != s.recLast + 1:
     refuse("SEG-D record " & $s.recIndex & " of " & s.recPath & " is incomplete: traces " &
       $s.recFirst & ".." & $(s.nextTrace - 1) & " of " & $s.recFirst & ".." & $s.recLast &
@@ -1298,7 +1571,227 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace, n: int, t: SegdTra
   s.nextTrace = trace
   s.recFormat = fOut
 
-proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
+const TimestampBlockType = 0x42'u8
+
+func isSourceBlock(b: uint8): bool {.inline.} = b in 0x15'u8 .. 0x19'u8 or b == 0x1F'u8
+
+proc patchBlocks(bytes: var seq[byte], fileNo: int64, gps: int64) =
+  # Rev 3 header blocks of 32 bytes: a Source Description holds the file number,
+  # a Timestamp the instant of the first sample. Negative values keep.
+  var a = 0
+  while a + SegdBlockSize <= bytes.len:
+    let kind = bytes[a + SegdBlockSize - 1]
+    if fileNo >= 0 and isSourceBlock(kind):
+      var b = decodeBlock[SegdSourceDescription](bytes.toOpenArray(a, a + SegdBlockSize - 1))
+      b.extFileNumber = uint32(fileNo)
+      let e = b.encoded
+      for q in 0 ..< SegdBlockSize: bytes[a + q] = e[q]
+    elif gps != low(int64) and kind == TimestampBlockType:
+      var b = decodeBlock[SegdTimestampHeader](bytes.toOpenArray(a, a + SegdBlockSize - 1))
+      b.timeZeroOfData = gps
+      let e = b.encoded
+      for q in 0 ..< SegdBlockSize: bytes[a + q] = e[q]
+    a += SegdBlockSize
+
+proc applyRecordPatch(rec: var SegdRecord, p: SubsetPatch) =
+  # The record's headers with the patch; ValueError for a name or a value that does not fit.
+  if p.fileNumber < -1 or p.fileNumber > 0xFF_FFFF:
+    refuse("a file number of " & $p.fileNumber & " does not fit: 0..16777215, or -1 to keep")
+  if not p.time.isNaN: checkRecordingTime(p.time, "the subset's time")
+  for o in p.headers:
+    let (blk, field) = splitName(o)
+    let digits = if blk.len > 2 and blk.startsWith("gh"): blk[2 .. ^1] else: ""
+    let num = if digits.len in 1 .. 6 and digits.allCharsInSet({'0' .. '9'}): parseInt(digits)
+      else: -1
+    if blk == "gh1":
+      if field in ["fileNumber", "year", "julianDay", "hour", "minute", "second"]:
+        refuse(o.name & ": the file number and the time are set with SubsetPatch.fileNumber " &
+          "and SubsetPatch.time, which change every place that holds them")
+      rec.gh1.setOverride(hbSegdGh1, field, o)
+    elif rec.layout == slRev2 and num >= 3 and num - 3 < rec.sourceHeaders.len:
+      rec.sourceHeaders[num - 3].setOverride(hbSegdGhN, field, o)
+    else:
+      refuse(o.name & ": the record fields are gh1 and, in Rev 2, the source headers gh3, gh4, ...")
+  if p.headers.len > 0:
+    # A value that a field cannot hold (a BCD field of too few digits) comes back changed.
+    template holds(h, what: untyped) =
+      try:
+        let e = h.encoded
+        var back = decodeBlock[typeof(h)](e)
+        back.raw = h.raw
+        if back != h: refuse("a header value does not fit its field in " & what)
+      except SegFormatError as err:
+        refuse("a header value does not fit its field in " & what & ": " & err.msg)
+    holds(rec.gh1, "General Header #1")
+    if rec.layout == slRev2:
+      for h in rec.sourceHeaders: holds(h, "a source header")
+  if p.fileNumber >= 0:
+    let n = p.fileNumber
+    rec.gh1.fileNumber = if n < 10000: int(n) else: BcdAllF
+    case rec.layout
+    of slRev2:
+      if rec.gh2.isSome:
+        var g = rec.gh2.get
+        g.extFileNumber = uint32(n)
+        rec.gh2 = some(g)
+      for h in rec.sourceHeaders.mitems: h.extFileNumber = uint32(n)
+    of slRev3:
+      rec.gh2Rev3.extFileNumber = uint32(n)
+      patchBlocks(rec.generalBlocks, n, low(int64))
+  if not p.time.isNaN:
+    let civil = fromUnix(int64(floor(p.time))).utc
+    rec.gh1.year = civil.year mod 100
+    rec.gh1.julianDay = civil.yearday + 1
+    rec.gh1.hour = civil.hour
+    rec.gh1.minute = civil.minute
+    rec.gh1.second = civil.second
+    if rec.layout == slRev3: rec.gh3.timeZero = unixToTimestamp(p.time)
+
+proc applyTracePatch(t: var SegdTrace, p: SubsetPatch, startUs: int64) =
+  # The trace with the patch: its file number, and in Rev 3 its Timestamp block.
+  if p.fileNumber >= 0:
+    t.header.fileNumber = if p.fileNumber < 10000: int(p.fileNumber) else: BcdAllF
+    t.header.extFileNumber = uint32(p.fileNumber)
+  let gps = if p.time.isNaN: low(int64) else: unixToTimestamp(p.time) + startUs
+  if t.layout == slRev3: patchBlocks(t.extensions, p.fileNumber, gps)
+
+proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
+  # Starts the record of the traces `startSubset` listed, at its first.
+  if src.path != s.subPath or src.memoryId != s.subMem:
+    refuse("the subset was listed for " & s.subPath & ", not " & src.path)
+  if trace != s.subset[0]:
+    refuse("the subset starts with trace " & $s.subset[0] & ", not trace " & $trace)
+  template entries: untyped = src.index.entries
+  let r = int(entries[trace].record)
+  var rec = src.index.segdRecords[r]
+  if rec.format.isNone:
+    refuse("SEG-D record " & $r & " has the undefined format code " & $rec.gh1.formatCode)
+  let fOut = s.segdFormat.get(rec.format.get)
+  if not fOut.definedIn(rec.revision):
+    refuse("SEG-D format " & $ord(fOut) & " is not defined in Rev " & $rec.revision &
+      " (record " & $r & ")")
+  var sets: seq[SubsetSet] = @[]
+  var setOf: seq[int] = @[]
+  # Each kept trace's channel: its place among the record's traces of its set. Only a
+  # Rev 2 skew rebuild reads it; the walk over the record is kept for the next subset.
+  let wantChans = rec.layout == slRev2 and rec.gh1.skewBlocks in 1 .. 98
+  if wantChans and not (s.chOpen == src.openId and s.chRec == r and s.chIdx.len > 0):
+    var first = trace
+    while first > 0 and int(entries[first - 1].record) == r: dec first
+    var counts: seq[tuple[key, n: int]] = @[]
+    s.chIdx.setLen 0
+    var at0 = first
+    while at0 < entries.len and int(entries[at0].record) == r:
+      let key = int(entries[at0].scanType) * 65536 + entries[at0].channelSet.int
+      var c = -1
+      for q in 0 ..< counts.len:
+        if counts[q].key == key: c = q
+      if c < 0:
+        counts.add (key: key, n: 0)
+        c = counts.high
+      s.chIdx.add int32(counts[c].n)
+      inc counts[c].n
+      inc at0
+    s.chOpen = src.openId
+    s.chRec = r
+    s.chFirst = first
+  for pos, k in s.subset:
+    let e = entries[k]
+    let (st, cs) = (int(e.scanType), e.channelSetIndex)
+    let known = st >= 0 and st < rec.scanTypes.len and cs >= 0 and
+      cs < (if rec.layout == slRev2: rec.scanTypes[st].descriptors.len
+        else: rec.scanTypes[st].descriptorsRev3.len)
+    if not known: refuse("trace " & $k & " of " & src.path & " has no known channel set")
+    var at = -1
+    for i in 0 ..< sets.len:
+      if sets[i].scan == st and sets[i].chan == cs: at = i
+    if at < 0:
+      sets.add SubsetSet(scan: st, chan: cs, n: -1, srcN: int(e.numSamples))
+      at = sets.high
+    inc sets[at].kept
+    sets[at].chans.add(if wantChans: int(s.chIdx[k - s.chFirst]) else: 0)
+    setOf.add at
+  if fOut != rec.format.get:
+    rec.gh1.formatCode = ord(fOut)
+    rec.format = some(fOut)
+  rec.applyRecordPatch(s.subPatch)
+  s.likeRec = rec
+  s.vctxKey = ""
+  s.likeSets = sets
+  s.likeSetOf = setOf
+  s.likeKept = s.subset
+  s.subset.setLen 0
+  s.likePos = 0
+  s.likeN = 0
+  s.likeSame = false
+  s.likeTraces.setLen 0
+  s.inRecord = true
+  s.recPath = src.path
+  s.recMem = src.memoryId
+  s.recIndex = r
+  s.recFirst = s.likeKept[0]
+  s.recLast = s.likeKept[^1]
+  s.nextTrace = s.recFirst
+  s.recFormat = fOut
+
+const NoVendorMaps = VendorRegistry()
+
+proc vendorOverride(t: var SegdTrace, o: HeaderOverride, field: string,
+    reg: VendorRegistry, ctx: VendorContext) =
+  # Writes a vendor map field into the trace's extension blocks: the first block
+  # (Rev 2: by extension number from 2; Rev 3: by type byte) where it applies.
+  if reg.maps.len == 0: refuse(o.name & ": no vendor maps are set: vendor overrides need a writer opened like " &
+    "a SEG-D file (openSeismicWriter(path, like = f)) and useVendorMaps")
+  let v = case o.value.kind
+    of fvInt: VendorValue(kind: vvInt, intVal: o.value.intVal)
+    of fvFloat: VendorValue(kind: vvFloat, floatVal: o.value.floatVal)
+    of fvText: VendorValue(kind: vvText, text: o.value.text)
+  var why: seq[string]
+  var done = false
+  var at = 0
+  var k = 0
+  while not done and at + SegdBlockSize <= t.extensions.len:
+    var span = SegdBlockSize
+    var area = VendorArea(kind: vtTraceExt, blockIndex: -1, blockType: -1, extIndex: k + 2)
+    if t.layout == slRev3:
+      let ty = t.extensions[at + 31]
+      area = VendorArea(kind: vtBlock, blockIndex: -1, blockType: int(ty),
+        where: "traceHeader", extIndex: -1)
+      if ty == BlockTypePosition1 and at + 96 <= t.extensions.len and
+          t.extensions[at + 63] == BlockTypePosition2 and
+          t.extensions[at + 95] == BlockTypePosition3:
+        span = 3 * SegdBlockSize
+    try:
+      reg.setVendorField(ctx, area, t.extensions.toOpenArray(at, at + span - 1), field, v)
+      done = true
+    except VendorFieldAbsentError as e:
+      if e.msg notin why: why.add e.msg
+    except ValueError as e:
+      # The field is decoded here: a value that does not fit is refused, not tried elsewhere.
+      refuse(o.name & ": " & e.msg)
+    at += span
+    inc k
+  if not done:
+    refuse(o.name & ": " & (if why.len == 0: "the trace has no extension blocks"
+      else: why.join("; ")))
+
+func hasVendorOverride(overrides: openArray[HeaderOverride]): bool =
+  for o in overrides:
+    if o.name.startsWith("vendor."): return true
+
+proc ensureVendorContext(s: var WriterState, key: string, rec: SegdRecord) =
+  # The context `(when (record ...))` reads, for the record as it will be written
+  # (the source headers as encoded, after a subset's patch); made once per record.
+  if s.vctxKey != key:
+    let blocks = s.vendor.usesRecordBlocks
+    s.vctx = vendorContext(rec, blocks)
+    if blocks and rec.layout == slRev2:
+      s.vctx.general.setLen 0
+      for g in rec.sourceHeaders: s.vctx.general.add g.encoded
+    s.vctxKey = key
+
+proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride],
+    reg: VendorRegistry = NoVendorMaps, ctx: VendorContext = VendorContext()) =
   for o in overrides:
     let (blk, field) = splitName(o)
     case blk
@@ -1315,7 +1808,21 @@ proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
         var x = t.ext1Rev3.get
         x.setOverride(hbSegdExt1Rev3, field, o)
         t.ext1Rev3 = some(x)
-    else: refuse(o.name & ": SEG-D trace blocks are trace and ext1")
+    of "vendor": t.vendorOverride(o, field, reg, ctx)
+    of "timestamp":
+      # Rev 3: the Timestamp block's fields, e.g. the instant of the first sample.
+      var at = -1
+      var a = 0
+      while at < 0 and t.layout == slRev3 and a + SegdBlockSize <= t.extensions.len:
+        if t.extensions[a + SegdBlockSize - 1] == TimestampBlockType: at = a
+        a += SegdBlockSize
+      if at < 0: refuse(o.name & ": the trace has no Timestamp block")
+      var x = decodeBlock[SegdTimestampHeader](
+        t.extensions.toOpenArray(at, at + SegdBlockSize - 1))
+      x.setOverride(hbSegdTimestamp, field, o)
+      let e = x.encoded
+      for q in 0 ..< SegdBlockSize: t.extensions[at + q] = e[q]
+    else: refuse(o.name & ": SEG-D trace blocks are trace, ext1, vendor and (Rev 3) timestamp")
 
 proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
@@ -1335,37 +1842,86 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   var t: SegdTrace
   withTemplateHeaders(s, src, trace, SegdTraceHeaderSize, keys, fields, h):
     t = loadSegdTrace(src, trace, src.index.segdRecords[r], h)
-  t.overrideSegd(overrides)
+  # A finished subset record ends when a trace that starts a record comes.
+  if s.subset.len == 0 and s.likeKept.len > 0 and s.likePos == s.likeKept.len and
+      (trace == 0 or int(src.index.entries[trace - 1].record) != r):
+    s.finishRecord()
+  # A subset's traces take the record's patch first, then the overrides.
+  if s.subset.len == 0 and s.likeKept.len == 0:
+    if overrides.hasVendorOverride:
+      s.ensureVendorContext($src.openId & ":" & $r, src.index.segdRecords[r])
+    t.overrideSegd(overrides, s.vendor, s.vctx)
+  let begun = s.subset.len > 0
+  if begun: s.beginSubset(src, trace)
   let sameRec = s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and
     s.recIndex == r
   var flip = false
-  if sameRec:
-    if trace != s.nextTrace:
-      refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
-        " (a record's traces are written in input order)")
-    if n != s.likeN and not (s.likeSame and n == srcN):
-      refuse(segdRec(r, src.path) & " has " & $s.likeN & " samples; trace " & $trace &
-        " has " & $n)
-    if s.recFormat == sd8015 and n mod 4 != 0 and
-        (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
-      refuse8015(trace, src.path, n)
-    if s.likeSame and n != srcN:
-      var trial = s.likeRec
-      applySegdCount(trial, n, r, src.path)
-      if not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
-      flip = true
-    elif not s.likeSame and not traceCountFits(t, n):
-      refuseTraceCount(r, n, src.path)
-  else:
-    s.startRecord(src, trace, n, t)
-  t.index = trace - s.recFirst
-  t.numSamples = n
-  t.samples = newSeq[byte](dataBytes(s.recFormat, n))
-  # 8015 fractions as the input was read: its convention is the file's.
-  encodeSamples(s.recFormat, samples, t.samples, src.index.codecs[r].twosComplement8015)
-  s.likeTraces.add t
-  if flip: s.likeSame = false
-  s.nextTrace = trace + 1
+  try:
+    if s.likeKept.len > 0:
+      # A subset record: its traces in the listed order, one count per channel set.
+      if not sameRec:
+        refuse("SEG-D record " & $s.recIndex & " of " & s.recPath & " is incomplete: " &
+          $s.likePos & " of the " & $s.likeKept.len & " traces of its subset were written")
+      if s.likePos == s.likeKept.len:
+        refuse(segdRec(r, src.path) & ": all " & $s.likeKept.len & " traces of its subset " &
+          "are written (startSubset starts the next record)")
+      if trace != s.likeKept[s.likePos]:
+        refuse("SEG-D record " & $r & ": trace " & $s.likeKept[s.likePos] & " comes next, not " &
+          $trace & " (a subset's traces are written in the order listed)")
+      let at = s.likeSetOf[s.likePos]
+      var sets = s.likeSets
+      if sets[at].n >= 0 and sets[at].n != n:
+        refuse(segdRec(r, src.path) & ": " & setLabel(s.likeRec, sets[at].scan, sets[at].chan) &
+          " has " & $sets[at].n & " samples; trace " & $trace & " has " & $n)
+      if s.recFormat == sd8015 and n mod 4 != 0 and
+          (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
+        refuse8015(trace, src.path, n)
+      if n != srcN and not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
+      var fresh = false
+      if sets[at].n < 0:
+        sets[at].n = n
+        var trial = s.likeRec
+        applySubset(trial, sets, r, src.path)
+        fresh = true
+      if n != srcN: setTraceCount(t, n)
+      let startUs = if s.likeRec.layout == slRev3: int64(s.likeRec.scanTypes[
+        sets[at].scan].descriptorsRev3[sets[at].chan].startTime) else: 0'i64
+      t.applyTracePatch(s.subPatch, startUs)
+      if overrides.hasVendorOverride: s.ensureVendorContext("subset", s.likeRec)
+      t.overrideSegd(overrides, s.vendor, s.vctx)
+      if fresh: s.likeSets = sets
+    elif sameRec:
+      if trace != s.nextTrace:
+        refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
+          " (a record's traces are written in input order)")
+      if n != s.likeN and not (s.likeSame and n == srcN):
+        refuse(segdRec(r, src.path) & " has " & $s.likeN & " samples; trace " & $trace &
+          " has " & $n)
+      if s.recFormat == sd8015 and n mod 4 != 0 and
+          (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
+        refuse8015(trace, src.path, n)
+      if s.likeSame and n != srcN:
+        var trial = s.likeRec
+        applySegdCount(trial, n, r, src.path)
+        if not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
+        flip = true
+      elif not s.likeSame and not traceCountFits(t, n):
+        refuseTraceCount(r, n, src.path)
+    else:
+      s.startRecord(src, trace, n, t)
+    t.index = if s.likeKept.len > 0: s.likePos else: trace - s.recFirst
+    t.numSamples = n
+    t.samples = newSeq[byte](dataBytes(s.recFormat, n))
+    # 8015 fractions as the input was read: its convention is the file's.
+    encodeSamples(s.recFormat, samples, t.samples, src.index.codecs[r].twosComplement8015)
+    s.likeTraces.add t
+    if flip: s.likeSame = false
+    s.nextTrace = trace + 1
+    if s.likeKept.len > 0: inc s.likePos
+  except CatchableError:
+    # A refused first trace leaves nothing of the record: the caller may start another.
+    if begun: s.dropRecord()
+    raise
 
 # ------------------------------------------------------- SEG-D from keys --
 
@@ -1964,6 +2520,9 @@ proc closeSegd(s: var WriterState, log: var DiagLog) =
   if s.segdFresh:
     if s.written == 0: refuse("no traces were written")
     s.flushSegdKeys()
+  elif s.subset.len > 0:
+    refuse("the subset listed for " & s.subPath & " has no trace written (write its " &
+      "traces, or abandonRecord)")
   elif s.inRecord: s.finishRecord()
   if s.segdNoZ > 0:
     log.report(sevWarning, dcValidation, "not written: an elevation without its location's " &
@@ -2057,6 +2616,105 @@ proc writeLike[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int
     raise
   inc w.s.written
 
+
+proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int],
+    patch = SubsetPatch()) =
+  ## Starts a SEG-D output record made of some of the traces of one record of
+  ## `src`, a file of the writer's standard (normally `like`): the next
+  ## `writeTrace(w, src, trace, samples)` calls must name `traces` in this
+  ## order, one per trace. The record ends when the next `startSubset`, a
+  ## trace that starts a record of a whole-record write, or `close` comes
+  ## (`ValueError` when traces of the list are missing). The same source trace
+  ## may start any number of output records.
+  ##
+  ## The record keeps the source record's headers (the extended header too)
+  ## and each kept trace its own header and extension bytes, except what the
+  ## subset changes: each channel set's channel count (0 for a set with no
+  ## kept trace, which keeps its descriptor); in Rev 2 the skew bytes, which
+  ## are rebuilt from the kept channels (each keeps its own byte) with as
+  ## many skew blocks as the longest scan type needs; the end time and sample
+  ## count of a channel set whose traces are written with a new count; the
+  ## record length (the longest trace length or end time over the sets that
+  ## have traces, recomputed only when an end time changed or a set emptied);
+  ## the trace header sample counts of traces written with a new count; and,
+  ## in Rev 3, the General Header #3 sizes. The traces of one channel set
+  ## share one count; sets may differ. Otherwise the SEG-D rules of
+  ## `writeTrace` hold.
+  ##
+  ## `patch` gives the record its own identity: file number, time and header
+  ## fields (`SubsetPatch`); the traces carry the file number and, in Rev 3,
+  ## their Timestamp block. A trace's Timestamp field can be set by the
+  ## override `timestamp.timeZeroOfData` (GPS microseconds, as stored) of its
+  ## `writeTrace`. A value that does not fit, or an unknown field name, is a
+  ## `ValueError` here.
+  ##
+  ## Nothing of a record is written before it ends. A first trace that
+  ## `writeTrace` refuses leaves no record: the caller starts another with
+  ## `startSubset`. A later trace that is refused leaves the record as it
+  ## was, to be written again; `abandonRecord` drops the record instead.
+  ##
+  ## Raises `ValueError` for a closed writer, a writer or file of another
+  ## standard, a SEG-D file from keys, an empty list, an index outside `src`
+  ## or in different records, indexes that do not ascend strictly, a record in
+  ## Rev 3 extended recording mode (it keeps the record length at 0), a subset
+  ## listed before whose first trace was not written, or the record in
+  ## progress being incomplete. A count one channel set's traces do not
+  ## share, or one the revision cannot hold (Rev 2 end times are multiples of
+  ## 2 ms), is `ValueError` from `writeTrace`.
+  if not w.s.open: refuse("the writer is closed")
+  if src.kind != w.s.kind or w.s.kind != skSegd:
+    refuse("a subset needs a SEG-D writer and a SEG-D file")
+  if w.s.segdFresh:
+    refuse("a writer opened from SegdOutputOptions takes traces from keys, not subsets")
+  if not src.isOpen: refuse("the file " & src.path & " is closed")
+  if w.s.subset.len > 0:
+    refuse("the subset listed for " & w.s.subPath & " has no trace written yet (write " &
+      "its traces, or abandonRecord)")
+  if traces.len == 0: refuse("a subset needs at least one trace")
+  let rec = src.traceEntry(traces[0]).record
+  for i in 0 ..< traces.len:
+    if src.traceEntry(traces[i]).record != rec:
+      refuse("trace " & $traces[i] & " is outside the record of trace " & $traces[0])
+    if i > 0 and traces[i] <= traces[i - 1]:
+      refuse("the subset's traces must ascend: " & $traces[i] & " follows " & $traces[i - 1])
+  let head = src.index.segdRecords[int(rec)]
+  if head.isRev3 and head.gh3.extendedRecordingMode == 1:
+    refuse(segdRec(int(rec), src.path) & " is in extended recording mode, which keeps " &
+      "the record length at 0: it cannot be written from a subset")
+  var probe = head
+  probe.applyRecordPatch(patch) # ValueError for a patch that does not fit, before any change
+  w.s.finishRecord()
+  w.s.subPatch = patch
+  w.s.subset = @traces
+  w.s.subPath = src.path
+  w.s.subMem = src.memoryId
+
+proc useVendorMaps*(w: var SeismicWriter, reg: VendorRegistry) =
+  ## Sets the vendor header maps that `vendor.<field>` overrides of a SEG-D
+  ## trace (`HeaderOverride`) use, replacing any set before. The field is
+  ## written into the first of the copied trace's extension blocks (Rev 2:
+  ## extension numbers 2 and up; Rev 3: every block type, a Position triple as
+  ## one block) where the map decodes it, as `setVendorField` does, with the
+  ## output record's headers (a subset's patch applied) as the context of
+  ## `(when (record ...))`. A value that does not fit the field is refused, not
+  ## tried in a later block. A map set after the writer opened serves every
+  ## later trace; the registry is copied. Raises `ValueError` for a closed
+  ## writer, a SEG-Y or SEG-2 one, or one opened from `SegdOutputOptions`.
+  if not w.s.open: refuse("the writer is closed")
+  if w.s.kind != skSegd or w.s.segdFresh:
+    refuse("vendor maps serve a SEG-D writer opened like a SEG-D file " &
+      "(openSeismicWriter(path, like = f))")
+  w.s.vendor = reg
+  w.s.vctxKey = ""
+  w.s.vctx = VendorContext()
+
+proc abandonRecord*(w: var SeismicWriter) =
+  ## Drops the SEG-D record in progress, or the subset listed by
+  ## `startSubset` whose traces were not written, with the traces buffered
+  ## for it. Nothing of a record is on disk before it ends, so the output
+  ## holds the records before it. Raises `ValueError` for a closed writer.
+  if not w.s.open: refuse("the writer is closed")
+  w.s.dropRecord()
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride] = []) =
@@ -2398,9 +3056,16 @@ proc addTextStanza*(w: var SeismicWriter, company, name, text: string,
   ## (`isBinary` false). The same rules and refusals.
   w.addSegyStanza(company, name, encodeText(text, teAscii), contentType, false)
 
+proc dropRecordCaches(s: var WriterState) =
+  # What was worked out for a source record is not kept past the writer's end.
+  s.chIdx = @[]
+  s.vctx = VendorContext()
+  s.vctxKey = ""
+
 proc finishWork(w: var SeismicWriter, log: var DiagLog) =
   # What `close` and `finishBytes` share: everything up to the last byte
   # going to the sink; a raise discards the output.
+  w.s.dropRecordCaches()
   try:
     case w.s.kind
     of skSegy: w.s.closeSegy(log)

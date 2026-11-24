@@ -424,6 +424,7 @@ func structural*(k: HeaderBlock): seq[string] =
   of hbSegdExt1, hbSegdExt1Rev3: @segdExt1Structural
   of hbSegdGh1: @segdGh1Structural
   of hbSegdGhN: @segdGhNStructural
+  of hbSegdTimestamp: @["blockType"]
   of hbSeg2File, hbSeg2Trace: @[] # every SEG-2 edit is refused (`editBlock`)
   else: @[] # not reachable by name (listings only)
 

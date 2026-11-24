@@ -676,9 +676,470 @@ proc mainSix*() =
   doAssert "own source count" in api, "docs/api.md does not state the own-count exception"
   doAssert "channel sets differ" in api
 
+
+proc makeSubsetRec(rev3: bool, ns: int, nA = 3, nB = 2, skew = false,
+    numbered = false, stamp = false): SegdRecordData =
+  ## Two channel sets, `nA` and `nB` traces (set 1: traces 0..2, set 2: 3..4), each
+  ## trace with its header extension and 32 more bytes of its own; an extended
+  ## header. Rev 2: set 2 has a 1 ms interval, set 1 2 ms. Rev 3: both 1 ms.
+  let fmt = sd8058
+  var r = SegdRecord(layout: (if rev3: slRev3 else: slRev2), format: some(fmt),
+    revision: SegdRevision(major: (if rev3: 3 else: 2), minor: (if rev3: 0 else: 1)))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 12, formatCode: ord(fmt), year: 26,
+    additionalGhBlocks: (if rev3: 2 else: 1), julianDay: 311, manufacturerCode: 9,
+    baseScanInterval16: (if rev3: 16 else: 32), recordType: 8, recordLength: BcdAllF,
+    scanTypesPerRecord: 1, channelSetsPerScanType: 2, extendedHeaderBlocks: 1)
+  r.extended = newSeq[byte](32)
+  for i in 0 ..< 32: r.extended[i] = byte(90 + i)
+  if stamp:
+    # A source header (Rev 2) or Source Description block (Rev 3) with the file number.
+    r.gh1.additionalGhBlocks = r.gh1.additionalGhBlocks + 1
+    if rev3:
+      r.generalBlocks = @(SegdSourceDescription(extFileNumber: 12, sourcePointNumber: 7,
+        blockType: 0x1F).encoded)
+    else:
+      r.sourceHeaders = @[SegdGeneralHeaderN(extFileNumber: 12, sourcePointNumber: 7,
+        blockNumber: 3, sourceSetNumber: 1)]
+  if rev3:
+    r.gh2Rev3 = SegdGeneralHeader2Rev3(extFileNumber: 12, revisionMajor: 3,
+      extRecordLength: uint32(1000 * ns), blockType: 2)
+    r.gh3 = SegdGeneralHeader3(timeZero: 1474994765504000, blockType: 3)
+    var sets: seq[SegdChannelSetDescriptorRev3]
+    for k in 1 .. 2:
+      sets.add SegdChannelSetDescriptorRev3(scanTypeNumber: 1,
+        channelSetNumber: uint16(if numbered: 5 + 2 * k else: k),
+        channelType: 0x10, endTime: int32(1000 * ns), numSamples: uint32(ns),
+        descaleMultiplier: 0.25, channelsInSet: uint32(if k == 1: nA else: nB),
+        samplingInterval: 1000,
+        traceHeaderExtensions: 2, blockType1: 0x30, blockType2: 0x31, blockType3: 0x32)
+    r.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: sets)]
+  else:
+    r.gh2 = some SegdGeneralHeader2(extFileNumber: 12, revisionMajor: 2, revisionMinor: 1,
+      extRecordLength: uint32(2 * ns), blockNumber: 2)
+    var sets: seq[SegdChannelSetDescriptor]
+    for k in 1 .. 2:
+      sets.add SegdChannelSetDescriptor(scanTypeNumber: 1,
+        channelSetNumber: (if numbered: 5 + 2 * k else: k),
+        endTime: uint16(if k == 1: ns else: ns div 2), channelCount: (if k == 1: nA else: nB),
+        channelType: 1, traceHeaderExtensions: 2, subscanExponent: k - 1)
+    r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: sets)]
+    if skew:
+      r.gh1.skewBlocks = (nA + 2 * nB + 31) div 32
+      var b = newSeq[byte](32 * r.gh1.skewBlocks)
+      for i in 0 ..< nA + 2 * nB: b[i] = byte(100 + i)
+      r.scanTypes[0].skew = b
+  r.traceCount = nA + nB
+  var traces: seq[SegdTrace]
+  for k in 0 ..< nA + nB:
+    let set = if k < nA: 1 else: 2
+    let setNo = if numbered: 5 + 2 * set else: set
+    var t = SegdTrace(layout: r.layout, index: k, numSamples: ns)
+    t.header = SegdTraceHeader(fileNumber: 12, scanTypeNumber: 1, channelSetNumber: setNo,
+      traceNumber: k + 1, traceHeaderExtensions: 2'u8)
+    if rev3:
+      t.ext1Rev3 = some SegdTraceHeaderExt1Rev3(receiverLineNumber: 7,
+        receiverPointNumber: int32(100 + k), numSamples: uint32(ns), sensorType: 2,
+        groupIndex: 1, blockType: 0x40)
+    else:
+      t.ext1 = some SegdTraceHeaderExt1(receiverLineNumber: 2000,
+        receiverPointNumber: int32(100 + k), receiverPointIndex: 1,
+        samplesPerTrace: uint32(ns), sensorType: 2)
+    t.extensions = newSeq[byte](32)
+    for i in 0 ..< 32: t.extensions[i] = byte(17 * k + i)
+    if stamp and rev3:
+      t.extensions = @(SegdTimestampHeader(timeZeroOfData: 777 + k, blockType: 0x42).encoded)
+    var vals = newSeq[float64](ns)
+    for i in 0 ..< ns: vals[i] = float64((i * (k + 2)) mod 11 - 5) * 0.125
+    t.samples = newSeq[byte](dataBytes(fmt, ns))
+    encodeSamples(fmt, vals, t.samples)
+    traces.add t
+  if rev3: computeRev3Sizes(r, traces)
+  result.record = r
+  result.traces = traces
+
+proc setOfTrace(k: int): int = (if k < 3: 0 else: 1)
+
+proc feedSubset(w: var SeismicWriter, f: SeismicFile, x: Tensor[float32], kept: openArray[int],
+    counts: array[2, int]) =
+  w.startSubset(f, kept)
+  for k in kept: w.writeTrace(f, k, x, k, counts[setOfTrace(k)])
+
+func endUnits(rev3: bool, set, n: int): int64 =
+  ## A channel set's end time for `n` samples: microseconds (Rev 3) or 2 ms units
+  ## (Rev 2, where set 2 samples at 1 ms).
+  if rev3: 1000'i64 * n elif set == 0: int64(n) else: int64(n div 2)
+
+proc checkSubset(g: SeismicFile, f: SeismicFile, x: Tensor[float32], first: int,
+    kept: openArray[int], counts: array[2, int], chans: array[2, int]) =
+  ## The output record whose traces start at trace `first` of `g`.
+  let rec = g.index.segdRecords[g.traceEntry(first).record]
+  doAssert rec.extended == f.index.segdRecords[0].extended
+  let rev3 = rec.layout == slRev3
+  var longest = 0'i64
+  for j in 0 .. 1:
+    let end1 = endUnits(rev3, j, counts[j])
+    if rev3:
+      let c = rec.scanTypes[0].descriptorsRev3[j]
+      doAssert int(c.channelsInSet) == chans[j]
+      if chans[j] > 0:
+        doAssert int64(c.endTime) == end1 and int(c.numSamples) == counts[j]
+    else:
+      let c = rec.scanTypes[0].descriptors[j]
+      doAssert c.channelCount == chans[j]
+      if chans[j] > 0: doAssert int64(c.endTime) == end1
+    if chans[j] > 0: longest = max(longest, end1)
+  if rev3: doAssert int64(recordLengthUs(rec.gh1, rec.gh2Rev3)) == longest
+  else: doAssert int64(recordLengthMs(rec.gh1, rec.gh2.get)) == 2 * longest
+  var bytes = int64(rec.headerBytes)
+  for i, k in kept:
+    let eo = g.traceEntry(first + i)
+    let ei = f.traceEntry(k)
+    doAssert eo.record == g.traceEntry(first).record
+    let n = counts[setOfTrace(k)]
+    doAssert eo.numSamples == uint32(n)
+    bytes += int64(eo.headerBytes) + int64(dataBytes(sd8058, n))
+    let y = g.readTraces(first + i ..< first + i + 1, float32)
+    for q in 0 ..< n: doAssert y[0, q] == x[k, q], "trace " & $k & " sample " & $q
+    doAssert eo.headerBytes == ei.headerBytes
+    let ho = g.copyBytes(eo.offset, eo.headerBytes)
+    let hi = f.copyBytes(ei.offset, ei.headerBytes)
+    # The trace header and the bytes after THE#1 stay; THE#1 keeps all but its count.
+    doAssert ho[0 ..< 20] == hi[0 ..< 20]
+    doAssert ho[52 ..< ho.len] == hi[52 ..< hi.len]
+    var diff = 0
+    for q in 20 ..< 52:
+      if ho[q] != hi[q]: inc diff
+    if n == int(ei.numSamples): doAssert diff == 0 else: doAssert diff in 1 .. 4
+  if rev3: doAssert int64(rec.gh3.dataSize) == bytes
+
+proc mainSeven*() =
+  ## A `like:` SEG-D writer writes records made of some traces of one source
+  ## record (`startSubset`), each channel set with its own sample count.
+  ## Seen failing: with the channel counts left as the source's, with the
+  ## record length left as the source's, with the Rev 3 sizes left as the
+  ## source's, and with the order check removed.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  for rev3 in [false, true]:
+    let nm = if rev3: "sub3" else: "sub2"
+    let src = tmp / (nm & ".sgd")
+    put(src, SegdData(records: @[makeSubsetRec(rev3, 8)]))
+    var f = openSeismic(src)
+    doAssert not f.log.isFatal, $f.log
+    let x = f.readTraces(0 ..< f.len, float32)
+    let dst = tmp / (nm & "_out.sgd")
+    var w = openSeismicWriter(dst, f)
+    let a = [1, 2, 4]
+    let b = [0, 3]
+    let c = [3, 4]
+    w.feedSubset(f, x, a, [4, 4]) # shorter in both sets
+    w.feedSubset(f, x, b, [6, 8]) # trace 3 used again; set 2 keeps its count
+    w.feedSubset(f, x, c, [8, 6]) # set 1 left empty
+    doAssert not w.close().isFatal
+    var g = openSeismic(dst)
+    doAssert not g.log.isFatal, $g.log
+    doAssert g.len == 7 and g.index.segdRecords.len == 3
+    g.checkSubset(f, x, 0, a, [4, 4], [2, 1])
+    g.checkSubset(f, x, 3, b, [6, 8], [1, 1])
+    g.checkSubset(f, x, 5, c, [8, 6], [0, 2])
+    # Errors: nothing of the output is installed.
+    let bad = tmp / (nm & "_bad.sgd")
+    let two = tmp / (nm & "_two.sgd")
+    put(two, SegdData(records: @[makeSubsetRec(rev3, 8), makeSubsetRec(rev3, 8)]))
+    var h = openSeismic(two)
+    var v = openSeismicWriter(bad, f)
+    let none: seq[int] = @[]
+    doAssertRaises(ValueError): v.startSubset(f, none)
+    doAssertRaises(ValueError): v.startSubset(f, [1, 5])
+    doAssertRaises(ValueError): v.startSubset(f, [-1])
+    doAssertRaises(ValueError): v.startSubset(f, [2, 1])
+    doAssertRaises(ValueError): v.startSubset(f, [1, 1])
+    var v2 = openSeismicWriter(bad, h)
+    doAssertRaises(ValueError): v2.startSubset(h, [1, 6]) # the second record
+    # Traces of one set with two counts.
+    block:
+      var e = openSeismicWriter(bad, f)
+      e.startSubset(f, [0, 1])
+      e.writeTrace(f, 0, x, 0, 8)
+      doAssertRaises(ValueError): e.writeTrace(f, 1, x, 1, 6)
+    # Out of order, past the subset, and a count of 0 or one the revision cannot hold.
+    var e = openSeismicWriter(bad, f)
+    e.startSubset(f, [1, 2])
+    doAssertRaises(ValueError): e.writeTrace(f, 2, x, 2, 8) # not its first
+    e.writeTrace(f, 1, x, 1, 8)
+    doAssertRaises(ValueError): e.startSubset(f, [0]) # the record is incomplete
+    e.writeTrace(f, 2, x, 2, 8)
+    doAssertRaises(ValueError): e.writeTrace(f, 2, x, 2, 8)
+    e.startSubset(f, [0, 1, 2])
+    e.writeTrace(f, 0, x, 0, 8)
+    doAssertRaises(ValueError): e.writeTrace(f, 2, x, 2, 8) # 1 comes next
+    e.writeTrace(f, 1, x, 1, 8)
+    e.writeTrace(f, 2, x, 2, 8)
+    e.startSubset(f, [3])
+    if rev3:
+      doAssertRaises(ValueError): e.writeTrace(f, 3, wave(3_000_000)) # end past 2^31 µs
+    else:
+      doAssertRaises(ValueError): e.writeTrace(f, 3, x, 3, 5) # not a multiple of 2 ms
+    e.startSubset(f, [3]) # a refused first trace leaves no record
+    doAssertRaises(ValueError): e.writeTrace(f, 3, x, 3, 0)
+    e.startSubset(f, [3])
+    e.writeTrace(f, 3, x, 3, 8)
+    doAssert not e.close().isFatal
+    var u = openSeismicWriter(tmp / (nm & "_inc.sgd"), f)
+    u.startSubset(f, [1, 2])
+    u.writeTrace(f, 1, x, 1, 8)
+    doAssertRaises(ValueError): discard u.close()
+    doAssert not fileExists(tmp / (nm & "_inc.sgd"))
+
+proc mainEight*() =
+  ## Subset records, the finer points: a whole record after a subset, a refused
+  ## first trace, `abandonRecord`, a pending subset, extended recording mode, a
+  ## Rev 3 set that starts at a negative time, Rev 2 skew bytes, set names.
+  ## Seen failing: the whole record after a subset was refused ("all traces of
+  ## its subset are written"); a refused first trace left the writer stuck and
+  ## `close` discarded the output; `close` with a pending subset wrote nothing
+  ## and raised nothing; the record length of the negative start was 6000, not
+  ## 8000; the skew bytes were the source's 100 and the blocks 4; a set was
+  ## named by its index, not its number.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  for rev3 in [false, true]:
+    let nm = if rev3: "fine3" else: "fine2"
+    let src = tmp / (nm & ".sgd")
+    put(src, SegdData(records: @[makeSubsetRec(rev3, 8)]))
+    var f = openSeismic(src)
+    let x = f.readTraces(0 ..< f.len, float32)
+    # (1) a whole record after a finished subset
+    block:
+      var w = openSeismicWriter(tmp / (nm & "_whole.sgd"), f)
+      w.feedSubset(f, x, [1, 2], [4, 4])
+      for k in 0 ..< f.len: w.writeTrace(f, k, x, k)
+      doAssert not w.close().isFatal
+      var g = openSeismic(tmp / (nm & "_whole.sgd"))
+      doAssert g.len == 7 and g.index.segdRecords.len == 2
+      g.checkSubset(f, x, 0, [1, 2], [4, 4], [2, 0])
+      doAssert readAll(tmp / (nm & "_whole.sgd")).len > 0
+    # (2) a refused first trace, then a good subset; abandonRecord
+    block:
+      let out2 = tmp / (nm & "_skip.sgd")
+      var w = openSeismicWriter(out2, f)
+      w.feedSubset(f, x, [0], [8, 8])
+      w.startSubset(f, [3])
+      if rev3:
+        doAssertRaises(ValueError): w.writeTrace(f, 3, wave(3_000_000))
+      else:
+        doAssertRaises(ValueError): w.writeTrace(f, 3, x, 3, 5)
+      w.feedSubset(f, x, [1, 2], [8, 8])
+      w.startSubset(f, [0, 1])
+      w.writeTrace(f, 0, x, 0)
+      w.abandonRecord()
+      doAssert w.len == 3
+      w.feedSubset(f, x, [4], [8, 8])
+      doAssert not w.close().isFatal
+      var g = openSeismic(out2)
+      doAssert g.len == 4 and g.index.segdRecords.len == 3
+      g.checkSubset(f, x, 0, [0], [8, 8], [1, 0])
+      g.checkSubset(f, x, 1, [1, 2], [8, 8], [2, 0])
+      g.checkSubset(f, x, 3, [4], [8, 8], [0, 1])
+    # (6) a pending subset: another startSubset and close both refuse
+    block:
+      var w = openSeismicWriter(tmp / (nm & "_pend.sgd"), f)
+      w.startSubset(f, [0])
+      doAssertRaises(ValueError): w.startSubset(f, [1])
+      w.abandonRecord()
+      w.startSubset(f, [0])
+      w.writeTrace(f, 0, x, 0)
+      doAssert not w.close().isFatal
+      var v = openSeismicWriter(tmp / (nm & "_pend2.sgd"), f)
+      v.startSubset(f, [0])
+      doAssertRaises(ValueError): discard v.close()
+      doAssert not fileExists(tmp / (nm & "_pend2.sgd"))
+    # (8) a set is named by its own numbers
+    block:
+      let p = tmp / (nm & "_num.sgd")
+      put(p, SegdData(records: @[makeSubsetRec(rev3, 8, numbered = true)]))
+      var h = openSeismic(p)
+      var w = openSeismicWriter(tmp / (nm & "_num_out.sgd"), h)
+      w.startSubset(h, [3, 4])
+      let y = h.readTraces(0 ..< h.len, float32)
+      w.writeTrace(h, 3, y, 3)
+      var msg = ""
+      try: w.writeTrace(h, 4, y, 4, 6)
+      except ValueError: msg = getCurrentExceptionMsg()
+      doAssert "channel set 9 of scan type 1" in msg, msg
+  # (4) Rev 3 extended recording mode
+  block:
+    var d = makeSubsetRec(true, 8)
+    d.record.gh3.extendedRecordingMode = 1
+    d.record.gh1.recordLength = 0
+    d.record.gh2Rev3.extRecordLength = 0
+    for c in d.record.scanTypes[0].descriptorsRev3.mitems: c.endTime = 0
+    let p = tmp / "erm.sgd"
+    put(p, SegdData(records: @[d]))
+    var f = openSeismic(p)
+    var w = openSeismicWriter(tmp / "erm_out.sgd", f)
+    var msg = ""
+    try: w.startSubset(f, [0])
+    except ValueError: msg = getCurrentExceptionMsg()
+    doAssert "extended recording mode" in msg, msg
+  # (5) a Rev 3 set that starts at a negative time keeps the span of its traces
+  block:
+    var d = makeSubsetRec(true, 8)
+    for c in d.record.scanTypes[0].descriptorsRev3.mitems:
+      c.startTime = -2000
+      c.endTime = 6000
+    d.record.gh2Rev3.extRecordLength = 8000
+    let p = tmp / "neg.sgd"
+    put(p, SegdData(records: @[d]))
+    var f = openSeismic(p)
+    let x = f.readTraces(0 ..< f.len, float32)
+    var w = openSeismicWriter(tmp / "neg_out.sgd", f)
+    w.feedSubset(f, x, [0], [8, 8]) # set 2 emptied, own count
+    w.feedSubset(f, x, [0], [6, 8]) # a new count: 6000 µs of samples, end 4000
+    doAssert not w.close().isFatal
+    var g = openSeismic(tmp / "neg_out.sgd")
+    let a = g.index.segdRecords[0]
+    let b = g.index.segdRecords[1]
+    doAssert a.gh2Rev3.extRecordLength == 8000
+    doAssert b.gh2Rev3.extRecordLength == 6000
+    doAssert b.scanTypes[0].descriptorsRev3[0].endTime == 4000
+  # (7) Rev 2 skew bytes follow the kept channels
+  block:
+    let p = tmp / "skew.sgd"
+    put(p, SegdData(records: @[makeSubsetRec(false, 8, 40, 30, skew = true)]))
+    var f = openSeismic(p)
+    doAssert f.index.segdRecords[0].gh1.skewBlocks == 4
+    let x = f.readTraces(0 ..< f.len, float32)
+    var w = openSeismicWriter(tmp / "skew_out.sgd", f)
+    w.startSubset(f, [0, 1, 40])
+    for k in [0, 1, 40]: w.writeTrace(f, k, x, k)
+    w.startSubset(f, [1, 41])
+    for k in [1, 41]: w.writeTrace(f, k, x, k)
+    doAssert not w.close().isFatal
+    var g = openSeismic(tmp / "skew_out.sgd")
+    doAssert not g.log.isFatal, $g.log
+    let r0 = g.index.segdRecords[0]
+    let r1 = g.index.segdRecords[1]
+    doAssert r0.gh1.skewBlocks == 1 and r0.scanTypes[0].skew.len == 32
+    doAssert r0.scanTypes[0].skew[0 .. 4] == @[100'u8, 101, 140, 170, 0]
+    doAssert r1.scanTypes[0].skew[0 .. 4] == @[101'u8, 141, 171, 0, 0]
+
+proc fileNo(g: SeismicFile, i: int): int64 =
+  let e = g.traceEntry(i)
+  fileNumber(decodeBlock[SegdTraceHeader](g.copyBytes(e.offset, 20)))
+
+proc mainNine*() =
+  ## `startSubset` with a `SubsetPatch`: each output record has its own file
+  ## number and time, and header fields by name.
+  ## Seen failing: with the file number written to General Header #1 only, the
+  ## traces kept the source's; with the Timestamp blocks left as the source's.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  for rev3 in [false, true]:
+    let nm = if rev3: "pat3" else: "pat2"
+    let src = tmp / (nm & ".sgd")
+    put(src, SegdData(records: @[makeSubsetRec(rev3, 8, stamp = true)]))
+    var f = openSeismic(src)
+    doAssert not f.log.isFatal, $f.log
+    let x = f.readTraces(0 ..< f.len, float32)
+    let numbers = [5'i64, 123, 20000]
+    let times = [1_700_000_000.0, 1_700_000_123.5, 1_900_000_000.25]
+    let kept = [[0, 3], [1, 2], [4, 4]]
+    let dst = tmp / (nm & "_out.sgd")
+    var w = openSeismicWriter(dst, f)
+    for i in 0 .. 2:
+      var patch = SubsetPatch(fileNumber: numbers[i], time: times[i])
+      if i == 0:
+        patch.headers = @[headerOverride("gh1.manufacturerCode", 33)]
+        if not rev3: patch.headers.add headerOverride("gh3.sourcePointNumber", 42.5)
+      let ks = if i == 2: @[4] else: @(kept[i])
+      w.startSubset(f, ks, patch)
+      for k in ks: w.writeTrace(f, k, x, k)
+    doAssert not w.close().isFatal
+    var g = openSeismic(dst, keys = true)
+    doAssert not g.log.isFatal, $g.log
+    doAssert g.len == 5 and g.index.segdRecords.len == 3
+    let srcRec = f.index.segdRecords[0]
+    var at = 0
+    for i in 0 .. 2:
+      let rec = g.index.segdRecords[i]
+      let n = if i == 2: 1 else: 2
+      doAssert (if rev3: fileNumber(rec.gh1, rec.gh2Rev3) else: fileNumber(rec.gh1, rec.gh2.get)) ==
+        numbers[i]
+      doAssert generalHeaderUtc(rec.gh1) == floor(times[i])
+      # The rest of General Header #1 is the source's.
+      var a = rec.gh1
+      let b = srcRec.gh1
+      (a.fileNumber, a.year, a.julianDay, a.hour, a.minute, a.second) =
+        (b.fileNumber, b.year, b.julianDay, b.hour, b.minute, b.second)
+      if i == 0:
+        doAssert a.manufacturerCode == 33
+        a.manufacturerCode = b.manufacturerCode
+      # (a Rev 2 record length is the one a subset's end times give: unchanged here)
+      doAssert a.encoded == b.encoded
+      if rev3:
+        doAssert abs(timestampToUnix(rec.gh3.timeZero) - times[i]) < 1e-5
+        let blk = decodeBlock[SegdSourceDescription](rec.generalBlocks.toOpenArray(0, 31))
+        doAssert blk.extFileNumber == uint32(numbers[i])
+        doAssert blk.sourcePointNumber == 7.0 # the rest of the block is the source's
+      else:
+        doAssert rec.sourceHeaders[0].extFileNumber == uint32(numbers[i])
+        doAssert rec.sourceHeaders[0].sourcePointNumber == (if i == 0: 42.5 else: 7.0)
+      for q in 0 ..< n:
+        doAssert fileNo(g, at + q) == numbers[i]
+        if rev3:
+          let e = g.traceEntry(at + q)
+          let hb = g.copyBytes(e.offset, e.headerBytes)
+          let ts = decodeBlock[SegdTimestampHeader](hb.toOpenArray(52 + 0, 52 + 31))
+          doAssert abs(timestampToUnix(ts.timeZeroOfData) - times[i]) < 1e-5
+          doAssert abs(g.traceKeys(at + q).time - times[i]) < 1e-5
+        doAssert g.traceKeys(at + q).record == float64(numbers[i])
+      at += n
+    # The other header bytes are the source's: the trace headers but for the file number.
+    let e0 = g.traceEntry(0)
+    let h0 = g.copyBytes(e0.offset, e0.headerBytes)
+    let s0 = f.copyBytes(f.traceEntry(0).offset, e0.headerBytes)
+    doAssert outside(h0, s0, [0 .. 1, 17 .. 19, 52 .. 59]).len == 0
+    # What does not fit is refused before anything changes.
+    var v = openSeismicWriter(tmp / (nm & "_bad.sgd"), f)
+    doAssertRaises(ValueError): v.startSubset(f, [0], SubsetPatch(fileNumber: 16_777_216))
+    doAssertRaises(ValueError): v.startSubset(f, [0], SubsetPatch(fileNumber: -2))
+    doAssertRaises(ValueError): v.startSubset(f, [0], SubsetPatch(time: 3_000_000_000.0))
+    doAssertRaises(ValueError): v.startSubset(f, [0], SubsetPatch(time: -700_000_000.0))
+    doAssertRaises(ValueError): v.startSubset(f, [0], SubsetPatch(time: Inf))
+    doAssertRaises(ValueError):
+      v.startSubset(f, [0], SubsetPatch(headers: @[headerOverride("gh1.nope", 1)]))
+    doAssertRaises(ValueError): # structural
+      v.startSubset(f, [0], SubsetPatch(headers: @[headerOverride("gh1.formatCode", 8015)]))
+    doAssertRaises(ValueError):
+      v.startSubset(f, [0], SubsetPatch(headers: @[headerOverride("gh9.sourcePointNumber", 1)]))
+    doAssertRaises(ValueError):
+      v.startSubset(f, [0], SubsetPatch(headers: @[headerOverride("gh1.manufacturerCode", 1000)]))
+    v.startSubset(f, [0]) # no subset was left pending by the refusals
+    v.writeTrace(f, 0, x, 0)
+    doAssert not v.close().isFatal
+    var one = openSeismic(tmp / (nm & "_bad.sgd"))
+    doAssert one.len == 1 and fileNo(one, 0) == 12
+    if rev3:
+      # A trace's own first-sample time, by override.
+      var u = openSeismicWriter(tmp / (nm & "_ts.sgd"), f)
+      u.startSubset(f, [0, 3], SubsetPatch(time: 1_700_000_000.0))
+      u.writeTrace(f, 0, x, 0, overrides = [headerOverride("timestamp.timeZeroOfData", 4242)])
+      u.writeTrace(f, 3, x, 3)
+      doAssert not u.close().isFatal
+      var q = openSeismic(tmp / (nm & "_ts.sgd"))
+      let kk0 = q.traceEntry(0)
+      let ts0 = decodeBlock[SegdTimestampHeader](
+        q.copyBytes(kk0.offset, kk0.headerBytes).toOpenArray(52, 83))
+      doAssert ts0.timeZeroOfData == 4242
+      let kk1 = q.traceEntry(1)
+      let ts1 = decodeBlock[SegdTimestampHeader](
+        q.copyBytes(kk1.offset, kk1.headerBytes).toOpenArray(52, 83))
+      doAssert abs(timestampToUnix(ts1.timeZeroOfData) - 1_700_000_000.0) < 1e-5
+
 main()
 mainTwo()
 mainThree()
 mainFour()
 mainFive()
 mainSix()
+mainSeven()
+mainEight()
+mainNine()

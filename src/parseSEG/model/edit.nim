@@ -830,7 +830,9 @@ proc editBlock[T](ed: var HeaderEditor, b: BlockRef, firstByte: static int, fiel
       "fixed fields are those sizes and counts); rewrite the file instead (seg2/writer, or " &
       "convertFile with target SEG-2)"
   if field in structural(b.kind):
-    refuse "changes the file's structure (sizes or counts); rewrite the file instead"
+    refuse (if field == "blockType": "is the block's type byte, which says what the block is; " &
+      "rewrite the file instead" else:
+      "changes the file's structure (sizes or counts); rewrite the file instead")
   # The block as edited so far (a batch's pending writes included), so
   # several fields of one header in a batch need no flush.
   var cur: seq[byte]

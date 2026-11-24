@@ -267,6 +267,11 @@ type
     name: string
     decoder: VendorDecoder
 
+  VendorFieldAbsentError* = object of ValueError
+    ## `setVendorField` and `clearVendorField`: no map applies to the area or the
+    ## field is not decoded there (unknown, its `(when)` fails, beyond the area, or
+    ## a repeat's element is missing), as against a value that cannot be written.
+
   VendorRegistry* = object
     ## Loaded maps and registered code decoders.
     maps*: seq[VendorMap]
@@ -1595,7 +1600,7 @@ proc writeVendorField(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
   var tie = false
   let at = reg.selectMap(ctx, area, bytes, tie)
   if at < 0:
-    raise newException(ValueError, "no vendor map applies to this " & $area.kind &
+    raise newException(VendorFieldAbsentError, "no vendor map applies to this " & $area.kind &
       " (field " & field & ")")
   template m: untyped = reg.maps[at]
   var baseName = field
@@ -1637,7 +1642,7 @@ proc writeVendorField(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
           var problems: seq[string]
           t.decodeTarget(bytes, ctx.byteOrder, blk, problems, ctx)
           positional = blk
-  raise newException(ValueError, why)
+  raise newException(VendorFieldAbsentError, why)
 
 proc setVendorField*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
     bytes: var openArray[byte], field: string, value: VendorValue) =
@@ -1654,7 +1659,8 @@ proc setVendorField*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
   ## the field is unknown or not decoded here (its `(when)` fails, or a repeat's element
   ## is not among those `decode` gives), the area is too short, the value does not fit,
   ## equals the field's `sentinel` (use `clearVendorField`), or the encoding cannot be
-  ## written (`ibm32`, `fixedpt`).
+  ## written (`ibm32`, `fixedpt`). A map or field that does not apply raises
+  ## `VendorFieldAbsentError`, a `ValueError`; the others are plain `ValueError`.
   reg.writeVendorField(ctx, area, bytes, field, some(value))
 
 proc clearVendorField*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
