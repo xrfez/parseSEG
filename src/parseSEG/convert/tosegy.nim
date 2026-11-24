@@ -527,9 +527,8 @@ proc initSegyFileFor(c: SegdToSegy, rec: SegdRecord, t: SegdTrace, srcName: stri
        "LINE/POINT IN PROPRIETARY HEADER " & StationHeaderName & " (LAYOUT STANZA)"
      else: "SEG-D RECEIVER/SOURCE LINE AND POINT NOT CARRIED (REV 1)")]
   for i, card in cards: result.text.setCard(i + 1, cardPrefix(i + 1) & card)
-  result.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
-    elif rev.major == 1: "SEG Y REV1" else: ""))
-  result.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+  result.text.setCard(39, revisionCardText(rev))
+  result.text.setCard(40, endCardText())
   let ns = t.numSamples
   let dt = wholeInterval(rec.sampleIntervalUs(t))
   let dtWhole = dt == round(dt) and dt <= 65535 and dt >= 0
@@ -867,9 +866,8 @@ proc initSegyFileForSeg2(c: var SegdToSegy, f: SeismicFile, t0: Seg2Trace, dt: f
   if dropped > 0:
     c.log.note(c.seen, lnSeg2Text, $dropped & " SEG-2 file strings (or NOTE lines) did not " &
       "fit the textual header's cards and were cut or dropped", c.loc)
-  result.text.setCard(39, cardPrefix(39) & (if rev.major >= 2: "SEG-Y_REV" & $rev
-    elif rev.major == 1: "SEG Y REV1" else: ""))
-  result.text.setCard(40, cardPrefix(40) & "END TEXTUAL HEADER")
+  result.text.setCard(39, revisionCardText(rev))
+  result.text.setCard(40, endCardText())
   let dtWhole = dt == round(dt) and dt <= 65535 and dt >= 0
   let sorting = case fdb.traceSort.get(tsAsAcquired)
     of tsAsAcquired: 1'i16
