@@ -154,15 +154,7 @@ type
 
   LossNote = enum
     ## Kinds of information a conversion drops; each is noted once.
-    lnExtendedText ## Rev 0 target: extended textual headers dropped.
-    lnStanzasAsText ## Rev 1 target: Rev 2 stanzas kept as plain text.
-    lnTrailers ## Rev 1 target: data trailers dropped.
-    lnTraceExtensions ## Rev 1 target: Trace Header Extension 1 and proprietary headers dropped.
-    lnIntervalRounding ## Rev 1 target: fractional sample intervals rounded.
-    lnUnassignedBinary ## A later revision: binary header bytes the input's leaves unassigned.
-    lnUnassignedTrace ## Rev 0 input: trace bytes 181-240, unassigned there, cleared.
-    lnRev1TraceFields ## Rev 0 target: the Rev 1 fields in trace bytes 181-240 dropped.
-    lnTimeRounding ## Rev 0 target: times with a time scalar rounded to whole ms.
+    ## Revision losses are `RevLoss` in `private/segyrev`, not here.
     lnSegdHeaders ## SEG-D extended/external headers.
     lnSegdGeneral ## SEG-D general header blocks beyond the first source.
     lnSegdTrailers ## SEG-D general trailers.
@@ -171,8 +163,6 @@ type
     lnSegdTimeRange ## A SEG-D record time outside years 1-9999.
     lnStartRounding ## A start time rounded to what the delay recording time holds.
     lnSourcePointRounding ## Rev 0 target: a fractional source point rounded.
-    lnSurveyType ## Rev 2.0 target: survey type dropped.
-    lnLayoutStanza ## Rev 2.0 target: the Layout stanza is not read.
     lnSeg2Text ## SEG-2 file strings that do not fit the textual header.
     lnSeg2Rounding ## SEG-2 delays or statics rounded to whole ms.
     lnSeg2Units ## SEG-2 UNITS without a SEG-Y measurement system.
