@@ -79,7 +79,9 @@ proc emit(w: var SegdWriter, data: openArray[byte]) =
   if w.fixedBlock == 0:
     w.sink.writeRecord(data)
   else:
-    w.pending.add data
+    let old = w.pending.len
+    w.pending.setLen old + data.len
+    if data.len > 0: copyMem(addr w.pending[old], addr data[0], data.len)
     var i = 0
     while w.pending.len - i >= w.fixedBlock:
       w.sink.writeRecord(w.pending.toOpenArray(i, i + w.fixedBlock - 1))
@@ -311,16 +313,26 @@ proc writeTrace*(w: var SegdWriter, t: SegdTrace) =
   w.checkTrace(t)
   # FIXREC (owner decision): a trace does not cross a block boundary when it
   # fits in one block; the rest of the current block is zero-padded instead.
-  w.buf.setLen 0
-  w.buf.add t.header.encoded
+  let hdr = t.header.encoded
+  var ext1: seq[byte]
   case t.layout
   of slRev2:
-    if t.ext1.isSome: w.buf.add t.ext1.get.encoded
+    if t.ext1.isSome: ext1 = @(t.ext1.get.encoded)
   of slRev3:
-    if t.ext1Rev3.isSome: w.buf.add t.ext1Rev3.get.encoded
-  w.buf.add t.extensions
-  w.buf.add t.samples
-  let n = w.buf.len
+    if t.ext1Rev3.isSome: ext1 = @(t.ext1Rev3.get.encoded)
+  # The whole trace is sized once and each part copied in one block
+  # (`add` of an openArray appends byte by byte).
+  let n = hdr.len + ext1.len + t.extensions.len + t.samples.len
+  w.buf.setLen n
+  var at = 0
+  template put(part: untyped) =
+    if part.len > 0:
+      copyMem(addr w.buf[at], addr part[0], part.len)
+      at += part.len
+  put hdr
+  put ext1
+  put t.extensions
+  put t.samples
   # A trace header never starts in a block's last 19 bytes, so readers can
   # tell padding from a header.
   if w.fixedBlock > 0 and w.pending.len > 0 and
