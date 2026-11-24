@@ -1551,11 +1551,15 @@ func offFlags(t: VendorTarget, b: openArray[byte], order: ByteOrder,
 func evalOn(t: VendorTarget, i: int, b: openArray[byte], order: ByteOrder,
     ctx: VendorContext, computed, on: var uint64): bool =
   # Field `i`'s own conditions, each field computed once (`computed`, `on`: bit per field).
+  # A condition on an earlier field fails when that field is off; one on the field itself
+  # or a later one reads its raw value, as in `decodeTarget`, where such a field's own
+  # conditions are not yet worked out (the loader refuses it; a hand-built target may not).
   const noOff: array[0, bool] = []
   if ((computed shr i) and 1) != 0: return ((on shr i) and 1) != 0
   result = true
   for c in t.fields[i].conds:
-    if (c.source == csField and not t.evalOn(c.fieldIndex, b, order, ctx, computed, on)) or
+    if (c.source == csField and c.fieldIndex in 0 ..< i and
+        not t.evalOn(c.fieldIndex, b, order, ctx, computed, on)) or
         not c.condHolds(t, b, order, ctx, noOff):
       result = false
       break
@@ -1565,8 +1569,9 @@ func evalOn(t: VendorTarget, i: int, b: openArray[byte], order: ByteOrder,
 func fieldIsOn*(t: VendorTarget, i: int, b: openArray[byte], order: ByteOrder,
     ctx: VendorContext): bool =
   ## **Internal.** True when field `i` of `t` passes its own `(when)` conditions, as
-  ## `decodeTarget` reckons it: a condition on an earlier field that is itself off fails.
-  ## Each field is worked out once, so a long chain of `(when (field ...))` costs a pass,
+  ## `decodeTarget` reckons it: a condition on an earlier field that is itself off fails, one
+  ## on the field itself or a later one (only a hand-built target has it) tests its raw
+  ## value. Each field is worked out once, so a long chain of `(when (field ...))` costs a pass,
   ## not a tree; a target of up to 64 fields allocates nothing (`vendorColumn` asks it for one
   ## field instead of the whole target), a larger one works out every field once (`offFlags`).
   if t.fields.len <= 64:

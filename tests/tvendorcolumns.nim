@@ -9,7 +9,9 @@
 ## through float64 in `vendorColumnInt` fails `exact_integers`. Taking a record-level field
 ## from any block of the map's targets without (match) by its name fails
 ## `record_fields_of_several_areas` and `one_name_twice_in_a_block`; reading later blocks
-## when the field is off in the first fails `record_field_reads_the_first_block`.
+## when the field is off in the first fails `record_field_reads_the_first_block`. Letting
+## `fieldIsOn` recurse into a field at or after the one asked about fails
+## `when_on_a_later_field` (the recursion never ends).
 
 import std/[assertions, math, monotimes, options, os, sequtils, strutils, times]
 
@@ -653,6 +655,43 @@ proc main*() =
     doAssert shown == @["hit:0", "hit:1"], $shown
     let col = f.vendorColumn(reg, "v")
     doAssert col.absent == 2 and col.numbers[0].isNaN
+    f.close()
+
+  block when_on_a_later_field:
+    # The loader refuses (when (field j)) with j at or after the field, but a target can be
+    # built by hand: a (when) on itself and a cycle (a on b, b on a). fieldIsOn ends and
+    # agrees with decodeTarget, which reads a later field's raw value (its own (when) not yet
+    # worked out). Recursing into a later field never ended (a stack overflow).
+    var reg = registry("""(.nif27)
+(vendormap "m" (version 1) (match (format segd))
+  (target (kind traceExt) (extension 2) (name c)
+    (field a (at 1) (enc u8))
+    (field b (at 2) (enc u8) (when (field a) (range 0 9)))
+    (field s (at 3) (enc u8))))""")
+    template t: untyped = reg.maps[0].targets[0]
+    var onA = t.fields[1].conds[0]
+    onA.fieldIndex = 1
+    onA.fieldName = "b"
+    t.fields[0].conds.add onA # a on b, b on a
+    var onSelf = t.fields[1].conds[0]
+    onSelf.fieldIndex = 2
+    onSelf.fieldName = "s"
+    t.fields[2].conds.add onSelf # s on itself
+    for (x, y, z) in [(5, 5, 5), (5, 50, 50), (50, 5, 5), (50, 50, 50)]:
+      var b = newSeq[byte](32)
+      b[0] = byte(x)
+      b[1] = byte(y)
+      b[2] = byte(z)
+      var blk: VendorBlock
+      var problems: seq[string]
+      t.decodeTarget(b, boBig, blk, problems)
+      for i, fp in t.fields:
+        doAssert t.fieldIsOn(i, b, boBig, VendorContext()) == (fp.name in blk),
+          fp.name & " " & $(x, y, z)
+    var f = openSeismicBytes(bytesOf(build([RecSpec(manufacturer: 9, second: 1, traces: 2,
+      exts: 1)])), "cycle")
+    discard f.vendorColumn(reg, "a")
+    discard f.vendorColumn(reg, "s")
     f.close()
 
   block timing_and_allocations:
