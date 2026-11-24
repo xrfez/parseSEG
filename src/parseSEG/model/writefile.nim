@@ -461,12 +461,10 @@ proc setOverride[H](h: var H, kind: HeaderBlock, field: string, o: HeaderOverrid
 const
   binaryDerived = [
     ("sampleInterval", "the writer sets it from the traces' interval"),
-    ("sampleIntervalOrig", "it is tied to the interval the writer sets"),
-    ("extSampleInterval", "the writer sets it from the traces' interval"),
-    ("extSampleIntervalOrig", "it is tied to the interval the writer sets")]
+    ("extSampleInterval", "the writer sets it from the traces' interval")]
   # Fields only Rev 2 has (the others set by name are in every revision).
   binaryRev2Only = ["extDataTracesPerEnsemble", "extAuxTracesPerEnsemble",
-    "extSamplesPerTraceOrig", "extEnsembleFold", "timeBasisCode"]
+    "extSamplesPerTraceOrig", "extSampleIntervalOrig", "extEnsembleFold", "timeBasisCode"]
 
 proc withBinaryOverrides(b: SegyBinaryHeader, rev: SegyRevision,
     overrides: openArray[HeaderOverride]): SegyBinaryHeader =
@@ -486,6 +484,19 @@ proc withBinaryOverrides(b: SegyBinaryHeader, rev: SegyRevision,
       refuse(o.name & ": is a Rev 2 field, and the output is Rev " & $rev)
     var err = ""
     if not setByName(result, field, o.value, err): refuse(o.name & ": " & err)
+  # A Rev 2 extended twin that is set hides its 16-bit field (`effective...`): judged
+  # on the finished header, so the order of the overrides does not matter.
+  for o in overrides:
+    let field = splitName(o)[1]
+    let hidden = rev.major >= 2 and (
+      (field == "dataTracesPerEnsemble" and result.extDataTracesPerEnsemble != 0) or
+      (field == "auxTracesPerEnsemble" and result.extAuxTracesPerEnsemble != 0) or
+      (field == "ensembleFold" and result.extEnsembleFold != 0) or
+      (field == "samplesPerTraceOrig" and result.extSamplesPerTraceOrig != 0) or
+      (field == "sampleIntervalOrig" and usableExtInterval(result.extSampleIntervalOrig)))
+    if hidden:
+      refuse(o.name & ": the extended field binary.ext" & toUpperAscii(field[0]) &
+        field[1 .. ^1] & " is set and overrides it; set that one instead")
 
 method writeRecordImpl(s: NullSink; data: openArray[byte]) {.raises: [].} =
   s.offset += data.len
@@ -762,9 +773,10 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## `extSamplesPerTrace`, `byteOrderMarker`, `segyMajor`, `segyMinor`,
   ## `fixedLengthTraces`, `numExtTextHeaders`, `maxAddlTraceHeaders`,
   ## `numTraces`, `firstTraceOffset`, `numTrailerRecords`), the sample interval
-  ## fields (`sampleInterval`, `sampleIntervalOrig`, `extSampleInterval`,
-  ## `extSampleIntervalOrig`), an unknown field, a value outside the field's
-  ## range and a Rev 2 field when the output is Rev 0 or 1.
+  ## fields the writer sets (`sampleInterval`, `extSampleInterval`), an unknown
+  ## field, a value outside the field's range, a Rev 2 field when the output is
+  ## Rev 0 or 1, and a 16-bit field whose Rev 2 extended twin is set and would hide it
+  ## (the message names the `binary.ext...` field to set instead).
   ##
   ## Raises `ValueError` for an unrecognized or
   ## multiplexed SEG-D `like`, a refused `binaryOverrides` entry, `binaryOverrides` on a non-SEG-Y `like`, a format for another standard or one the

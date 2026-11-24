@@ -147,8 +147,10 @@ proc main*() =
         var wr = openSeismicWriterBytes(f, segyRevision = some(SegyRevision(major: 2, minor: 1)),
           binaryOverrides = ovs())
         wr.writeTrace(f, 0, f.readTraces(0 ..< 1), 0)
-        let bytes = wr.finishBytes()
-        doAssert bytes.len > 3600
+        var rd = openSeismicBytes(wr.finishBytes(), "rev.sgy")
+        doAssert rd.fileField("binary.segyMajor").toFloat == 2
+        rd.check(tag & " to 2.1")
+        rd.close()
       f.close()
 
     # Refusals: before any file is created.
@@ -161,7 +163,7 @@ proc main*() =
     for n in ["samplesPerTrace", "formatCode", "extSamplesPerTrace", "byteOrderMarker",
         "segyMajor", "segyMinor", "fixedLengthTraces", "numExtTextHeaders",
         "maxAddlTraceHeaders", "numTraces", "firstTraceOffset", "numTrailerRecords",
-        "sampleInterval", "sampleIntervalOrig", "extSampleInterval", "extSampleIntervalOrig"]:
+        "sampleInterval", "extSampleInterval"]:
       refusedBy headerOverride("binary." & n, 1)
     refusedBy headerOverride("binary.nope", 1)
     refusedBy headerOverride("jobId", 1)
@@ -171,6 +173,26 @@ proc main*() =
     refusedBy headerOverride("binary.sweepLength", 1.5)
     refusedBy headerOverride("binary.extEnsembleFold", 1), SegyRevision(major: 0, minor: 0)
     refusedBy headerOverride("binary.timeBasisCode", 1), SegyRevision(major: 1, minor: 0)
+    # The Orig interval fields are the caller's.
+    var wo = openSeismicWriter(tmp / "orig.sgy", SegyOutputOptions(binaryOverrides: @[
+      headerOverride("binary.extSampleIntervalOrig", 4000.5)]))
+    wo.writeTrace(k, x)
+    discard wo.close()
+    var go = openSeismic(tmp / "orig.sgy")
+    doAssert go.fileField("binary.extSampleIntervalOrig").toFloat == 4000.5
+    go.close()
+    var wo2 = openSeismicWriter(tmp / "orig16.sgy", SegyOutputOptions(binaryOverrides: @[
+      headerOverride("binary.sampleIntervalOrig", 4000)]))
+    wo2.writeTrace(k, x)
+    discard wo2.close()
+    var go2 = openSeismic(tmp / "orig16.sgy")
+    doAssert go2.fileField("binary.sampleIntervalOrig").toFloat == 4000
+    go2.close()
+    # A 16-bit field hidden by its set extended twin is refused, in either order.
+    for (a, b) in [("extEnsembleFold", "ensembleFold"), ("ensembleFold", "extEnsembleFold")]:
+      doAssertRaises(ValueError):
+        discard openSeismicWriter(refused, SegyOutputOptions(binaryOverrides: @[
+          headerOverride("binary." & a, 5), headerOverride("binary." & b, 6)]))
     # Rev 2 holds its own fields.
     var w2 = openSeismicWriter(tmp / "rev2fields.sgy", SegyOutputOptions(binaryOverrides: @[
       headerOverride("binary.extEnsembleFold", 70000), headerOverride("binary.timeBasisCode", 4)]))
@@ -189,6 +211,17 @@ proc main*() =
       discard openSeismicWriter(refused, like = f, binaryOverrides = [headerOverride(
         "binary.extEnsembleFold", 1)])
     f.close()
+    block:
+      var wt = openSeismicWriter(tmp / "twin.sgy", SegyOutputOptions(binaryOverrides: @[
+        headerOverride("binary.extEnsembleFold", 5)]))
+      wt.writeTrace(k, x)
+      discard wt.close()
+      var ft = openSeismic(tmp / "twin.sgy")
+      doAssertRaises(ValueError):
+        discard openSeismicWriter(refused, like = ft, binaryOverrides = [headerOverride(
+          "binary.ensembleFold", 6)])
+      doAssert not fileExists(refused)
+      ft.close()
     # The revision the output is written in decides which fields exist.
     f = openSeismic(tmp / "rev21_base.sgy")
     doAssertRaises(ValueError):

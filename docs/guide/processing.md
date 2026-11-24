@@ -219,8 +219,9 @@ file exists; what is dropped is listed by `revisionNotes`. A non-SEG-Y file does
 binary file header (after any revision change), written exactly; `SegyOutputOptions` has the
 same field for a file made from keys. A field that sizes the file or names the revision
 (`samplesPerTrace`, `formatCode`, `numTraces`, `segyMajor`, ...), the sample interval fields
-(`sampleInterval`, `extSampleInterval` and their `Orig` twins), an unknown name, a value out
-of range, or a Rev 2 field in a Rev 0 or 1 output is a `ValueError` before any file exists.
+the writer sets (`sampleInterval`, `extSampleInterval`), an unknown name, a value out
+of range, a Rev 2 field in a Rev 0 or 1 output, or a 16-bit field whose set Rev 2 extended
+twin would hide it is a `ValueError` before any file exists.
 A non-SEG-Y `like` does not take `binaryOverrides`.
 
 Failures raise, and a failed output never appears under its name: `close` returns the
