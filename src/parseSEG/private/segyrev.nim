@@ -31,6 +31,37 @@ func endCardText*(): string =
   ## Card 40, the end marker, prefix included.
   cardPrefix(40) & "END TEXTUAL HEADER"
 
+func setBinarySampleCount*(b: var SegyBinaryHeader, n: int): bool =
+  ## Sets the binary header's samples-per-trace fields to `n`, as the writers
+  ## do. False, with nothing changed, when `n` needs Rev 2 and `b` is earlier.
+  if n > int(high(uint16)) or (b.rulesRevision.major >= 2 and b.extSamplesPerTrace != 0):
+    if b.rulesRevision.major < 2: return false
+    b.extSamplesPerTrace = uint32(n)
+  b.samplesPerTrace = if n > int(high(uint16)): 0'u16 else: uint16(n)
+  true
+
+proc writtenCountBytes*(b: var SegyBinaryHeader, written, maxSamples: int,
+    anyWritten: bool, declaredTraces: uint64, order: ByteOrder): seq[byte] =
+  ## The binary-header bytes to patch once the traces are known, or empty when
+  ## `b` already holds them. `declaredTraces` is the count the rewritten header
+  ## declared (0 when the revision has no such field, or the input declared
+  ## none): it becomes `written`. When any trace was written, the sample count
+  ## becomes the largest of those traces.
+  ##
+  ## When every trace was skipped, the sample-count field is left as the source
+  ## wrote it. A variable file (`fixedLengthTraces == 0`) does not require 0:
+  ## the flag says each trace carries its own count, so the binary field is not
+  ## a declaration of traces that were not written, and 0 makes a reader warn
+  ## that samples per trace is 0. A fixed-length count the target cannot hold
+  ## is refused before any trace, so this path does not clear that field either.
+  let before = b
+  if anyWritten and uint32(maxSamples) != b.effectiveSamplesPerTrace:
+    discard b.setBinarySampleCount(maxSamples)
+  if declaredTraces != 0: b.numTraces = uint64(written)
+  if b != before:
+    result = newSeq[byte](BinaryHeaderSize)
+    b.encode(result, order)
+
 func trimmedCard(card: string): string =
   var n = card.len
   while n > 0 and card[n - 1] == ' ': dec n

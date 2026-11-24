@@ -27,10 +27,11 @@
 ## - SEG-Y and SEG-2: the sample count, which may differ from the input's.
 ##   SEG-Y updates the trace header (Trace Header Extension 1 when it holds
 ##   the count or the count exceeds 65535) and the binary header, which gets
-##   the count of the traces written (the largest when they differ); a
-##   fixed-length file needs one count for all traces. The Rev 2 trace
-##   count (binary bytes 3513-3520), when the input declares one, becomes
-##   the number written.
+##   the count of the traces written (the largest when they differ; left as
+##   the source wrote it when every trace was skipped, because a variable
+##   file's flag does not require 0); a fixed-length file needs one count
+##   for all traces. The Rev 2 trace count (binary bytes 3513-3520), when
+##   the input declares one, becomes the number written.
 ##
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
@@ -806,11 +807,8 @@ proc setTraceCount(t: var SegyTrace, n: int) =
 
 proc setFileCount(b: var SegyBinaryHeader, n: int) =
   # The binary header's samples per trace.
-  if n > int(high(uint16)) or (b.rulesRevision.major >= 2 and b.extSamplesPerTrace != 0):
-    if b.rulesRevision.major < 2:
-      refuse($n & " samples per trace need SEG-Y Rev 2")
-    b.extSamplesPerTrace = uint32(n)
-  b.samplesPerTrace = if n > int(high(uint16)): 0'u16 else: uint16(n)
+  if not b.setBinarySampleCount(n):
+    refuse($n & " samples per trace need SEG-Y Rev 2")
 
 proc headerBytes(src: SeismicFile, trace: int, minimum: int): (int, int) =
   # Where trace `trace`'s header bytes start in the map, and how many there
@@ -952,15 +950,11 @@ proc closeSegy(s: var WriterState, log: var DiagLog) =
   log.add s.segy.log
   s.sink.close()
   s.sink = nil
-  # The binary header's counts, now known: the samples of every trace
-  # written, the largest when they differ.
+  # The binary header's counts, now known. Same bytes as `convertSegy`.
   var b = s.segyFile.binary
-  if s.segyCount != -1 and uint32(s.segyMax) != b.effectiveSamplesPerTrace:
-    b.setFileCount(s.segyMax)
-  if s.segyNumTraces != 0: b.numTraces = uint64(s.written)
-  if b != s.segyFile.binary:
-    var bytes = newSeq[byte](BinaryHeaderSize)
-    b.encode(bytes, s.segyFile.byteOrder)
+  let bytes = writtenCountBytes(b, s.written, s.segyMax, s.segyCount != -1,
+    s.segyNumTraces, s.segyFile.byteOrder)
+  if bytes.len > 0:
     if s.memory:
       s.mem.patch(s.segyFile.tapeLabel.len + TextHeaderSize, bytes)
       return

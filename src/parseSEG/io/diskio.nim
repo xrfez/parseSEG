@@ -132,6 +132,37 @@ method writeRecordImpl*(s: DiskSink; data: openArray[byte]) {.raises: [Catchable
 method writeTapeMarkImpl*(s: DiskSink) {.raises: [CatchableError].} =
   discard "disk files store no tape marks"
 
+proc patch*(s: DiskSink, at: int, data: openArray[byte]) =
+  ## Overwrites bytes at `at` already accepted by `writeRecord` (the
+  ## back-patching of counts known at the end, as `MemSink.patch`). Bytes still
+  ## in the buffer are patched there; bytes already flushed are patched in the
+  ## file, and the file position returns to the end of what was flushed.
+  ## Raises `IndexDefect` when the range is outside what was written, and
+  ## `IOError` when the file cannot be patched.
+  if s.failed:
+    raise newException(IOError, "an earlier write failed: " & s.name & " is incomplete")
+  if at < 0 or data.len > int(s.offset) - at:
+    raise newException(IndexDefect, "patch outside the bytes written")
+  if data.len == 0: return
+  let flushed = s.offset - int64(s.used)
+  if int64(at) < flushed:
+    let nFile = min(data.len, int(flushed - at))
+    flushFile(s.f)
+    let pos = getFilePos(s.f)
+    try:
+      setFilePos(s.f, int64(at))
+      if writeBytes(s.f, data, 0, nFile) != nFile:
+        s.failed = true
+        raise newException(IOError, "cannot patch " & s.name)
+      flushFile(s.f)
+    finally:
+      setFilePos(s.f, pos)
+  if int64(at) + data.len > flushed:
+    let dataAt = int(max(int64(at), flushed) - at)
+    let bufAt = int(max(int64(at), flushed) - flushed)
+    let n = data.len - dataAt
+    if n > 0: copyMem(addr s.buf[bufAt], addr data[dataAt], n)
+
 method close*(s: DiskSink) {.raises: [CatchableError].} =
   ## Writes the buffered records and closes the file. Raises `IOError` when
   ## bytes did not reach it, now or in an earlier write (the file is closed

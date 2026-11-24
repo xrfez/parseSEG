@@ -18,7 +18,10 @@
 ##   - before Rev 2: a sample count or interval held in the Rev 2 extended
 ##     fields moves to the 16-bit ones; a trace whose count or interval
 ##     does not fit them is skipped with an error (a fixed-length file of
-##     such traces is refused).
+##     such traces is refused). The binary header's trace count, when the
+##   input declared one, becomes the number written, and its sample count
+##   the largest of the traces written (left as the source wrote it when
+##   every trace was skipped: a variable file's flag does not require 0).
 ##   Cards 39 and 40 name the target revision when it differs from the
 ##   source. A card that held anything other than blanks or a standard
 ##   revision or end text is a warning, the old text quoted. A trace
@@ -92,7 +95,7 @@
 
 import std/[math, os, strutils, times]
 import ../common/[endians, errors, diagnostics, progress]
-import ../io/[records, diskio, memsource]
+import ../io/[records, diskio, memsink, memsource]
 import ../segy/[reader as segyreader, writer as segywriter, textheader, binheader, traceheader,
   samples, exttext, layout]
 import ../segd/[reader as segdreader]
@@ -264,6 +267,13 @@ func inputSize(src: RecordSource): int64 =
   elif src of DiskSource: DiskSource(src).size
   else: -1
 
+proc patchSink(sink: RecordSink, at: int, data: openArray[byte]) =
+  # The binary-header patch. A disk or memory sink can be overwritten; a tape
+  # cannot, and the count would be a lie, so that is an error.
+  if sink of DiskSink: DiskSink(sink).patch(at, data)
+  elif sink of MemSink: MemSink(sink).patch(at, data)
+  else: raise newException(IOError, "cannot patch the binary header of " & sink.name)
+
 proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     progress: Progress = nil): DiagLog =
   ## Rewrites the SEG-Y file at `src` with the target revision, byte order and
@@ -302,6 +312,10 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     return
   f.binary.formatCode = int16(ord(outFmt))
   f.format = some(outFmt)
+  # 0 while the traces are written, so the writer does not warn; patched to
+  # the count actually written, as the `like:` writer does.
+  let declaredTraces = f.binary.numTraces
+  f.binary.numTraces = 0
   var w: SegyWriter
   try:
     w = openSegyWriter(sink, f, SegyWriteOptions(byteOrder: opts.byteOrder, lenient: true))
@@ -316,6 +330,8 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
   var layoutReordered: seq[int] # traces whose proprietary headers the Layout fully described
   var tk = initProgressTicker(progress, inputSize(src))
   let fixedOut = f.binary.fixedLengthTraces == 1
+  var written = 0
+  var maxSamples = 0
   while r.readTrace(t):
     if not tk.tick(t.offset):
       result.add r.log
@@ -339,6 +355,8 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     if ok:
       try:
         w.writeTrace(t)
+        maxSamples = max(maxSamples, t.numSamples)
+        inc written
       except CatchableError as e:
         result.report(sevFatal, dcIo, "writing trace " & $t.index & ": " & e.msg, loc = tl)
         return
@@ -350,6 +368,10 @@ proc convertSegy*(src: RecordSource, sink: RecordSink, opts = ConvertOptions(),
     return
   try:
     w.close()
+    var b = f.binary
+    let bytes = writtenCountBytes(b, written, maxSamples, written > 0, declaredTraces,
+      opts.byteOrder)
+    if bytes.len > 0: patchSink(sink, f.tapeLabel.len + TextHeaderSize, bytes)
   except CatchableError as e:
     result.report(sevFatal, dcIo, "closing: " & e.msg, loc = loc)
   # The writer cannot know a Layout stanza describes proprietary headers; the
