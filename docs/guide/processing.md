@@ -260,8 +260,11 @@ Options and rules:
 - **Sample count.** A SEG-Y or SEG-2 trace may get more or fewer samples than it had (the
   tensor form takes `count = n`: the first `n` of the row). The trace header follows, and
   the SEG-Y binary header gets the count of the traces written (the largest when they
-  differ). A fixed-length SEG-Y file needs one count for all traces. A SEG-D trace keeps
-  its count: its channel set descriptor holds it.
+  differ). A fixed-length SEG-Y file needs one count for all traces. A SEG-D record takes
+  one count, the first trace written to it; a later trace with another count is
+  `ValueError`, and nothing of that record is written. The record length, each channel
+  set's end time and the sample count in an existing trace header extension follow. A
+  trace written with its own count leaves those headers unchanged.
 - **Which traces.** SEG-Y and SEG-2 traces can be written in any order and any subset (a
   declared Rev 2 trace count becomes the number written). SEG-D records are written
   whole, each record's traces in input order: a record ends when a trace of another record

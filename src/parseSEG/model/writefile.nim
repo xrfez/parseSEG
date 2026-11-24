@@ -26,6 +26,11 @@
 ##   fixed-length file needs one count for all traces. The Rev 2 trace
 ##   count (binary bytes 3513-3520), when the input declares one, becomes
 ##   the number written.
+## - SEG-D: the sample count of a record, taken from the first trace written
+##   to it. Every later trace of that record must have the same count. The
+##   record length, each channel set's end time and the sample count in an
+##   existing trace header extension follow. A trace written with its own
+##   count leaves those headers unchanged.
 ##
 ## `overrides` (`HeaderOverride`) change named header fields of the written
 ## trace, so the input trace serves as a template: a stacked trace with a
@@ -52,11 +57,17 @@
 ## order. A record starts with its first trace and ends when a trace of
 ## another record arrives, or on `close`; it must then have all its traces
 ## (`ValueError` otherwise: write the missing traces, or drop the writer).
-## Records may be skipped, repeated or reordered. Each trace keeps its sample
-## count (the channel set descriptors hold it). The record headers and
-## trailer come from the trace's own record in `src`; a new format sets the
-## format code and, for Rev 3, the General Header #3 data and record sizes.
-## Multiplexed SEG-D input is refused (convert it first).
+## Records may be skipped, repeated or reordered. A record's traces may have
+## a new sample count: the first trace's count is the record's, and every
+## later trace must match it (`ValueError`, naming the record and the counts,
+## otherwise, and nothing of that record is written). The record length, each
+## channel set's end time (start plus count times the interval) and the sample
+## count in each existing trace header extension follow; a count the headers
+## cannot hold is refused the same way. SEG-D 8015 still needs a multiple of
+## 4. A trace written with its own count leaves those headers unchanged. The
+## record headers and trailer come from the trace's own record in `src`; a
+## new format sets the format code and, for Rev 3, the General Header #3 data
+## and record sizes. Multiplexed SEG-D input is refused (convert it first).
 ##
 ## The output goes to a temporary file next to `path`, renamed when `close`
 ## succeeds. A writer dropped without `close`, or whose `close` raises,
@@ -307,6 +318,10 @@ type
     recMem: int           ## `recPath`'s `memoryId` (0 for a disk file).
     recIndex, recFirst, recLast, nextTrace: int
     recFormat: SegdSampleFormat
+    likeTraces: seq[SegdTrace] ## Buffered traces of the like: record; written at its end.
+    likeN: int                 ## The count the record's traces must share.
+    likeSame: bool             ## Every buffered trace kept its source count.
+    likeRec: SegdRecord        ## Headers to write; a new format is already applied.
     # SEG-2
     seg2: Seg2Writer
     seg2Format: Option[Seg2SampleFormat] ## none: each trace's own.
@@ -484,8 +499,8 @@ proc openSegy(s: var WriterState, like: SeismicFile, format: SegyTargetFormat,
   s.makeSink()
 
 proc checkGroups(src: SeismicFile, first, last: int) =
-  # 8015 packs 4 samples into 10 bytes, and a SEG-D trace keeps its count:
-  # a trace of another length cannot go into that format.
+  # 8015 packs 4 samples into 10 bytes: a trace whose count is not a
+  # multiple of 4 cannot go into that format.
   for i in first..last:
     if src.index.entries[i].numSamples mod 4 != 0:
       refuse("SEG-D format 8015 holds samples in groups of 4; trace " & $i & " of " & src.path &
@@ -948,17 +963,203 @@ proc loadSegdTrace(src: SeismicFile, trace: int, rec: SegdRecord,
   result.channelSet = e.channelSetIndex
   result.numSamples = int(e.numSamples)
 
+proc segdRec(recNo: int, path: string): string =
+  "SEG-D record " & $recNo & " of " & path
+
+proc refuse8015(trace: int, path: string, n: int) =
+  refuse("SEG-D format 8015 holds samples in groups of 4; trace " & $trace & " of " &
+    path & " has " & $n)
+
+proc refuseTraceCount(recNo, n: int, path: string) =
+  refuse(segdRec(recNo, path) & ": " & $n & " samples do not fit the trace header extension")
+
+func traceCountFits(t: SegdTrace, n: int): bool =
+  case t.layout
+  of slRev2: t.ext1.isNone or n <= 0x00_FF_FFFF
+  of slRev3: n >= 0 and n <= int(high(uint32))
+
+proc setTraceCount(t: var SegdTrace, n: int) =
+  t.numSamples = n
+  case t.layout
+  of slRev2:
+    if t.ext1.isSome:
+      var x = t.ext1.get
+      x.samplesPerTrace = uint32(n)
+      t.ext1 = some(x)
+  of slRev3:
+    if t.ext1Rev3.isSome:
+      var x = t.ext1Rev3.get
+      x.numSamples = uint32(n)
+      t.ext1Rev3 = some(x)
+
+proc setRev2ExtLength(rec: var SegdRecord, ms, recNo: int, path: string) =
+  if rec.gh2.isNone:
+    refuse(segdRec(recNo, path) & " has no General Header #2 for a record length of " &
+      $ms & " ms")
+  if ms < 0 or ms > 0xFFFFFF:
+    refuse(segdRec(recNo, path) & ": a record length of " & $ms &
+      " ms does not fit General Header #2")
+  var g2 = rec.gh2.get
+  g2.extRecordLength = uint32(ms)
+  rec.gh2 = some(g2)
+
+proc setRev2RecordLength(rec: var SegdRecord, ms, recNo: int, path: string) =
+  if ms < 0:
+    refuse(segdRec(recNo, path) & ": a record length of " & $ms & " ms is negative")
+  if rec.gh1.recordLength == BcdAllF:
+    setRev2ExtLength(rec, ms, recNo, path)
+    return
+  let ms64 = int64(ms)
+  if ms64 * 10 mod 1024 == 0:
+    let tenths = ms64 * 10 div 1024
+    if tenths <= 999:
+      rec.gh1.recordLength = int(tenths)
+      return
+  rec.gh1.recordLength = BcdAllF
+  setRev2ExtLength(rec, ms, recNo, path)
+
+proc setRev3RecordLength(rec: var SegdRecord, us: int64, recNo: int, path: string) =
+  if us < 0 or us > int64(high(uint32)):
+    refuse(segdRec(recNo, path) & ": a record length of " & $us &
+      " µs does not fit General Header #2")
+  if rec.gh1.recordLength == BcdAllF:
+    rec.gh2Rev3.extRecordLength = uint32(us)
+    return
+  if us mod 102400 == 0:
+    let tenths = us div 102400
+    if tenths <= 999:
+      rec.gh1.recordLength = int(tenths)
+      return
+  rec.gh1.recordLength = BcdAllF
+  rec.gh2Rev3.extRecordLength = uint32(us)
+
+proc setName(scan, ch: int): string =
+  "channel set " & $ch & " of scan type " & $scan
+
+proc setRev2End(c: var SegdChannelSetDescriptor, g1: SegdGeneralHeader1, n: int,
+    which: string) =
+  # End time is an exact multiple of 2 ms: start + n * BSI / (32 * 2^exp).
+  let dummy = c.channelCount == 0
+  if c.subscanExponent < 0 or c.subscanExponent > 9 or int(g1.baseScanInterval16) <= 0:
+    if dummy:
+      c.endTime = c.startTime
+      return
+    refuse(which & " has no usable sample interval")
+  let denom = 32 * (1 shl c.subscanExponent)
+  let num = int64(n) * int64(g1.baseScanInterval16)
+  if num mod int64(denom) != 0:
+    refuse(which & ": an end time for " & $n & " samples is not a multiple of 2 ms")
+  let endAt = int64(c.startTime) + num div int64(denom)
+  if endAt < 0 or endAt > int64(high(uint16)):
+    refuse(which & ": an end time of " & $endAt & " (2 ms units) does not fit a channel set")
+  c.endTime = uint16(endAt)
+  if not dummy:
+    let si = c.sampleIntervalMs(g1)
+    let window = if si > 0: int(round((c.endTimeMs - c.startTimeMs) / si)) else: -1
+    if window != n:
+      refuse(which & ": the channel set window would not read back as " & $n & " samples")
+
+proc setRev3End(c: var SegdChannelSetDescriptorRev3, n: int, which: string) =
+  if n < 0 or n > int(high(uint32)):
+    refuse(which & ": " & $n & " samples do not fit a channel set")
+  let dummy = c.channelsInSet == 0
+  let interval = int64(c.samplingInterval)
+  if interval <= 0:
+    if dummy:
+      c.endTime = c.startTime
+      c.numSamples = uint32(n)
+      return
+    refuse(which & " has no sample interval")
+  let endAt = int64(c.startTime) + int64(n) * interval
+  if endAt < 0 or endAt > int64(high(int32)):
+    refuse(which & ": an end time of " & $endAt & " µs does not fit a channel set")
+  c.endTime = int32(endAt)
+  c.numSamples = uint32(n)
+
+proc applySegdCount(rec: var SegdRecord, n, recNo: int, path: string) =
+  # Rewrites the headers a new sample count changes. The caller passes a copy.
+  if rec.isRev3 and rec.gh3.extendedRecordingMode == 1:
+    refuse(segdRec(recNo, path) & " is in extended recording mode, which keeps the " &
+      "record length at 0, so the sample count cannot change")
+  if rec.scanTypes.len == 0:
+    refuse(segdRec(recNo, path) &
+      " has no channel set, so a new sample count cannot be written")
+  case rec.layout
+  of slRev2:
+    if n > 0x00_FF_FFFF:
+      for s in rec.scanTypes:
+        if s.layout != slRev2: continue
+        for c in s.descriptors:
+          if c.traceHeaderExtensions > 0:
+            refuseTraceCount(recNo, n, path)
+    var longest = 0
+    for i in 0 ..< rec.scanTypes.len:
+      if rec.scanTypes[i].layout != slRev2:
+        refuse(segdRec(recNo, path) & " has a channel set the record's revision cannot update")
+      for j in 0 ..< rec.scanTypes[i].descriptors.len:
+        let c = addr rec.scanTypes[i].descriptors[j]
+        let st = if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1
+        let cs = if c.channelSetNumber > 0: c.channelSetNumber else: j + 1
+        setRev2End(c[], rec.gh1, n, segdRec(recNo, path) & ", " & setName(st, cs))
+        longest = max(longest, int(c.endTime) * 2)
+    setRev2RecordLength(rec, longest, recNo, path)
+  of slRev3:
+    var longest = low(int64)
+    var any = false
+    for i in 0 ..< rec.scanTypes.len:
+      if rec.scanTypes[i].layout != slRev3:
+        refuse(segdRec(recNo, path) & " has a channel set the record's revision cannot update")
+      for j in 0 ..< rec.scanTypes[i].descriptorsRev3.len:
+        any = true
+        let c = addr rec.scanTypes[i].descriptorsRev3[j]
+        let st = if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1
+        let cs = if c.channelSetNumber > 0: int(c.channelSetNumber) else: j + 1
+        setRev3End(c[], n, segdRec(recNo, path) & ", " & setName(st, cs))
+        longest = max(longest, int64(c.endTime))
+    if not any:
+      refuse(segdRec(recNo, path) &
+        " has no channel set, so a new sample count cannot be written")
+    if longest < 0:
+      refuse(segdRec(recNo, path) & ": a record length of " & $longest & " µs is negative")
+    setRev3RecordLength(rec, longest, recNo, path)
+
+proc noteRev3Sizes(rec: var SegdRecord, traces: openArray[SegdTrace]) =
+  # GH#3 sizes from the bytes about to be written. A zero stays zero.
+  if not rec.isRev3: return
+  var data = rec.headerBytes
+  for t in traces:
+    var hdr = SegdTraceHeaderSize
+    if t.ext1Rev3.isSome: hdr += SegdBlockSize
+    hdr += t.extensions.len
+    data += int64(hdr) + int64(t.samples.len)
+  if rec.gh3.dataSize != 0: rec.gh3.dataSize = uint64(data)
+  if rec.gh3.recordSize != 0:
+    rec.gh3.recordSize = uint64(data + int64(rec.trailerRev3.len))
+
 proc finishRecord(s: var WriterState) =
+  # The like: path buffers a record so a later count mismatch can be refused
+  # before any byte of it is written. Headers go out only when it is complete.
+  if not s.inRecord: return
   if s.nextTrace != s.recLast + 1:
     refuse("SEG-D record " & $s.recIndex & " of " & s.recPath & " is incomplete: traces " &
       $s.recFirst & ".." & $(s.nextTrace - 1) & " of " & $s.recFirst & ".." & $s.recLast &
       " were written (records are written whole)")
+  var rec = s.likeRec
+  if not s.likeSame:
+    applySegdCount(rec, s.likeN, s.recIndex, s.recPath)
+    for t in s.likeTraces.mitems: setTraceCount(t, s.likeN)
+    if rec.isRev3: noteRev3Sizes(rec, s.likeTraces)
+  s.segd.writeRecordHeaders(rec)
+  for t in s.likeTraces: s.segd.writeTrace(t)
   s.segd.endRecord()
   s.inRecord = false
+  s.likeTraces.setLen 0
+  s.likeN = 0
+  s.likeSame = true
 
-proc startRecord(s: var WriterState, src: SeismicFile, trace: int) =
-  # Checks that `trace` can start its record, ends the record in progress and
-  # writes the new one's headers.
+proc startRecord(s: var WriterState, src: SeismicFile, trace, n: int, t: SegdTrace) =
+  # Checks that `trace` can start its record and ends the record in progress.
+  # Headers wait until the record's last trace (`finishRecord`).
   template entries: untyped = src.index.entries
   let r = int(entries[trace].record)
   if trace > 0 and int(entries[trace - 1].record) == r:
@@ -977,6 +1178,12 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace: int) =
   while last + 1 < entries.len and int(entries[last + 1].record) == r: inc last
   # A chosen 8015 (the input's own is written as it is): `src` need not be `like`.
   if fOut == sd8015 and rec.format.get != sd8015: checkGroups(src, trace, last)
+  let srcN = int(entries[trace].numSamples)
+  if fOut == sd8015 and n mod 4 != 0: refuse8015(trace, src.path, n)
+  if n != srcN:
+    var trial = rec
+    applySegdCount(trial, n, r, src.path)
+    if not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
   if s.inRecord: s.finishRecord()
   if fOut != rec.format.get:
     rec.gh1.formatCode = ord(fOut)
@@ -987,7 +1194,10 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace: int) =
         data += int64(entries[k].headerBytes) + dataBytes(fOut, int(entries[k].numSamples))
       if rec.gh3.dataSize != 0: rec.gh3.dataSize = uint64(data)
       if rec.gh3.recordSize != 0: rec.gh3.recordSize = uint64(data + rec.trailerRev3.len)
-  s.segd.writeRecordHeaders(rec)
+  s.likeRec = rec
+  s.likeN = n
+  s.likeSame = n == srcN
+  s.likeTraces.setLen 0
   s.inRecord = true
   s.recPath = src.path
   s.recMem = src.memoryId
@@ -1025,10 +1235,9 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   if src.demuxPath.len > 0:
     refuse(src.path & " holds multiplexed SEG-D; convert it to a demultiplexed file first")
   let e = src.index.entries[trace]
-  if samples.len != int(e.numSamples):
-    refuse("a SEG-D trace keeps its sample count (the channel set descriptors hold it): " &
-      "trace " & $trace & " has " & $e.numSamples & ", " & $samples.len & " were given")
   let r = int(e.record)
+  let n = samples.len
+  let srcN = int(e.numSamples)
   if int(e.headerBytes) < SegdTraceHeaderSize:
     refuse("the headers of trace " & $trace & " lie outside the file")
   # The overrides are checked before the record's headers can be written.
@@ -1036,17 +1245,33 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   withTemplateHeaders(s, src, trace, SegdTraceHeaderSize, keys, fields, h):
     t = loadSegdTrace(src, trace, src.index.segdRecords[r], h)
   t.overrideSegd(overrides)
-  if s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and s.recIndex == r:
+  let sameRec = s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and
+    s.recIndex == r
+  var flip = false
+  if sameRec:
     if trace != s.nextTrace:
       refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
         " (a record's traces are written in input order)")
+    if n != s.likeN and not (s.likeSame and n == srcN):
+      refuse(segdRec(r, src.path) & " has " & $s.likeN & " samples; trace " & $trace &
+        " has " & $n)
+    if s.recFormat == sd8015 and n mod 4 != 0: refuse8015(trace, src.path, n)
+    if s.likeSame and n != srcN:
+      var trial = s.likeRec
+      applySegdCount(trial, n, r, src.path)
+      if not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
+      flip = true
+    elif not s.likeSame and not traceCountFits(t, n):
+      refuseTraceCount(r, n, src.path)
   else:
-    s.startRecord(src, trace)
+    s.startRecord(src, trace, n, t)
   t.index = trace - s.recFirst
-  t.samples = newSeq[byte](dataBytes(s.recFormat, samples.len))
+  t.numSamples = n
+  t.samples = newSeq[byte](dataBytes(s.recFormat, n))
   # 8015 fractions as the input was read: its convention is the file's.
   encodeSamples(s.recFormat, samples, t.samples, src.index.codecs[r].twosComplement8015)
-  s.segd.writeTrace(t)
+  s.likeTraces.add t
+  if flip: s.likeSame = false
   s.nextTrace = trace + 1
 
 # ------------------------------------------------------- SEG-D from keys --
