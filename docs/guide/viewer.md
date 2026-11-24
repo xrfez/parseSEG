@@ -1002,7 +1002,8 @@ applied. SEG-2 stays `toNone`. The leap-second offset comes from the current tab
 | `toHeaderSubsec` | Header clock with a sub-second part (SEG-Y nanoseconds) | that instant plus `t0Ms` |
 
 `time` of a re-read SEG-D Rev 3 trace is its first sample (`toFirstSample`).
-Ask `recordTimeZeroUs` for the shot instant, in UTC microseconds.
+`recordTimeZeroUs` (the shot instant in UTC microseconds) is deprecated: compute it from
+`firstSampleUs` minus the delay (`t0Ms`).
 
 `sampleTimeUs(k, n)` is sample `n` in UTC microseconds. `sampleAtUs(k, us)` is
 the fractional sample index (NaN when the start or the interval is missing).
@@ -1030,8 +1031,10 @@ applies to every trace without its own ("A block (e.g. Position 50-52, Additiona
 Info 20, Aux Channel Ref 21) applies to the preceding Source Description block"). Read
 the record's block with `recordOrientation(record)`.
 
-A unit's serial number, for a file name, is `unitSerial(i)`: an `Option[string]` from the
-SEG-D Rev 3 Sensor Info header (0x41) in the trace extensions, none for any other file. Do not
+`unitSerial(i)` and `recordSensorSerial(record)` are deprecated: read the `serialNumber` field
+of the Sensor Info block in the header rows (`traceHeaders`, the record's header rows) and
+choose the serial in the application. For reference, `unitSerial(i)` gave an `Option[string]`
+from the SEG-D Rev 3 Sensor Info header (0x41) in the trace extensions, none for any other file. Do not
 use `gh1.manufacturerSerial` (the recording system's serial) or the storage unit label's serial
 (an archive id) for it; `recordSensorSerial(record)` reads a block in the general header.
 

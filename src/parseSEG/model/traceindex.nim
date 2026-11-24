@@ -1181,7 +1181,13 @@ proc startTimeMs*(f: SeismicFile, trace: int): float64 =
   f.startTimeMsInto([trace], v)
   v[0]
 
-proc recordTimeZeroUs*(f: SeismicFile, trace: int): Option[int64] =
+proc recordTimeZeroUs*(f: SeismicFile, trace: int): Option[int64]
+    {.deprecated: "an application computes it: firstSampleUs minus the delay " &
+    "(t0Ms) of the trace; the library delivers the header rows and trace keys".} =
+  ## Deprecated: compute the instant from the trace keys, `firstSampleUs`
+  ## minus the delay (`t0Ms`), and read the header rows (`traceHeaders`)
+  ## for the rest.
+  ##
   ## The UTC microsecond instant of the time zero of trace `trace`'s record.
   ##
   ## SEG-D Rev 3: General Header #3 `timeZero`, converted with
@@ -1297,7 +1303,12 @@ proc firstSensorSerial(area: openArray[byte]): Option[string] =
     s.add char(area[i])
   some(s)
 
-proc unitSerial*(f: SeismicFile, trace: int): Option[string] =
+proc unitSerial*(f: SeismicFile, trace: int): Option[string]
+    {.deprecated: "read the serialNumber field of the Sensor Info block in " &
+    "the trace's header rows (traceHeaders); an application picks the serial".} =
+  ## Deprecated: the library delivers the header rows (`traceHeaders`); an
+  ## application reads the Sensor Info block's `serialNumber` field itself.
+  ##
   ## The serial number of the unit that recorded trace `trace`: bytes 14-31
   ## of the SEG-D Rev 3 Sensor Info header (0x41) in the trace header
   ## extensions, trimmed of blanks and NULs. None when the trace has no such
@@ -1328,7 +1339,12 @@ proc unitSerial*(f: SeismicFile, trace: int): Option[string] =
     result = firstSensorSerial(mem.toOpenArray(a, a + int(ext) - 1))
   f.requireUncut()
 
-proc recordSensorSerial*(f: SeismicFile, record: int): Option[string] =
+proc recordSensorSerial*(f: SeismicFile, record: int): Option[string]
+    {.deprecated: "read the serialNumber field of the Sensor Info block in " &
+    "the record's header rows; an application picks the serial".} =
+  ## Deprecated: the library delivers the record's header rows; an
+  ## application reads the Sensor Info block's `serialNumber` field itself.
+  ##
   ## The serial in the first Sensor Info header (0x41) of SEG-D record
   ## `record`'s general header blocks (bytes 14-31, trimmed); none when that
   ## record has none, the field is blank or not printable ASCII, or the file

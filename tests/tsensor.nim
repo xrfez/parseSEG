@@ -113,11 +113,16 @@ proc rev2File(path: string, trace: seq[byte]) =
   doAssert writeSegd(sink, d).count(sevError) == 0
   sink.close()
 
+# The deprecated accessors are what this file tests.
+{.push warning[Deprecated]: off.}
+
 proc traceSerial(f: SeismicFile, i: int): Option[string] =
   f.unitSerial(i)
 
 proc recordSerial(f: SeismicFile, i: int): Option[string] =
   f.recordSensorSerial(i)
+
+{.pop.}
 
 proc main*() =
   let tmp = scratchDir("parseseg_tsensor")

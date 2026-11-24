@@ -28,6 +28,9 @@ import parseSEG/io/[memsink, memsource]
 
 import parseSEG/common/years
 
+# `recordTimeZeroUs` is deprecated; this file still tests it.
+{.push warning[Deprecated]: off.}
+
 proc keysOf(b: seq[byte], name: string): TraceKeys =
   var f = openSeismicBytes(b, name, keys = true)
   doAssert f.len == 1
@@ -403,5 +406,7 @@ proc main*() =
       let us = k.sampleTimeUs(n)
       doAssert us.isSome
       doAssert k.sampleAtUs(us.get) == float64(n)
+
+{.pop.}
 
 when isMainModule: main()

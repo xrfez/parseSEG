@@ -51,6 +51,8 @@ export seismickind, progress, keys, keytypes, indextypes, indexwalk, tensors, fi
 # their private fields (for the library's own modules), so their public
 # names are listed one by one, as are headerfields'. A new public name goes
 # here and in docs/api.md (tdocs checks both).
+# Re-exporting the deprecated accessors must not warn; their callers get the warning.
+{.push warning[Deprecated]: off.}
 export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, traceindex.isOpen,
   traceindex.path, traceindex.fromCache, traceindex.demuxPath, traceindex.len,
   traceindex.kind, traceindex.log, traceindex.recordCount, traceindex.maxSamples,
@@ -67,6 +69,7 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.applyGeometry, traceindex.saveIndex, traceindex.index, traceindex.cutShort,
   traceindex.readFailed, traceindex.access, traceindex.openSeismicBytes,
   traceindex.inMemory
+{.pop.}
 export headerfields.fieldNames, headerfields.fieldByName, headerfields.traceField,
   headerfields.recordField, headerfields.fileField, headerfields.findTraceField,
   headerfields.findRecordField, headerfields.findFileField, headerfields.blockKind,
