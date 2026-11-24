@@ -127,6 +127,27 @@ type
       ## `trace.<KEYWORD>`, a trace string.
     value*: FieldValue ## The value as stored (SEG-Y: before its scalar).
 
+  SubsetPatch* = object
+    ## What a subset record (`startSubset`) changes of its source record's
+    ## identity; the defaults keep the source's.
+    fileNumber*: int64 = -1
+      ## The file number, 0..16777215 (-1 keeps it). It goes into General
+      ## Header #1 (BCD up to 9999, else `FFFF` and the extended number),
+      ## General Header #2 and the source headers' extended numbers, each
+      ## trace header, and, in Rev 3, the file number of the Source
+      ## Description blocks.
+    time*: float64 = NaN
+      ## The record's time, UTC POSIX seconds, 1950 to 2049 (NaN keeps it).
+      ## General Header #1 holds whole seconds (the fraction is dropped there).
+      ## Rev 3: General Header #3's time zero is `time` to the microsecond,
+      ## and a trace's Timestamp block (0x42) is the instant of its first
+      ## sample, `time` plus the start time of its channel set.
+    headers*: seq[HeaderOverride]
+      ## Record header fields by name, applied before `fileNumber` and `time`:
+      ## `gh1.<field>` and, in Rev 2, `gh3.<field>`, `gh4.<field>`, ... (the
+      ## source headers), with the field names `recordField` uses. Fields
+      ## that size the file are refused.
+
   SegyOutputOptions* = object
     ## A SEG-Y file not modelled on an input (`openSeismicWriter(path,
     ## opts)`). The defaults give Rev 2.1, big-endian, IEEE float32 samples
@@ -357,6 +378,7 @@ type
     subset: seq[int]           ## From `startSubset`: the source traces of the next record.
     subPath: string            ## That subset's file and `memoryId`.
     subMem: int
+    subPatch: SubsetPatch      ## The patch of the subset listed, and of its record.
     likeKept: seq[int]         ## The record in progress is these source traces; empty: whole.
     likeSets: seq[SubsetSet]   ## Its channel sets with a kept trace.
     likeSetOf: seq[int]        ## For each kept trace, its index in `likeSets`.
@@ -1460,6 +1482,85 @@ proc startRecord(s: var WriterState, src: SeismicFile, trace, n: int, t: SegdTra
   s.nextTrace = trace
   s.recFormat = fOut
 
+const TimestampBlockType = 0x42'u8
+
+func isSourceBlock(b: uint8): bool {.inline.} = b in 0x15'u8 .. 0x19'u8 or b == 0x1F'u8
+
+proc patchBlocks(bytes: var seq[byte], fileNo: int64, gps: int64) =
+  # Rev 3 header blocks of 32 bytes: a Source Description holds the file number,
+  # a Timestamp the instant of the first sample. Negative values keep.
+  var a = 0
+  while a + SegdBlockSize <= bytes.len:
+    let kind = bytes[a + SegdBlockSize - 1]
+    if fileNo >= 0 and isSourceBlock(kind):
+      var b = decodeBlock[SegdSourceDescription](bytes.toOpenArray(a, a + SegdBlockSize - 1))
+      b.extFileNumber = uint32(fileNo)
+      let e = b.encoded
+      for q in 0 ..< SegdBlockSize: bytes[a + q] = e[q]
+    elif gps != low(int64) and kind == TimestampBlockType:
+      var b = decodeBlock[SegdTimestampHeader](bytes.toOpenArray(a, a + SegdBlockSize - 1))
+      b.timeZeroOfData = gps
+      let e = b.encoded
+      for q in 0 ..< SegdBlockSize: bytes[a + q] = e[q]
+    a += SegdBlockSize
+
+proc applyRecordPatch(rec: var SegdRecord, p: SubsetPatch) =
+  # The record's headers with the patch; ValueError for a name or a value that does not fit.
+  if p.fileNumber < -1 or p.fileNumber > 0xFF_FFFF:
+    refuse("a file number of " & $p.fileNumber & " does not fit: 0..16777215, or -1 to keep")
+  if not p.time.isNaN: checkRecordingTime(p.time, "the subset's time")
+  for o in p.headers:
+    let (blk, field) = splitName(o)
+    if blk == "gh1": rec.gh1.setOverride(hbSegdGh1, field, o)
+    elif rec.layout == slRev2 and blk.len > 2 and blk.startsWith("gh") and
+        blk[2 .. ^1].allCharsInSet({'0' .. '9'}) and parseInt(blk[2 .. ^1]) >= 3 and
+        parseInt(blk[2 .. ^1]) - 3 < rec.sourceHeaders.len:
+      rec.sourceHeaders[parseInt(blk[2 .. ^1]) - 3].setOverride(hbSegdGhN, field, o)
+    else:
+      refuse(o.name & ": the record fields are gh1 and, in Rev 2, the source headers gh3, gh4, ...")
+  if p.headers.len > 0:
+    # A value that a field cannot hold (a BCD field of too few digits) comes back changed.
+    template holds(h, what: untyped) =
+      try:
+        let e = h.encoded
+        var back = decodeBlock[typeof(h)](e)
+        back.raw = h.raw
+        if back != h: refuse("a header value does not fit its field in " & what)
+      except SegFormatError as err:
+        refuse("a header value does not fit its field in " & what & ": " & err.msg)
+    holds(rec.gh1, "General Header #1")
+    if rec.layout == slRev2:
+      for h in rec.sourceHeaders: holds(h, "a source header")
+  if p.fileNumber >= 0:
+    let n = p.fileNumber
+    rec.gh1.fileNumber = if n < 10000: int(n) else: BcdAllF
+    case rec.layout
+    of slRev2:
+      if rec.gh2.isSome:
+        var g = rec.gh2.get
+        g.extFileNumber = uint32(n)
+        rec.gh2 = some(g)
+      for h in rec.sourceHeaders.mitems: h.extFileNumber = uint32(n)
+    of slRev3:
+      rec.gh2Rev3.extFileNumber = uint32(n)
+      patchBlocks(rec.generalBlocks, n, low(int64))
+  if not p.time.isNaN:
+    let civil = fromUnix(int64(floor(p.time))).utc
+    rec.gh1.year = civil.year mod 100
+    rec.gh1.julianDay = civil.yearday + 1
+    rec.gh1.hour = civil.hour
+    rec.gh1.minute = civil.minute
+    rec.gh1.second = civil.second
+    if rec.layout == slRev3: rec.gh3.timeZero = unixToTimestamp(p.time)
+
+proc applyTracePatch(t: var SegdTrace, p: SubsetPatch, startUs: int64) =
+  # The trace with the patch: its file number, and in Rev 3 its Timestamp block.
+  if p.fileNumber >= 0:
+    t.header.fileNumber = if p.fileNumber < 10000: int(p.fileNumber) else: BcdAllF
+    t.header.extFileNumber = uint32(p.fileNumber)
+  let gps = if p.time.isNaN: low(int64) else: unixToTimestamp(p.time) + startUs
+  if t.layout == slRev3: patchBlocks(t.extensions, p.fileNumber, gps)
+
 proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
   # Starts the record of the traces `startSubset` listed, at its first.
   if src.path != s.subPath or src.memoryId != s.subMem:
@@ -1517,6 +1618,7 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
   if fOut != rec.format.get:
     rec.gh1.formatCode = ord(fOut)
     rec.format = some(fOut)
+  rec.applyRecordPatch(s.subPatch)
   s.likeRec = rec
   s.likeSets = sets
   s.likeSetOf = setOf
@@ -1552,7 +1654,20 @@ proc overrideSegd(t: var SegdTrace, overrides: openArray[HeaderOverride]) =
         var x = t.ext1Rev3.get
         x.setOverride(hbSegdExt1Rev3, field, o)
         t.ext1Rev3 = some(x)
-    else: refuse(o.name & ": SEG-D trace blocks are trace and ext1")
+    of "timestamp":
+      # Rev 3: the Timestamp block's fields, e.g. the instant of the first sample.
+      var at = -1
+      var a = 0
+      while at < 0 and t.layout == slRev3 and a + SegdBlockSize <= t.extensions.len:
+        if t.extensions[a + SegdBlockSize - 1] == TimestampBlockType: at = a
+        a += SegdBlockSize
+      if at < 0: refuse(o.name & ": the trace has no Timestamp block")
+      var x = decodeBlock[SegdTimestampHeader](
+        t.extensions.toOpenArray(at, at + SegdBlockSize - 1))
+      x.setOverride(hbSegdTimestamp, field, o)
+      let e = x.encoded
+      for q in 0 ..< SegdBlockSize: t.extensions[at + q] = e[q]
+    else: refuse(o.name & ": SEG-D trace blocks are trace, ext1 and (Rev 3) timestamp")
 
 proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride], keys: ptr TraceKeys,
@@ -1572,11 +1687,12 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   var t: SegdTrace
   withTemplateHeaders(s, src, trace, SegdTraceHeaderSize, keys, fields, h):
     t = loadSegdTrace(src, trace, src.index.segdRecords[r], h)
-  t.overrideSegd(overrides)
   # A finished subset record ends when a trace that starts a record comes.
   if s.subset.len == 0 and s.likeKept.len > 0 and s.likePos == s.likeKept.len and
       (trace == 0 or int(src.index.entries[trace - 1].record) != r):
     s.finishRecord()
+  # A subset's traces take the record's patch first, then the overrides.
+  if s.subset.len == 0 and s.likeKept.len == 0: t.overrideSegd(overrides)
   let begun = s.subset.len > 0
   if begun: s.beginSubset(src, trace)
   let sameRec = s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and
@@ -1603,12 +1719,18 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
           (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
         refuse8015(trace, src.path, n)
       if n != srcN and not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
+      var fresh = false
       if sets[at].n < 0:
         sets[at].n = n
         var trial = s.likeRec
         applySubset(trial, sets, r, src.path)
-        s.likeSets = sets
+        fresh = true
       if n != srcN: setTraceCount(t, n)
+      let startUs = if s.likeRec.layout == slRev3: int64(s.likeRec.scanTypes[
+        sets[at].scan].descriptorsRev3[sets[at].chan].startTime) else: 0'i64
+      t.applyTracePatch(s.subPatch, startUs)
+      t.overrideSegd(overrides)
+      if fresh: s.likeSets = sets
     elif sameRec:
       if trace != s.nextTrace:
         refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
@@ -2336,7 +2458,8 @@ proc writeLike[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int
   inc w.s.written
 
 
-proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int]) =
+proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int],
+    patch = SubsetPatch()) =
   ## Starts a SEG-D output record made of some of the traces of one record of
   ## `src`, a file of the writer's standard (normally `like`): the next
   ## `writeTrace(w, src, trace, samples)` calls must name `traces` in this
@@ -2358,6 +2481,13 @@ proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int]
   ## in Rev 3, the General Header #3 sizes. The traces of one channel set
   ## share one count; sets may differ. Otherwise the SEG-D rules of
   ## `writeTrace` hold.
+  ##
+  ## `patch` gives the record its own identity: file number, time and header
+  ## fields (`SubsetPatch`); the traces carry the file number and, in Rev 3,
+  ## their Timestamp block. A trace's Timestamp field can be set by the
+  ## override `timestamp.timeZeroOfData` (GPS microseconds, as stored) of its
+  ## `writeTrace`. A value that does not fit, or an unknown field name, is a
+  ## `ValueError` here.
   ##
   ## Nothing of a record is written before it ends. A first trace that
   ## `writeTrace` refuses leaves no record: the caller starts another with
@@ -2392,7 +2522,10 @@ proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int]
   if head.isRev3 and head.gh3.extendedRecordingMode == 1:
     refuse(segdRec(int(rec), src.path) & " is in extended recording mode, which keeps " &
       "the record length at 0: it cannot be written from a subset")
+  var probe = head
+  probe.applyRecordPatch(patch) # ValueError for a patch that does not fit, before any change
   w.s.finishRecord()
+  w.s.subPatch = patch
   w.s.subset = @traces
   w.s.subPath = src.path
   w.s.subMem = src.memoryId
