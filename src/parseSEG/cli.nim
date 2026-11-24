@@ -99,6 +99,8 @@ Vendor maps (NIF plugins for vendor header areas; docs/design/vendor_maps.md)
                                 a skeleton map for every unmapped vendor area
 
 Other
+  leapseconds [--file=X.nif]      the current GPS-UTC table, or check X.nif
+                                  and print its problems
   version | help
 """
 
@@ -138,9 +140,10 @@ func takesNext(args: seq[string], i: int): bool =
   key in ValueOptions and i + 1 < args.len and
     not (args[i + 1].startsWith("-") and args[i + 1].len > 1 and args[i + 1][1] notin Digits)
 
-proc parseArgs(args: seq[string]): Args =
+proc parseArgs(args: seq[string], fileIsValue = false): Args =
   ## `--key=value`, `--key:value` or `--key value` (and `-o value`) for value
-  ## options; flags take no value; `--` ends the options.
+  ## options; flags take no value; `--` ends the options. `fileIsValue`:
+  ## `leapseconds` takes `--file X` (dump's `--file` stays a flag).
   var i = 0
   var optionsDone = false
   while i < args.len:
@@ -156,15 +159,40 @@ proc parseArgs(args: seq[string]): Args =
       var val = ""
       if sep >= 0:
         val = body[sep + 1 .. ^1]
-      elif takesNext(args, i):
+      elif takesNext(args, i) or (fileIsValue and key == "file" and sep < 0 and
+          i + 1 < args.len and not (args[i + 1].startsWith("-") and args[i + 1].len > 1 and
+          args[i + 1][1] notin Digits)):
         val = args[i + 1]
         inc i
-      if key in ValueOptions and val.len == 0:
+      let fileValue = fileIsValue and key == "file"
+      if (key in ValueOptions or fileValue) and val.len == 0:
         usage("option " & x & " needs a value")
-      if key in Flags and sep >= 0:
+      if key in Flags and sep >= 0 and not fileValue:
         usage("option --" & key & " takes no value")
       result.opts.add (key, val) # an unknown option is reported by its command
     inc i
+
+func leapFile(args: seq[string], i: int): bool =
+  let x = args[i]
+  x == "--file" or x.startsWith("--file=") or x.startsWith("--file:")
+
+func leapsecondsCommand(args: seq[string], fileAt: int): bool =
+  ## True when skipping a value after `--file` leaves `leapseconds` as the
+  ## command. `--file dump f` stays a flag.
+  var k = 0
+  while k < args.len:
+    if k == fileAt:
+      let x = args[k]
+      if x.startsWith("--file=") or x.startsWith("--file:"): k += 1
+      elif k + 1 < args.len and not (args[k + 1].startsWith("-") and
+          args[k + 1].len > 1 and args[k + 1][1] notin Digits):
+        k += 2
+      else: k += 1
+    elif args[k].startsWith("-") and args[k] notin ["--help", "-h", "--version"]:
+      k += (if takesNext(args, k): 2 else: 1)
+    else:
+      return args[k] == "leapseconds"
+  false
 
 func has(a: Args, key: string): bool = a.opts.anyIt(it[0] == key)
 
@@ -970,6 +998,26 @@ proc surveyApply(a: Args): int =
   printLog(log, sevWarning)
   if log.failed: 1 else: 0
 
+proc leapseconds(a: Args): int =
+  ## The current table, or the problems in `--file` (exit 1). A missing file
+  ## is a usage error (exit 2).
+  a.onlyOptions(["file"])
+  if a.pos.len != 0: usage("expected leapseconds [--file X.nif]")
+  if not a.has("file"):
+    stdout.write leapTableNif(currentLeapTable())
+    return 0
+  let path = a.get("file")
+  checkInput(path)
+  if getFileSize(path) > 1 shl 20:
+    echo path & ": leap table longer than 1 MB"
+    return 1
+  let parsed = parseLeapTable(readFileShared(path))
+  if parsed.problems.len > 0:
+    for p in parsed.problems: echo p
+    return 1
+  echo path & ": ok"
+  0
+
 # ------------------------------------------------------------------- main --
 
 proc run*(args: seq[string]): int =
@@ -981,11 +1029,14 @@ proc run*(args: seq[string]): int =
   # that is neither an option nor the value of one (`--traces 0 dump f`).
   var k = 0
   while k < args.len and args[k].startsWith("-") and args[k] notin ["--help", "-h", "--version"]:
-    k += (if takesNext(args, k): 2 else: 1)
+    if leapFile(args, k) and leapsecondsCommand(args, k):
+      k += (if args[k] == "--file": 2 else: 1)
+    else:
+      k += (if takesNext(args, k): 2 else: 1)
   if k >= args.len: k = 0
   let cmd = args[k]
   try:
-    let a = parseArgs(args[0 ..< k] & args[k + 1 .. ^1])
+    let a = parseArgs(args[0 ..< k] & args[k + 1 .. ^1], fileIsValue = cmd == "leapseconds")
     if a.has("help") or a.has("h"):
       stdout.write Usage
       return 0
@@ -1001,6 +1052,7 @@ proc run*(args: seq[string]): int =
     of "headers": headers(a)
     of "journal": journal(a)
     of "vendormap": vendormap(a)
+    of "leapseconds": leapseconds(a)
     of "version", "--version":
       echo "parseSEG ", PackageVersion
       0

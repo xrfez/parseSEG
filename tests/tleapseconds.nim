@@ -5,10 +5,12 @@
 ## `useLeapTable`, so an instant after the added date stayed at offset 18.
 ## `leapKnownAt` was missing, so the checked-to cases did not compile.
 ## Truncating division made `leapKnownAt(-1)` false on 1969-12-31.
+## `leapseconds` was an unknown command, so the CLI check exited 2.
 
 import std/[assertions, atomics, options, os, strutils, typedthreads]
 
 import parseSEG
+import parseSEG/cli
 import parseSEG/common/years
 
 const oldDays = [
@@ -207,5 +209,44 @@ proc main*() =
     useLeapTable(later)
     doAssert leapKnownAt(daysFromCivil(2018, 6, 30) * 86400 * 1_000_000)
     doAssert not leapKnownAt(daysFromCivil(2018, 7, 1) * 86400 * 1_000_000)
+    useLeapTable(defaultLeapTable())
+
+  block cli_prints_and_checks:
+    useLeapTable(defaultLeapTable())
+    proc capture(args: varargs[string]): tuple[output: string, code: int] =
+      let path = getTempDir() / "leap-cli-out.txt"
+      let oldOut = stdout
+      let oldErr = stderr
+      var f = open(path, fmWrite)
+      stdout = f
+      stderr = f
+      result.code = run(@args)
+      flushFile(f)
+      f.close()
+      stdout = oldOut
+      stderr = oldErr
+      result.output = readFile(path)
+    let shown = capture("leapseconds")
+    doAssert shown.code == 0, shown.output
+    doAssert shown.output.find("checkedTo 2016 12 31") >= 0
+    doAssert shown.output.find("(version 1)") >= 0
+    let missing = capture("leapseconds", "--file", getTempDir() / "no-such-leap.nif")
+    doAssert missing.code == 2
+    let badPath = getTempDir() / "bad-leap.nif"
+    writeFile(badPath, "(leapSeconds)")
+    let bad = capture("leapseconds", "--file", badPath)
+    doAssert bad.code == 1
+    doAssert bad.output.find("version is missing") >= 0
+    let goodPath = getTempDir() / "good-leap.nif"
+    writeFile(goodPath, leapTableNif(defaultLeapTable()))
+    let good = capture("--file", goodPath, "leapseconds")
+    doAssert good.code == 0, good.output
+    doAssert good.output.endsWith(": ok\n") or good.output.endsWith(": ok")
+    let dumped = capture("dump", "--file")
+    doAssert dumped.code == 2
+    doAssert dumped.output.find("expected dump <file>") >= 0
+    let flagged = capture("--file", "dump", "missing.sgy")
+    doAssert flagged.output.find("unknown command") < 0
+    doAssert flagged.output.find("no such file") >= 0
 
 when isMainModule: main()
