@@ -22,6 +22,7 @@ records, channel sets, keys, gathers).
 | [Survey files](#survey-files-in-the-background) | `looksLikeSps`, `readSps(progress)`, `readP1(progress)`, `SpsOptions` |
 | [The header tab](#the-header-tab-and-the-textual-header) | `traceHeaders`, `copyBytes`, `textHeader` |
 | [Geometry](#geometry-time-and-annotation) | `traceKeys`, inline and crossline |
+| [Leap seconds](#leap-seconds-the-file-replacing-it-adding-one) | `useLeapTable`, `withLeap`, `leapKnownAt` |
 | [Edits](#keep-the-users-header-edits-as-a-patch) | `writeHeaderPatch`, `openEditor(f)`, `release` |
 
 ## Open a file: progress, cancel and an index cache
@@ -989,7 +990,8 @@ Unknown values are NaN. `time` is the trace's UTC time in POSIX seconds (fractio
 time zero, except when a SEG-D Rev 3 Timestamp block supplied it. `timeOrigin`
 says which header that was. `firstSampleUs` is sample 0 in whole UTC
 microseconds. Sample skew, time-drift blocks and relative time mode are not
-applied. SEG-2 stays `toNone`. A leap second after 2016-12-31 needs a new release.
+applied. SEG-2 stays `toNone`. The leap-second offset comes from the current table
+([below](#leap-seconds-the-file-replacing-it-adding-one)).
 
 | `timeOrigin` | Where `time` came from | `firstSampleUs` |
 |---|---|---|
@@ -1080,6 +1082,45 @@ doAssert inlines.len == 200 and inlines[0] == 1001 and crosslines[^1] == 200
 
 `traceField(f, i, "trace.inlineNumber")` (and `traceFieldColumn`, `sortTraces`) read the
 standard bytes 189-192 only, which this file leaves at 0.
+
+## leap seconds: the file, replacing it, adding one
+
+The GPS−UTC offset is not compiled in. `data/leapseconds.nif` is the shipped
+table (IERS Bulletin C, complete through 2016-12-31), embedded so the library
+works with no file present. `defaultLeapTable` is that table.
+`currentLeapTable` is the one every converter uses, the shipped one until
+`useLeapTable`. A key already read keeps the instant it was given: after
+replacing the table, re-read the keys.
+
+`checkedTo` is the last UTC date the list is known complete. After that day
+the converters still return the last offset, and `leapKnownAt` is false, so
+the viewer can warn. `parseSEG leapseconds` prints the current table;
+`parseSEG leapseconds --file X.nif` checks a file and prints its problems.
+
+`withLeap` is the "add a leap second" action. The new offset starts at
+00:00:00 UTC on `date`, which is the day after a month end: 1 July and
+1 January by convention, the first of any other month as well. `step` is
++1 or −1. `checkedTo` is left as it was.
+
+```nim
+import parseSEG
+
+proc addOne() =
+  defer: useLeapTable(defaultLeapTable())
+  let june2017 = 1496275200'i64 # 2017-06-01T00:00:00Z, after checkedTo
+  let june2018 = 1527811200'i64 # 2018-06-01T00:00:00Z
+  doAssert utcMinusGps(june2017 * 1_000_000) == -18
+  doAssert not leapKnownAt(june2017 * 1_000_000)
+  let added = currentLeapTable().withLeap(LeapDate(year: 2018, month: 1, day: 1))
+  let back = parseLeapTable(leapTableNif(added))
+  doAssert back.problems.len == 0
+  useLeapTable(back.table)
+  doAssert utcMinusGps(june2017 * 1_000_000) == -18
+  doAssert utcMinusGps(june2018 * 1_000_000) == -19
+  doAssert not leapKnownAt(june2018 * 1_000_000)
+
+addOne()
+```
 
 ## Keep the user's header edits as a patch
 

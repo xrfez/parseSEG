@@ -242,7 +242,8 @@ nim docs               # API docs into htmldocs/
 - **Layout:**
   - `src/parseSEG.nim` is the umbrella module;
   - `src/parseSEG/` holds the modules, by area: `common`, `io`, `segy`, `segd`, `seg2`, `model`, `convert`, `survey` and `vendor`, plus `private` for internals;
-  - `vendormaps/` holds the built-in vendor header maps.
+   - `vendormaps/` holds the built-in vendor header maps;
+   - `data/leapseconds.nif` is the shipped GPS−UTC table (embedded; `useLeapTable` replaces it).
 
 ## License
 
