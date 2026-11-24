@@ -829,16 +829,16 @@ proc main*() =
   block receiver_point_code_matches_sensor_class:
     # Break: drop the point code when storing a receiver (join.nim
     # addReceiverRow) so a second code at the same station overwrites the
-    # first; a geophone then gets the later H1 coordinates, and no
-    # several-codes or ambiguous line is logged.
+    # first; a geophone then gets the later H1 coordinates. G1 with H1 is
+    # not a point-code warning, and the load log says nothing of codes.
     let g1 = r21('R', "10.00", "104.00", '1', "G1", "1000.0", "2000.0", "1.0")
     let h1 = r21('R', "10.00", "104.00", '1', "H1", "3000.0", "4000.0", "2.0")
     var g: SurveyGeometry
     g.addSps(parseSps([H00, g1, h1].join("\n")))
     doAssert g.receiverCount == 1
     doAssert g.table.receivers[stationKey(10, 104, 1)].x == 3000
-    doAssert g.log.has("several point codes", sevInfo), $g.log
-    doAssert g.log.has("G1", sevInfo) and g.log.has("H1", sevInfo)
+    doAssert g.log.len == 0, $g.log
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
 
     var hydro = initTraceKeys()
     (hydro.rcvLine, hydro.rcvPoint, hydro.rcvIndex) = (10.0, 104.0, 1'i16)
@@ -871,7 +871,7 @@ proc main*() =
     anyk.traceCode = 12
     doAssert gOnly.receiverPointCode(anyk) == "H1"
     doAssert anyk.applySurvey(gOnly) and anyk.rcvX == 50
-    doAssert not gOnly.log.has("ambiguous", sevWarning), $gOnly.log
+    doAssert gOnly.pointCodeWarnings.len == 0, $gOnly.pointCodeWarnings
 
     let a = r21('R', "12.00", "2.00", '1', "G1", "10.0", "20.0", "1.0")
     let b = r21('R', "12.00", "2.00", '1', "G2", "30.0", "40.0", "2.0")
@@ -882,7 +882,9 @@ proc main*() =
     gk.sensorType = 2
     doAssert gAmb.receiverPointCode(gk) == "G2"
     doAssert gk.applySurvey(gAmb) and gk.rcvX == 30 and gk.rcvY == 40
-    doAssert gAmb.log.has("ambiguous", sevWarning), $gAmb.log
+    doAssert gAmb.pointCodeWarnings.has("several point codes (G1, G2)", sevWarning),
+      $gAmb.pointCodeWarnings
+    doAssert not gAmb.log.has("point codes", sevWarning), $gAmb.log
 
     var unk = initTraceKeys()
     (unk.rcvLine, unk.rcvPoint) = (10.0, 104.0)
@@ -891,7 +893,7 @@ proc main*() =
     doAssert g.receiverPointCode(unk) == "H1"
     doAssert unk.applySurvey(g) and unk.rcvX == 3000
     # G1 and H1 each match a class: not ambiguous.
-    doAssert not g.log.has("ambiguous", sevWarning), $g.log
+    doAssert g.pointCodeWarnings.len == 0
 
     let kl1 = r21('R', "13.00", "3.00", '1', "KL", "1.0", "2.0", "1.0")
     let kl2 = r21('R', "13.00", "3.00", '1', "KL", "9.0", "8.0", "1.0")
@@ -900,7 +902,7 @@ proc main*() =
     doAssert gKl.receiverCount == 1
     doAssert gKl.table.receivers[stationKey(13, 3, 1)].x == 9
     doAssert gKl.log.has("other coordinates", sevWarning), $gKl.log
-    doAssert not gKl.log.has("several point codes", sevInfo)
+    doAssert gKl.pointCodeWarnings.len == 0
     var kk = initTraceKeys()
     (kk.rcvLine, kk.rcvPoint) = (13.0, 3.0)
     doAssert gKl.receiverPointCode(kk) == "KL"
@@ -912,7 +914,7 @@ proc main*() =
     gPm.addSps(parseSps([H00, pm, later].join("\n")))
     doAssert gPm.receiverCount == 1
     doAssert gPm.table.receivers[stationKey(14, 4, 1)].x == 70
-    doAssert not gPm.log.has("several point codes", sevInfo), $gPm.log
+    doAssert gPm.pointCodeWarnings.len == 0, $gPm.pointCodeWarnings
 
     let again = r21('R', "15.00", "5.00", '1', "G1", "4.0", "5.0", "1.0")
     let again2 = r21('R', "15.00", "5.00", '1', "G1", "6.0", "7.0", "1.0")
@@ -921,7 +923,7 @@ proc main*() =
     doAssert gSame.receiverCount == 1
     doAssert gSame.table.receivers[stationKey(15, 5, 1)].x == 6
     doAssert gSame.log.has("other coordinates", sevWarning)
-    doAssert not gSame.log.has("several point codes", sevInfo)
+    doAssert gSame.pointCodeWarnings.len == 0
 
     let rg = r21('R', "16.00", "6.00", '1', "G1", "1.0", "2.0", "1.0")
     let rr = r21('R', "16.00", "6.00", '1', "R1", "8.0", "9.0", "1.0")
@@ -955,13 +957,14 @@ proc main*() =
     doAssert k.sensorClass == scUnknown
 
   block r_then_h_geophone_takes_r_without_warning:
-    # Break: chooseRow matches a class letter only, so a geophone with R1 then
-    # H1 takes the later H1 and the station is logged ambiguous.
+    # Break: `decide` (join.nim) matches a class letter only, so a geophone
+    # with R1 then H1 takes the later H1 and the station is a point-code
+    # warning.
     let r1 = r21('R', "21.00", "8.00", '1', "R1", "100.0", "200.0", "1.0")
     let h1 = r21('R', "21.00", "8.00", '1', "H1", "300.0", "400.0", "2.0")
     var g: SurveyGeometry
     g.addSps(parseSps([H00, r1, h1].join("\n")))
-    doAssert not g.log.has("ambiguous", sevWarning), $g.log
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
     let n = g.log.len
     var geo = initTraceKeys()
     (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (21.0, 8.0, 1'i16)
@@ -1026,8 +1029,8 @@ proc main*() =
     doAssert held.applySurvey(g, overwrite = true) and held.rcvX == 1000
 
   block geometry_copies_do_not_share_rows_or_log:
-    # Break: SurveyGeometry.codes and logRef are refs (join.nim), so a copy
-    # shares the coded rows and the log. addSps after the copy changes what
+    # Break: make SurveyGeometry.several (join.nim) a ref, so a copy shares
+    # the coded rows (and a ref log would share the log). addSps after the copy changes what
     # the copy's applySurvey returns, and one log is the other.
     let g1 = r21('R', "10.00", "104.00", '1', "G1", "1000.0", "2000.0", "1.0")
     let h1 = r21('R', "10.00", "104.00", '1', "H1", "3000.0", "4000.0", "2.0")
@@ -1076,17 +1079,152 @@ proc main*() =
     discard fromG.applySurvey(after)
     doAssert g.log.len == n and after.log.len == nAfter
 
-  block ambiguous_suppression_carries_the_count:
-    # Break: noteAmbiguous (join.nim) suppresses further warnings without N
-    # ("further ambiguous receiver point-code choices are not logged").
+  block point_code_warning_is_gone_after_a_replace:
+    # Break: in addReceiverRow (join.nim) keep the station in `several` when
+    # KL replaces it, and in pointCodeWarnings skip the check that the table
+    # row still holds several codes. The warning then names G1, G2 although
+    # the station is KL. (Before the warnings were derived, the load-time
+    # warning stayed in `g.log` in this scenario.)
+    let a = r21('R', "10.00", "104.00", '1', "G1", "10.0", "20.0", "1.0")
+    let b = r21('R', "10.00", "104.00", '1', "G2", "30.0", "40.0", "1.0")
+    let kl = r21('R', "10.00", "104.00", '1', "KL", "90.0", "80.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, a, b].join("\n")))
+    doAssert g.pointCodeWarnings.len == 1, $g.pointCodeWarnings
+    g.addSps(parseSps([H00, kl].join("\n")))
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
+    doAssert not g.log.has("point codes", sevWarning) and not g.log.has("more diagnostics",
+      sevInfo), $g.log
+    var k = initTraceKeys()
+    (k.rcvLine, k.rcvPoint) = (10.0, 104.0)
+    k.traceCode = 12
+    doAssert g.receiverPointCode(k) == "KL"
+    doAssert k.applySurvey(g) and k.rcvX == 90, $k.rcvX
+    var one: SurveyGeometry # the same within one file
+    one.addSps(parseSps([H00, a, b, kl].join("\n")))
+    doAssert one.pointCodeWarnings.len == 0 and one.log.count(sevWarning) == 1, $one.log
+    doAssert one.log.has("other coordinates", sevWarning)
+
+  block point_code_warning_is_gone_after_add_receiver:
+    # Break: in addReceiver (join.nim) keep the station in `several`, and in
+    # pointCodeWarnings skip the check that the table row still holds
+    # several codes: the warning for G1, G2 stays after the station is set
+    # by hand. A row written straight into `table` drops it too.
+    let a = r21('R', "31.00", "1.00", '1', "G1", "10.0", "20.0", "1.0")
+    let b = r21('R', "31.00", "1.00", '1', "G2", "30.0", "40.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, a, b].join("\n")))
+    var raw = g
+    doAssert g.pointCodeWarnings.len == 1
+    g.addReceiver(31, 1, 1, 5, 6, 7)
+    doAssert g.pointCodeWarnings.len == 0, $g.pointCodeWarnings
+    var k = initTraceKeys()
+    (k.rcvLine, k.rcvPoint, k.rcvIndex) = (31.0, 1.0, 1'i16)
+    k.traceCode = 12
+    doAssert g.receiverPointCode(k) == ""
+    doAssert k.applySurvey(g) and k.rcvX == 5, $k.rcvX
+    raw.table.addReceiver(31, 1, 1, 8, 9, 7)
+    doAssert raw.pointCodeWarnings.len == 0, $raw.pointCodeWarnings
+    doAssert raw.receiverPointCode(k, overwrite = true) == ""
+    doAssert k.applySurvey(raw, overwrite = true) and k.rcvX == 8, $k.rcvX
+
+  block point_code_warnings_do_not_depend_on_station_order:
+    # Break: drop the sort in pointCodeWarnings (join.nim): the warnings come
+    # in table order, not by line and point. Codes are listed sorted, not as
+    # they arrived (G2 before G1 here).
+    var rows: seq[(string, string)] = @[]
+    for (line, point) in [("7.00", "3.00"), ("2.00", "9.00"), ("5.00", "1.00"),
+        ("2.00", "4.00"), ("9.00", "8.00")]:
+      rows.add (r21('R', line, point, '1', "G2", "1.0", "2.0", "1.0"),
+        r21('R', line, point, '1', "G1", "3.0", "4.0", "1.0"))
+    var forward = @[H00]
+    for r in rows: forward.add [r[0], r[1]]
+    var backward = @[H00]
+    for i in countdown(rows.high, 0): backward.add [rows[i][0], rows[i][1]]
+    var gf, gb: SurveyGeometry
+    gf.addSps(parseSps(forward.join("\n")))
+    gb.addSps(parseSps(backward.join("\n")))
+    let wf = gf.pointCodeWarnings
+    let wb = gb.pointCodeWarnings
+    doAssert wf.len == 5 and wb.len == 5, $wf
+    var stations: seq[string] = @[]
+    for i in 0 ..< wf.len:
+      doAssert $wf[i] == $wb[i], $wf[i] & " / " & $wb[i]
+      stations.add wf[i].msg.split(' ')[1]
+    doAssert stations == @["2.0/4.0/1", "2.0/9.0/1", "5.0/1.0/1", "7.0/3.0/1", "9.0/8.0/1"],
+      $stations
+    doAssert wf[0].msg.contains("(G1, G2)"), wf[0].msg
+
+  block point_code_warning_names_each_class:
+    # Break: end pointCodeWarning (join.nim) with "the later row is used",
+    # as the load-time warning did, instead of the row each class gets: the
+    # text then hides that a hydrophone takes H1 and a geophone G2.
+    let g1 = r21('R', "10.00", "104.00", '1', "G1", "10.0", "20.0", "1.0")
+    let g2 = r21('R', "10.00", "104.00", '1', "G2", "30.0", "40.0", "1.0")
+    let h1 = r21('R', "10.00", "104.00", '1', "H1", "50.0", "60.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, g1, g2, h1].join("\n")))
+    let w = g.pointCodeWarnings
+    doAssert w.len == 1 and w[0].severity == sevWarning, $w
+    doAssert w[0].msg == "receiver 10.0/104.0/1 has several point codes (G1, G2, H1): " &
+      "hydrophone H1, geophone G2, other G2, unknown H1", w[0].msg
+    var later: SurveyGeometry
+    later.addSps(parseSps([H00, h1, g1, g2].join("\n")))
+    doAssert later.pointCodeWarnings[0].msg == "receiver 10.0/104.0/1 has several point " &
+      "codes (G1, G2, H1): hydrophone H1, geophone G2, other G2, unknown G2",
+      later.pointCodeWarnings[0].msg
+    let r1 = r21('R', "11.00", "1.00", '1', "R1", "1.0", "2.0", "1.0")
+    let gx = r21('R', "11.00", "1.00", '1', "G1", "3.0", "4.0", "1.0")
+    var noHydro: SurveyGeometry
+    noHydro.addSps(parseSps([H00, gx, r1].join("\n")))
+    doAssert noHydro.pointCodeWarnings.len == 1 and noHydro.pointCodeWarnings[0].msg.endsWith(
+      "(G1, R1): hydrophone R1, geophone G1, other R1, unknown R1"),
+      $noHydro.pointCodeWarnings
+    for pair in [["R1", "H1"], ["G1", "H1"], ["H1", "R1"]]:
+      var quiet: SurveyGeometry
+      quiet.addSps(parseSps([H00, r21('R', "12.00", "1.00", '1', pair[0], "1.0", "2.0", "1.0"),
+        r21('R', "12.00", "1.00", '1', pair[1], "3.0", "4.0", "1.0")].join("\n")))
+      doAssert quiet.pointCodeWarnings.len == 0, $pair & ": " & $quiet.pointCodeWarnings
+
+  block point_code_warning_cap_follows_the_rows:
+    # Break: in addReceiverRow (join.nim) keep the station in `several` when
+    # KL replaces it, and skip pointCodeWarnings' check of the table row: the
+    # five warnings and the count of one more then stay after five of the six
+    # stations are KL. (Counted at load, the count stayed in `g.log`.)
     var lines = @[H00]
+    var kills = @[H00]
     for i in 1 .. 6:
       let point = $(100 + i) & ".00"
       lines.add r21('R', "20.00", point, '1', "G1", $(1000 + i) & ".0", "2000.0", "1.0")
       lines.add r21('R', "20.00", point, '1', "G2", $(2000 + i) & ".0", "3000.0", "2.0")
+      if i > 1: kills.add r21('R', "20.00", point, '1', "KL", "1.0", "1.0", "1.0")
     var g: SurveyGeometry
     g.addSps(parseSps(lines.join("\n")))
-    doAssert g.log.has("1 more diagnostics of this kind for ambiguous", sevInfo), $g.log
+    var w = g.pointCodeWarnings
+    doAssert w.len == 6 and w.count(sevWarning) == 5, $w
+    doAssert w[5].severity == sevInfo and
+      w[5].msg == "1 more diagnostics of this kind for point codes were not logged", $w[5]
+    doAssert g.log.len == 0, $g.log
+    g.addSps(parseSps(kills.join("\n")))
+    w = g.pointCodeWarnings
+    doAssert w.len == 1 and w[0].msg.startsWith("receiver 20.0/101.0/1 has"), $w
+    doAssert not g.log.has("more diagnostics", sevInfo) and g.log.count(sevWarning) == 5, $g.log
+
+  block point_code_warnings_of_a_copy:
+    # Break: make SurveyGeometry.several (join.nim) a ref: the copy shares
+    # the coded rows, and KL in the copy clears the original's warning.
+    let a = r21('R', "40.00", "1.00", '1', "G1", "1.0", "2.0", "1.0")
+    let b = r21('R', "40.00", "1.00", '1', "G2", "3.0", "4.0", "1.0")
+    let kl = r21('R', "40.00", "1.00", '1', "KL", "5.0", "6.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, a].join("\n")))
+    let before = g
+    g.addSps(parseSps([H00, b].join("\n")))
+    doAssert before.pointCodeWarnings.len == 0 and g.pointCodeWarnings.len == 1
+    var copy = g
+    copy.addSps(parseSps([H00, kl].join("\n")))
+    doAssert copy.pointCodeWarnings.len == 0 and g.pointCodeWarnings.len == 1
+    doAssert before.pointCodeWarnings.len == 0
 
   block trace_code_bit14_only_for_rev2:
     # Break: clear bit 14 for every revision (keytypes.nim classOfSegy), so

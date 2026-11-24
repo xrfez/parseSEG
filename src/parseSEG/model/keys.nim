@@ -310,6 +310,10 @@ type
   Coordinates* = object
     ## A station's position, in the survey's grid units.
     x*, y*, z*: float64 ## z may be NaN.
+    codeId: uint32
+      # A `SurveyGeometry`'s point code of a receiver row (survey/join),
+      # kept with the row so a station with one code costs no other entry.
+      # 0: none (a row written here or by hand).
 
   GeometryTable* = object
     ## Source and receiver coordinates by station.

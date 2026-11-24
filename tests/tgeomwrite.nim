@@ -384,6 +384,29 @@ proc main*() =
     doAssert not rm.log.has("binary measurement system", sevInfo)
     doAssert readSegy(tmp / "umcopy.sgy").file.binary.measurementSystem == 1
 
+  block point_code_warnings_reach_the_returned_log_once:
+    # Break: drop `log.add g.pointCodeWarnings` from writeInPlace
+    # (writeback.nim): the copy's log, the only one a caller of
+    # copyWithGeometry reads, then says nothing of the G1/G2 station. Drop
+    # the SEG-D branch's add in convertWithGeometry: the same for SEG-D input.
+    proc warnings(log: DiagLog): int =
+      for d in log:
+        if d.severity == sevWarning and "has several point codes" in d.msg: inc result
+    let path = tmp / "pc.sgy"
+    segyFile(path)
+    var g2 = r21('R', "10", "104", '1', "500999.0", "6000999.0", "12.8")
+    g2[25] = '2' # point code G2 beside the survey's G1 at 10/104/1
+    let g = sps("pc.sps", @segySurvey & @[g2])
+    doAssert g.pointCodeWarnings.len == 1 and not g.log.has("point codes", sevWarning)
+    let r = copyWithGeometry(path, tmp / "pccopy.sgy", g)
+    doAssert not r.log.hasErrors and r.log.warnings == 1, $r.log.warnings
+    let c = convertWithGeometry(path, tmp / "pcconv.sgy", g)
+    doAssert not c.hasErrors and c.warnings == 1, $c.warnings
+    let segd = tmp / "pc.sgd"
+    writeRev3(segd, @[])
+    let d = convertWithGeometry(segd, tmp / "pcsegd.sgy", g)
+    doAssert not d.isFatal and d.warnings == 1, $d.warnings
+
   block values_that_round_to_the_bytes_there_are_no_change:
     # Shotpoint 99.5 into a 4-byte espnum that already holds 100: the planned
     # bytes equal the file's, so nothing changes (it used to count as a write
