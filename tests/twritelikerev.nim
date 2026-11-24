@@ -1,6 +1,7 @@
 ## `openSeismicWriter(..., like, segyRevision)` writes the source headers as
 ## another SEG-Y revision, by the same rules as `convertSegy`. Synthetic files.
 ## Seen failing with `segyRevOn` forced false: the output kept Rev 0.0.
+## Seen failing before the card-39 warning: `revisionNotes` was empty.
 
 import std/[assertions, options, os, strutils]
 
@@ -76,6 +77,30 @@ proc keysOf(path: string): seq[TraceKeys] =
 proc newSamples(n: int): seq[float32] =
   result = newSeq[float32](n)
   for i in 0 ..< n: result[i] = float32(1000 + i)
+
+proc cardFile(name, card39: string): string =
+  ## One short fixed-length Rev 2.1 trace whose card 39 is `card39`.
+  result = tmp / name
+  var f = SegyFile(byteOrder: boBig, format: some(sfFloat32), revision: rev(2, 1),
+    extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
+    text: initTextHeader(teEbcdic))
+  f.text.setCard(39, card39)
+  f.text.setCard(40, "C40 END TEXTUAL HEADER")
+  f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 2, segyMinor: 1,
+    samplesPerTrace: 8, sampleInterval: 2000, fixedLengthTraces: 1,
+    byteOrderMarker: ByteOrderMarker)
+  let sink = openDiskSink(result)
+  var w = openSegyWriter(sink, f, SegyWriteOptions(byteOrder: boBig, lenient: true))
+  var x = newSeq[float32](8)
+  for i in 0 ..< 8: x[i] = float32(i)
+  var tr = SegyTrace(index: 0, numSamples: 8)
+  tr.header = SegyTraceHeader(traceSeqLine: 1, fieldRecord: 1, traceNumberInField: 1,
+    traceIdCode: 1, numSamples: 8, sampleInterval: 2000)
+  tr.samples = newSeq[byte](32)
+  encodeSamples(sfFloat32, x, tr.samples, boBig)
+  w.writeTrace(tr)
+  w.close()
+  sink.close()
 
 proc writeLike(src, dst: string, samples: seq[float32], revision: Option[SegyRevision]) =
   var f = openSeismic(src)
@@ -267,5 +292,44 @@ proc main*() =
     let d = readSegy(dst)
     doAssert d.file.text.card(39).strip == "C39 SEG Y REV1", d.file.text.card(39)
     doAssert d.file.text.card(40).strip == "C40 END TEXTUAL HEADER"
+
+  block a_custom_card_39_is_replaced_and_reported:
+    let src = cardFile("custom39.sgy", "C39 CUSTOM REV TEXT HERE")
+    var f = openSeismic(src)
+    let dst = tmp / "custom39_out.sgy"
+    var w = openSeismicWriter(dst, like = f, segyRevision = some(rev(1)))
+    w.writeTrace(f, 0, newSamples(8))
+    doAssert w.revisionNotes.has("CUSTOM REV TEXT HERE", sevWarning), $w.revisionNotes
+    discard w.close()
+    f.close()
+    var g = openSeismic(dst)
+    doAssert g.index.segy.text.card(39).strip == "C39 SEG Y REV1", g.index.segy.text.card(39)
+    g.close()
+
+  block a_standard_card_39_is_replaced_without_a_report:
+    let src = cardFile("std39.sgy", "C39 SEG-Y_REV2.1")
+    var f = openSeismic(src)
+    let dst = tmp / "std39_out.sgy"
+    var w = openSeismicWriter(dst, like = f, segyRevision = some(rev(1)))
+    w.writeTrace(f, 0, newSamples(8))
+    doAssert not w.revisionNotes.has("card 39 held", sevWarning), $w.revisionNotes
+    discard w.close()
+    f.close()
+    var g = openSeismic(dst)
+    doAssert g.index.segy.text.card(39).strip == "C39 SEG Y REV1", g.index.segy.text.card(39)
+    g.close()
+
+  block a_blank_card_39_is_replaced_without_a_report:
+    let src = cardFile("blank39.sgy", "C39 ")
+    var f = openSeismic(src)
+    let dst = tmp / "blank39_out.sgy"
+    var w = openSeismicWriter(dst, like = f, segyRevision = some(rev(1)))
+    w.writeTrace(f, 0, newSamples(8))
+    doAssert not w.revisionNotes.has("card 39 held", sevWarning), $w.revisionNotes
+    discard w.close()
+    f.close()
+    var g = openSeismic(dst)
+    doAssert g.index.segy.text.card(39).strip == "C39 SEG Y REV1", g.index.segy.text.card(39)
+    g.close()
 
 when isMainModule: main()

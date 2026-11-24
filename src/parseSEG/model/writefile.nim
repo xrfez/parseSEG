@@ -411,7 +411,8 @@ func path*(w: SeismicWriter): lent string {.inline.} =
 
 func revisionNotes*(w: SeismicWriter): lent DiagLog {.inline.} =
   ## What a `segyRevision` change dropped or could not write, in
-  ## `convertSegy`'s words. File-level notes are there after open; a skipped
+  ## `convertSegy`'s words. File-level notes are there after open, including a
+  ## warning quoting a card 39 or 40 that held other text; a skipped
   ## trace's error after that `writeTrace`; the Rev 0 time-clamp warning after
   ## `close` or `finishBytes`. Empty when `segyRevision` was not set, or was
   ## the source revision. `close`'s log does not include these.
@@ -625,7 +626,8 @@ proc openSeismicWriter*(path: string, like: SeismicFile, segyFormat = stKeep,
   ## read-back check use that revision, on the bytes that will be written.
   ## A trace identification code is kept as stored. What the target drops
   ## (extended text, trailers, Trace Header Extension 1, a survey type, a
-  ## time rounded or clamped) is listed by `revisionNotes`, in `convertSegy`'s
+  ## time rounded or clamped, a card 39 or 40 that held other text) is listed
+  ## by `revisionNotes`, in `convertSegy`'s
   ## words, not by `close`. A variable-length trace whose count or interval
   ## does not fit is skipped: an error in `revisionNotes`, and it is not
   ## counted. A fixed-length count or interval that does not fit is refused.

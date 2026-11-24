@@ -20,7 +20,9 @@
 ##     does not fit them is skipped with an error (a fixed-length file of
 ##     such traces is refused).
 ##   Cards 39 and 40 name the target revision when it differs from the
-##   source. A trace identification code is kept as stored.
+##   source. A card that held anything other than blanks or a standard
+##   revision or end text is a warning, the old text quoted. A trace
+##   identification code is kept as stored.
 ## - `convertSegdToSegy`: SEG-D (Rev 1, 2.x, 3.x) to SEG-Y. Every record's
 ##   traces go out in file order, one SEG-Y trace per SEG-D trace (auxiliary
 ##   traces included, with their trace identification code). The mapping is
