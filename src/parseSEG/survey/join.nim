@@ -40,7 +40,8 @@
 ## stored; `KL` and `PM` still replace the station. The row each class gets
 ## is decided when the rows are loaded, and
 ## an ambiguous choice is logged then. A join does not log and does not
-## mutate the geometry. `receiverPointCode` is the code that join used.
+## mutate the geometry. `receiverPointCode` is that code when the join would
+## apply the row (not an auxiliary trace, and not a kept header position).
 ## Source rows are unchanged. Auxiliary traces are left alone. The channel →
 ## station step
 ## (2-4) assumes the recorder numbers
@@ -1036,14 +1037,18 @@ proc applyReceiverChoice(stations: SurveyGeometry, k: var TraceKeys, overwrite: 
     k.cmpY = NaN
   k.deriveGeometry(overwrite)
 
-func receiverPointCode*(g: SurveyGeometry, k: TraceKeys): string =
-  ## The SPS point code of the receiver row `applySurvey` uses for `k`
-  ## ("" when that station has no coded row). One row is returned as stored.
-  ## Several are matched by `sensorClass`: a hydrophone takes the last `H*`,
-  ## a geophone the last `G*` else the last `R*`, another identified receiver
-  ## the last `R*` else the last `G*`. Unknown, or none of those rows, is the
-  ## later row (two rows of one letter use the later one). The choice was
-  ## made when the rows were loaded.
+func receiverPointCode*(g: SurveyGeometry, k: TraceKeys, overwrite = false): string =
+  ## The SPS point code of the receiver row `applySurvey` would apply to `k`
+  ## ("" when it would not: an auxiliary trace, a header receiver position
+  ## kept because `overwrite` is false, or no coded row). `overwrite` is the
+  ## same flag as `applySurvey`. One row is returned as stored. Several are
+  ## matched by `sensorClass`: a hydrophone takes the last `H*`, a geophone
+  ## the last `G*` else the last `R*`, another identified receiver the last
+  ## `R*` else the last `G*`. Unknown, or none of those rows, is the later
+  ## row (two rows of one letter use the later one). The choice was made
+  ## when the rows were loaded.
+  if k.status == tsAuxiliary: return ""
+  if not overwrite and k.hasReceiverXY: return ""
   let hit = g.codedKey(k.rcvLine, k.rcvPoint, k.rcvIndex)
   if not hit.found: return ""
   let rows = g.codes[hit.key]

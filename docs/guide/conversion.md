@@ -153,8 +153,9 @@ hydrophone `H1`, with no warning), another identified receiver the last `R*` els
 `G*`. Unknown, or none of those rows, takes the later row. Two rows of one letter (`G1`,
 `G2`) use the later one, and `g.log` says the station was ambiguous when the rows were
 loaded (a join does not log); further warnings of that kind are a count.
-`receiverPointCode(g, keys)` is that code,
-so a viewer can show it. Source rows are unchanged.
+`receiverPointCode(g, keys, overwrite = false)` is that code when `applySurvey` would
+apply the row, and "" for an auxiliary trace or when the header receiver position is kept
+(`overwrite` false, the default). Source rows are unchanged.
 
 ```nim
 import std/math

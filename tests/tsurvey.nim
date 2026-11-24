@@ -844,24 +844,24 @@ proc main*() =
     (hydro.rcvLine, hydro.rcvPoint, hydro.rcvIndex) = (10.0, 104.0, 1'i16)
     hydro.sensorType = 1
     doAssert hydro.sensorClass == scHydrophone
+    doAssert g.receiverPointCode(hydro) == "H1"
     doAssert hydro.applySurvey(g)
     doAssert hydro.rcvX == 3000 and hydro.rcvY == 4000
-    doAssert g.receiverPointCode(hydro) == "H1"
 
     var geo = initTraceKeys()
     (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (10.0, 104.0, 1'i16)
     geo.traceCode = 12
     doAssert geo.sensorClass == scGeophone
+    doAssert g.receiverPointCode(geo) == "G1"
     doAssert geo.applySurvey(g)
     doAssert geo.rcvX == 1000 and geo.rcvY == 2000, $geo.rcvX
-    doAssert g.receiverPointCode(geo) == "G1"
 
     var press = initTraceKeys()
     (press.rcvLine, press.rcvPoint) = (10.0, 104.0)
     press.traceCode = 11
     doAssert press.sensorClass == scHydrophone
-    doAssert press.applySurvey(g) and press.rcvX == 3000
     doAssert g.receiverPointCode(press) == "H1"
+    doAssert press.applySurvey(g) and press.rcvX == 3000
 
     let only = r21('R', "11.00", "1.00", '1', "H1", "50.0", "60.0", "3.0")
     var gOnly: SurveyGeometry
@@ -869,8 +869,8 @@ proc main*() =
     var anyk = initTraceKeys()
     (anyk.rcvLine, anyk.rcvPoint) = (11.0, 1.0)
     anyk.traceCode = 12
-    doAssert anyk.applySurvey(gOnly) and anyk.rcvX == 50
     doAssert gOnly.receiverPointCode(anyk) == "H1"
+    doAssert anyk.applySurvey(gOnly) and anyk.rcvX == 50
     doAssert not gOnly.log.has("ambiguous", sevWarning), $gOnly.log
 
     let a = r21('R', "12.00", "2.00", '1', "G1", "10.0", "20.0", "1.0")
@@ -880,16 +880,16 @@ proc main*() =
     var gk = initTraceKeys()
     (gk.rcvLine, gk.rcvPoint) = (12.0, 2.0)
     gk.sensorType = 2
-    doAssert gk.applySurvey(gAmb) and gk.rcvX == 30 and gk.rcvY == 40
     doAssert gAmb.receiverPointCode(gk) == "G2"
+    doAssert gk.applySurvey(gAmb) and gk.rcvX == 30 and gk.rcvY == 40
     doAssert gAmb.log.has("ambiguous", sevWarning), $gAmb.log
 
     var unk = initTraceKeys()
     (unk.rcvLine, unk.rcvPoint) = (10.0, 104.0)
     unk.traceCode = 1
     doAssert unk.sensorClass == scUnknown
-    doAssert unk.applySurvey(g) and unk.rcvX == 3000
     doAssert g.receiverPointCode(unk) == "H1"
+    doAssert unk.applySurvey(g) and unk.rcvX == 3000
     # G1 and H1 each match a class: not ambiguous.
     doAssert not g.log.has("ambiguous", sevWarning), $g.log
 
@@ -903,8 +903,8 @@ proc main*() =
     doAssert not gKl.log.has("several point codes", sevInfo)
     var kk = initTraceKeys()
     (kk.rcvLine, kk.rcvPoint) = (13.0, 3.0)
-    doAssert kk.applySurvey(gKl) and kk.rcvX == 9
     doAssert gKl.receiverPointCode(kk) == "KL"
+    doAssert kk.applySurvey(gKl) and kk.rcvX == 9
 
     let pm = r21('R', "14.00", "4.00", '1', "PM", "7.0", "8.0", "1.0")
     let later = r21('R', "14.00", "4.00", '1', "G1", "70.0", "80.0", "1.0")
@@ -931,8 +931,8 @@ proc main*() =
     (em.rcvLine, em.rcvPoint) = (16.0, 6.0)
     em.sensorType = 21
     doAssert em.sensorClass == scOther
-    doAssert em.applySurvey(gR) and em.rcvX == 8
     doAssert gR.receiverPointCode(em) == "R1"
+    doAssert em.applySurvey(gR) and em.rcvX == 8
 
     var k = initTraceKeys()
     k.sensorType = 6
@@ -967,14 +967,36 @@ proc main*() =
     (geo.rcvLine, geo.rcvPoint, geo.rcvIndex) = (21.0, 8.0, 1'i16)
     geo.traceCode = 12
     doAssert geo.sensorClass == scGeophone
-    doAssert geo.applySurvey(g) and geo.rcvX == 100, $geo.rcvX
     doAssert g.receiverPointCode(geo) == "R1"
+    doAssert geo.applySurvey(g) and geo.rcvX == 100, $geo.rcvX
     var hydro = initTraceKeys()
     (hydro.rcvLine, hydro.rcvPoint, hydro.rcvIndex) = (21.0, 8.0, 1'i16)
     hydro.traceCode = 11
-    doAssert hydro.applySurvey(g) and hydro.rcvX == 300
     doAssert g.receiverPointCode(hydro) == "H1"
+    doAssert hydro.applySurvey(g) and hydro.rcvX == 300
     doAssert g.log.len == n
+
+  block receiver_point_code_only_when_applied:
+    # Break: receiverPointCode (join.nim) ignores auxiliary traces and a
+    # header position applySurvey would keep, so it names a row that is not
+    # applied.
+    let g1 = r21('R', "22.00", "9.00", '1', "G1", "1000.0", "2000.0", "1.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps([H00, g1].join("\n")))
+    var open = initTraceKeys()
+    (open.rcvLine, open.rcvPoint) = (22.0, 9.0)
+    open.traceCode = 12
+    doAssert g.receiverPointCode(open) == "G1"
+    var aux = open
+    aux.status = tsAuxiliary
+    doAssert g.receiverPointCode(aux) == "", "auxiliary"
+    var held = open
+    (held.rcvX, held.rcvY) = (9.0, 8.0)
+    doAssert g.receiverPointCode(held) == "", "header position kept"
+    doAssert g.receiverPointCode(held, overwrite = true) == "G1"
+    doAssert not aux.applySurvey(g) and aux.rcvX.isNaN
+    doAssert not held.applySurvey(g) and held.rcvX == 9
+    doAssert held.applySurvey(g, overwrite = true) and held.rcvX == 1000
 
   block geometry_copies_do_not_share_rows_or_log:
     # Break: SurveyGeometry.codes and logRef are refs (join.nim), so a copy
