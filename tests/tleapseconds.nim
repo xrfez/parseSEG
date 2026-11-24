@@ -3,6 +3,8 @@
 ## Seen to fail first: validation accepted a step of +2 and a first entry
 ## after 1980-01-06 (problems stayed empty). Converters ignored
 ## `useLeapTable`, so an instant after the added date stayed at offset 18.
+## `leapKnownAt` was missing, so the checked-to cases did not compile.
+## Truncating division made `leapKnownAt(-1)` false on 1969-12-31.
 
 import std/[assertions, atomics, options, os, strutils, typedthreads]
 
@@ -186,5 +188,24 @@ proc main*() =
     doAssert utcMinusGps(boundary) == -17
     doAssert gpsMinusUtc(utcUsToGpsUs(boundary)) == 17
     doAssert gpsUsToUtcUs(utcUsToGpsUs(before)) == before
+
+  block known_through_checked_to:
+    let endDay = daysFromCivil(2016, 12, 31) * 86400 * 1_000_000
+    doAssert leapKnownAt(endDay)
+    doAssert leapKnownAt(endDay + 86400 * 1_000_000 - 1)
+    doAssert not leapKnownAt(endDay + 86400 * 1_000_000)
+    doAssert gpsMinusUtc(utcUsToGpsUs(endDay + 86400 * 1_000_000)) == 18
+    let added = defaultLeapTable().withLeap(LeapDate(year: 2018, month: 1, day: 1))
+    useLeapTable(added)
+    doAssert not leapKnownAt(daysFromCivil(2017, 6, 1) * 86400 * 1_000_000)
+    var later = added
+    later.checkedTo = LeapDate(year: 1969, month: 12, day: 31)
+    useLeapTable(later)
+    doAssert leapKnownAt(-1)
+    doAssert not leapKnownAt(0)
+    later.checkedTo = LeapDate(year: 2018, month: 6, day: 30)
+    useLeapTable(later)
+    doAssert leapKnownAt(daysFromCivil(2018, 6, 30) * 86400 * 1_000_000)
+    doAssert not leapKnownAt(daysFromCivil(2018, 7, 1) * 86400 * 1_000_000)
 
 when isMainModule: main()

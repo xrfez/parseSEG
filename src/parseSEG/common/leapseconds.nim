@@ -17,6 +17,9 @@
 ## every reader uses from then on. Keys already read keep the instants they
 ## were given: a caller that changes the table re-reads keys.
 ##
+## `leapKnownAt` is false after `checkedTo`. Converters still return the last
+## offset then, so a caller can warn without a different answer.
+##
 ## The swap is one release store of a pointer to an immutable copy
 ## (`allocShared`, never freed). A reader acquire-loads that pointer and uses
 ## the copy, so it cannot see a torn table and no `seq` is shared across
@@ -282,6 +285,15 @@ proc useLeapTable*(t: LeapTable) =
   if problems.len > 0:
     raise newException(ValueError, problems[0])
   currentSlot.store(allocPublished(t), moRelease)
+
+proc leapKnownAt*(utcUs: int64): bool {.gcsafe, raises: [].} =
+  ## True when `utcUs` (UTC microseconds since 1970) falls on or before the
+  ## end of `currentLeapTable.checkedTo`. Converters still return the last
+  ## offset after that date; this is how a caller warns.
+  var sec = utcUs div 1_000_000
+  if utcUs mod 1_000_000 < 0: dec sec
+  let p = loadSlot(currentSlot)
+  sec < dateStart(p.year, p.month, p.day) + 86400
 
 proc leapOffsetAt*(unixSec: int64): int {.gcsafe, raises: [].} =
   # GPS − UTC at POSIX second `unixSec`. Before the first entry, that
