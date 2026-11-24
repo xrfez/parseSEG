@@ -481,11 +481,15 @@ proc utcMinusGps*(utcUs: int64): int {.gcsafe, raises: [].} =
   -leapOffsetAt(sec)
 
 proc timestampToUnix*(ts: int64): float64 {.gcsafe, raises: [].} =
-  ## UTC POSIX seconds of a SEG-D timestamp (GPS µs). The leap-second offset
-  ## comes from `gpsUsToUtcUs` (one table); the seconds stay the historical
-  ## float expression, so a value already stored does not move.
-  let (sec, _) = splitUs(gpsUsToUtcUs(ts))
-  float64(ts) / 1e6 + float64(GpsEpochUnix) - float64(leapOffsetAt(sec))
+  ## UTC POSIX seconds of a SEG-D timestamp (GPS µs). The seconds stay the
+  ## historical two-step float expression, so a value already stored does not
+  ## move, including inside an inserted leap second. The offset is
+  ## `currentLeapTable` (the same table as the integer converters).
+  let gpsSec = float64(ts) / 1e6
+  result = gpsSec + float64(GpsEpochUnix)
+  for _ in 0 .. 1:
+    result = gpsSec + float64(GpsEpochUnix) -
+      float64(leapOffsetAt(int64(floor(result))))
 
 proc unixToTimestamp*(unix: float64): int64 {.gcsafe, raises: [].} =
   ## The SEG-D timestamp (GPS µs) of UTC POSIX seconds `unix`. The offset

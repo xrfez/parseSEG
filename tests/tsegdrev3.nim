@@ -2,7 +2,7 @@
 
 import std/[assertions, os, times, math, strutils]
 
-import parseSEG/common/years
+import parseSEG/common/[years, leapseconds]
 import parseSEG/segd/[headers, rev3, reader]
 
 import parseSEG/io/[records, diskio]
@@ -288,5 +288,41 @@ proc main*() =
     atLeap(1981, 6, 30, 0, 1)
     atLeap(2008, 12, 31, 14, 15)
     atLeap(2016, 12, 31, 17, 18)
+
+  block inserted_second_keeps_the_historical_float:
+    # Historical rule, the old two-step expression: start from GPS seconds
+    # plus the GPS epoch, then twice replace that with GPS seconds plus the
+    # epoch minus the table's GPS−UTC at the floored POSIX second. Inside the
+    # inserted second that is the POSIX second before the insertion plus the
+    # fraction when the offset before it is negative, and the POSIX second the
+    # insertion is folded into plus the fraction otherwise. Broken by taking
+    # the offset from `gpsUsToUtcUs` (1972-06-30 was 78796800.0, not 78796799.0).
+    proc offsetAt(unixSec: int64): int =
+      let table = defaultLeapTable()
+      result = table.entries[0].gpsMinusUtc
+      for e in table.entries:
+        if daysFromCivil(e.year, e.month, e.day) * 86400 <= unixSec:
+          result = e.gpsMinusUtc
+        else: break
+    proc historical(ts: int64): float64 =
+      let gpsSec = float64(ts) / 1e6
+      result = gpsSec + float64(GpsEpochUnix)
+      for _ in 0 .. 1:
+        result = gpsSec + float64(GpsEpochUnix) -
+          float64(offsetAt(int64(floor(result))))
+    let table = defaultLeapTable()
+    let firstIns = table.entries[1]
+    let t1972 = daysFromCivil(firstIns.year, firstIns.month, firstIns.day) * 86400
+    let start1972 = (t1972 - GpsEpochUnix + int64(table.entries[0].gpsMinusUtc)) * 1_000_000
+    doAssert timestampToUnix(start1972) == 78796799.0
+    for i in 1 ..< table.entries.len:
+      let e = table.entries[i]
+      let prev = table.entries[i - 1]
+      let posix = daysFromCivil(e.year, e.month, e.day) * 86400
+      let start = (posix - GpsEpochUnix + int64(prev.gpsMinusUtc)) * 1_000_000
+      var us = start
+      while us < start + 1_000_000:
+        doAssert timestampToUnix(us) == historical(us)
+        us += 100
 
 when isMainModule: main()
