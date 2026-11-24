@@ -458,8 +458,11 @@ channel-type field, so pass one (`sctSeismic` when omitted; `sctTimeBreak`, `sct
 `sctSourceRefPilot`, `sctSourceRefSweep` and the other Rev 3 codes the reader knows). A record
 is held until the next record number or `close`, then written whole; record numbers must not
 go backwards. A record's time zero is its first trace's `keys.time`, or `SegdOutputOptions.time`
-when that trace has none; a record with neither is refused (the writer does not invent a
-time). That time zero is written in General Header #1 and General Header #3. Each trace's
+when that trace has none, except when that trace's origin is `toFirstSample`: then it is
+the first-sample instant minus `t0Ms` (integer microseconds; a NaN `t0Ms` is 0), so writing
+keys just read back keeps the shot. A record with neither time is refused (the writer does
+not invent a time). That time zero is written in General Header #1 and General Header #3.
+Each trace's
 Timestamp block (0x42) holds the first-sample instant: `firstSampleUs` when the keys carry
 an origin, otherwise `keys.time` plus `t0Ms` (caller-built keys: `time` is time zero).
 A re-read trace then has origin `toFirstSample`, and its `time` is the first sample

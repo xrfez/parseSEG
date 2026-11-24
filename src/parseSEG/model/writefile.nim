@@ -1489,6 +1489,18 @@ proc firstSampleGpsUs(k: TraceKeys, recorded: float64): int64 =
   let delay = if k.t0Ms.isNaN: 0'i64 else: int64(round(k.t0Ms * 1000.0))
   utcUsToGpsUs(int64(round(recorded * 1e6)) + delay)
 
+proc ghTimeZeroGpsUs(k: TraceKeys, recTime: float64): int64 =
+  # GPS µs of the record time zero (GH#3, and GH#1's whole second). A
+  # re-read Rev 3 trace has origin `toFirstSample` and `time` at sample 0,
+  # so the shot is that instant minus `t0Ms` (integer µs; NaN is 0). Any
+  # other origin is `recTime`, as before. Does not change `recorded`.
+  if k.timeOrigin == toFirstSample:
+    let fs = k.firstSampleUs
+    if fs.isSome:
+      let delay = if k.t0Ms.isNaN: 0'i64 else: int64(round(k.t0Ms * 1000.0))
+      return utcUsToGpsUs(fs.get - delay)
+  unixToTimestamp(recTime)
+
 proc checkStation(line, point: float64, what: string): bool =
   # True when the station is known. A line and a point that are both 0, or
   # both NaN, are unknown (the reader gives NaN back).
@@ -1784,9 +1796,10 @@ proc flushSegdKeys(s: var WriterState) =
   let additional = 2 + nOpt
   let recTime = s.segdRecTime
   doAssert not recTime.isNaN, "a SEG-D record was buffered without a recording time"
-  # GH#1 holds whole seconds of the time as General Header #3 holds it: the
-  # time rounded to the microsecond (unixToTimestamp), read back.
-  let civil = fromUnix(int64(floor(timestampToUnix(unixToTimestamp(recTime))))).utc
+  # GH#1 holds whole seconds of the time General Header #3 holds: the record
+  # time zero. A re-read `toFirstSample` trace subtracts `t0Ms` in integer µs.
+  let tzGps = ghTimeZeroGpsUs(s.segdPending[0].keys, recTime)
+  let civil = fromUnix(int64(floor(timestampToUnix(tzGps)))).utc
   var gh1 = SegdGeneralHeader1(formatCode: ord(fmt), recordType: 8, recordLength: BcdAllF,
     year: civil.year mod 100, julianDay: civil.yearday + 1, hour: civil.hour,
     minute: civil.minute, second: civil.second,
@@ -1828,8 +1841,7 @@ proc flushSegdKeys(s: var WriterState) =
   # in range: writeSegdKeys refuses a window whose end does not fit an int32
   gh2.extRecordLength = uint32(longest)
   rec.gh2Rev3 = gh2
-  rec.gh3 = SegdGeneralHeader3(timeZero: unixToTimestamp(recTime),
-    blockType: BlockTypeGeneralHeader3)
+  rec.gh3 = SegdGeneralHeader3(timeZero: tzGps, blockType: BlockTypeGeneralHeader3)
   var descs: seq[SegdChannelSetDescriptorRev3] = @[]
   for j, ct in setType:
     let endUs = float64(setT0[j]) + span
@@ -2230,9 +2242,12 @@ proc writeTrace*[T: SampleType](w: var SeismicWriter, keys: TraceKeys, samples: 
   ## itself), so `tsLive` or `tsDead` with one is refused, as is
   ## `tsAuxiliary` with seismic or EM. The record's time zero is the first
   ## trace's `keys.time` when that is set, otherwise `SegdOutputOptions.time`;
-  ## with neither, the record is refused (the message names both). It is
-  ## written in General Header #1 (year, julian day and the whole second of
-  ## the time rounded to the microsecond) and in General Header #3's timestamp.
+  ## with neither, the record is refused (the message names both). When that
+  ## trace's origin is `toFirstSample`, the time zero written is its
+  ## first-sample instant minus `t0Ms` (integer microseconds; a NaN `t0Ms`
+  ## is 0): a re-read Rev 3 trace has `time` at sample 0, and this keeps
+  ## the shot. It is written in General Header #1 (year, julian day and the
+  ## whole second of that time) and in General Header #3's timestamp.
   ## The Timestamp block (0x42) holds the first-sample instant:
   ## `firstSampleUs` when the keys carry an origin, otherwise `keys.time`
   ## plus `t0Ms` (caller-built keys: `time` is time zero; a trace with no

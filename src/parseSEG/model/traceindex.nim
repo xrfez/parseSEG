@@ -1181,6 +1181,44 @@ proc startTimeMs*(f: SeismicFile, trace: int): float64 =
   f.startTimeMsInto([trace], v)
   v[0]
 
+proc recordTimeZeroUs*(f: SeismicFile, trace: int): Option[int64] =
+  ## The UTC microsecond instant of the time zero of trace `trace`'s record.
+  ##
+  ## SEG-D Rev 3: General Header #3 `timeZero`, converted with
+  ## `gpsUsToUtcUs`, when that field is non-zero (one-microsecond
+  ## resolution); `none` when it is zero. SEG-D Rev 0-2: the General
+  ## Header #1 clock, which holds a whole second, as microseconds since
+  ## the Unix epoch; `none` when that clock is unset. SEG-Y: the header
+  ## clock the keys already use, the same instant `firstSampleUs` minus
+  ## the delay recording time gives (whole seconds in Rev 0 and Rev 1;
+  ## microseconds, from nanoseconds rounded to the nearest microsecond,
+  ## in Rev 2); `none` when the file gives no time. Any other format:
+  ## `none`.
+  ##
+  ## Does not need `keys = true`. Raises `ValueError` for a trace out of
+  ## range, and, when SEG-Y keys are read from the map, for a closed file;
+  ## `SegTruncatedError` if that read finds the file cut short.
+  f.requireTrace(trace)
+  case f.idx.kind
+  of skSegd:
+    let rec = f.idx.segdRecords[f.idx.entries[trace].record]
+    if rec.isRev3:
+      if rec.gh3.timeZero != 0: some(gpsUsToUtcUs(rec.gh3.timeZero))
+      else: none(int64)
+    else:
+      let t = generalHeaderUtc(rec.gh1)
+      if t.isNaN: none(int64) else: some(int64(t) * 1_000_000)
+  of skSegy:
+    var ks: array[1, TraceKeys]
+    f.traceKeysInto([trace], ks)
+    let fs = ks[0].firstSampleUs
+    if fs.isNone: return none(int64)
+    let delay = if ks[0].t0Ms.isNaN: 0'i64
+                else: int64(round(ks[0].t0Ms * 1000.0))
+    some(fs.get - delay)
+  of skSeg2, skUnknown:
+    none(int64)
+
 proc firstOrientation(area: openArray[byte]): Option[SegdOrientation] =
   # The first Orientation block. Indexing reads extension bytes but does not
   # walk their block types, so a later block is not compared or reported.

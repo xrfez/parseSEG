@@ -1001,6 +1001,9 @@ applied. SEG-2 stays `toNone`. The leap-second offset comes from the current tab
 | `toHeaderSeconds` | Header clock of whole seconds (SEG-D GH#1, SEG-Y without a fraction) | that instant plus `t0Ms` |
 | `toHeaderSubsec` | Header clock with a sub-second part (SEG-Y nanoseconds) | that instant plus `t0Ms` |
 
+`time` of a re-read SEG-D Rev 3 trace is its first sample (`toFirstSample`).
+Ask `recordTimeZeroUs` for the shot instant, in UTC microseconds.
+
 `sampleTimeUs(k, n)` is sample `n` in UTC microseconds. `sampleAtUs(k, us)` is
 the fractional sample index (NaN when the start or the interval is missing).
 

@@ -11,8 +11,16 @@
 ## Skipping `noteRecordedTime` in `noteHeaderClock` left the origin
 ## unrecorded, so sample 0 was missing (SEG-Y rev 2, 2024-01-01, Ext1
 ## nanoseconds 1234567, delay 4 ms).
+##
+## A second write of re-read `toFirstSample` keys stored GH#3 as
+## `keys.time` (sample 0, T+d) instead of time zero T. With T =
+## 1700000020.125 and d = -20.125 ms, that moved GH#3 by -20125 us.
+## Reverting `ghTimeZeroGpsUs` to `unixToTimestamp(recTime)` fails
+## `record_time_zero_stable` on the GH#3 bytes and `recordTimeZeroUs`.
+## Returning none from `recordTimeZeroUs` fails that block and the
+## Rev 2 and SEG-Y blocks.
 
-import std/[assertions, math, options]
+import std/[assertions, math, options, times]
 
 import parseSEG
 
@@ -27,7 +35,8 @@ proc keysOf(b: seq[byte], name: string): TraceKeys =
   result = f.traceKeys(0)
   f.close()
 
-proc rev3File(stamp: int64, startUs: int32, withStamp: bool): seq[byte] =
+proc rev3File(stamp: int64, startUs: int32, withStamp: bool,
+    gh3Us = utcUsToGpsUs(1_700_000_000_000_000'i64)): seq[byte] =
   var r = SegdRecord(layout: slRev3, format: some(sd8058),
     revision: SegdRevision(major: 3, minor: 0))
   let the = uint8(1 + ord(withStamp))
@@ -37,8 +46,7 @@ proc rev3File(stamp: int64, startUs: int32, withStamp: bool): seq[byte] =
     scanTypesPerRecord: 1, channelSetsPerScanType: 1, manufacturerCode: 9)
   r.gh2Rev3 = SegdGeneralHeader2Rev3(extFileNumber: 1, revisionMajor: 3,
     revisionMinor: 0, extRecordLength: 1000, blockType: BlockTypeGeneralHeader2)
-  r.gh3 = SegdGeneralHeader3(timeZero: utcUsToGpsUs(1_700_000_000_000_000'i64),
-    blockType: BlockTypeGeneralHeader3)
+  r.gh3 = SegdGeneralHeader3(timeZero: gh3Us, blockType: BlockTypeGeneralHeader3)
   var d = SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: 1,
     channelType: 0x10, startTime: startUs, endTime: startUs + 1000, numSamples: 1,
     descaleMultiplier: 1.0, channelsInSet: 1, samplingInterval: 1000, arrayForming: 1,
@@ -68,11 +76,11 @@ proc rev3File(stamp: int64, startUs: int32, withStamp: bool): seq[byte] =
   w.close()
   sink.takeBytes()
 
-proc rev2File(): seq[byte] =
+proc rev2File(year = 24, julian = 1, hour = 0, minute = 0, second = 0): seq[byte] =
   var r = SegdRecord(layout: slRev2, format: some(sd8058),
     revision: SegdRevision(major: 2, minor: 0))
-  r.gh1 = SegdGeneralHeader1(fileNumber: 1, formatCode: 8058, year: 24,
-    additionalGhBlocks: 1, julianDay: 1, hour: 0, minute: 0, second: 0,
+  r.gh1 = SegdGeneralHeader1(fileNumber: 1, formatCode: 8058, year: year,
+    additionalGhBlocks: 1, julianDay: julian, hour: hour, minute: minute, second: second,
     manufacturerCode: 9, baseScanInterval16: 32, recordType: 8, recordLength: BcdAllF,
     scanTypesPerRecord: 1, channelSetsPerScanType: 1)
   r.gh2 = some SegdGeneralHeader2(extFileNumber: 1, revisionMajor: 2, revisionMinor: 0,
@@ -291,6 +299,102 @@ proc main*() =
       doAssert got.isSome, $k.timeOrigin & " t0 " & $k.t0Ms
       doAssert got.get == want, $k.timeOrigin & " t0 " & $k.t0Ms & " got " & $got.get &
         " want " & $want
+
+  block record_time_zero_stable:
+    # T has a non-zero microsecond part. d = 900 ms crosses a second, so a
+    # rewrite that stored keys.time would move GH#1 as well as GH#3.
+    const ShotT = 1_700_000_020.125
+    const ShotUs = 1_700_000_020_125_000'i64
+    proc writeShot(k: TraceKeys): seq[byte] =
+      var w = openSeismicWriterBytes(SegdOutputOptions(sampleIntervalUs: 1000,
+        numSamples: 1))
+      var t = k
+      if t.record.isNaN: t.record = 1
+      t.intervalUs = 1000
+      w.writeTrace(t, [1'f32])
+      w.finishBytes()
+    proc shotOf(b: seq[byte]): tuple[k: TraceKeys, tz: int64, gh3, gh1: seq[byte]] =
+      var f = openSeismicBytes(b, "shot", keys = true)
+      doAssert f.len == 1
+      doAssert f.log.count(sevError) == 0
+      let tz = f.recordTimeZeroUs(0)
+      doAssert tz.isSome, "record time zero missing"
+      result = (f.traceKeys(0), tz.get, @(f.index.segdRecords[0].gh3.encoded),
+        @(f.index.segdRecords[0].gh1.encoded))
+      f.close()
+      doAssert b.len >= 96 and b[95] == 0x03
+      doAssert result.gh3 == b[64 .. 95]
+    for d in [-20.125, 0.0, 20.125, 900.0]:
+      var k = initTraceKeys()
+      k.time = ShotT
+      k.t0Ms = d
+      k.intervalUs = 1000
+      k.record = 1
+      let b1 = writeShot(k)
+      let a = shotOf(b1)
+      doAssert a.tz == ShotUs, "d " & $d & " tz " & $a.tz
+      doAssert a.k.timeOrigin == toFirstSample
+      doAssert a.k.firstSampleUs.get == ShotUs + int64(round(d * 1000.0)), $d
+      var bare = openSeismicBytes(b1, "nokeys")
+      doAssert not bare.hasKeys
+      doAssert bare.recordTimeZeroUs(0).get == ShotUs
+      bare.close()
+      let b2 = writeShot(a.k)
+      let c = shotOf(b2)
+      doAssert c.tz == ShotUs, "rewrite d " & $d & " tz " & $c.tz
+      doAssert c.k.firstSampleUs.get == a.k.firstSampleUs.get, $d
+      doAssert c.k.t0Ms == a.k.t0Ms, $d
+      doAssert c.gh3 == a.gh3, "GH#3 moved for d " & $d
+      doAssert c.gh1 == a.gh1, "GH#1 moved for d " & $d
+      doAssert b2[64 .. 95] == b1[64 .. 95], "GH#3 file bytes moved for d " & $d
+
+  block record_time_zero_rev2:
+    const ShotT = 1_700_000_020.125
+    let sec = int64(floor(ShotT))
+    let civil = fromUnix(sec).utc
+    let b = rev2File(year = civil.year mod 100, julian = civil.yearday + 1,
+      hour = civil.hour, minute = civil.minute, second = civil.second)
+    var f = openSeismicBytes(b, "r2tz", keys = true)
+    doAssert f.log.count(sevError) == 0
+    let tz = f.recordTimeZeroUs(0)
+    doAssert tz.isSome
+    doAssert tz.get == sec * 1_000_000, $tz.get
+    f.close()
+
+  block record_time_zero_segy:
+    const ShotT = 1_700_000_020.125
+    const ShotUs = 1_700_000_020_125_000'i64
+    let whole = int64(floor(ShotT)) * 1_000_000
+    for rev in [1, 2]:
+      let want = if rev == 1: whole else: ShotUs
+      for d in [-20.125, 0.0, 20.125]:
+        var k = initTraceKeys()
+        k.time = ShotT
+        k.t0Ms = d
+        k.intervalUs = 1000
+        var w = openSeismicWriterBytes(SegyOutputOptions(
+          revision: SegyRevision(major: uint8(rev), minor: uint8(ord(rev >= 2)))))
+        w.writeTrace(k, [1'f32])
+        let b = w.finishBytes()
+        var f = openSeismicBytes(b, "sytz", keys = true)
+        doAssert f.log.count(sevError) == 0
+        let tz = f.recordTimeZeroUs(0)
+        doAssert tz.isSome, "rev " & $rev & " d " & $d
+        doAssert tz.get == want, "rev " & $rev & " d " & $d & " got " & $tz.get
+        f.close()
+
+  block record_time_zero_none:
+    var k = initTraceKeys()
+    k.intervalUs = 1000
+    var w = openSeismicWriterBytes(SegyOutputOptions())
+    w.writeTrace(k, [1'f32])
+    var f = openSeismicBytes(w.finishBytes(), "notime", keys = true)
+    doAssert f.traceKeys(0).time.isNaN
+    doAssert f.recordTimeZeroUs(0).isNone
+    f.close()
+    var g = openSeismicBytes(rev3File(0, 0, false, 0), "gh3zero", keys = true)
+    doAssert g.recordTimeZeroUs(0).isNone
+    g.close()
 
   block sample_index:
     let k = keysOf(segyFile(1, 0, 0, 4, false), "idx")
