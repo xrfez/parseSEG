@@ -1,10 +1,11 @@
-; GPS minus UTC leap seconds. Dates from the IERS Bulletin C list,
-; through the leap of 2016-12-31. GPS minus UTC is (TAI minus UTC) minus 19;
-; from 1972-01-01 until the first of these leaps the offset is -9.
+; GPS minus UTC leap seconds. This list is the IERS Bulletin C list,
+; complete to 2026-06-30. A later bulletin is applied by editing this file
+; or loading another. GPS minus UTC is (TAI minus UTC) minus 19; from
+; 1972-01-01 until the first of these leaps the offset is -9.
 ; checkedTo is the last UTC date this list is known to be complete.
 (leapSeconds
   (version 1)
-  (checkedTo 2016 12 31)
+  (checkedTo 2026 6 30)
   (leap (date 1972 1 1) (gpsMinusUtc -9))
   (leap (date 1972 7 1) (gpsMinusUtc -8))
   (leap (date 1973 1 1) (gpsMinusUtc -7))

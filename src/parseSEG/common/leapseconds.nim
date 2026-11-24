@@ -1,7 +1,7 @@
 ## GPS−UTC leap seconds as a NIF document a caller can replace.
 ##
 ## The form is
-## `(leapSeconds (version 1) (checkedTo 2016 12 31) (leap (date 2017 1 1) (gpsMinusUtc 18)) ...)`.
+## `(leapSeconds (version 1) (checkedTo 2026 6 30) (leap (date 2017 1 1) (gpsMinusUtc 18)) ...)`.
 ## A `;` comment may name the source of the dates. A leading `(.nif27)`
 ## directive is ignored. `checkedTo` is the last UTC date the table is known
 ## complete. Each `leap` is the UTC date a new offset starts (00:00:00 that
@@ -12,8 +12,8 @@
 ## `LeapStartOffset` (−9: GPS−UTC from 1972-01-01 until the leap of 1972-06-30,
 ## which is (TAI−UTC) − 19).
 ##
-## The shipped table is `data/leapseconds.nif` (IERS Bulletin C, through the
-## leap of 2016-12-31), embedded with `staticRead`, so the library works with
+## The shipped table is `data/leapseconds.nif` (IERS Bulletin C, complete
+## through 2026-06-30), embedded with `staticRead`, so the library works with
 ## no file present. `useLeapTable` replaces the table every converter and
 ## every reader uses from then on. Keys already read keep the instants they
 ## were given: a caller that changes the table re-reads keys.

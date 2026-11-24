@@ -46,7 +46,7 @@ proc reader() {.thread.} =
       sawLong.store(1, moRelease)
     else:
       doAssert false, "torn leap table: " & $t.entries.len
-    doAssert t.checkedTo == LeapDate(year: 2016, month: 12, day: 31)
+    doAssert t.checkedTo == LeapDate(year: 2026, month: 6, day: 30)
 
 proc main*() =
   defer: useLeapTable(defaultLeapTable())
@@ -58,7 +58,7 @@ proc main*() =
     doAssert fromFile.problems.len == 0, $fromFile.problems
     let t = defaultLeapTable()
     doAssert t == fromFile.table
-    doAssert t.checkedTo == LeapDate(year: 2016, month: 12, day: 31)
+    doAssert t.checkedTo == LeapDate(year: 2026, month: 6, day: 30)
     doAssert t.entries.len == oldDays.len + 1
     doAssert t.entries[0] == LeapSecond(year: 1972, month: 1, day: 1,
       gpsMinusUtc: LeapStartOffset)
@@ -191,14 +191,15 @@ proc main*() =
     doAssert gpsUsToUtcUs(utcUsToGpsUs(before)) == before
 
   block known_through_checked_to:
-    let endDay = daysFromCivil(2016, 12, 31) * 86400 * 1_000_000
+    useLeapTable(defaultLeapTable())
+    let endDay = daysFromCivil(2026, 6, 30) * 86400 * 1_000_000
     doAssert leapKnownAt(endDay)
     doAssert leapKnownAt(endDay + 86400 * 1_000_000 - 1)
     doAssert not leapKnownAt(endDay + 86400 * 1_000_000)
     doAssert gpsMinusUtc(utcUsToGpsUs(endDay + 86400 * 1_000_000)) == 18
     let added = defaultLeapTable().withLeap(LeapDate(year: 2018, month: 1, day: 1))
     useLeapTable(added)
-    doAssert not leapKnownAt(daysFromCivil(2017, 6, 1) * 86400 * 1_000_000)
+    doAssert not leapKnownAt(daysFromCivil(2026, 7, 1) * 86400 * 1_000_000)
     var later = added
     later.checkedTo = LeapDate(year: 1969, month: 12, day: 31)
     useLeapTable(later)
@@ -227,7 +228,7 @@ proc main*() =
       result.output = readFile(path)
     let shown = capture("leapseconds")
     doAssert shown.code == 0, shown.output
-    doAssert shown.output.find("checkedTo 2016 12 31") >= 0
+    doAssert shown.output.find("checkedTo 2026 6 30") >= 0
     doAssert shown.output.find("(version 1)") >= 0
     let missing = capture("leapseconds", "--file", getTempDir() / "no-such-leap.nif")
     doAssert missing.code == 2

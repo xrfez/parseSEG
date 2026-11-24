@@ -467,7 +467,7 @@ proc gpsUsToUtcUs*(gpsUs: int64): int64 {.gcsafe, raises: [].} =
   ## either `int64` end is not supported: this saturates to that end and
   ## raises nothing. A product that does not fit saturates the same way, so
   ## a release or danger build does not overflow. The offset is
-  ## `currentLeapTable` (shipped complete through 2016-12-31; `useLeapTable`
+  ## `currentLeapTable` (shipped complete through 2026-06-30; `useLeapTable`
   ## replaces it). After `checkedTo` the last offset is still used.
   if gpsUs > high(int64) - UnsupportedEdgeUs: return high(int64)
   if gpsUs < low(int64) + UnsupportedEdgeUs: return low(int64)

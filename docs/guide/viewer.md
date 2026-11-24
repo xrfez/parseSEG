@@ -1086,7 +1086,7 @@ standard bytes 189-192 only, which this file leaves at 0.
 ## leap seconds: the file, replacing it, adding one
 
 The GPS−UTC offset is not compiled in. `data/leapseconds.nif` is the shipped
-table (IERS Bulletin C, complete through 2016-12-31), embedded so the library
+table (IERS Bulletin C, complete through 2026-06-30), embedded so the library
 works with no file present. `defaultLeapTable` is that table.
 `currentLeapTable` is the one every converter uses, the shipped one until
 `useLeapTable`. A key already read keeps the instant it was given: after
@@ -1107,17 +1107,17 @@ import parseSEG
 
 proc addOne() =
   defer: useLeapTable(defaultLeapTable())
-  let june2017 = 1496275200'i64 # 2017-06-01T00:00:00Z, after checkedTo
-  let june2018 = 1527811200'i64 # 2018-06-01T00:00:00Z
-  doAssert utcMinusGps(june2017 * 1_000_000) == -18
-  doAssert not leapKnownAt(june2017 * 1_000_000)
-  let added = currentLeapTable().withLeap(LeapDate(year: 2018, month: 1, day: 1))
+  let july2026 = 1782864000'i64 # 2026-07-01T00:00:00Z, after checkedTo
+  let july2027 = 1814400000'i64 # 2027-07-01T00:00:00Z
+  doAssert utcMinusGps(july2026 * 1_000_000) == -18
+  doAssert not leapKnownAt(july2026 * 1_000_000)
+  let added = currentLeapTable().withLeap(LeapDate(year: 2027, month: 1, day: 1))
   let back = parseLeapTable(leapTableNif(added))
   doAssert back.problems.len == 0
   useLeapTable(back.table)
-  doAssert utcMinusGps(june2017 * 1_000_000) == -18
-  doAssert utcMinusGps(june2018 * 1_000_000) == -19
-  doAssert not leapKnownAt(june2018 * 1_000_000)
+  doAssert utcMinusGps(july2026 * 1_000_000) == -18
+  doAssert utcMinusGps(july2027 * 1_000_000) == -19
+  doAssert not leapKnownAt(july2027 * 1_000_000)
 
 addOne()
 ```
