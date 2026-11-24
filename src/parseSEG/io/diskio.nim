@@ -132,6 +132,17 @@ method writeRecordImpl*(s: DiskSink; data: openArray[byte]) {.raises: [Catchable
 method writeTapeMarkImpl*(s: DiskSink) {.raises: [CatchableError].} =
   discard "disk files store no tape marks"
 
+proc c_fflush(f: File): cint {.importc: "fflush", header: "<stdio.h>".}
+proc c_strerror(code: cint): cstring {.importc: "strerror", header: "<string.h>".}
+var cErrno {.importc: "errno", header: "<errno.h>".}: cint
+
+proc flushChecked(f: File, name: string) {.raises: [IOError].} =
+  # `flushFile` discards fflush's result (`syncio`); a patch that fits the
+  # stdio buffer would otherwise return, and `close` would too.
+  if c_fflush(f) != 0:
+    let code = cErrno
+    raise newException(IOError, "cannot patch " & name & ": " & $c_strerror(code))
+
 proc patch*(s: DiskSink, at: int, data: openArray[byte]) =
   ## Overwrites bytes at `at` already accepted by `writeRecord` (the
   ## back-patching of counts known at the end, as `MemSink.patch`). Bytes still
@@ -149,14 +160,26 @@ proc patch*(s: DiskSink, at: int, data: openArray[byte]) =
     let nFile = min(data.len, int(flushed - at))
     flushFile(s.f)
     let pos = getFilePos(s.f)
+    var pending: ref IOError = nil
     try:
       setFilePos(s.f, int64(at))
-      if writeBytes(s.f, data, 0, nFile) != nFile:
+      try:
+        if writeBytes(s.f, data, 0, nFile) != nFile:
+          raise newException(IOError, "cannot patch " & s.name)
+        flushChecked(s.f, s.name)
+      except IOError as e:
         s.failed = true
-        raise newException(IOError, "cannot patch " & s.name)
-      flushFile(s.f)
+        pending = e
+    except IOError as e:
+      pending = e
     finally:
-      setFilePos(s.f, pos)
+      try:
+        setFilePos(s.f, pos)
+      except IOError as e:
+        if pending.isNil:
+          s.failed = true
+          pending = e
+    if not pending.isNil: raise pending
   if int64(at) + data.len > flushed:
     let dataAt = int(max(int64(at), flushed) - at)
     let bufAt = int(max(int64(at), flushed) - flushed)
