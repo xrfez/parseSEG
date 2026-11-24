@@ -1,7 +1,4 @@
-## SEG-D Rev 3 header blocks and timestamps (task 5.1).
-##
-## Seen to fail first: a position after any source description was stored as
-## the source's (`k.srcX` was 999, from the second description).
+## SEG-D Rev 3 header blocks and timestamps.
 
 import std/[assertions, os, times, math, strutils]
 
@@ -176,7 +173,6 @@ proc main*() =
     let back = decodeBlock[SegdSourceDescription](s.encoded)
     doAssert back.phaseAngle == -90 and back.depth == 0x0102
 
-  # Phase 8 review.
   block p8_b3_position_after_additional_source_info_is_the_source:
     var rec = SegdRecord(layout: slRev3)
     var t = SegdTrace(layout: slRev3, ext1Rev3: some(SegdTraceHeaderExt1Rev3()))
@@ -192,8 +188,6 @@ proc main*() =
     doAssert k.srcX == 500 and k.srcY == 600 and k.srcZ.isNaN and k.rcvX.isNaN
 
   block source_position_attaches_only_to_the_selected_description:
-    # Seen to fail first: a position after any source description was the
-    # source's (srcX was 999, from the second description).
     proc pos(x, y: float64): SegdPositionBlock =
       SegdPositionBlock(position1Valid: 1, position1Quality: 1, tuple1Coord1: x,
         tuple1Coord2: y, tuple1Coord3: Inf, blockType1: 0x50, blockType2: 0x51,
@@ -233,8 +227,6 @@ proc main*() =
     doAssert k4.srcX.isNaN and k4.rcvX == 111 and k4.rcvY == 222
 
   block integer_leap_seconds:
-    # Seen to fail first: gpsUsToUtcUs returned one microsecond low, so a
-    # round trip and the ±1 µs leap checks failed.
     proc bits(x: float64): uint64 = cast[uint64](x)
     let samples = [
       0'i64, 1_123_456, 1'i64, -1_000_000'i64,

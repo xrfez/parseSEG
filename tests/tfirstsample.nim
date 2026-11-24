@@ -1,8 +1,4 @@
-## Exact sample-0 time and where `TraceKeys.time` came from (PTIME1).
-##
-## Seen to fail first: `firstSampleUs` returned the recorded instant and did
-## not add `t0Ms`, so a GH#3 time zero of 2.5 ms and a SEG-Y delay of 5 ms
-## were short.
+## Exact sample-0 time and where `TraceKeys.time` came from.
 ##
 ## A stored sub-second of 500000 us with a float fraction below 0.5 was
 ## taken as a crossed second, so `firstSampleUs` was 1000000 us early
