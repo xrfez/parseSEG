@@ -676,9 +676,201 @@ proc mainSix*() =
   doAssert "own source count" in api, "docs/api.md does not state the own-count exception"
   doAssert "channel sets differ" in api
 
+
+proc makeSubsetRec(rev3: bool, ns: int): SegdRecordData =
+  ## Two channel sets, 3 and 2 traces (set 1: traces 0..2, set 2: 3..4), each
+  ## trace with its header extension and 32 more bytes of its own; an extended
+  ## header. Rev 2: set 2 has a 1 ms interval, set 1 2 ms. Rev 3: both 1 ms.
+  let fmt = sd8058
+  var r = SegdRecord(layout: (if rev3: slRev3 else: slRev2), format: some(fmt),
+    revision: SegdRevision(major: (if rev3: 3 else: 2), minor: (if rev3: 0 else: 1)))
+  r.gh1 = SegdGeneralHeader1(fileNumber: 12, formatCode: ord(fmt), year: 26,
+    additionalGhBlocks: (if rev3: 2 else: 1), julianDay: 311, manufacturerCode: 9,
+    baseScanInterval16: (if rev3: 16 else: 32), recordType: 8, recordLength: BcdAllF,
+    scanTypesPerRecord: 1, channelSetsPerScanType: 2, extendedHeaderBlocks: 1)
+  r.extended = newSeq[byte](32)
+  for i in 0 ..< 32: r.extended[i] = byte(90 + i)
+  if rev3:
+    r.gh2Rev3 = SegdGeneralHeader2Rev3(extFileNumber: 12, revisionMajor: 3,
+      extRecordLength: uint32(1000 * ns), blockType: 2)
+    r.gh3 = SegdGeneralHeader3(timeZero: 1474994765504000, blockType: 3)
+    var sets: seq[SegdChannelSetDescriptorRev3]
+    for k in 1 .. 2:
+      sets.add SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: uint16(k),
+        channelType: 0x10, endTime: int32(1000 * ns), numSamples: uint32(ns),
+        descaleMultiplier: 0.25, channelsInSet: uint32(4 - k), samplingInterval: 1000,
+        traceHeaderExtensions: 2, blockType1: 0x30, blockType2: 0x31, blockType3: 0x32)
+    r.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: sets)]
+  else:
+    r.gh2 = some SegdGeneralHeader2(extFileNumber: 12, revisionMajor: 2, revisionMinor: 1,
+      extRecordLength: uint32(2 * ns), blockNumber: 2)
+    var sets: seq[SegdChannelSetDescriptor]
+    for k in 1 .. 2:
+      sets.add SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: k,
+        endTime: uint16(if k == 1: ns else: ns div 2), channelCount: 4 - k,
+        channelType: 1, traceHeaderExtensions: 2, subscanExponent: k - 1)
+    r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: sets)]
+  r.traceCount = 5
+  var traces: seq[SegdTrace]
+  for k in 0 ..< 5:
+    let set = if k < 3: 1 else: 2
+    var t = SegdTrace(layout: r.layout, index: k, numSamples: ns)
+    t.header = SegdTraceHeader(fileNumber: 12, scanTypeNumber: 1, channelSetNumber: set,
+      traceNumber: k + 1, traceHeaderExtensions: 2'u8)
+    if rev3:
+      t.ext1Rev3 = some SegdTraceHeaderExt1Rev3(receiverLineNumber: 7,
+        receiverPointNumber: int32(100 + k), numSamples: uint32(ns), sensorType: 2,
+        groupIndex: 1, blockType: 0x40)
+    else:
+      t.ext1 = some SegdTraceHeaderExt1(receiverLineNumber: 2000,
+        receiverPointNumber: int32(100 + k), receiverPointIndex: 1,
+        samplesPerTrace: uint32(ns), sensorType: 2)
+    t.extensions = newSeq[byte](32)
+    for i in 0 ..< 32: t.extensions[i] = byte(17 * k + i)
+    var vals = newSeq[float64](ns)
+    for i in 0 ..< ns: vals[i] = float64((i * (k + 2)) mod 11 - 5) * 0.125
+    t.samples = newSeq[byte](dataBytes(fmt, ns))
+    encodeSamples(fmt, vals, t.samples)
+    traces.add t
+  if rev3: computeRev3Sizes(r, traces)
+  result.record = r
+  result.traces = traces
+
+proc setOfTrace(k: int): int = (if k < 3: 0 else: 1)
+
+proc feedSubset(w: var SeismicWriter, f: SeismicFile, x: Tensor[float32], kept: openArray[int],
+    counts: array[2, int]) =
+  w.startSubset(f, kept)
+  for k in kept: w.writeTrace(f, k, x, k, counts[setOfTrace(k)])
+
+func endUnits(rev3: bool, set, n: int): int64 =
+  ## A channel set's end time for `n` samples: microseconds (Rev 3) or 2 ms units
+  ## (Rev 2, where set 2 samples at 1 ms).
+  if rev3: 1000'i64 * n elif set == 0: int64(n) else: int64(n div 2)
+
+proc checkSubset(g: SeismicFile, f: SeismicFile, x: Tensor[float32], first: int,
+    kept: openArray[int], counts: array[2, int], chans: array[2, int]) =
+  ## The output record whose traces start at trace `first` of `g`.
+  let rec = g.index.segdRecords[g.traceEntry(first).record]
+  doAssert rec.extended == f.index.segdRecords[0].extended
+  let rev3 = rec.layout == slRev3
+  var longest = 0'i64
+  for j in 0 .. 1:
+    let end1 = endUnits(rev3, j, counts[j])
+    if rev3:
+      let c = rec.scanTypes[0].descriptorsRev3[j]
+      doAssert int(c.channelsInSet) == chans[j]
+      if chans[j] > 0:
+        doAssert int64(c.endTime) == end1 and int(c.numSamples) == counts[j]
+    else:
+      let c = rec.scanTypes[0].descriptors[j]
+      doAssert c.channelCount == chans[j]
+      if chans[j] > 0: doAssert int64(c.endTime) == end1
+    if chans[j] > 0: longest = max(longest, end1)
+  if rev3: doAssert int64(recordLengthUs(rec.gh1, rec.gh2Rev3)) == longest
+  else: doAssert int64(recordLengthMs(rec.gh1, rec.gh2.get)) == 2 * longest
+  var bytes = int64(rec.headerBytes)
+  for i, k in kept:
+    let eo = g.traceEntry(first + i)
+    let ei = f.traceEntry(k)
+    doAssert eo.record == g.traceEntry(first).record
+    let n = counts[setOfTrace(k)]
+    doAssert eo.numSamples == uint32(n)
+    bytes += int64(eo.headerBytes) + int64(dataBytes(sd8058, n))
+    let y = g.readTraces(first + i ..< first + i + 1, float32)
+    for q in 0 ..< n: doAssert y[0, q] == x[k, q], "trace " & $k & " sample " & $q
+    doAssert eo.headerBytes == ei.headerBytes
+    let ho = g.copyBytes(eo.offset, eo.headerBytes)
+    let hi = f.copyBytes(ei.offset, ei.headerBytes)
+    # The trace header and the bytes after THE#1 stay; THE#1 keeps all but its count.
+    doAssert ho[0 ..< 20] == hi[0 ..< 20]
+    doAssert ho[52 ..< ho.len] == hi[52 ..< hi.len]
+    var diff = 0
+    for q in 20 ..< 52:
+      if ho[q] != hi[q]: inc diff
+    if n == int(ei.numSamples): doAssert diff == 0 else: doAssert diff in 1 .. 4
+  if rev3: doAssert int64(rec.gh3.dataSize) == bytes
+
+proc mainSeven*() =
+  ## A `like:` SEG-D writer writes records made of some traces of one source
+  ## record (`startSubset`), each channel set with its own sample count.
+  ## Seen failing: with the channel counts left as the source's, with the
+  ## record length left as the source's, with the Rev 3 sizes left as the
+  ## source's, and with the order check removed.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  for rev3 in [false, true]:
+    let nm = if rev3: "sub3" else: "sub2"
+    let src = tmp / (nm & ".sgd")
+    put(src, SegdData(records: @[makeSubsetRec(rev3, 8)]))
+    var f = openSeismic(src)
+    doAssert not f.log.isFatal, $f.log
+    let x = f.readTraces(0 ..< f.len, float32)
+    let dst = tmp / (nm & "_out.sgd")
+    var w = openSeismicWriter(dst, f)
+    let a = [1, 2, 4]
+    let b = [0, 3]
+    let c = [3, 4]
+    w.feedSubset(f, x, a, [4, 4]) # shorter in both sets
+    w.feedSubset(f, x, b, [6, 8]) # trace 3 used again; set 2 keeps its count
+    w.feedSubset(f, x, c, [8, 6]) # set 1 left empty
+    doAssert not w.close().isFatal
+    var g = openSeismic(dst)
+    doAssert not g.log.isFatal, $g.log
+    doAssert g.len == 7 and g.index.segdRecords.len == 3
+    g.checkSubset(f, x, 0, a, [4, 4], [2, 1])
+    g.checkSubset(f, x, 3, b, [6, 8], [1, 1])
+    g.checkSubset(f, x, 5, c, [8, 6], [0, 2])
+    # Errors: nothing of the output is installed.
+    let bad = tmp / (nm & "_bad.sgd")
+    let two = tmp / (nm & "_two.sgd")
+    put(two, SegdData(records: @[makeSubsetRec(rev3, 8), makeSubsetRec(rev3, 8)]))
+    var h = openSeismic(two)
+    var v = openSeismicWriter(bad, f)
+    let none: seq[int] = @[]
+    doAssertRaises(ValueError): v.startSubset(f, none)
+    doAssertRaises(ValueError): v.startSubset(f, [1, 5])
+    doAssertRaises(ValueError): v.startSubset(f, [-1])
+    doAssertRaises(ValueError): v.startSubset(f, [2, 1])
+    doAssertRaises(ValueError): v.startSubset(f, [1, 1])
+    var v2 = openSeismicWriter(bad, h)
+    doAssertRaises(ValueError): v2.startSubset(h, [1, 6]) # the second record
+    # Traces of one set with two counts.
+    block:
+      var e = openSeismicWriter(bad, f)
+      e.startSubset(f, [0, 1])
+      e.writeTrace(f, 0, x, 0, 8)
+      doAssertRaises(ValueError): e.writeTrace(f, 1, x, 1, 6)
+    # Out of order, past the subset, and a count of 0 or one the revision cannot hold.
+    var e = openSeismicWriter(bad, f)
+    e.startSubset(f, [1, 2])
+    doAssertRaises(ValueError): e.writeTrace(f, 2, x, 2, 8) # not its first
+    e.writeTrace(f, 1, x, 1, 8)
+    doAssertRaises(ValueError): e.startSubset(f, [0]) # the record is incomplete
+    e.writeTrace(f, 2, x, 2, 8)
+    doAssertRaises(ValueError): e.writeTrace(f, 2, x, 2, 8)
+    e.startSubset(f, [0, 1, 2])
+    e.writeTrace(f, 0, x, 0, 8)
+    doAssertRaises(ValueError): e.writeTrace(f, 2, x, 2, 8) # 1 comes next
+    e.writeTrace(f, 1, x, 1, 8)
+    e.writeTrace(f, 2, x, 2, 8)
+    e.startSubset(f, [3])
+    if rev3:
+      doAssertRaises(ValueError): e.writeTrace(f, 3, wave(3_000_000)) # end past 2^31 µs
+    else:
+      doAssertRaises(ValueError): e.writeTrace(f, 3, x, 3, 5) # not a multiple of 2 ms
+    doAssertRaises(ValueError): e.writeTrace(f, 3, x, 3, 0)
+    e.writeTrace(f, 3, x, 3, 8)
+    doAssert not e.close().isFatal
+    var u = openSeismicWriter(tmp / (nm & "_inc.sgd"), f)
+    u.startSubset(f, [1, 2])
+    u.writeTrace(f, 1, x, 1, 8)
+    doAssertRaises(ValueError): discard u.close()
+    doAssert not fileExists(tmp / (nm & "_inc.sgd"))
+
 main()
 mainTwo()
 mainThree()
 mainFour()
 mainFive()
 mainSix()
+mainSeven()
