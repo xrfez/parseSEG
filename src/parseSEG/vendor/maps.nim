@@ -1094,6 +1094,14 @@ func readRaw(f: VendorFieldPlan, b: openArray[byte], order: ByteOrder, iv: var i
     true
   else: false
 
+func sentinelMask(f: VendorFieldPlan): uint64 =
+  # The bits of a raw integer that a `sentinel` is compared on.
+  let w = encWidth(f.enc)
+  if f.enc in {veUNib, veINib}:
+    (if f.nibbles >= 16: not 0'u64 else: (1'u64 shl (4 * f.nibbles)) - 1)
+  elif f.enc == veBcd or w >= 8: not 0'u64
+  else: (1'u64 shl (8 * w)) - 1
+
 proc decodeField(f: VendorFieldPlan, b: openArray[byte], base: int,
     order: ByteOrder): Option[VendorValue] =
   # None when the field does not fit `b` or holds its sentinel.
@@ -1143,12 +1151,7 @@ proc decodeField(f: VendorFieldPlan, b: openArray[byte], base: int,
       floatVal: (if f.scaled: fv * f.scale + f.offset else: fv), unit: f.unit)
   if f.sentinel.isSome:
     # Compare the raw bit pattern: (sentinel 0xFFFFFF) matches an i24 of -1.
-    let w = encWidth(f.enc)
-    let mask =
-      if f.enc in {veUNib, veINib}:
-        (if f.nibbles >= 16: not 0'u64 else: (1'u64 shl (4 * f.nibbles)) - 1)
-      elif f.enc == veBcd or w >= 8: not 0'u64
-      else: (1'u64 shl (8 * w)) - 1
+    let mask = f.sentinelMask
     if (cast[uint64](iv) and mask) == (cast[uint64](f.sentinel.get) and mask):
       return none(VendorValue)
   var v = if f.scaled:
@@ -1186,6 +1189,29 @@ func condHolds(c: VendorCondition, t: VendorTarget, b: openArray[byte], order: B
       else: int64(x and 15)
   c.testHolds(v)
 
+func elementCount(r: VendorRepeatPlan, decoded: openArray[VendorField], areaLen: int,
+    problems: var seq[string]): int =
+  # How many elements of `r` are decoded: its count (a number, or the value of the field
+  # `countRef` among the `decoded` ones: absent, a sentinel, a failed `(when)` or a
+  # number that is not an integer all leave it missing), at most the whole strides that
+  # fit `areaLen`. Reading and writing a repeat's field both ask this.
+  result = r.count
+  if r.countRef.len > 0:
+    result = -1
+    for f in decoded:
+      if f.name == r.countRef and f.value.kind == vvInt:
+        result = int(max(min(f.value.intVal, 1_000_000), -2))
+    if result == -1:
+      problems.add "repeat count field " & r.countRef & " is missing"
+      result = 0
+    elif result < 0:
+      problems.add "repeat count field " & r.countRef & " is negative"
+      result = 0
+  let fit = if r.stride > 0: max(0, (areaLen - r.byteOff) div r.stride) else: 0
+  if result > fit:
+    problems.add "repeat of " & $result & " elements exceeds the area (" & $fit & " fit)"
+    result = fit
+
 proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
     blk: var VendorBlock, problems: var seq[string], ctx: VendorContext = VendorContext()) =
   ## Decodes `t`'s fields from `b` into `blk`; fields that do not fit are
@@ -1211,22 +1237,7 @@ proc decodeTarget*(t: VendorTarget, b: openArray[byte], order: ByteOrder,
     elif (2 * f.byteOff + ord(f.lowNibble) + f.nibbles + 1) div 2 > b.len:
       problems.add "field " & f.name & " lies beyond the " & $b.len & "-byte area"
   for r in t.repeats:
-    var count = r.count
-    if r.countRef.len > 0:
-      count = -1
-      for f in blk.fields:
-        if f.name == r.countRef and f.value.kind == vvInt:
-          count = int(max(min(f.value.intVal, 1_000_000), -2))
-      if count == -1:
-        problems.add "repeat count field " & r.countRef & " is missing"
-        count = 0
-      elif count < 0:
-        problems.add "repeat count field " & r.countRef & " is negative"
-        count = 0
-    let fit = if r.stride > 0: max(0, (b.len - r.byteOff) div r.stride) else: 0
-    if count > fit:
-      problems.add "repeat of " & $count & " elements exceeds the area (" & $fit & " fit)"
-      count = fit
+    let count = r.elementCount(blk.fields, b.len, problems)
     for i in 0..<count:
       for f in r.fields:
         let v = decodeField(f, b, r.byteOff + i * r.stride, order)
@@ -1333,6 +1344,13 @@ func rawBits(f: VendorFieldPlan): int =
 func isSignedEnc(e: VendorEncoding): bool =
   e in {veI8, veI16, veI24, veI32, veI64, veINib}
 
+func shown(v: VendorValue): string =
+  # A number's text for a message.
+  case v.kind
+  of vvInt: $v.intVal
+  of vvFloat: $v.floatVal
+  else: $v.kind
+
 func rawValue(f: VendorFieldPlan, v: VendorValue): int64 {.raises: [ValueError].} =
   # The raw integer that decodes to `v` (inverts `scale` and `offset`); ValueError
   # for a value of the wrong kind, a fraction in an unscaled field, or a number
@@ -1351,7 +1369,7 @@ func rawValue(f: VendorFieldPlan, v: VendorValue): int64 {.raises: [ValueError].
       raise newException(ValueError, "field " & f.name & " has a zero scale")
     x = (x - f.offset) / f.scale
     if x.classify in {fcNan, fcInf, fcNegInf}:
-      raise newException(ValueError, "field " & f.name & ": " & $v.floatVal & " has no raw value")
+      raise newException(ValueError, "field " & f.name & ": " & v.shown & " has no raw value")
     x = round(x)
   elif x.classify in {fcNan, fcInf, fcNegInf} or x != floor(x):
     raise newException(ValueError, "field " & f.name & " (" & $f.enc &
@@ -1389,14 +1407,14 @@ proc putRawInt(f: VendorFieldPlan, b: var openArray[byte], pos: int, o: ByteOrde
       rest = rest div 10
   else: discard
 
-proc encodeField*(f: VendorFieldPlan, b: var openArray[byte], base: int, order: ByteOrder,
+proc encodeField(f: VendorFieldPlan, b: var openArray[byte], base: int, order: ByteOrder,
     value: Option[VendorValue]) =
-  ## Writes `value` into the bytes of field `f` of block `b` (`base`: the offset of the
-  ## repeat element, else 0): the exact inverse of the decoding. `none` writes the
-  ## field's `sentinel` ("no value"). Only the field's own bytes (nibbles) change.
-  ## Raises `ValueError`, leaving `b` as it was, when the field does not fit `b`, the
-  ## value is of the wrong kind or does not fit the encoding (nothing is truncated),
-  ## there is no sentinel to write, or the encoding is unsupported (`ibm32`, `fixedpt`).
+  # Writes `value` into the bytes of field `f` of block `b` (`base`: the offset of the
+  # repeat element, else 0): the inverse of `decodeField`. `none` writes the field's
+  # `sentinel` ("no value"). Only the field's own bytes (nibbles) change. ValueError,
+  # with `b` as it was, when the field does not fit `b`, the value is of the wrong kind,
+  # does not fit the encoding (nothing is truncated) or equals the sentinel, there is
+  # no sentinel to write, or the encoding is unsupported (`ibm32`, `fixedpt`).
   let pos = base + f.byteOff
   if not f.fits(b, pos):
     raise newException(ValueError, "field " & f.name & " lies beyond the " & $b.len &
@@ -1421,14 +1439,23 @@ proc encodeField*(f: VendorFieldPlan, b: var openArray[byte], base: int, order: 
       if f.enc.isSignedEnc:
         lo = if bits >= 64: int64.low else: -(1'i64 shl (bits - 1))
         hi = if bits >= 64: int64.high else: (1'i64 shl (bits - 1)) - 1
+      elif bits >= 64:
+        # decode gives the 64 bits as an int64: any int64 is a bit pattern to write
+        lo = int64.low
+        hi = int64.high
       else:
         lo = 0
-        hi = if bits >= 63: int64.high else: (1'i64 shl bits) - 1
+        hi = (1'i64 shl bits) - 1
     # A sentinel is a bit pattern (0xFFFFFF in an i24): only a value is range-checked.
     if (value.isSome or f.enc == veBcd) and (raw < lo or raw > hi):
       raise newException(ValueError, "field " & f.name & ": " & $raw & " does not fit " &
         $f.enc & (if f.enc in {veUNib, veINib, veBcd}: " of " & $f.nibbles & " nibbles"
                   else: ""))
+    if value.isSome and f.sentinel.isSome and
+        (cast[uint64](raw) and f.sentinelMask) ==
+          (cast[uint64](f.sentinel.get) and f.sentinelMask):
+      raise newException(ValueError, "field " & f.name & ": " & $raw &
+        " equals the sentinel; use clearVendorField")
     f.putRawInt(b, pos, o, raw)
   of veF32, veF64:
     if value.isNone:
@@ -1458,9 +1485,6 @@ proc encodeField*(f: VendorFieldPlan, b: var openArray[byte], base: int, order: 
     if t.len > f.len:
       raise newException(ValueError, "field " & f.name & ": text of " & $t.len &
         " bytes does not fit " & $f.len)
-    for c in t:
-      if f.enc == veAscii and ord(c) > 127:
-        raise newException(ValueError, "field " & f.name & ": text is not ASCII")
     let pad = repeat(' ', f.len - t.len)
     let text = if f.trim == trimLeft: pad & t else: t & pad
     for i in 0..<f.len:
@@ -1475,16 +1499,26 @@ proc encodeField*(f: VendorFieldPlan, b: var openArray[byte], base: int, order: 
     raise newException(ValueError, "field " & f.name & ": writing " & $f.enc &
       " is not supported")
 
-func activeFlags(t: VendorTarget, upTo: int, b: openArray[byte], order: ByteOrder,
+func offFlags(t: VendorTarget, b: openArray[byte], order: ByteOrder,
     ctx: VendorContext): seq[bool] =
-  # For fields 0..upTo of `t`: true where the field's own `(when)` conditions failed,
-  # as `decodeTarget` reckons it.
+  # Per field of `t`: true where its own `(when)` conditions fail, as `decodeTarget`
+  # reckons it (a field off by them is absent).
   result = newSeq[bool](t.fields.len)
-  for i in 0..upTo:
-    for c in t.fields[i].conds:
+  for i, f in t.fields:
+    for c in f.conds:
       if not c.condHolds(t, b, order, ctx, result):
         result[i] = true
         break
+
+func elementIndex(field: string, baseName: var string): int =
+  # `name[i]` with i a run of decimal digits: -1 for any other name, else i.
+  result = -1
+  let open = field.find('[')
+  if open > 0 and field[^1] == ']':
+    let digits = field[open + 1 ..< field.len - 1]
+    if digits.len in 1..7 and digits.allCharsInSet(Digits):
+      baseName = field[0 ..< open]
+      result = parseInt(digits)
 
 proc writeVendorField(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
     bytes: var openArray[byte], field: string, value: Option[VendorValue]) =
@@ -1494,51 +1528,63 @@ proc writeVendorField(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
     raise newException(ValueError, "no vendor map applies to this " & $area.kind &
       " (field " & field & ")")
   template m: untyped = reg.maps[at]
-  let open = field.find('[')
-  let isElem = field.len > 0 and field[^1] == ']' and open > 0
-  let baseName = if isElem: field[0 ..< open] else: field
-  var elem = -1
-  if isElem:
-    try: elem = parseInt(field[open + 1 ..< field.len - 1])
-    except ValueError: elem = -1
-  for t in m.targets:
-    if targetMatches(t, area, bytes):
-      for i, f in t.fields:
-        if f.name == field:
-          if f.conds.len > 0 and
-              t.activeFlags(i, bytes, ctx.byteOrder, ctx)[i]:
-            raise newException(ValueError, "field " & field & " is absent here: its (when) " &
-              "condition does not hold")
-          f.encodeField(bytes, 0, ctx.byteOrder, value)
-          return
-      if elem >= 0:
-        for r in t.repeats:
-          for f in r.fields:
-            if f.name == baseName:
-              var count = r.count
-              if r.countRef.len > 0:
-                count = -1
-                for cf in t.fields:
-                  var iv: int64
-                  if cf.name == r.countRef and cf.readRaw(bytes, ctx.byteOrder, iv):
-                    count = int(max(min(iv, 1_000_000), -1))
-              if elem >= count:
-                raise newException(ValueError, "field " & field & " is beyond the repeat's " &
-                  $max(count, 0) & " elements")
-              f.encodeField(bytes, r.byteOff + elem * r.stride, ctx.byteOrder, value)
+  var baseName = field
+  let elem = elementIndex(field, baseName)
+  # Walk the targets as `decodeAll` does (the positional ones, which share a block,
+  # then those with `match`) and write the first place where the field is decoded.
+  var why = "map " & m.name & " has no field " & field & " for this " & $area.kind
+  var positional = VendorBlock()
+  for pass in 0..1:
+    for t in m.targets:
+      if targetMatches(t, area, bytes) and (t.matches.len == 0) == (pass == 0):
+        var blk = if pass == 0: positional else: VendorBlock()
+        let off = t.offFlags(bytes, ctx.byteOrder, ctx)
+        for i, f in t.fields:
+          if f.name == field:
+            if off[i]:
+              why = "field " & field & " is absent here: its (when) condition does not hold"
+            elif not f.fits(bytes, f.byteOff):
+              why = "field " & field & " lies beyond the " & $bytes.len & "-byte area"
+            else:
+              f.encodeField(bytes, 0, ctx.byteOrder, value)
               return
-  raise newException(ValueError, "map " & m.name & " has no field " & field & " for this " &
-    $area.kind)
+        if elem >= 0:
+          for r in t.repeats:
+            for f in r.fields:
+              if f.name == baseName:
+                var plain = blk
+                var fieldsOnly = t
+                fieldsOnly.repeats = @[]
+                var problems: seq[string]
+                fieldsOnly.decodeTarget(bytes, ctx.byteOrder, plain, problems, ctx)
+                let count = r.elementCount(plain.fields, bytes.len, problems)
+                if elem < count:
+                  f.encodeField(bytes, r.byteOff + elem * r.stride, ctx.byteOrder, value)
+                  return
+                why = "field " & field & " is not decoded: the repeat has " & $count &
+                  " elements" & (if problems.len > 0: " (" & problems.join("; ") & ")" else: "")
+        if pass == 0:
+          var problems: seq[string]
+          t.decodeTarget(bytes, ctx.byteOrder, blk, problems, ctx)
+          positional = blk
+  raise newException(ValueError, why)
 
 proc setVendorField*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,
     bytes: var openArray[byte], field: string, value: VendorValue) =
   ## Sets the field `field` (`name[i]` inside a repeat) in the bytes of a vendor area, as
   ## `decode` would read it back: the same map and target are chosen (code decoders
   ## are not consulted: they have no field plans), `scale` and `offset` are inverted,
-  ## and only the field's own bytes change. Raises `ValueError`, leaving `bytes` as
-  ## they were, when no map or target applies, the field is unknown, its `(when)`
-  ## condition does not hold, the area is too short, the value does not fit or the
-  ## encoding cannot be written (see `encodeField`).
+  ## and only the field's own bytes change. The target is the first one, in the order
+  ## `decodeAll` reads them (those without `match`, then those with), where the field is
+  ## decoded: a target whose `(when)` for it fails is skipped, so reading the block back
+  ## gives the value written. Text shorter than the field is padded with spaces (on the
+  ## left under `(trim left)`), so under `(trim none)` it reads back padded; bytes 128 to
+  ## 255 are written as they are. A 64-bit unsigned field takes the int64 `decode` gives.
+  ## Raises `ValueError`, leaving `bytes` as they were, when no map or target applies,
+  ## the field is unknown or not decoded here (its `(when)` fails, or a repeat's element
+  ## is not among those `decode` gives), the area is too short, the value does not fit,
+  ## equals the field's `sentinel` (use `clearVendorField`), or the encoding cannot be
+  ## written (`ibm32`, `fixedpt`).
   reg.writeVendorField(ctx, area, bytes, field, some(value))
 
 proc clearVendorField*(reg: VendorRegistry, ctx: VendorContext, area: VendorArea,

@@ -76,7 +76,8 @@ not where it is:
   block's bytes, `clearVendorField` writes its `sentinel`. Both choose the map and target as
   `decode` does, invert `scale` and `offset`, change only the field's own bytes (or nibbles)
   and raise `ValueError` (bytes unchanged) for an unknown field, a false `(when)`, a value
-  that does not fit and `ibm32`/`fixedpt` fields, which are not written yet.
+  that does not fit or equals the sentinel, a repeat element `decode` would not show, and
+  `ibm32`/`fixedpt` fields, which are not written yet.
 - **Rev 3 trailer.** A target `(kind trailer)` with `match` and no `blockIndex` is tried on
   the data of each Rev 3 trailer description block (matched from its first byte, not limited
   to 32 bytes); the whole trailer area of Rev 0-2 is never offered to it.
