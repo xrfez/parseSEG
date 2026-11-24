@@ -58,6 +58,8 @@ export traceindex.SeismicFile, traceindex.openSeismic, traceindex.close, tracein
   traceindex.startTimeMs, traceindex.startTimeMsInto, traceindex.recordTimeZeroUs,
   traceindex.traceOrientation,
   traceindex.recordOrientation,
+  traceindex.unitSerial,
+  traceindex.recordSensorSerial,
   traceindex.ensureKeys,
   traceindex.keysRevision,
   traceindex.seg2Trace, traceindex.textHeader, traceindex.extendedTextHeaders,

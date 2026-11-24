@@ -1275,6 +1275,74 @@ proc recordOrientation*(f: SeismicFile, record: int): Option[SegdOrientation] =
   if not rec.isRev3: return
   firstOrientation(rec.generalBlocks)
 
+const
+  BlockTypeSensorInfo = 0x41'u8
+  SerialFirst = 13   # 0-based: byte 14 of the Sensor Info block
+  SerialLast = 30    # 0-based: byte 31
+
+proc firstSensorSerial(area: openArray[byte]): Option[string] =
+  # The serial of the first Sensor Info block: bytes 14-31, trimmed of blanks
+  # and NULs. None when it is blank or holds a byte that is not printable
+  # ASCII (the bytes are not text, so none is returned).
+  let at = findBlock(area, BlockTypeSensorInfo)
+  if at < 0 or at + SegdBlockSize > area.len: return
+  var first = at + SerialFirst
+  var last = at + SerialLast
+  while first <= last and area[first] in {0'u8, 0x20'u8}: inc first
+  while last >= first and area[last] in {0'u8, 0x20'u8}: dec last
+  if first > last: return
+  var s = newStringOfCap(last - first + 1)
+  for i in first .. last:
+    if area[i] notin {0x20'u8 .. 0x7E'u8}: return
+    s.add char(area[i])
+  some(s)
+
+proc unitSerial*(f: SeismicFile, trace: int): Option[string] =
+  ## The serial number of the unit that recorded trace `trace`: bytes 14-31
+  ## of the SEG-D Rev 3 Sensor Info header (0x41) in the trace header
+  ## extensions, trimmed of blanks and NULs. None when the trace has no such
+  ## block, the field is blank, it holds a byte that is not printable ASCII,
+  ## or the file is not SEG-D Rev 3 (SEG-D before Rev 3, SEG-Y, SEG-2). The
+  ## first block wins. It does not fall back to the general header, to
+  ## `gh1.manufacturerSerial` (the recording system's serial) or to the
+  ## storage unit label's serial (an archive id). Scans the extensions as
+  ## `traceOrientation` does; does not need `keys = true`. Raises
+  ## `ValueError` for a trace out of range, a closed file, or headers that
+  ## lie outside the file, and `SegTruncatedError` for a file cut short
+  ## while open (`cutShort`).
+  f.requireTrace(trace)
+  f.requireOpen()
+  if f.idx.kind != skSegd: return
+  let e = f.idx.entries[trace]
+  if not f.idx.segdRecords[e.record].isRev3: return
+  let hb = int64(e.headerBytes)
+  if e.offset < 0 or hb < SegdTraceHeaderSize or e.offset + hb > f.mappedSize:
+    raiseOutside(trace)
+  let ext = hb - SegdTraceHeaderSize
+  if ext < SegdBlockSize: return
+  f.requireUncutFirst()
+  let start = e.offset + SegdTraceHeaderSize
+  f.withHeld(start, e.offset + hb):
+    let mem = f.unsafeMemory
+    let a = int(start)
+    result = firstSensorSerial(mem.toOpenArray(a, a + int(ext) - 1))
+  f.requireUncut()
+
+proc recordSensorSerial*(f: SeismicFile, record: int): Option[string] =
+  ## The serial in the first Sensor Info header (0x41) of SEG-D record
+  ## `record`'s general header blocks (bytes 14-31, trimmed); none when that
+  ## record has none, the field is blank or not printable ASCII, or the file
+  ## is not SEG-D Rev 3. Separate from `unitSerial`, which never falls back
+  ## to it. Raises `ValueError` for a record out of range or a closed file.
+  f.requireOpen()
+  if record notin 0 ..< f.recordCount:
+    raise newException(ValueError, "no record " & $record & " (the file has " &
+      $f.recordCount & ")")
+  if f.idx.kind != skSegd: return
+  let rec = f.idx.segdRecords[record]
+  if not rec.isRev3: return
+  firstSensorSerial(rec.generalBlocks)
+
 proc traceKeys*(f: SeismicFile, traces: openArray[int]): seq[TraceKeys] =
   ## The keys of each trace of `traces` (see `traceKeysInto`); works on a file
   ## opened without `keys = true`.

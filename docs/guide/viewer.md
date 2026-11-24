@@ -1030,6 +1030,11 @@ applies to every trace without its own ("A block (e.g. Position 50-52, Additiona
 Info 20, Aux Channel Ref 21) applies to the preceding Source Description block"). Read
 the record's block with `recordOrientation(record)`.
 
+A unit's serial number, for a file name, is `unitSerial(i)`: an `Option[string]` from the
+SEG-D Rev 3 Sensor Info header (0x41) in the trace extensions, none for any other file. Do not
+use `gh1.manufacturerSerial` (the recording system's serial) or the storage unit label's serial
+(an archive id) for it; `recordSensorSerial(record)` reads a block in the general header.
+
 A Position block in the trace extensions that does not follow a source description is the
 receiver's coordinates, even when the only source description is in the general header.
 That is how a shot gather is written, and how INOVA files are read: do not take that
