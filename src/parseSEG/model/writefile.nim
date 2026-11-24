@@ -299,6 +299,7 @@ type
     kept: int         ## Traces of the set in the subset.
     n: int            ## The sample count its traces share; -1 until one is written.
     srcN: int         ## The source count of its first kept trace.
+    chans: seq[int]   ## The source channel (its place in the set) of each kept trace.
 
   PendingStanza = object
     company, name, contentType: string
@@ -1146,6 +1147,18 @@ proc setRev3RecordLength(rec: var SegdRecord, us: int64, recNo: int, path: strin
 proc setName(scan, ch: int): string =
   "channel set " & $ch & " of scan type " & $scan
 
+proc setLabel(rec: SegdRecord, i, j: int): string =
+  # A channel set by its own numbers, as `applySegdCount` names it.
+  case rec.layout
+  of slRev2:
+    let c = rec.scanTypes[i].descriptors[j]
+    setName(if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1,
+      if c.channelSetNumber > 0: c.channelSetNumber else: j + 1)
+  of slRev3:
+    let c = rec.scanTypes[i].descriptorsRev3[j]
+    setName(if c.scanTypeNumber > 0: c.scanTypeNumber else: i + 1,
+      if c.channelSetNumber > 0: int(c.channelSetNumber) else: j + 1)
+
 proc setRev2End(c: var SegdChannelSetDescriptor, g1: SegdGeneralHeader1, n: int,
     which: string) =
   # End time is an exact multiple of 2 ms: start + n * BSI / (32 * 2^exp).
@@ -1244,12 +1257,53 @@ proc noteRev3Sizes(rec: var SegdRecord, traces: openArray[SegdTrace]) =
   if rec.gh3.recordSize != 0:
     rec.gh3.recordSize = uint64(data + int64(rec.trailerRev3.len))
 
+proc rebuildSkew(rec: var SegdRecord, sets: openArray[SubsetSet]) =
+  # Rev 2 skew blocks hold one byte per channel and subscan of each channel set, in
+  # scan order. A kept channel keeps its own byte; the blocks are as many as
+  # the longest scan type needs.
+  if rec.layout != slRev2 or rec.gh1.skewBlocks <= 0 or rec.gh1.skewBlocks == BcdAllF:
+    return
+  var dropped = false
+  for ss in sets:
+    if ss.kept != max(rec.scanTypes[ss.scan].descriptors[ss.chan].channelCount, 0):
+      dropped = true
+  for i in 0 ..< rec.scanTypes.len:
+    for j in 0 ..< rec.scanTypes[i].descriptors.len:
+      var any = false
+      for ss in sets:
+        if ss.scan == i and ss.chan == j: any = true
+      if not any and rec.scanTypes[i].descriptors[j].channelCount > 0: dropped = true
+  if not dropped: return
+  var fresh = newSeq[seq[byte]](rec.scanTypes.len)
+  var most = 0
+  for i in 0 ..< rec.scanTypes.len:
+    var at = 0
+    for j in 0 ..< rec.scanTypes[i].descriptors.len:
+      let c = rec.scanTypes[i].descriptors[j]
+      let subs = 1 shl (if c.subscanExponent in 0..9: c.subscanExponent else: 0)
+      let have = max(c.channelCount, 0)
+      var kept: seq[int] = @[]
+      for ss in sets:
+        if ss.scan == i and ss.chan == j: kept = ss.chans
+      for sub in 0 ..< subs:
+        for ch in kept:
+          let from1 = at + sub * have + ch
+          fresh[i].add(if ch < have and from1 < rec.scanTypes[i].skew.len:
+            rec.scanTypes[i].skew[from1] else: 0'u8)
+      at += subs * have
+    most = max(most, (fresh[i].len + SegdBlockSize - 1) div SegdBlockSize)
+  for i in 0 ..< rec.scanTypes.len:
+    fresh[i].setLen most * SegdBlockSize
+    rec.scanTypes[i].skew = fresh[i]
+  rec.gh1.skewBlocks = most
+
 proc applySubset(rec: var SegdRecord, sets: openArray[SubsetSet], recNo: int,
     path: string) =
   # Headers a subset changes: each channel set's channel count (0 when no kept
-  # trace is in it), the end time of a set whose count changed, and, when an
-  # end time changed or a set emptied, the record length. A set whose count
-  # is not known yet (-1) keeps its own. The caller passes a copy.
+  # trace is in it), the Rev 2 skew bytes, the end time of a set whose count
+  # changed, and, when an end time changed or a set emptied, the record
+  # length. A set whose count is not known yet (-1) keeps its own. The
+  # caller passes a copy.
   var recompute = false
   var longest = low(int64)
   template find(i, j: int): int =
@@ -1260,6 +1314,7 @@ proc applySubset(rec: var SegdRecord, sets: openArray[SubsetSet], recNo: int,
   for ss in sets:
     if ss.n == 0: refuse(segdRec(recNo, path) & ": a sample count of 0 cannot be written")
     if ss.n > 0 and ss.n != ss.srcN: recompute = true
+  rebuildSkew(rec, sets)
   case rec.layout
   of slRev2:
     for i in 0 ..< rec.scanTypes.len:
@@ -1273,7 +1328,7 @@ proc applySubset(rec: var SegdRecord, sets: openArray[SubsetSet], recNo: int,
           c.channelCount = sets[at].kept
           if sets[at].n > 0 and sets[at].n != sets[at].srcN:
             setRev2End(c[], rec.gh1, sets[at].n, segdRec(recNo, path) & ", " &
-              setName(i + 1, j + 1))
+              setLabel(rec, i, j))
     for s in rec.scanTypes:
       for c in s.descriptors:
         if c.channelCount > 0: longest = max(longest, int64(c.endTime) * 2)
@@ -1288,20 +1343,31 @@ proc applySubset(rec: var SegdRecord, sets: openArray[SubsetSet], recNo: int,
         else:
           c.channelsInSet = uint32(sets[at].kept)
           if sets[at].n > 0 and sets[at].n != sets[at].srcN:
-            setRev3End(c[], sets[at].n, segdRec(recNo, path) & ", " & setName(i + 1, j + 1))
+            setRev3End(c[], sets[at].n, segdRec(recNo, path) & ", " & setLabel(rec, i, j))
     for k in 0 ..< sets.len:
+      # The trace length, whether the count changed or not: a set that starts
+      # at a negative time ends before its traces do.
       let c = rec.scanTypes[sets[k].scan].descriptorsRev3[sets[k].chan]
-      let span = if sets[k].n > 0 and sets[k].n != sets[k].srcN:
-          int64(sets[k].n) * int64(c.samplingInterval)
-        else: low(int64)
-      longest = max(longest, max(span, int64(c.endTime)))
+      let n = if sets[k].n > 0: sets[k].n else: sets[k].srcN
+      longest = max(longest, max(int64(n) * int64(c.samplingInterval), int64(c.endTime)))
   if recompute:
-    if rec.isRev3 and rec.gh3.extendedRecordingMode == 1:
-      refuse(segdRec(recNo, path) & " is in extended recording mode, which keeps the " &
-        "record length at 0, so the sample count cannot change")
     case rec.layout
     of slRev2: setRev2RecordLength(rec, int(longest), recNo, path)
     of slRev3: setRev3RecordLength(rec, longest, recNo, path)
+
+proc dropRecord(s: var WriterState) =
+  # Forgets the record in progress and a pending subset. Nothing of a record
+  # is written before it ends, so nothing is on disk.
+  s.written -= s.likeTraces.len
+  s.likeTraces.setLen 0
+  s.inRecord = false
+  s.subset.setLen 0
+  s.likeKept.setLen 0
+  s.likeSets.setLen 0
+  s.likeSetOf.setLen 0
+  s.likePos = 0
+  s.likeN = 0
+  s.likeSame = true
 
 proc finishRecord(s: var WriterState) =
   # The like: path buffers a record so a later count mismatch can be refused
@@ -1411,7 +1477,28 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
       " (record " & $r & ")")
   var sets: seq[SubsetSet] = @[]
   var setOf: seq[int] = @[]
-  for k in s.subset:
+  # Each kept trace's channel: its place among the record's traces of its set.
+  var first = trace
+  while first > 0 and int(entries[first - 1].record) == r: dec first
+  var counts: seq[tuple[key, n: int]] = @[]
+  var chOf = newSeq[int](s.subset.len)
+  var nextKept = 0
+  var at0 = first
+  while nextKept < s.subset.len:
+    let e = entries[at0]
+    let key = int(e.scanType) * 65536 + e.channelSet.int
+    var c = -1
+    for q in 0 ..< counts.len:
+      if counts[q].key == key: c = q
+    if c < 0:
+      counts.add (key: key, n: 0)
+      c = counts.high
+    if at0 == s.subset[nextKept]:
+      chOf[nextKept] = counts[c].n
+      inc nextKept
+    inc counts[c].n
+    inc at0
+  for pos, k in s.subset:
     let e = entries[k]
     let (st, cs) = (int(e.scanType), e.channelSetIndex)
     let known = st >= 0 and st < rec.scanTypes.len and cs >= 0 and
@@ -1425,6 +1512,7 @@ proc beginSubset(s: var WriterState, src: SeismicFile, trace: int) =
       sets.add SubsetSet(scan: st, chan: cs, n: -1, srcN: int(e.numSamples))
       at = sets.high
     inc sets[at].kept
+    sets[at].chans.add chOf[pos]
     setOf.add at
   if fOut != rec.format.get:
     rec.gh1.formatCode = ord(fOut)
@@ -1485,64 +1573,74 @@ proc writeSegd[T: SampleType](s: var WriterState, src: SeismicFile, trace: int,
   withTemplateHeaders(s, src, trace, SegdTraceHeaderSize, keys, fields, h):
     t = loadSegdTrace(src, trace, src.index.segdRecords[r], h)
   t.overrideSegd(overrides)
-  if s.subset.len > 0: s.beginSubset(src, trace)
+  # A finished subset record ends when a trace that starts a record comes.
+  if s.subset.len == 0 and s.likeKept.len > 0 and s.likePos == s.likeKept.len and
+      (trace == 0 or int(src.index.entries[trace - 1].record) != r):
+    s.finishRecord()
+  let begun = s.subset.len > 0
+  if begun: s.beginSubset(src, trace)
   let sameRec = s.inRecord and s.recPath == src.path and s.recMem == src.memoryId and
     s.recIndex == r
   var flip = false
-  if s.likeKept.len > 0:
-    # A subset record: its traces in the listed order, one count per channel set.
-    if not sameRec:
-      refuse("SEG-D record " & $s.recIndex & " of " & s.recPath & " is incomplete: " &
-        $s.likePos & " of the " & $s.likeKept.len & " traces of its subset were written")
-    if s.likePos == s.likeKept.len:
-      refuse(segdRec(r, src.path) & ": all " & $s.likeKept.len & " traces of its subset " &
-        "are written (startSubset starts the next record)")
-    if trace != s.likeKept[s.likePos]:
-      refuse("SEG-D record " & $r & ": trace " & $s.likeKept[s.likePos] & " comes next, not " &
-        $trace & " (a subset's traces are written in the order listed)")
-    let at = s.likeSetOf[s.likePos]
-    var sets = s.likeSets
-    if sets[at].n >= 0 and sets[at].n != n:
-      refuse(segdRec(r, src.path) & ": " & setName(sets[at].scan + 1, sets[at].chan + 1) &
-        " has " & $sets[at].n & " samples; trace " & $trace & " has " & $n)
-    if s.recFormat == sd8015 and n mod 4 != 0 and
-        (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
-      refuse8015(trace, src.path, n)
-    if n != srcN and not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
-    if sets[at].n < 0:
-      sets[at].n = n
-      var trial = s.likeRec
-      applySubset(trial, sets, r, src.path)
-      s.likeSets = sets
-    if n != srcN: setTraceCount(t, n)
-  elif sameRec:
-    if trace != s.nextTrace:
-      refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
-        " (a record's traces are written in input order)")
-    if n != s.likeN and not (s.likeSame and n == srcN):
-      refuse(segdRec(r, src.path) & " has " & $s.likeN & " samples; trace " & $trace &
-        " has " & $n)
-    if s.recFormat == sd8015 and n mod 4 != 0 and
-        (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
-      refuse8015(trace, src.path, n)
-    if s.likeSame and n != srcN:
-      var trial = s.likeRec
-      applySegdCount(trial, n, r, src.path)
-      if not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
-      flip = true
-    elif not s.likeSame and not traceCountFits(t, n):
-      refuseTraceCount(r, n, src.path)
-  else:
-    s.startRecord(src, trace, n, t)
-  t.index = if s.likeKept.len > 0: s.likePos else: trace - s.recFirst
-  t.numSamples = n
-  t.samples = newSeq[byte](dataBytes(s.recFormat, n))
-  # 8015 fractions as the input was read: its convention is the file's.
-  encodeSamples(s.recFormat, samples, t.samples, src.index.codecs[r].twosComplement8015)
-  s.likeTraces.add t
-  if flip: s.likeSame = false
-  s.nextTrace = trace + 1
-  if s.likeKept.len > 0: inc s.likePos
+  try:
+    if s.likeKept.len > 0:
+      # A subset record: its traces in the listed order, one count per channel set.
+      if not sameRec:
+        refuse("SEG-D record " & $s.recIndex & " of " & s.recPath & " is incomplete: " &
+          $s.likePos & " of the " & $s.likeKept.len & " traces of its subset were written")
+      if s.likePos == s.likeKept.len:
+        refuse(segdRec(r, src.path) & ": all " & $s.likeKept.len & " traces of its subset " &
+          "are written (startSubset starts the next record)")
+      if trace != s.likeKept[s.likePos]:
+        refuse("SEG-D record " & $r & ": trace " & $s.likeKept[s.likePos] & " comes next, not " &
+          $trace & " (a subset's traces are written in the order listed)")
+      let at = s.likeSetOf[s.likePos]
+      var sets = s.likeSets
+      if sets[at].n >= 0 and sets[at].n != n:
+        refuse(segdRec(r, src.path) & ": " & setLabel(s.likeRec, sets[at].scan, sets[at].chan) &
+          " has " & $sets[at].n & " samples; trace " & $trace & " has " & $n)
+      if s.recFormat == sd8015 and n mod 4 != 0 and
+          (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
+        refuse8015(trace, src.path, n)
+      if n != srcN and not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
+      if sets[at].n < 0:
+        sets[at].n = n
+        var trial = s.likeRec
+        applySubset(trial, sets, r, src.path)
+        s.likeSets = sets
+      if n != srcN: setTraceCount(t, n)
+    elif sameRec:
+      if trace != s.nextTrace:
+        refuse("SEG-D record " & $r & ": trace " & $s.nextTrace & " comes next, not " & $trace &
+          " (a record's traces are written in input order)")
+      if n != s.likeN and not (s.likeSame and n == srcN):
+        refuse(segdRec(r, src.path) & " has " & $s.likeN & " samples; trace " & $trace &
+          " has " & $n)
+      if s.recFormat == sd8015 and n mod 4 != 0 and
+          (src.index.segdRecords[r].format.get != sd8015 or n != srcN):
+        refuse8015(trace, src.path, n)
+      if s.likeSame and n != srcN:
+        var trial = s.likeRec
+        applySegdCount(trial, n, r, src.path)
+        if not traceCountFits(t, n): refuseTraceCount(r, n, src.path)
+        flip = true
+      elif not s.likeSame and not traceCountFits(t, n):
+        refuseTraceCount(r, n, src.path)
+    else:
+      s.startRecord(src, trace, n, t)
+    t.index = if s.likeKept.len > 0: s.likePos else: trace - s.recFirst
+    t.numSamples = n
+    t.samples = newSeq[byte](dataBytes(s.recFormat, n))
+    # 8015 fractions as the input was read: its convention is the file's.
+    encodeSamples(s.recFormat, samples, t.samples, src.index.codecs[r].twosComplement8015)
+    s.likeTraces.add t
+    if flip: s.likeSame = false
+    s.nextTrace = trace + 1
+    if s.likeKept.len > 0: inc s.likePos
+  except CatchableError:
+    # A refused first trace leaves nothing of the record: the caller may start another.
+    if begun: s.dropRecord()
+    raise
 
 # ------------------------------------------------------- SEG-D from keys --
 
@@ -2141,6 +2239,9 @@ proc closeSegd(s: var WriterState, log: var DiagLog) =
   if s.segdFresh:
     if s.written == 0: refuse("no traces were written")
     s.flushSegdKeys()
+  elif s.subset.len > 0:
+    refuse("the subset listed for " & s.subPath & " has no trace written (write its " &
+      "traces, or abandonRecord)")
   elif s.inRecord: s.finishRecord()
   if s.segdNoZ > 0:
     log.report(sevWarning, dcValidation, "not written: an elevation without its location's " &
@@ -2239,34 +2340,47 @@ proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int]
   ## Starts a SEG-D output record made of some of the traces of one record of
   ## `src`, a file of the writer's standard (normally `like`): the next
   ## `writeTrace(w, src, trace, samples)` calls must name `traces` in this
-  ## order, one per trace, and the record ends when the next `startSubset`,
-  ## the next whole-record trace or `close` comes (`ValueError` when traces
-  ## of the list are missing). The same source trace may start any number of
-  ## output records.
+  ## order, one per trace. The record ends when the next `startSubset`, a
+  ## trace that starts a record of a whole-record write, or `close` comes
+  ## (`ValueError` when traces of the list are missing). The same source trace
+  ## may start any number of output records.
   ##
   ## The record keeps the source record's headers (the extended header too)
   ## and each kept trace its own header and extension bytes, except what the
   ## subset changes: each channel set's channel count (0 for a set with no
-  ## kept trace, which keeps its descriptor), the end time and sample count of
-  ## a channel set whose traces are written with a new count, the record
-  ## length (recomputed from the channel sets that have channels, only when an
-  ## end time changed or a set emptied), the trace header sample counts of
-  ## traces written with a new count and, in Rev 3, the General Header #3
-  ## sizes. The traces of one channel set share one count; sets may differ.
-  ## Otherwise the SEG-D rules of `writeTrace` hold.
+  ## kept trace, which keeps its descriptor); in Rev 2 the skew bytes, which
+  ## are rebuilt from the kept channels (each keeps its own byte) with as
+  ## many skew blocks as the longest scan type needs; the end time and sample
+  ## count of a channel set whose traces are written with a new count; the
+  ## record length (the longest trace length or end time over the sets that
+  ## have traces, recomputed only when an end time changed or a set emptied);
+  ## the trace header sample counts of traces written with a new count; and,
+  ## in Rev 3, the General Header #3 sizes. The traces of one channel set
+  ## share one count; sets may differ. Otherwise the SEG-D rules of
+  ## `writeTrace` hold.
+  ##
+  ## Nothing of a record is written before it ends. A first trace that
+  ## `writeTrace` refuses leaves no record: the caller starts another with
+  ## `startSubset`. A later trace that is refused leaves the record as it
+  ## was, to be written again; `abandonRecord` drops the record instead.
   ##
   ## Raises `ValueError` for a closed writer, a writer or file of another
   ## standard, a SEG-D file from keys, an empty list, an index outside `src`
-  ## or in different records, indexes that do not ascend strictly, or the
-  ## record in progress being incomplete. A count one channel set's traces
-  ## do not share, or one the revision cannot hold (Rev 2 end times are
-  ## multiples of 2 ms), is `ValueError` from `writeTrace`.
+  ## or in different records, indexes that do not ascend strictly, a record in
+  ## Rev 3 extended recording mode (it keeps the record length at 0), a subset
+  ## listed before whose first trace was not written, or the record in
+  ## progress being incomplete. A count one channel set's traces do not
+  ## share, or one the revision cannot hold (Rev 2 end times are multiples of
+  ## 2 ms), is `ValueError` from `writeTrace`.
   if not w.s.open: refuse("the writer is closed")
   if src.kind != w.s.kind or w.s.kind != skSegd:
     refuse("a subset needs a SEG-D writer and a SEG-D file")
   if w.s.segdFresh:
     refuse("a writer opened from SegdOutputOptions takes traces from keys, not subsets")
   if not src.isOpen: refuse("the file " & src.path & " is closed")
+  if w.s.subset.len > 0:
+    refuse("the subset listed for " & w.s.subPath & " has no trace written yet (write " &
+      "its traces, or abandonRecord)")
   if traces.len == 0: refuse("a subset needs at least one trace")
   let rec = src.traceEntry(traces[0]).record
   for i in 0 ..< traces.len:
@@ -2274,10 +2388,22 @@ proc startSubset*(w: var SeismicWriter, src: SeismicFile, traces: openArray[int]
       refuse("trace " & $traces[i] & " is outside the record of trace " & $traces[0])
     if i > 0 and traces[i] <= traces[i - 1]:
       refuse("the subset's traces must ascend: " & $traces[i] & " follows " & $traces[i - 1])
+  let head = src.index.segdRecords[int(rec)]
+  if head.isRev3 and head.gh3.extendedRecordingMode == 1:
+    refuse(segdRec(int(rec), src.path) & " is in extended recording mode, which keeps " &
+      "the record length at 0: it cannot be written from a subset")
   w.s.finishRecord()
   w.s.subset = @traces
   w.s.subPath = src.path
   w.s.subMem = src.memoryId
+
+proc abandonRecord*(w: var SeismicWriter) =
+  ## Drops the SEG-D record in progress, or the subset listed by
+  ## `startSubset` whose traces were not written, with the traces buffered
+  ## for it. Nothing of a record is on disk before it ends, so the output
+  ## holds the records before it. Raises `ValueError` for a closed writer.
+  if not w.s.open: refuse("the writer is closed")
+  w.s.dropRecord()
 
 proc writeTrace*[T: SampleType](w: var SeismicWriter, src: SeismicFile, trace: int,
     samples: openArray[T], overrides: openArray[HeaderOverride] = []) =

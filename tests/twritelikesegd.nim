@@ -677,8 +677,9 @@ proc mainSix*() =
   doAssert "channel sets differ" in api
 
 
-proc makeSubsetRec(rev3: bool, ns: int): SegdRecordData =
-  ## Two channel sets, 3 and 2 traces (set 1: traces 0..2, set 2: 3..4), each
+proc makeSubsetRec(rev3: bool, ns: int, nA = 3, nB = 2, skew = false,
+    numbered = false): SegdRecordData =
+  ## Two channel sets, `nA` and `nB` traces (set 1: traces 0..2, set 2: 3..4), each
   ## trace with its header extension and 32 more bytes of its own; an extended
   ## header. Rev 2: set 2 has a 1 ms interval, set 1 2 ms. Rev 3: both 1 ms.
   let fmt = sd8058
@@ -696,9 +697,11 @@ proc makeSubsetRec(rev3: bool, ns: int): SegdRecordData =
     r.gh3 = SegdGeneralHeader3(timeZero: 1474994765504000, blockType: 3)
     var sets: seq[SegdChannelSetDescriptorRev3]
     for k in 1 .. 2:
-      sets.add SegdChannelSetDescriptorRev3(scanTypeNumber: 1, channelSetNumber: uint16(k),
+      sets.add SegdChannelSetDescriptorRev3(scanTypeNumber: 1,
+        channelSetNumber: uint16(if numbered: 5 + 2 * k else: k),
         channelType: 0x10, endTime: int32(1000 * ns), numSamples: uint32(ns),
-        descaleMultiplier: 0.25, channelsInSet: uint32(4 - k), samplingInterval: 1000,
+        descaleMultiplier: 0.25, channelsInSet: uint32(if k == 1: nA else: nB),
+        samplingInterval: 1000,
         traceHeaderExtensions: 2, blockType1: 0x30, blockType2: 0x31, blockType3: 0x32)
     r.scanTypes = @[SegdScanType(layout: slRev3, descriptorsRev3: sets)]
   else:
@@ -706,16 +709,23 @@ proc makeSubsetRec(rev3: bool, ns: int): SegdRecordData =
       extRecordLength: uint32(2 * ns), blockNumber: 2)
     var sets: seq[SegdChannelSetDescriptor]
     for k in 1 .. 2:
-      sets.add SegdChannelSetDescriptor(scanTypeNumber: 1, channelSetNumber: k,
-        endTime: uint16(if k == 1: ns else: ns div 2), channelCount: 4 - k,
+      sets.add SegdChannelSetDescriptor(scanTypeNumber: 1,
+        channelSetNumber: (if numbered: 5 + 2 * k else: k),
+        endTime: uint16(if k == 1: ns else: ns div 2), channelCount: (if k == 1: nA else: nB),
         channelType: 1, traceHeaderExtensions: 2, subscanExponent: k - 1)
     r.scanTypes = @[SegdScanType(layout: slRev2, descriptors: sets)]
-  r.traceCount = 5
+    if skew:
+      r.gh1.skewBlocks = (nA + 2 * nB + 31) div 32
+      var b = newSeq[byte](32 * r.gh1.skewBlocks)
+      for i in 0 ..< nA + 2 * nB: b[i] = byte(100 + i)
+      r.scanTypes[0].skew = b
+  r.traceCount = nA + nB
   var traces: seq[SegdTrace]
-  for k in 0 ..< 5:
-    let set = if k < 3: 1 else: 2
+  for k in 0 ..< nA + nB:
+    let set = if k < nA: 1 else: 2
+    let setNo = if numbered: 5 + 2 * set else: set
     var t = SegdTrace(layout: r.layout, index: k, numSamples: ns)
-    t.header = SegdTraceHeader(fileNumber: 12, scanTypeNumber: 1, channelSetNumber: set,
+    t.header = SegdTraceHeader(fileNumber: 12, scanTypeNumber: 1, channelSetNumber: setNo,
       traceNumber: k + 1, traceHeaderExtensions: 2'u8)
     if rev3:
       t.ext1Rev3 = some SegdTraceHeaderExt1Rev3(receiverLineNumber: 7,
@@ -858,7 +868,9 @@ proc mainSeven*() =
       doAssertRaises(ValueError): e.writeTrace(f, 3, wave(3_000_000)) # end past 2^31 µs
     else:
       doAssertRaises(ValueError): e.writeTrace(f, 3, x, 3, 5) # not a multiple of 2 ms
+    e.startSubset(f, [3]) # a refused first trace leaves no record
     doAssertRaises(ValueError): e.writeTrace(f, 3, x, 3, 0)
+    e.startSubset(f, [3])
     e.writeTrace(f, 3, x, 3, 8)
     doAssert not e.close().isFatal
     var u = openSeismicWriter(tmp / (nm & "_inc.sgd"), f)
@@ -867,6 +879,138 @@ proc mainSeven*() =
     doAssertRaises(ValueError): discard u.close()
     doAssert not fileExists(tmp / (nm & "_inc.sgd"))
 
+proc mainEight*() =
+  ## Subset records, the finer points: a whole record after a subset, a refused
+  ## first trace, `abandonRecord`, a pending subset, extended recording mode, a
+  ## Rev 3 set that starts at a negative time, Rev 2 skew bytes, set names.
+  ## Seen failing: the whole record after a subset was refused ("all traces of
+  ## its subset are written"); a refused first trace left the writer stuck and
+  ## `close` discarded the output; `close` with a pending subset wrote nothing
+  ## and raised nothing; the record length of the negative start was 6000, not
+  ## 8000; the skew bytes were the source's 100 and the blocks 4; a set was
+  ## named by its index, not its number.
+  let tmp = scratchDir("parseseg_twritelikesegd")
+  for rev3 in [false, true]:
+    let nm = if rev3: "fine3" else: "fine2"
+    let src = tmp / (nm & ".sgd")
+    put(src, SegdData(records: @[makeSubsetRec(rev3, 8)]))
+    var f = openSeismic(src)
+    let x = f.readTraces(0 ..< f.len, float32)
+    # (1) a whole record after a finished subset
+    block:
+      var w = openSeismicWriter(tmp / (nm & "_whole.sgd"), f)
+      w.feedSubset(f, x, [1, 2], [4, 4])
+      for k in 0 ..< f.len: w.writeTrace(f, k, x, k)
+      doAssert not w.close().isFatal
+      var g = openSeismic(tmp / (nm & "_whole.sgd"))
+      doAssert g.len == 7 and g.index.segdRecords.len == 2
+      g.checkSubset(f, x, 0, [1, 2], [4, 4], [2, 0])
+      doAssert readAll(tmp / (nm & "_whole.sgd")).len > 0
+    # (2) a refused first trace, then a good subset; abandonRecord
+    block:
+      let out2 = tmp / (nm & "_skip.sgd")
+      var w = openSeismicWriter(out2, f)
+      w.feedSubset(f, x, [0], [8, 8])
+      w.startSubset(f, [3])
+      if rev3:
+        doAssertRaises(ValueError): w.writeTrace(f, 3, wave(3_000_000))
+      else:
+        doAssertRaises(ValueError): w.writeTrace(f, 3, x, 3, 5)
+      w.feedSubset(f, x, [1, 2], [8, 8])
+      w.startSubset(f, [0, 1])
+      w.writeTrace(f, 0, x, 0)
+      w.abandonRecord()
+      doAssert w.len == 3
+      w.feedSubset(f, x, [4], [8, 8])
+      doAssert not w.close().isFatal
+      var g = openSeismic(out2)
+      doAssert g.len == 4 and g.index.segdRecords.len == 3
+      g.checkSubset(f, x, 0, [0], [8, 8], [1, 0])
+      g.checkSubset(f, x, 1, [1, 2], [8, 8], [2, 0])
+      g.checkSubset(f, x, 3, [4], [8, 8], [0, 1])
+    # (6) a pending subset: another startSubset and close both refuse
+    block:
+      var w = openSeismicWriter(tmp / (nm & "_pend.sgd"), f)
+      w.startSubset(f, [0])
+      doAssertRaises(ValueError): w.startSubset(f, [1])
+      w.abandonRecord()
+      w.startSubset(f, [0])
+      w.writeTrace(f, 0, x, 0)
+      doAssert not w.close().isFatal
+      var v = openSeismicWriter(tmp / (nm & "_pend2.sgd"), f)
+      v.startSubset(f, [0])
+      doAssertRaises(ValueError): discard v.close()
+      doAssert not fileExists(tmp / (nm & "_pend2.sgd"))
+    # (8) a set is named by its own numbers
+    block:
+      let p = tmp / (nm & "_num.sgd")
+      put(p, SegdData(records: @[makeSubsetRec(rev3, 8, numbered = true)]))
+      var h = openSeismic(p)
+      var w = openSeismicWriter(tmp / (nm & "_num_out.sgd"), h)
+      w.startSubset(h, [3, 4])
+      let y = h.readTraces(0 ..< h.len, float32)
+      w.writeTrace(h, 3, y, 3)
+      var msg = ""
+      try: w.writeTrace(h, 4, y, 4, 6)
+      except ValueError: msg = getCurrentExceptionMsg()
+      doAssert "channel set 9 of scan type 1" in msg, msg
+  # (4) Rev 3 extended recording mode
+  block:
+    var d = makeSubsetRec(true, 8)
+    d.record.gh3.extendedRecordingMode = 1
+    d.record.gh1.recordLength = 0
+    d.record.gh2Rev3.extRecordLength = 0
+    for c in d.record.scanTypes[0].descriptorsRev3.mitems: c.endTime = 0
+    let p = tmp / "erm.sgd"
+    put(p, SegdData(records: @[d]))
+    var f = openSeismic(p)
+    var w = openSeismicWriter(tmp / "erm_out.sgd", f)
+    var msg = ""
+    try: w.startSubset(f, [0])
+    except ValueError: msg = getCurrentExceptionMsg()
+    doAssert "extended recording mode" in msg, msg
+  # (5) a Rev 3 set that starts at a negative time keeps the span of its traces
+  block:
+    var d = makeSubsetRec(true, 8)
+    for c in d.record.scanTypes[0].descriptorsRev3.mitems:
+      c.startTime = -2000
+      c.endTime = 6000
+    d.record.gh2Rev3.extRecordLength = 8000
+    let p = tmp / "neg.sgd"
+    put(p, SegdData(records: @[d]))
+    var f = openSeismic(p)
+    let x = f.readTraces(0 ..< f.len, float32)
+    var w = openSeismicWriter(tmp / "neg_out.sgd", f)
+    w.feedSubset(f, x, [0], [8, 8]) # set 2 emptied, own count
+    w.feedSubset(f, x, [0], [6, 8]) # a new count: 6000 µs of samples, end 4000
+    doAssert not w.close().isFatal
+    var g = openSeismic(tmp / "neg_out.sgd")
+    let a = g.index.segdRecords[0]
+    let b = g.index.segdRecords[1]
+    doAssert a.gh2Rev3.extRecordLength == 8000
+    doAssert b.gh2Rev3.extRecordLength == 6000
+    doAssert b.scanTypes[0].descriptorsRev3[0].endTime == 4000
+  # (7) Rev 2 skew bytes follow the kept channels
+  block:
+    let p = tmp / "skew.sgd"
+    put(p, SegdData(records: @[makeSubsetRec(false, 8, 40, 30, skew = true)]))
+    var f = openSeismic(p)
+    doAssert f.index.segdRecords[0].gh1.skewBlocks == 4
+    let x = f.readTraces(0 ..< f.len, float32)
+    var w = openSeismicWriter(tmp / "skew_out.sgd", f)
+    w.startSubset(f, [0, 1, 40])
+    for k in [0, 1, 40]: w.writeTrace(f, k, x, k)
+    w.startSubset(f, [1, 41])
+    for k in [1, 41]: w.writeTrace(f, k, x, k)
+    doAssert not w.close().isFatal
+    var g = openSeismic(tmp / "skew_out.sgd")
+    doAssert not g.log.isFatal, $g.log
+    let r0 = g.index.segdRecords[0]
+    let r1 = g.index.segdRecords[1]
+    doAssert r0.gh1.skewBlocks == 1 and r0.scanTypes[0].skew.len == 32
+    doAssert r0.scanTypes[0].skew[0 .. 4] == @[100'u8, 101, 140, 170, 0]
+    doAssert r1.scanTypes[0].skew[0 .. 4] == @[101'u8, 141, 171, 0, 0]
+
 main()
 mainTwo()
 mainThree()
@@ -874,3 +1018,4 @@ mainFour()
 mainFive()
 mainSix()
 mainSeven()
+mainEight()
