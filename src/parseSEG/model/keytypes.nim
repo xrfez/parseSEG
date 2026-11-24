@@ -3,7 +3,7 @@
 ## re-exports this module), so the library's SEG-Y key reader
 ## (`private/segykeys`) can build them.
 
-import std/math
+import std/[math, options]
 
 type
   TraceStatus* = enum
@@ -29,6 +29,15 @@ type
     scHydrophone = "hydrophone" ## Pressure / hydrophone: `H*`.
     scGeophone = "geophone"     ## Geophone or particle motion: `G*`.
     scOther = "other"           ## Another identified receiver: `R*`.
+
+  TimeOrigin* = enum
+    ## Where `TraceKeys.time` came from. `toNone` for keys a caller built
+    ## (`initTraceKeys`) and when the headers did not give a time.
+    toNone           ## Unknown, or not recorded.
+    toFirstSample    ## SEG-D Rev 3 Timestamp (0x42): time of sample 0.
+    toRecordTimeZero ## SEG-D Rev 3 GH#3 time zero (microseconds).
+    toHeaderSeconds  ## Header clock of whole seconds (SEG-D GH#1, SEG-Y without a fraction).
+    toHeaderSubsec   ## Header clock with a sub-second part (SEG-Y nanoseconds).
 
   TraceKeys* = object
     ## Geometry of one trace (NaN / 0 where unknown).
@@ -64,6 +73,10 @@ type
       ## undefined (status unknown) from one the output revision defines
       ## differently, and does not carry it over. `tcrCaller` (the default,
       ## also for SEG-D and SEG-2) is a code the caller chose for the output.
+    timePack: uint32
+      # Origin in the low 3 bits, the microsecond within that POSIX second
+      # in the next 20. Occupies the 4 bytes that padded `channel`, so the
+      # object stays 184 bytes.
     channel*: float64
       ## Channel (trace) number in the field record: SEG-Y the layout's `chan`
       ## (bytes 13-16; NaN when 0, and when a Layout stanza keeps something
@@ -75,6 +88,8 @@ type
       ## unknown. SEG-Y: the layout's date and time fields (trace bytes
       ## 157-168) in their time basis; SEG-D: GH#1, for Rev 3 the trace's
       ## Timestamp block or the GH#3 time zero (see the module documentation).
+      ## Time zero, except when a Timestamp block supplied it (`timeOrigin`).
+      ## `firstSampleUs` is sample 0 in whole microseconds.
     t0Ms*: float64
       ## Time of sample 0 in ms (in ms also for SEG-Y depth data, whose "time"
       ## fields hold depths). SEG-Y: the delay recording time (the layout's
@@ -98,6 +113,80 @@ func initTraceKeys*(): TraceKeys =
     srcY: NaN, rcvLine: NaN, rcvPoint: NaN, rcvX: NaN, rcvY: NaN, srcZ: NaN, rcvZ: NaN,
     cmpX: NaN, cmpY: NaN, channel: NaN, time: NaN, t0Ms: NaN, intervalUs: NaN, inline: NaN,
     crossline: NaN)
+
+const
+  OriginBits = 3
+  OriginMask = 0x7'u32
+
+static: doAssert sizeof(TraceKeys) == 184
+
+func timeOrigin*(k: TraceKeys): TimeOrigin {.inline.} =
+  ## Where `time` came from. `toNone` for keys a caller built and when the
+  ## headers did not give a time.
+  TimeOrigin(k.timePack and OriginMask)
+
+func fractionUs(utcUs: int64): int {.inline.} =
+  var sub = int(utcUs mod 1_000_000)
+  if sub < 0: sub += 1_000_000
+  sub
+
+proc noteRecordedTime*(k: var TraceKeys, origin: TimeOrigin, utcUs: int64) =
+  ## Records where `time` came from and the exact microsecond within that
+  ## POSIX second, taken from `utcUs` (UTC microseconds since 1970 of the
+  ## recorded instant, not of sample 0). Does not change `time`. A caller
+  ## who only sets `time` leaves the origin `toNone`.
+  k.timePack = uint32(origin.ord) or (uint32(fractionUs(utcUs)) shl OriginBits)
+
+func recordedUs(k: TraceKeys): Option[int64] =
+  # The recorded instant in UTC microseconds, from `time`'s POSIX second and
+  # the stored fraction. The float can round across a second; the fraction
+  # says which side the exact microsecond was on.
+  if k.timeOrigin == toNone or k.time.isNaN: return none(int64)
+  let sub = int64(k.timePack shr OriginBits)
+  var sec = int64(floor(k.time))
+  let frac = k.time - float64(sec)
+  if sub >= 500_000 and frac < 0.5: dec sec
+  elif sub < 500_000 and frac >= 0.5: inc sec
+  some(sec * 1_000_000 + sub)
+
+func delayUs(k: TraceKeys): Option[int64] =
+  if k.t0Ms.isNaN: return none(int64)
+  some(int64(round(k.t0Ms * 1000.0)))
+
+func firstSampleUs*(k: TraceKeys): Option[int64] =
+  ## UTC microseconds since 1970 of sample 0, exact where the file is exact.
+  ## A first-sample timestamp (`toFirstSample`) is that instant; a time-zero
+  ## source (`toRecordTimeZero`, `toHeaderSeconds`, `toHeaderSubsec`) adds
+  ## `t0Ms`, rounded to the nearest microsecond. None when the time is
+  ## unknown, the origin was not recorded (`toNone`, the default for keys a
+  ## caller built), or a time-zero source has no `t0Ms`.
+  ##
+  ## Sample skew, time-drift blocks and relative time mode are not applied.
+  let rec = k.recordedUs
+  if rec.isNone: return none(int64)
+  if k.timeOrigin == toFirstSample: return rec
+  let extra = k.delayUs
+  if extra.isNone: return none(int64)
+  some(rec.get + extra.get)
+
+func sampleTimeUs*(k: TraceKeys, n: int64): Option[int64] =
+  ## UTC microseconds of sample `n` (0 is sample 0): `firstSampleUs` plus
+  ## `n` sample intervals, rounded to the nearest microsecond. None when the
+  ## first-sample time or the interval is unknown. Sample skew, time-drift
+  ## blocks and relative time mode are not applied.
+  let t0 = k.firstSampleUs
+  if t0.isNone or k.intervalUs.isNaN: return none(int64)
+  some(t0.get + int64(round(float64(n) * k.intervalUs)))
+
+func sampleAtUs*(k: TraceKeys, us: int64): float64 =
+  ## Fractional sample index of UTC microseconds `us` (0 is sample 0). NaN
+  ## when the first-sample time is unknown or the interval is unknown or 0.
+  ## The inverse of `sampleTimeUs` when `n` times the interval is a whole
+  ## number of microseconds. Sample skew, time-drift blocks and relative
+  ## time mode are not applied.
+  let t0 = k.firstSampleUs
+  if t0.isNone or k.intervalUs.isNaN or k.intervalUs == 0.0: return NaN
+  float64(us - t0.get) / k.intervalUs
 
 func isSeismic*(k: TraceKeys): bool {.inline.} =
   ## The trace is not auxiliary (live, dead or of unknown status).

@@ -58,6 +58,12 @@
 ## - SEG-D Rev 3: the trace's Timestamp block (0x42) when it has one, else
 ##   the GH#3 time zero (both GPS µs), else GH#1 as for Rev 1/2.
 ## - SEG-2: ACQUISITION_DATE/TIME (`Seg2File.acquisitionTime`).
+##
+## `timeOrigin` says which of those supplied `time`. `toNone` when it is
+## unknown, for keys a caller built, and for SEG-2 (that reader is not
+## classified). `firstSampleUs` is sample 0 in whole UTC microseconds: a
+## Timestamp block is that instant, and the others add `t0Ms`. Sample skew,
+## time-drift blocks and relative time mode are not applied.
 
 import std/[math, tables, hashes, strutils]
 import ../segy/[reader as segyreader, fields]
@@ -148,15 +154,25 @@ proc sourceFrom(area: openArray[byte], k: var TraceKeys): int =
         k.srcIndex = int16(s.sourcePointIndex)
         return at
 
-proc segdTime(rec: SegdRecord, t: SegdTrace): float64 =
+proc noteSegdTime(rec: SegdRecord, t: SegdTrace, k: var TraceKeys) =
+  # `k.time` as before, and where it came from. A zero timestamp falls
+  # through, as it always did.
   if rec.isRev3:
     let at = findBlock(t.extensions, 0x42'u8)
     if at >= 0:
       let ts = decodeBlock[SegdTimestampHeader](t.extensions.toOpenArray(at,
         at + SegdBlockSize - 1))
-      if ts.timeZeroOfData != 0: return timestampToUnix(ts.timeZeroOfData)
-    if rec.gh3.timeZero != 0: return timestampToUnix(rec.gh3.timeZero)
-  generalHeaderUtc(rec.gh1)
+      if ts.timeZeroOfData != 0:
+        k.time = timestampToUnix(ts.timeZeroOfData)
+        k.noteRecordedTime(toFirstSample, gpsUsToUtcUs(ts.timeZeroOfData))
+        return
+    if rec.gh3.timeZero != 0:
+      k.time = timestampToUnix(rec.gh3.timeZero)
+      k.noteRecordedTime(toRecordTimeZero, gpsUsToUtcUs(rec.gh3.timeZero))
+      return
+  k.time = generalHeaderUtc(rec.gh1)
+  if not k.time.isNaN:
+    k.noteRecordedTime(toHeaderSeconds, int64(k.time) * 1_000_000)
 
 func knownSet(rec: SegdRecord, t: SegdTrace): bool =
   # The trace's channel set is one of the record's descriptors.
@@ -183,7 +199,7 @@ proc traceKeys*(rec: SegdRecord, t: SegdTrace): TraceKeys =
   ## The keys of a SEG-D trace in record `rec`.
   result = initTraceKeys()
   result.record = float64(rec.fileNumber)
-  result.time = segdTime(rec, t)
+  noteSegdTime(rec, t, result)
   if knownSet(rec, t):
     result.t0Ms = rec.startTimeMs(t)
     result.intervalUs = rec.sampleIntervalUs(t)

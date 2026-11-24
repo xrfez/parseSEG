@@ -422,37 +422,68 @@ func int16Of(x: float64, default: int): int {.inline.} =
   # none (NaN, a fraction, out of range: a stanza may type it as anything).
   if x == trunc(x) and x >= -32768.0 and x <= 32767.0: int(x) else: default
 
-proc segyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
-    cache: var ScalarCache, timeBasis: int16): float64 =
+func nearestUs(ns: int64): int64 {.inline.} =
+  # Nearest microsecond of a nanosecond count. float64 holds every int32,
+  # and every count this layout can produce, exactly.
+  int64(round(float64(ns) / 1000.0))
+
+proc noteSegyTime(p: GeometryPlan, h: RawHeaders, o: static ByteOrder,
+    cache: var ScalarCache, timeBasis: int16, k: var TraceKeys) =
   # The date and time fields (standard: trace bytes 157-168 and Ext1
-  # 141-144) in their time basis.
+  # 141-144) in their time basis. `k.time` is the historical float; the
+  # nanosecond count is kept to the microsecond for `firstSampleUs`.
   var year, day, hour, minute, second, code: int
   var ns = 0.0
+  var nsCount = 0'i64
+  var hasNs = false
   if p.stdTime:
     template i16(at: int): int = int(loadNum[int16](h.std, at, o))
     year = i16(156)
-    if year == 0: return NaN
+    if year == 0:
+      k.time = NaN
+      return
     (day, hour, minute, second, code) = (i16(158), i16(160), i16(162), i16(164), i16(166))
-    if p.nanos and h.ext1 != nil: ns = float64(loadNum[int32](h.ext1, 140, o)) * 1e-9
+    if p.nanos and h.ext1 != nil:
+      nsCount = int64(loadNum[int32](h.ext1, 140, o))
+      ns = float64(nsCount) * 1e-9
+      hasNs = nsCount != 0
   else:
     # A Layout stanza moved a field or reuses its bytes: a field the layout
     # no longer has makes the time unknown (-1 is no day, hour, ...).
-    template part(k: KeyField, default: int): int = int16Of(keyValue(p, k, h, o, cache), default)
+    template part(kf: KeyField, default: int): int =
+      int16Of(keyValue(p, kf, h, o, cache), default)
     year = part(kfYear, 0)
-    if year == 0: return NaN
+    if year == 0:
+      k.time = NaN
+      return
     (day, hour, minute, second) = (part(kfDay, -1), part(kfHour, -1), part(kfMinute, -1),
       part(kfSecond, -1))
     code = part(kfTimebase, 0)
     let x = keyValue(p, kfNanosecs, h, o, cache)
-    if not x.isNaN: ns = x * 1e-9
+    if not x.isNaN:
+      ns = x * 1e-9
+      if x == trunc(x) and x >= float64(low(int32)) and x <= float64(high(int32)):
+        nsCount = int64(int32(x))
+      else:
+        nsCount = int64(round(x))
+      hasNs = nsCount != 0
   let basis = if code != 0: code else: int(timeBasis)
   let s = civilSeconds(fullYear(year), day, hour, minute, second)
+  let origin = if hasNs: toHeaderSubsec else: toHeaderSeconds
   case basis
-  of 0, 2, 4: s + ns
+  of 0, 2, 4:
+    k.time = s + ns
+    if not k.time.isNaN:
+      k.noteRecordedTime(origin, int64(s) * 1_000_000 + nearestUs(nsCount))
   of 5: # GPS time of day: as a SEG-D timestamp, which converts with the leap seconds
-    if s.isNaN: NaN
-    else: timestampToUnix(int64(round((s - float64(GpsEpochUnix)) * 1e6))) + ns
-  else: NaN
+    if s.isNaN:
+      k.time = NaN
+    else:
+      let gpsUs = int64(round((s - float64(GpsEpochUnix)) * 1e6))
+      k.time = timestampToUnix(gpsUs) + ns
+      k.noteRecordedTime(origin, gpsUsToUtcUs(gpsUs) + nearestUs(nsCount))
+  else:
+    k.time = NaN
 
 proc intervalIn(h: RawHeaders, o: static ByteOrder, fixedUs: float64): float64 {.inline.} =
   if not fixedUs.isNaN: return fixedUs
@@ -576,7 +607,7 @@ proc keysIn(p: GeometryPlan, h: RawHeaders, o: static ByteOrder, timeBasis: int1
     of 0: tcrRev0
     of 1: tcrRev1
     else: tcrRev2
-  result.time = segyTime(p, h, o, cache, timeBasis)
+  noteSegyTime(p, h, o, cache, timeBasis, result)
   result.t0Ms = startTimeIn(p, h, o, cache)
   # The sample interval is not a layout value: with the sample count it is
   # what the reader walks the file by, at bytes 115-118 (and Extension 1's),
