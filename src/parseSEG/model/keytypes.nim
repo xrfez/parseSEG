@@ -118,9 +118,10 @@ func classOfSegd(t: uint8): SensorClass {.inline.} =
   of 21, 22: scOther
   else: scUnknown
 
-func classOfSegy(code: int): SensorClass {.inline.} =
+func classOfSegy(code: int, rev: TraceCodeRev): SensorClass {.inline.} =
   # Rev 2 bit 14 is the interpolated flag, not part of the identification.
-  let base = if code >= 0: code and 0x3FFF else: code
+  # Rev 0, Rev 1 and a caller-supplied code are used as stored.
+  let base = if rev == tcrRev2 and code >= 0: code and 0x3FFF else: code
   case base
   of 11: scHydrophone
   of 12 .. 17, 39 .. 41: scGeophone
@@ -138,17 +139,18 @@ func sensorClass*(k: TraceKeys): SensorClass =
   ## 21 (0x15) electric dipole and 22 (0x16) magnetic coil (other). Any
   ## other non-zero value is unknown.
   ##
-  ## Otherwise the SEG-Y trace identification code (`traceCode`, bit 14
-  ## cleared when the code is non-negative), or `component` when `traceCode`
-  ## is 0 and `component` holds a component code (SEG-2 writes 12, 13 or 14):
-  ## 11 pressure sensor (hydrophone); 12-17 vertical, cross-line, in-line
-  ## and rotated particle motion, and 39-41 rotational pitch, roll and yaw
-  ## (geophone); 27-38 electric and magnetic field components (other).
-  ## Anything else, including 0, -1 and 1 (seismic, sensor not named), is
-  ## unknown.
+  ## Otherwise the SEG-Y trace identification code (`traceCode`; Rev 2
+  ## clears bit 14, the interpolated flag, when the code is non-negative;
+  ## Rev 0, Rev 1 and a caller-supplied code are used as stored), or
+  ## `component` when `traceCode` is 0 and `component` holds a component
+  ## code (SEG-2 writes 12, 13 or 14): 11 pressure sensor (hydrophone);
+  ## 12-17 vertical, cross-line, in-line and rotated particle motion, and
+  ## 39-41 rotational pitch, roll and yaw (geophone); 27-38 electric and
+  ## magnetic field components (other). Anything else, including 0, -1 and
+  ## 1 (seismic, sensor not named), is unknown.
   if k.sensorType != 0: return classOfSegd(k.sensorType)
-  let code = if k.traceCode != 0: int(k.traceCode) else: int(k.component)
-  classOfSegy(code)
+  if k.traceCode != 0: return classOfSegy(int(k.traceCode), k.traceCodeRev)
+  classOfSegy(int(k.component), tcrCaller)
 
 func deriveGeometry*(k: var TraceKeys, overwrite = false) =
   ## Fills `offset` (the source-receiver distance) and the midpoint from the

@@ -940,7 +940,9 @@ proc main*() =
     doAssert k.sensorClass == scOther
     k.sensorType = 0
     k.traceCode = 11 or 0x4000
+    k.traceCodeRev = tcrRev2
     doAssert k.sensorClass == scHydrophone
+    k.traceCodeRev = tcrCaller
     k.traceCode = 41
     doAssert k.sensorClass == scGeophone
     k.traceCode = 27
@@ -950,6 +952,27 @@ proc main*() =
     doAssert k.sensorClass == scGeophone
     k.component = 1
     doAssert k.sensorClass == scUnknown
+
+  block trace_code_bit14_only_for_rev2:
+    # Break: clear bit 14 for every revision (keytypes.nim classOfSegy), so
+    # 16400 under rev 1 is read as geophone (code 16) and a caller-supplied
+    # 16395 is hydrophone. Rev 2 alone treats bit 14 as the interpolated flag.
+    var rev1 = initTraceKeys()
+    rev1.traceCode = 16400
+    rev1.traceCodeRev = tcrRev1
+    doAssert rev1.sensorClass != scGeophone, $rev1.sensorClass
+    var rev0 = initTraceKeys()
+    rev0.traceCode = 16400
+    rev0.traceCodeRev = tcrRev0
+    doAssert rev0.sensorClass != scGeophone, $rev0.sensorClass
+    var caller = initTraceKeys()
+    caller.traceCode = 16395
+    doAssert caller.traceCodeRev == tcrCaller
+    doAssert caller.sensorClass != scHydrophone, $caller.sensorClass
+    var rev2 = initTraceKeys()
+    rev2.traceCode = 16395
+    rev2.traceCodeRev = tcrRev2
+    doAssert rev2.sensorClass == scHydrophone, $rev2.sensorClass
 
   block a_byte_order_mark_is_not_a_record:
     const bom = "\xEF\xBB\xBF"
