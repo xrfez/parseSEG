@@ -953,6 +953,69 @@ proc main*() =
     k.component = 1
     doAssert k.sensorClass == scUnknown
 
+  block geometry_copies_do_not_share_rows_or_log:
+    # Break: SurveyGeometry.codes and logRef are refs (join.nim), so a copy
+    # shares the coded rows and the log. addSps after the copy changes what
+    # the copy's applySurvey returns, and one log is the other.
+    let g1 = r21('R', "10.00", "104.00", '1', "G1", "1000.0", "2000.0", "1.0")
+    let h1 = r21('R', "10.00", "104.00", '1', "H1", "3000.0", "4000.0", "2.0")
+    var g: SurveyGeometry
+    var before = g
+    g.addSps(parseSps([H00, g1, h1].join("\n")))
+    var after = g
+    doAssert before.receiverCount == 0 and before.log.len == 0
+    var early = initTraceKeys()
+    (early.rcvLine, early.rcvPoint, early.rcvIndex) = (10.0, 104.0, 1'i16)
+    early.traceCode = 12
+    doAssert not early.applySurvey(before), $early.rcvX
+    doAssert early.rcvX.isNaN
+    var mid = initTraceKeys()
+    (mid.rcvLine, mid.rcvPoint, mid.rcvIndex) = (10.0, 104.0, 1'i16)
+    mid.traceCode = 12
+    doAssert mid.applySurvey(after) and mid.rcvX == 1000, $mid.rcvX
+    let moved = r21('R', "10.00", "104.00", '1', "G1", "7000.0", "8000.0", "3.0")
+    let extra = r21('R', "30.00", "1.00", '1', "G1", "42.0", "43.0", "1.0")
+    g.addSps(parseSps([H00, moved, extra].join("\n")))
+    doAssert g.log.has("other coordinates", sevWarning), $g.log
+    doAssert not after.log.has("other coordinates", sevWarning), $after.log
+    doAssert before.log.len == 0
+    var still = initTraceKeys()
+    (still.rcvLine, still.rcvPoint, still.rcvIndex) = (10.0, 104.0, 1'i16)
+    still.traceCode = 12
+    doAssert still.applySurvey(after) and still.rcvX == 1000, $still.rcvX
+    var added = initTraceKeys()
+    (added.rcvLine, added.rcvPoint) = (30.0, 1.0)
+    doAssert not added.applySurvey(after) and added.rcvX.isNaN
+    var fromG = initTraceKeys()
+    (fromG.rcvLine, fromG.rcvPoint) = (30.0, 1.0)
+    doAssert fromG.applySurvey(g) and fromG.rcvX == 42, $fromG.rcvX
+    before.addReceiver(1, 1, 1, 5, 6, 7)
+    doAssert g.receiverCount == 2 and after.receiverCount == 1
+    after.addReceiver(10, 104, 1, 9, 9, 9)
+    doAssert g.table.receivers[stationKey(10, 104, 1)].x == 7000
+    doAssert after.table.receivers[stationKey(10, 104, 1)].x == 9
+    var kept = initTraceKeys()
+    (kept.rcvLine, kept.rcvPoint, kept.rcvIndex) = (10.0, 104.0, 1'i16)
+    kept.traceCode = 12
+    doAssert g.receiverPointCode(kept) == "G1"
+    doAssert after.receiverPointCode(kept) == ""
+    let n = g.log.len
+    let nAfter = after.log.len
+    discard fromG.applySurvey(after)
+    doAssert g.log.len == n and after.log.len == nAfter
+
+  block ambiguous_suppression_carries_the_count:
+    # Break: noteAmbiguous (join.nim) suppresses further warnings without N
+    # ("further ambiguous receiver point-code choices are not logged").
+    var lines = @[H00]
+    for i in 1 .. 6:
+      let point = $(100 + i) & ".00"
+      lines.add r21('R', "20.00", point, '1', "G1", $(1000 + i) & ".0", "2000.0", "1.0")
+      lines.add r21('R', "20.00", point, '1', "G2", $(2000 + i) & ".0", "3000.0", "2.0")
+    var g: SurveyGeometry
+    g.addSps(parseSps(lines.join("\n")))
+    doAssert g.log.has("1 more diagnostics of this kind for ambiguous", sevInfo), $g.log
+
   block trace_code_bit14_only_for_rev2:
     # Break: clear bit 14 for every revision (keytypes.nim classOfSegy), so
     # 16400 under rev 1 is read as geophone (code 16) and a caller-supplied

@@ -36,8 +36,11 @@
 ## (`keys.applyGeometry`), then the offset and midpoint. A receiver row keeps
 ## its SPS point code: several codes at one station are matched by
 ## `sensorClass` (one row is taken as stored; `KL` and `PM` still replace the
-## station). `receiverPointCode` is the code that join used. Source rows are
-## unchanged. Auxiliary traces are left alone. The channel → station step
+## station). The row each class gets is decided when the rows are loaded, and
+## an ambiguous choice is logged then. A join does not log and does not
+## mutate the geometry. `receiverPointCode` is the code that join used.
+## Source rows are unchanged. Auxiliary traces are left alone. The channel →
+## station step
 ## (2-4) assumes the recorder numbers
 ## channels as the relation file does; when headers carry both stations,
 ## channel numbers are never used.
@@ -148,8 +151,13 @@ type
     lastStation: (StationKey, StationRecord) # the entry `byStation` was given last
     hasLastStation: bool
 
+  ReceiverRow = object
+    code: string
+    c: Coordinates
+
   SurveyGeometry* = object
     ## Station coordinates and channel relations from survey files.
+    ## A value: a copy does not share stations, coded rows or the log.
     table*: GeometryTable
     runs: array[RelationDomain, RunStore]
     multiComponent*: bool
@@ -163,23 +171,17 @@ type
       ## one (H20, H201); a later file with another is a warning (nothing is
       ## rescaled). Write-back records it in SEG-Y output (`measurementSystem`).
     trailingDigits*: bool ## Unmapped line names use their trailing digits.
-    logStore: DiagLog ## Empty stand-in when `logRef` is nil (`var` does not
-                      ## apply a field default). Writes go to `logRef`.
-    logRef: ref DiagLog ## See `log`. Shared across copies.
-    codes: RcvCodes
-
-  ReceiverRow = object
-    code: string
-    c: Coordinates
-
-  RcvCodes = ref object
-    ## Coded receiver rows, shared across copies so a by-value join can note
-    ## an ambiguous choice. `table.receivers` still holds the last loaded
-    ## coordinates (one per station).
-    rows: Table[StationKey, seq[ReceiverRow]]
-    noted: Table[StationKey, string] ## Codes already named in `log`.
-    ambiguousNoted: HashSet[StationKey]
-    ambiguousLogged: int
+    logStore: DiagLog ## See `log`. A value, so a copy has its own log.
+    codes: Table[StationKey, seq[ReceiverRow]]
+      ## Coded receiver rows, by station. A value: copies do not share them.
+      ## `table.receivers` still holds the last loaded coordinates.
+    pick: Table[StationKey, array[SensorClass, int16]]
+      ## For a station with several codes, the row each sensor class gets.
+      ## Decided when the second code is loaded; a join only reads it.
+    pickXy: Table[StationKey, array[SensorClass, Coordinates]]
+      ## Coordinates of `pick`, so a join copies no row and allocates nothing.
+    notedCodes: Table[StationKey, string] ## Codes already named in `log`.
+    notedAmbiguous: HashSet[StationKey]
 
   GeometryFields* = object
     ## Which joined values are written to a file (`writeGeometry`,
@@ -220,10 +222,10 @@ type
       ## station missing from the survey, or no station at all).
 
 func log*(g: SurveyGeometry): lent DiagLog {.inline.} =
-  ## Problems met while adding survey files, and an ambiguous receiver
-  ## point-code choice (`applySurvey` appends it here).
-  if g.logRef.isNil: return g.logStore
-  g.logRef[]
+  ## Problems met while adding survey files: a station given twice, several
+  ## receiver point codes, an ambiguous class choice. Logged when the rows
+  ## are loaded; a join does not append. A copy has its own log.
+  g.logStore
 
 
 func relationCount*(g: SurveyGeometry, domain = rdSource): int {.inline.} =
@@ -270,10 +272,12 @@ proc addReceiver*(g: var SurveyGeometry, line, point: float64, index: int16, x, 
   ## A coded row from SPS at that station is dropped: this coordinate is the
   ## one `applySurvey` uses.
   g.table.addReceiver(line, point, index, x, y, z)
-  if not g.codes.isNil:
-    let key = stationKey(line, point, index)
-    g.codes.rows.del(key)
-    if key in g.codes.noted: g.codes.noted.del(key)
+  let key = stationKey(line, point, index)
+  if key in g.codes: g.codes.del(key)
+  if key in g.pick: g.pick.del(key)
+  if key in g.pickXy: g.pickXy.del(key)
+  if key in g.notedCodes: g.notedCodes.del(key)
+  g.notedAmbiguous.excl(key)
 
 proc mapLine*(g: var SurveyGeometry, name: string, line: float64) =
   ## Maps a text line name (SPS 1.0, P1) to a line number, for the files
@@ -300,12 +304,8 @@ func idx(i: int): int16 {.inline.} =
   ## not (out-of-range values clamp).
   int16(clamp(i, int(low(int16)), int(high(int16))))
 
-proc ensureLog(g: var SurveyGeometry) {.inline.} =
-  if g.logRef.isNil: g.logRef = (ref DiagLog)()
-
 proc note(g: var SurveyGeometry, sev: Severity, file, msg: string, record = -1) =
-  g.ensureLog()
-  g.logRef[].report(sev, dcBadValue, msg, loc = Location(file: file, record: record))
+  g.logStore.report(sev, dcBadValue, msg, loc = Location(file: file, record: record))
 
 template noteCapped(g: var SurveyGeometry, cap: var RepeatCap, kind: string, sev: Severity,
     file, msg: string, record = -1) =
@@ -338,26 +338,27 @@ func isMarker(code: string): bool =
   let u = code.toUpperAscii
   u == "KL" or u == "PM"
 
-proc ensureCodes(g: var SurveyGeometry) {.inline.} =
-  g.ensureLog()
-  if g.codes.isNil: g.codes = RcvCodes()
+proc dropPicks(g: var SurveyGeometry, key: StationKey)
+proc decideStation(g: var SurveyGeometry, cap: var RepeatCap, file: string, key: StationKey)
 
 proc addReceiverRow(g: var SurveyGeometry, cap: var RepeatCap, file: string, record: int,
     line, point: float64, index: int16, code: string, c: Coordinates) =
   # A different point code is kept; the same code again replaces that row
   # (later coordinates, and the row becomes the last loaded). KL/PM, or a
-  # row arriving at a station that holds one, replaces the station.
-  g.ensureCodes()
+  # row arriving at a station that holds one, replaces the station. A second
+  # code decides each class's row and may log one ambiguous warning.
   let key = stationKey(line, point, index)
   var rows: seq[ReceiverRow] = @[]
-  if key in g.codes.rows: rows = g.codes.rows[key]
+  if key in g.codes: rows = g.codes[key]
   let marker = isMarker(code) or (rows.len == 1 and isMarker(rows[0].code))
   if marker:
     let known = rows.len > 0
     let same = known and sameCoordinates(rows[^1].c, c)
-    g.codes.rows[key] = @[ReceiverRow(code: code, c: c)]
+    g.codes[key] = @[ReceiverRow(code: code, c: c)]
     g.table.receivers[key] = c
-    if key in g.codes.noted: g.codes.noted.del(key)
+    if key in g.notedCodes: g.notedCodes.del(key)
+    g.dropPicks(key)
+    g.notedAmbiguous.excl(key)
     if known: g.noteAgain(cap, pkReceiver, file, record, key, same)
     return
   var found = -1
@@ -371,28 +372,28 @@ proc addReceiverRow(g: var SurveyGeometry, cap: var RepeatCap, file: string, rec
     row.c = c
     rows.delete(found)
     rows.add row
-    g.codes.rows[key] = rows
+    g.codes[key] = rows
     g.table.receivers[key] = c
     g.noteAgain(cap, pkReceiver, file, record, key, same)
   else:
     rows.add ReceiverRow(code: code, c: c)
-    g.codes.rows[key] = rows
+    g.codes[key] = rows
     g.table.receivers[key] = c
+  g.decideStation(cap, file, key)
 
 proc noteSeveralCodes(g: var SurveyGeometry, cap: var RepeatCap, file: string) =
   # One line per station that holds more than one point code, naming them.
   # The first few per file, then a count, as for "given again".
-  if g.codes.isNil: return
-  for key, rows in g.codes.rows:
+  for key, rows in g.codes:
     if rows.len < 2: continue
     var sig = ""
     for i, row in rows:
       if i > 0: sig.add ", "
       sig.add row.code
-    if g.codes.noted.getOrDefault(key) == sig: continue
+    if g.notedCodes.getOrDefault(key) == sig: continue
     g.noteCapped(cap, "codes", sevInfo, file, "receiver " & $key.line & "/" &
       $key.point & "/" & $key.index & " has several point codes: " & sig)
-    g.codes.noted[key] = sig
+    g.notedCodes[key] = sig
 
 proc addStation(g: var SurveyGeometry, cap: var RepeatCap, kind: SpsPointKind, file: string,
     record: int, line, point: float64, index: int16, c: Coordinates, code = "") =
@@ -597,9 +598,12 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, xDomain = rdSource) =
   ## skipped, with one warning per line name. A source given before is
   ## replaced and reported. A receiver with the same point code is too; a
   ## different code is kept beside it (one info per such station, naming the
-  ## codes). `KL` and `PM` still replace the station. A warning when the
-  ## later coordinates differ, an info when they are the same. `g.log` gets
-  ## the first few reports of each kind per file, then a count.
+  ## codes). A second code decides which row each sensor class gets; one
+  ## warning when any class falls to the later row, capped with the others.
+  ## `KL` and `PM` still replace the station. A warning when the later
+  ## coordinates differ, an info when they are the same. `g.log` gets the
+  ## first few reports of each kind per file, then a count (the count names
+  ## how many were not logged).
   var unresolved: HashSet[string]
   var cap: RepeatCap
   # (by index: `pairs` of a seq gives each record as a copy, its strings too)
@@ -649,8 +653,7 @@ proc addSps*(g: var SurveyGeometry, f: SpsFile, xDomain = rdSource) =
       g.note(sevWarning, f.name, "grid units '" & u.name & "' (" & $u.metres &
         " m) differ from the survey's '" & g.gridUnit.name & "' (" & $g.gridUnit.metres &
         " m); the coordinates are taken as they are", -1)
-  g.ensureLog()
-  cap.summarize(g.logRef[], f.name)
+  cap.summarize(g.logStore, f.name)
 
 proc addP1*(g: var SurveyGeometry, f: P1File, elevation = false) =
   ## Adds the shotpoints of the P1 logical files in `f` as sources. The
@@ -680,8 +683,7 @@ proc addP1*(g: var SurveyGeometry, f: P1File, elevation = false) =
 proc addLog(g: var SurveyGeometry, log: DiagLog) =
   if log.isFatal: raise newException(IOError, log[log.len - 1].msg)
   if log.len == 0: return
-  g.ensureLog()
-  g.logRef[].add log
+  g.logStore.add log
 
 proc addSps*(g: var SurveyGeometry, path: string, opts = SpsOptions(),
     xDomain = relationDomainOf(path)) =
@@ -946,47 +948,58 @@ func chooseRow(rows: openArray[ReceiverRow], class: SensorClass): tuple[i: int, 
   if n > 1: return (last, true)
   (rows.high, true)
 
-func rowsAt(g: SurveyGeometry, line, point: float64, index: int16):
-    tuple[ok: bool, key: StationKey, rows: seq[ReceiverRow]] =
-  # The same index rules as `lookup`: exact, then index 0, and a trace with
-  # index 0 also tries index 1. The first key that has rows, not a merge.
-  if g.codes.isNil or line.isNaN or point.isNaN: return
-  let keys = [stationKey(line, point, index), stationKey(line, point, 0),
-    stationKey(line, point, 1)]
-  for i in 0 .. (if index == 0: 2 else: 1):
-    if keys[i] in g.codes.rows:
-      return (true, keys[i], g.codes.rows[keys[i]])
+proc dropPicks(g: var SurveyGeometry, key: StationKey) =
+  if key in g.pick: g.pick.del(key)
+  if key in g.pickXy: g.pickXy.del(key)
 
-proc noteAmbiguous(g: SurveyGeometry, key: StationKey, rows: openArray[ReceiverRow]) =
-  # One warning per station, not per trace. The first few, then one count.
-  if g.codes.isNil or g.logRef.isNil: return
-  if g.codes.ambiguousNoted.containsOrIncl(key): return
-  if g.codes.ambiguousLogged >= MaxRepeats:
-    if g.codes.ambiguousLogged == MaxRepeats:
-      g.logRef[].report(sevInfo, dcBadValue,
-        "further ambiguous receiver point-code choices are not logged")
-    inc g.codes.ambiguousLogged
+proc decideStation(g: var SurveyGeometry, cap: var RepeatCap, file: string, key: StationKey) =
+  # The row each class gets, stored so a join only reads coordinates. One
+  # warning when any class falls to the later row; further ones are a count.
+  if key notin g.codes or g.codes[key].len < 2:
+    g.dropPicks(key)
+    g.notedAmbiguous.excl(key)
     return
+  let rows = g.codes[key]
+  var idx: array[SensorClass, int16]
+  var xy: array[SensorClass, Coordinates]
+  var warn = false
+  for class in SensorClass:
+    let choice = chooseRow(rows, class)
+    idx[class] = int16(choice.i)
+    if choice.i >= 0: xy[class] = rows[choice.i].c
+    if choice.ambiguous: warn = true
+  g.pick[key] = idx
+  g.pickXy[key] = xy
+  if not warn or key in g.notedAmbiguous: return
   var sig = ""
   for i, row in rows:
     if i > 0: sig.add ", "
     sig.add row.code
-  inc g.codes.ambiguousLogged
-  g.logRef[].report(sevWarning, dcBadValue, "receiver " & $key.line & "/" & $key.point &
-    "/" & $key.index & " is ambiguous (point codes " & sig & "); the later row is used")
+  g.noteCapped(cap, "ambiguous", sevWarning, file, "receiver " & $key.line & "/" &
+    $key.point & "/" & $key.index & " is ambiguous (point codes " & sig &
+    "); the later row is used")
+  g.notedAmbiguous.incl(key)
+
+func codedKey(g: SurveyGeometry, line, point: float64, index: int16):
+    tuple[found: bool, key: StationKey] =
+  # The same index rules as `lookup`: exact, then index 0, and a trace with
+  # index 0 also tries index 1. The first key that has coded rows.
+  if line.isNaN or point.isNaN: return
+  let keys = [stationKey(line, point, index), stationKey(line, point, 0),
+    stationKey(line, point, 1)]
+  for i in 0 .. (if index == 0: 2 else: 1):
+    if keys[i] in g.codes:
+      return (true, keys[i])
 
 proc applyReceiverChoice(stations: SurveyGeometry, k: var TraceKeys, overwrite: bool,
     before: TraceKeys) =
   # Class-aware receiver coordinates, after `applyGeometry`'s last-wins fill.
-  # Sources are left as `applyGeometry` set them.
-  if stations.codes.isNil: return
+  # Reads the choice made at load. Does not log and does not mutate `stations`.
+  # One row has no `pickXy`: the table already holds that row.
   if not overwrite and before.hasReceiverXY: return
-  let found = stations.rowsAt(k.rcvLine, k.rcvPoint, k.rcvIndex)
-  if not found.ok: return
-  let choice = chooseRow(found.rows, k.sensorClass)
-  if choice.i < 0: return
-  if choice.ambiguous: stations.noteAmbiguous(found.key, found.rows)
-  let c = found.rows[choice.i].c
+  let hit = stations.codedKey(k.rcvLine, k.rcvPoint, k.rcvIndex)
+  if not hit.found or hit.key notin stations.pickXy: return
+  let c = stations.pickXy[hit.key][k.sensorClass]
   let xySame = k.rcvX == c.x and k.rcvY == c.y
   let zSame = c.z.isNaN or k.rcvZ == c.z
   (k.rcvX, k.rcvY) = (c.x, c.y)
@@ -1004,12 +1017,16 @@ func receiverPointCode*(g: SurveyGeometry, k: TraceKeys): string =
   ## Several are matched by `sensorClass`: `H*` hydrophone, `G*` geophone or
   ## other particle-motion sensor, `R*` any other identified receiver. No
   ## unique match is the later candidate, the same row the coordinates come
-  ## from.
-  let found = g.rowsAt(k.rcvLine, k.rcvPoint, k.rcvIndex)
-  if not found.ok: return ""
-  let i = chooseRow(found.rows, k.sensorClass).i
-  if i < 0: return ""
-  found.rows[i].code
+  ## from. The choice was made when the rows were loaded.
+  let hit = g.codedKey(k.rcvLine, k.rcvPoint, k.rcvIndex)
+  if not hit.found: return ""
+  let rows = g.codes[hit.key]
+  if rows.len == 0: return ""
+  if hit.key in g.pick:
+    let i = int(g.pick[hit.key][k.sensorClass])
+    if i < 0 or i > rows.high: return ""
+    return rows[i].code
+  rows[0].code
 
 proc join(k: var TraceKeys, stations, relations: SurveyGeometry, overwrite: bool,
     match: var JoinMatch): set[JoinGroup] =
@@ -1031,7 +1048,8 @@ proc applySurvey*(k: var TraceKeys, g: SurveyGeometry, overwrite = false): bool 
   ## that already holds the survey's values). A receiver station with several
   ## point codes is matched by `sensorClass` (see `receiverPointCode`); one
   ## row is taken whatever its code. No unique class match uses the later
-  ## candidate and logs an ambiguous warning on `g.log`.
+  ## candidate. That choice was logged, if ambiguous, when the rows were
+  ## loaded; this does not log and does not mutate `g`.
   var match: JoinMatch
   k.join(g, g, overwrite, match) != {}
 
@@ -1041,7 +1059,8 @@ proc applySurvey*(k: var TraceKeys, stations, relations: SurveyGeometry,
   ## relations (and `multiComponent`) of another: a survey whose relation
   ## file is held already (a viewer's map keeps it) is joined without reading
   ## that file again. The same as one geometry holding both. An ambiguous
-  ## receiver point-code choice is logged on `stations`.
+  ## receiver point-code choice was logged on `stations` when its rows were
+  ## loaded; this does not log.
   var match: JoinMatch
   k.join(stations, relations, overwrite, match) != {}
 
