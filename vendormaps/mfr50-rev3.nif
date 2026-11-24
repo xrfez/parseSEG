@@ -19,4 +19,5 @@
       (enum (0x31 "G3i FTU (per third-party compliance report)")
             (0x32 "type 0x32 (not in the source document)")))
     ; inferred from the same dump: device serial number = bytes 3-5, unsigned 24-bit big-endian.
-    (field deviceSerialNumber (at 3) (enc u24) (byteOrder big) (sentinel 0))))
+    ; device serial number of the field unit, named sensorSerial (see README "The sensor serial")
+    (field sensorSerial (at 3) (enc u24) (byteOrder big) (sentinel 0))))

@@ -19,4 +19,21 @@ in the map's `match`), decode a field only under `(when ...)` or in a `(group ..
 
 | `segy-x100-stations.nif` | SEG-Y files whose textual header says the source and receiver line and point numbers are times 100 in the trace headers: bytes 181-196 read as `rec_line`, `rec_point`, `sht_line`, `sht_point`, divided by 100, and the offset (bytes 37-40) read through the coordinate scalar (`coor4`), as the coordinates are (a `(layout)`, no target) | SEG-Y Rev 0 | none |
 
+## Well-known field names
+
+An application reads two field names from a map's trace-level blocks (a trace header block or
+a trace header extension); the library only decodes them.
+
+### The sensor serial
+
+A field named `sensorSerial` holds the serial number of the unit that recorded the trace: a
+node, a field unit or a digitizer module. Keep it in a trace-level block. A controller or
+recorder serial must not use this name. A value that is blank or a declared sentinel is no
+serial. The fields of a map may not overlap, so a unit serial has this one name.
+
+### The first sample time
+
+A field named `firstSampleTime` holds a trace's own start time as a 64-bit count of
+microseconds, with the unit text "us GPS" or "us UTC".
+
 The header comment of each map gives its source, what it applies to and what it leaves out.

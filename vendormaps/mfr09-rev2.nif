@@ -252,7 +252,7 @@
       (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 6)) (range 0 1))
       (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 32)) (range 3 255))
       ; digitizer module serial number, 0 = unknown
-      (field moduleSerialNumber (at 1) (enc u24) (sentinel 0))
+      (field sensorSerial (at 1) (enc u24) (sentinel 0))
       ; microseconds since 1980-01-06 00:00:00 GPS time (no leap seconds): 18 s ahead of UTC in 2024
       (group (when (record extendedHeader (match (at 1) (bytes 9 0 0 1)) (byte 30)) (is 3))
         (field firstSampleTime (at 9) (enc i64) (sentinel 0) (unit "us GPS")))
