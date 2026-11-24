@@ -2,6 +2,8 @@
 ## another SEG-Y revision, by the same rules as `convertSegy`. Synthetic files.
 ## Seen failing with `segyRevOn` forced false: the output kept Rev 0.0.
 ## Seen failing before the card-39 warning: `revisionNotes` was empty.
+## Seen failing when that warning quoted the card raw: `\n` and `\x01` stayed
+## in the message (the checked quote replaced with spaces, then trimmed).
 
 import std/[assertions, options, os, strutils]
 
@@ -78,12 +80,12 @@ proc newSamples(n: int): seq[float32] =
   result = newSeq[float32](n)
   for i in 0 ..< n: result[i] = float32(1000 + i)
 
-proc cardFile(name, card39: string): string =
+proc cardFile(name, card39: string, encoding = teEbcdic): string =
   ## One short fixed-length Rev 2.1 trace whose card 39 is `card39`.
   result = tmp / name
   var f = SegyFile(byteOrder: boBig, format: some(sfFloat32), revision: rev(2, 1),
     extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
-    text: initTextHeader(teEbcdic))
+    text: initTextHeader(encoding))
   f.text.setCard(39, card39)
   f.text.setCard(40, "C40 END TEXTUAL HEADER")
   f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 2, segyMinor: 1,
@@ -331,5 +333,23 @@ proc main*() =
     var g = openSeismic(dst)
     doAssert g.index.segy.text.card(39).strip == "C39 SEG Y REV1", g.index.segy.text.card(39)
     g.close()
+
+  block a_replaced_card_is_quoted_without_control_characters:
+    for enc in [teAscii, teEbcdic]:
+      let src = cardFile("ctrl39_" & $enc & ".sgy", "C39 BAD\nLINE\x01", enc)
+      var f = openSeismic(src)
+      let dst = tmp / ("ctrl39_" & $enc & "_out.sgy")
+      var w = openSeismicWriter(dst, like = f, segyRevision = some(rev(1)))
+      doAssert w.revisionNotes.has("card 39 held \"C39 BAD LINE\"", sevWarning),
+        $enc & ": " & $w.revisionNotes
+      for d in w.revisionNotes:
+        if d.severity == sevWarning and "card 39 held" in d.msg:
+          doAssert '\n' notin d.msg and '\x01' notin d.msg, $enc & ": " & repr(d.msg)
+      w.writeTrace(f, 0, newSamples(8))
+      discard w.close()
+      f.close()
+      var g = openSeismic(dst)
+      doAssert g.index.segy.text.card(39).strip == "C39 SEG Y REV1", g.index.segy.text.card(39)
+      g.close()
 
 when isMainModule: main()

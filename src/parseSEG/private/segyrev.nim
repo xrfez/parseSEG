@@ -67,6 +67,13 @@ func trimmedCard(card: string): string =
   while n > 0 and card[n - 1] == ' ': dec n
   if n == 0: "" else: card.substr(0, n - 1)
 
+func quotedCard(card: string): string =
+  # Printable ASCII only, as `textCard`: a control byte must not enter a log line.
+  result = card
+  for ch in result.mitems:
+    if ch notin {' '..'~'}: ch = ' '
+  result = trimmedCard(result)
+
 func cardBody(card: string, n: int): string =
   let p = cardPrefix(n)
   if card.len >= p.len and card.substr(0, p.len - 1) == p:
@@ -97,7 +104,7 @@ func standardCard(card: string, n: int): bool =
 
 proc noteReplacedCard(log: var DiagLog, card: string, n: int, loc: Location) =
   if standardCard(card, n): return
-  log.report(sevWarning, dcValidation, "card " & $n & " held \"" & trimmedCard(card) &
+  log.report(sevWarning, dcValidation, "card " & $n & " held \"" & quotedCard(card) &
     "\"; replaced with the target revision", loc = loc)
 
 func revisionFault*(rev: SegyRevision): string =

@@ -3,6 +3,8 @@
 ## cannot hold is reported. Synthetic files, written by the library.
 ## Seen failing before the card-39 warning: a custom card was replaced and
 ## the log had no warning quoting it.
+## Seen failing when that warning quoted the card raw: `\n` and `\x01` stayed
+## in the message (the checked quote replaced with spaces, then trimmed).
 ## Seen failing before the written-count patch: `convertSegy` bytes differed
 ## from the `like:` writer (the source trace count was left in place).
 
@@ -111,12 +113,12 @@ proc rev2File(name: string, ns: int, fixed: bool, binNs: uint16, binExtNs: uint3
   w.close()
   sink.close()
 
-proc cardFile(name, card39: string): string =
+proc cardFile(name, card39: string, encoding = teEbcdic): string =
   ## One short fixed-length Rev 2.1 trace whose card 39 is `card39`.
   result = tmp / name
   var f = SegyFile(byteOrder: boBig, format: some(sfFloat32), revision: rev(2, 1),
     extended: initExtendedTextHeader(), trailer: initExtendedTextHeader(),
-    text: initTextHeader(teEbcdic))
+    text: initTextHeader(encoding))
   f.text.setCard(39, card39)
   f.text.setCard(40, "C40 END TEXTUAL HEADER")
   f.binary = SegyBinaryHeader(formatCode: 5, segyMajor: 2, segyMinor: 1,
@@ -364,6 +366,16 @@ proc main*() =
     let (dst, log) = convertTo(src, rev(1), "blank39_r1.sgy")
     doAssert not log.has("card 39 held", sevWarning), $log
     doAssert card39Of(dst).strip == "C39 SEG Y REV1", card39Of(dst)
+
+  block a_replaced_card_is_quoted_without_control_characters:
+    for enc in [teAscii, teEbcdic]:
+      let src = cardFile("ctrl39_" & $enc & ".sgy", "C39 BAD\nLINE\x01", enc)
+      let (dst, log) = convertTo(src, rev(1), "ctrl39_" & $enc & "_r1.sgy")
+      doAssert log.has("card 39 held \"C39 BAD LINE\"", sevWarning), $enc & ": " & $log
+      for d in log:
+        if d.severity == sevWarning and "card 39 held" in d.msg:
+          doAssert '\n' notin d.msg and '\x01' notin d.msg, $enc & ": " & repr(d.msg)
+      doAssert card39Of(dst).strip == "C39 SEG Y REV1", card39Of(dst)
 
   block skipped_traces_do_not_keep_the_source_count:
     # Both traces need Extension 1, which they lack: Rev 2.0 skips both.
